@@ -48,7 +48,7 @@ describe("ApprovalCard", () => {
     expect(onDecide).toHaveBeenCalledWith(true);
 
     rerender(<ApprovalCard block={approval("approved")} onDecide={onDecide} />);
-    expect(screen.getByText("Approved and sent")).toBeInTheDocument();
+    expect(screen.getByText("Approved")).toBeInTheDocument();
     expect(screen.getByText("via web")).toBeInTheDocument();
   });
 
@@ -114,13 +114,13 @@ describe("ApprovalCard", () => {
   it("renders expired and cancelled terminal states distinctly", () => {
     const { rerender } = render(
       <TooltipProvider>
-        <ApprovalCard block={approval("expired")} onDecide={vi.fn()} />
+        <ApprovalCard block={approval("expired")} onDecide={vi.fn()} onRequestAgain={vi.fn()} />
       </TooltipProvider>,
     );
     expect(screen.getByText("Request expired")).toBeInTheDocument();
     expect(screen.getByText("Nothing was sent.")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: /request again/i }),
+      screen.getByRole("button", { name: /new confirmation/i }),
     ).toBeInTheDocument();
 
     rerender(
@@ -130,7 +130,25 @@ describe("ApprovalCard", () => {
     );
     expect(screen.getByText("Request cancelled")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /request again/i }),
+      screen.queryByRole("button", { name: /new confirmation/i }),
     ).not.toBeInTheDocument();
   });
+});
+
+
+it("2072 shows local expiry, a working review link and a real fresh-request action", () => {
+  const decide = vi.fn();
+  const request = vi.fn();
+  render(<ApprovalCard block={{ ...approval(), expires_at: new Date(NOW + 1).toISOString() }} onDecide={decide} onRequestAgain={request} reviewPath="/assistant/approvals" />);
+  act(() => { vi.advanceTimersByTime(30_000); });
+  expect(screen.getByText("Request expired")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Approve and send" })).toBeNull();
+  expect(screen.getByRole("link", { name: "Open Approvals" })).toHaveAttribute("href", "/assistant/approvals");
+  fireEvent.click(screen.getByRole("button", { name: "Ask for a new confirmation" }));
+  expect(request).toHaveBeenCalledTimes(1);
+  expect(decide).not.toHaveBeenCalled();
+});
+it("2072 never offers an inert retry when no consumer supports it", () => {
+  render(<ApprovalCard block={approval("expired")} onDecide={vi.fn()} />);
+  expect(screen.queryByRole("button")).toBeNull();
 });

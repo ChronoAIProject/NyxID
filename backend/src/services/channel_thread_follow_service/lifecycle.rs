@@ -113,9 +113,10 @@ pub async fn stop(
     parent: &str,
     child: &str,
 ) -> AppResult<NyxbotThread> {
-    access(db, owner, channel).await?;
+    let row = access(db, owner, channel).await?;
+    let manager = owner.to_owned();
     let db = db.clone();
-    let owner = owner.to_owned();
+    let owner = row.user_id.clone();
     let channel = channel.to_owned();
     let parent = parent.to_owned();
     let child = child.to_owned();
@@ -130,7 +131,13 @@ pub async fn stop(
             let child = child.as_str();
 
             let work: AppResult<_> = Box::pin(async {
-                fence(db, channel, owner, session).await?;
+                let binding = fence(db, channel, owner, session).await?;
+                if binding.org_specialist.is_some() {
+                    super::super::org_channel_service::fence_management(
+                        db, session, &binding, &manager,
+                    )
+                    .await?;
+                }
                 let mut row = db.collection::<NyxbotThread>(THREADS).find_one(doc! {"_id":child,
                 "user_id":owner,"channel_id":channel,"parent_chat_id":parent,"record_scope":SCOPE})
                 .session(&mut *session).await?.ok_or_else(not_found)?;
@@ -146,6 +153,7 @@ pub async fn stop(
 
 /// The same transaction as a parent setting write; late starters conflict
 /// on the channel fence and reload the live setting/generation.
+#[cfg(test)]
 pub async fn update_settings(
     db: &Database,
     owner: &str,
@@ -155,6 +163,31 @@ pub async fn update_settings(
     stop_children: bool,
     reassign: bool,
 ) -> AppResult<NyxbotThread> {
+    update_settings_as(
+        db,
+        owner,
+        owner,
+        channel,
+        chat,
+        update,
+        stop_children,
+        reassign,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_settings_as(
+    db: &Database,
+    owner: &str,
+    manager: &str,
+    channel: &str,
+    chat: &str,
+    update: bson::Document,
+    stop_children: bool,
+    reassign: bool,
+) -> AppResult<NyxbotThread> {
+    let manager = manager.to_owned();
     let db = db.clone();
     let owner = owner.to_owned();
     let channel = channel.to_owned();
@@ -167,7 +200,10 @@ pub async fn update_settings(
             let chat=chat.as_str();
 
         let work:AppResult<_>=Box::pin(async {
-            fence(db,channel,owner,session).await?;
+            let binding = fence(db,channel,owner,session).await?;
+            if binding.org_specialist.is_some() {
+                super::super::org_channel_service::fence_management(db,session,&binding,&manager).await?;
+            }
             let row=db.collection::<NyxbotThread>(THREADS).find_one_and_update(
                 doc! {"_id":chat,"user_id":owner,"channel_id":channel,"record_scope":{"$ne":SCOPE}},update.clone())
                 .return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(not_found)?;
@@ -208,7 +244,14 @@ pub async fn sweep(db: &Database) -> AppResult<()> {
 
 /// Relink and close inherited bindings atomically. Explicit chat overrides keep
 /// their effective agent and generation.
-pub async fn relink(db: &Database, owner: &str, channel: &str, agent: &str) -> AppResult<()> {
+pub async fn relink(
+    db: &Database,
+    owner: &str,
+    manager: &str,
+    channel: &str,
+    agent: &str,
+) -> AppResult<()> {
+    let manager = manager.to_owned();
     let db = db.clone();
     let owner = owner.to_owned();
     let channel = channel.to_owned();
@@ -221,6 +264,15 @@ pub async fn relink(db: &Database, owner: &str, channel: &str, agent: &str) -> A
             let agent=agent.as_str();
 
         let work:AppResult<()>=Box::pin(async {
+            let current=fence(db,channel,owner,session).await?;
+            if let Some(mut binding)=current.org_specialist.clone() {
+                super::super::org_channel_service::fence_management(db,session,&current,&manager).await?;
+                super::super::org_channel_service::live_doc(db,session,"assistant_agents",doc!{"_id":agent,"user_id":&binding.org_id,"kind":"specialist","destroyed_at":null},true).await?;
+                binding.revision=uuid::Uuid::new_v4().to_string();
+                binding.guests=Default::default();
+                db.collection::<bson::Document>(CHANNELS).update_one(doc!{"_id":channel},doc!{"$set":{"org_specialist":bson::to_bson(&binding).map_err(|_|not_found())?}}).session(&mut *session).await?;
+                super::super::org_channel_service::lifecycle::retire_in_session(db,session,channel,None).await?;
+            }
             db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":channel,"user_id":owner},
                 doc! {"$set":{"agent_id":agent,"updated_at":bson::DateTime::now()},"$inc":{"follow_capacity_revision":1,"follow_binding_generation":1}})
                 .session(&mut *session).await?;

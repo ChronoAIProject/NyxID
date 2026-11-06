@@ -42,6 +42,7 @@ async fn enqueue(
 ) -> String {
     let id = Uuid::new_v4().to_string();
     let request = GroupRequest {
+        execution_task: None,
         collaboration: None,
         id: id.clone(),
         group_id: access.group.id.clone(),
@@ -355,7 +356,7 @@ async fn org_group_threads_keys_billing_uploads_and_single_auth_resolution() {
             assert!(uploads::for_chat(&f.state.db, &chat, other).await.is_err());
         }
         let payer = super::billing::owner_resolver::BillingOwnerResolver::new(f.state.db.clone())
-            .resolve_for_execution(
+            .resolve_for_ordinary_execution(
                 actor,
                 &f.org,
                 crate::models::usage_meter::CredentialClass::NyxidManagedMaster,
@@ -2087,6 +2088,7 @@ async fn org_group_concurrent_appends_retry_transaction_conflicts_without_duplic
     let first = TransactionCollisionHook::new(barrier.clone());
     let second = TransactionCollisionHook::new(barrier);
     let request = |id: &str| GroupRequest {
+        execution_task: None,
         collaboration: None,
         id: id.into(),
         group_id: access.group.id.clone(),
@@ -2154,5 +2156,42 @@ async fn org_group_concurrent_appends_retry_transaction_conflicts_without_duplic
             .unwrap(),
         2
     );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_group_global_candidacy_uses_the_existing_person_read() {
+    let f = Fixture::new("org_group_broad_enrollment").await;
+    let (agent, _) = f.create().await;
+    let group = create(&f, &agent).await.group;
+    assert!(!access(&f, &f.member, &group.id).await.execution_enrolled);
+    super::execution_permission_dispatch::phase_b_tests::enroll_global(&f.state.db, &f.member)
+        .await;
+    assert!(access(&f, &f.member, &group.id).await.execution_enrolled);
+    // A cached user-level deny removes candidacy without a marker or extra lookup.
+    super::feature_flag_admin_service::mutate(
+        &f.state.db,
+        super::execution_permission_enrollment::FLAG,
+        super::feature_flag_admin_service::Mutation::Override {
+            kind: crate::models::feature_flag_override::FlagTargetKind::User,
+            target_id: Some(f.member.clone()),
+            enabled: Some(false),
+        },
+        &super::audit_service::AuditActor {
+            user_id: f.admin.clone(),
+            api_key_id: None,
+            api_key_name: None,
+            ip_address: None,
+            user_agent: None,
+        },
+    )
+    .await
+    .unwrap();
+    f.state
+        .execution_enrollment
+        .refresh(&f.state.db)
+        .await
+        .unwrap();
+    assert!(!access(&f, &f.member, &group.id).await.execution_enrolled);
     f.state.db.drop().await.unwrap();
 }

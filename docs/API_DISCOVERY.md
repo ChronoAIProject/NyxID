@@ -254,6 +254,27 @@ ElevenLabs and Twilio both publish JSON specifications that currently fit under 
 
 To extend coverage: add a JSON overlay under `backend/specs/catalog/`, register it in `HOSTED_SPEC_SOURCES` and `SLUG_TO_SPEC_KEY`, and the seed, backfill, sync, and serving paths all pick it up.
 
+The `nyx-panel` overlay is an instance-mounted device contract, without a
+seeded catalog connection. Panels register its hosted URL on their daily
+`UserEndpoint.openapi_spec_url`; each connection retains its own node route
+and service grants. It exposes on-demand camera JPEGs, display images/captions and
+voice controls, audio output, input mode, screen brightness and persistent fallback
+images. Bot selection, credentials, network and system management remain on the
+separate management service. Daily parameter endpoints reject unknown or combined
+fields; they cannot change the selected Bot. Daily preferences and persistent
+fallback operations require panel firmware v0.6.15 or later. Tool-returned
+images use the ordinary NyxAgent image pipeline; voice tasks use the selected
+Bot's existing service grants. No camera transport or device-specific executor
+is added to Voice.
+With panel firmware v0.6.14 or later, the default camera tool calls
+`POST /camera/capture`: the panel displays the
+same JPEG returned to the model for two minutes, then restores its fallback.
+`GET /camera/snapshot.jpg` remains available for captures that leave the display
+unchanged. Display source metadata is available in `/status` for verification.
+Existing panels can attach the contract through `PUT /keys/{slug}` with
+`openapi_spec_url` pointing to this deployment's
+`/api/v1/catalog-specs/nyx-panel/openapi.json`; no grant or key change is needed.
+
 The Telnyx overlay covers core AI inference, assistants, conversations, speech,
 messaging, and calling. Its full upstream spec exceeds the fetch limit. See
 [Telnyx integration](TELNYX_INTEGRATION.md) for connection setup and platform
@@ -782,6 +803,25 @@ rejected. Valid URLs preserve CMA's configured hostname, port, and route.
 See the [CMA producer handoff](plans/2026-10-27-cma-callback-url-contract.md)
 for required CMA response surfaces and `CHRONO_SERVER_PUBLIC_URL` configuration.
 
+The read-only `GET /api/v1/assistant/nyxagent/cma-sessions` projects verified
+personal origin receipts: `service_id`, CMA `agent_id`, NyxID `conversation_id`,
+`turn_id`, `specialist_id`, validated nullable `cma_url`, and safe
+`connection_name` / `connection_slug`. It never emits credentials or result
+bodies. `conversation` and up to 50 comma-separated `pins`
+(`<connection UUID>:<agt_id>`) select scope; `agents` optionally intersects up to
+50 exact candidates. `after` advances a 50-row page using `next_cursor`.
+`discover=true` returns eligible personal `connections` (id/name/slug/connected/
+requires_connection) with the same cursor envelope. Every read rechecks live
+personal connection identity, owner/history access, and erasure admission.
+Inventory cannot author an origin. Origin rows retain the earliest verified
+invocation independently of watch expiry, with transactional source deletion and
+personal erasure cleanup. See [CMA session status cards](chat/12-cma-sessions.md)
+for pin persistence, bounded status-filtered discovery (15-second discovery and
+five-second active-detail polling), independent pin receipt queries, and
+per-connection observer recovery. Retryable connection failures retain only
+previously authorized observations in the same account/source scope; a denied
+connection does not suppress healthy peers.
+
 These adapters use the existing authenticated async-watch executor, two-hour
 deadline, quotas, billing and live authority checks. They add no user-controlled
 polling URL or new cancellation API. Guest calls retain their ordinary tool
@@ -791,3 +831,46 @@ excludes encrypted results. CMA watch metadata has a 30-day TTL; result encrypti
 and the four-hour payload deadline remain the same as other watches. The
 [frontend contract](chat/05-frontend-ui.md#cma-delegation-cards) describes card
 placement and refresh behavior.
+
+
+## Assistant connection setup
+
+For eligible personal-credential catalogs, NyxBot's `nyx__connect_service`
+returns a hosted link immediately, even when personal or organization
+connections already exist.
+The chat result also includes bounded `existing_connections` metadata and
+`existing_connections_truncated`; each fact names ownership, connection label,
+and enabled state while leaving the provider account identity unknown. The
+assistant gives the link immediately and mentions those facts in one short
+line, without asking whether to proceed, offering reuse instead, or replacing
+the link with a settings page.
+
+Explicit platform-key requests create unified connections in one step. Other
+non-hosted chat requests retain the legacy connector, including no-auth and
+internal master-credential services. Repeating an active legacy connection
+returns successful `status: already_connected` with catalog ID/slug and existing
+facts: there is no separate account to add. It creates no duplicate connection.
+A catalog without `provider_config_id` returns `connect_unavailable` with
+`reason: provider_requirement_only` only when a `required: true` provider
+requirement is its only credential path (`requires_user_credential=false`).
+Optional requirements do not block setup, and `requires_user_credential=true`
+keeps the hosted API-key form. Admin-only OAuth and device-code providers must
+have their platform client credentials configured before a chat can mint a link; a
+device-code public client requires only a client ID. Specialists cannot create
+links and see only facts within their effective connection grants; completing
+setup never grants them access automatically. Unified inventory uses the shared
+service visibility resolver with one membership load, excludes Viewer/scope-denied
+rows and deleted tombstones, and retains disabled connections. Unscoped NyxBot
+also includes the actor's own active legacy `user_service_connections` row for
+the catalog, marked `source: "legacy_connection"`, using only ID, label, active
+state and creation time. Both sources share the ten-row bound and ordering;
+`migration_connection` / `source_id` lineage suppresses a legacy row already
+represented by a retained unified row. Specialist inventories contain only unified
+rows within their grants. Org-agent thread
+keys belong to the acting member; their effective connection IDs are restricted
+to the agent organization's own rows. A platform catalog grant in a personal
+key's effective scope does not grant inventory of that catalog's connections:
+selection matches exact `UserService` IDs.
+External MCP clients keep the legacy connection response contract. See
+[the engine contract](chat/08-nyxagent-engine.md#protected-org-connections-and-hosted-personal-setup)
+for bounds, owner checks, failures, and readiness-gated personal intent locks.

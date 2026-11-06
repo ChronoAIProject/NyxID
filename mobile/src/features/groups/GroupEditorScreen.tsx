@@ -1,20 +1,19 @@
 import { AgentAvatar } from "../../components/AgentAvatar";
+import { SkeletonRows } from "../../components/Skeleton";
 import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Alert } from "react-native";
+import { Alert } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Notice } from "../../components/workspace/WorkspaceUI";
 import {
-  ActionButton,
-  Card,
-  Field,
-  Label,
-  Notice,
-  WorkspacePage,
-} from "../../components/workspace/WorkspaceUI";
-import { WorkspaceSelectionField } from "../../components/workspace/WorkspaceSelectionField";
+  SettingsGroup,
+  SettingsPage,
+  SettingsRow,
+  SettingsTextField,
+} from "../../components/settings/SettingsList";
+import { SettingsSelectionRow } from "../../components/settings/SettingsSelectionRow";
 import { groupsApi } from "../../lib/api/groupsApi";
 import { agentsApi } from "../../lib/api/agentsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
-import { useTheme } from "../../theme/ThemeContext";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import {
   groupCreateSchema,
@@ -49,7 +48,6 @@ function GroupEditor({
   onSaved,
   onRemoved,
 }: GroupEditorScreenProps) {
-  const { colors } = useTheme();
   const live = useGroupAvailability();
   const client = useQueryClient();
   const scope = useRef({ mounted: true, epoch: live.epoch });
@@ -341,17 +339,15 @@ function GroupEditor({
         onRemoved={onRemoved ?? onBack}
       />
     );
+  const removedMembers =
+    baseline?.members.filter(
+      (member) => member.destroyed || !aliveIds.has(member.id),
+    ) ?? [];
   return (
-    <WorkspacePage
-      showHeading={false}
-      title={groupId ? "Crew settings" : "New crew"}
-    >
+    <SettingsPage>
       {error && <Notice message={error} tone="error" />}
       {(agents.isPending || (!!groupId && detail.isPending)) && (
-        <ActivityIndicator
-          accessibilityLabel="Loading crew editor"
-          color={colors.primary}
-        />
+        <SkeletonRows rows={3} title accessibilityLabel="Loading crew editor" />
       )}
       {(agents.isError || detail.isError) && (
         <>
@@ -359,21 +355,48 @@ function GroupEditor({
             message="Could not load the crew's agents and settings."
             tone="error"
           />
-          <ActionButton
-            label="Retry crew editor"
-            variant="secondary"
-            onPress={() => {
-              void agents.refetch();
-              if (groupId) void detail.refetch();
-            }}
-          />
+          <SettingsGroup inset={false}>
+            <SettingsRow
+              tone="action"
+              label="Retry"
+              accessibilityLabel="Retry crew editor"
+              onPress={() => {
+                void agents.refetch();
+                if (groupId) void detail.refetch();
+              }}
+            />
+          </SettingsGroup>
         </>
       )}
       {initialized && (
         <>
-          {!groupId && (
-            <Card>
-              <WorkspaceSelectionField
+          {baseline?.owner?.type === "org" && (
+            <Notice
+              message={`${baseline.owner.name} · ${canManage ? "You can manage this crew." : "Only the creator and participating Admins manage this crew."}`}
+            />
+          )}
+          <SettingsGroup
+            inset={false}
+            footer={
+              !groupId && (orgs.isError || features.isError)
+                ? "Organization choices could not be loaded. Personal crews remain available."
+                : !groupId && !!enabledOrgs.length && !orgEnabled
+                  ? "Organization crews are not enabled."
+                  : !groupId
+                    ? "Changing ownership resets the selected agents and participants."
+                    : undefined
+            }
+          >
+            <SettingsTextField
+              accessibilityLabel="Name"
+              value={name}
+              onChangeText={setName}
+              placeholder="Crew name, e.g. Launch crew"
+              autoCapitalize="sentences"
+              editable={!disabled}
+            />
+            {!groupId && (
+              <SettingsSelectionRow
                 label="Ownership"
                 title="Choose crew owner"
                 description="Choose where this crew belongs. Changing ownership resets its selected agents and participants."
@@ -413,31 +436,18 @@ function GroupEditor({
                   setPeopleTouched(false);
                 }}
               />
-              {(orgs.isError || features.isError) && (
-                <Label muted>
-                  Organization choices could not be loaded. Personal crews
-                  remain available.
-                </Label>
-              )}
-              {!!enabledOrgs.length && !orgEnabled && (
-                <Label muted>Organization crews are not enabled.</Label>
-              )}
-            </Card>
-          )}
-          {baseline?.owner?.type === "org" && (
-            <Notice
-              message={`${baseline.owner.name} · ${canManage ? "You can manage this crew." : "Only the creator and participating Admins manage this crew."}`}
-            />
-          )}
-          <Field
-            label="Name"
-            value={name}
-            onChangeText={setName}
-            placeholder="Launch crew"
-            editable={!disabled}
-          />
-          <Card>
-            <WorkspaceSelectionField
+            )}
+          </SettingsGroup>
+          <SettingsGroup
+            inset={false}
+            title="Members"
+            footer={
+              !eligible.length
+                ? "No eligible agents available."
+                : "@mention agents or choose recipients in the chat. Otherwise, messages go to whoever you last addressed, then the lead agent."
+            }
+          >
+            <SettingsSelectionRow
               label="Members"
               title="Choose crew agents"
               description={`Choose up to ${GROUP_MAX_MEMBERS} agents. Apply updates this draft; save the crew to keep your changes.`}
@@ -464,20 +474,26 @@ function GroupEditor({
                 setMembers(ids);
               }}
             />
-            {baseline?.members
-              .filter((member) => member.destroyed || !aliveIds.has(member.id))
-              .map((member) => (
-                <Label key={member.id} muted>
-                  {member.name} · No longer available; removed when you save.
-                </Label>
-              ))}
-            {!eligible.length && (
-              <Label muted>No eligible agents available.</Label>
-            )}
-          </Card>
+            {removedMembers.map((member) => (
+              <SettingsRow
+                key={member.id}
+                label={member.name}
+                detail="No longer available; removed when you save."
+                disabled
+              />
+            ))}
+          </SettingsGroup>
           {!!org && (
-            <Card>
-              <WorkspaceSelectionField
+            <SettingsGroup
+              inset={false}
+              title="Organization"
+              footer={
+                participants.isPending
+                  ? "Loading organization members…"
+                  : undefined
+              }
+            >
+              <SettingsSelectionRow
                 label="Participants"
                 title="Choose crew participants"
                 description={`Choose up to ${GROUP_MAX_PARTICIPANTS} organization Admins and Members. The creator is included when creating a crew.`}
@@ -527,17 +543,8 @@ function GroupEditor({
                   setPeople(ids);
                 }}
               />
-              {participants.isPending && (
-                <ActivityIndicator color={colors.primary} />
-              )}
-              {participants.isError && (
-                <Notice
-                  message="Could not load organization members."
-                  tone="error"
-                />
-              )}
               {!!groupId && (
-                <WorkspaceSelectionField
+                <SettingsSelectionRow
                   label="Lead agent"
                   title="Choose the lead agent"
                   description="Messages use the lead agent when no recipient or previous recipient is selected. Choose from this crew's selected agents."
@@ -554,51 +561,75 @@ function GroupEditor({
                   disabled={selectionDisabled || !members.length}
                   readOnly={!canManage}
                   scopeKey={`${live.epoch}:${groupId}:${org}:lead:${members.join(",")}`}
-                  placeholder="Choose a lead agent"
+                  placeholder="Choose"
                   confirmLabel="Use this lead agent"
                   onChange={([id]) => setLead(id)}
                 />
               )}
-            </Card>
+            </SettingsGroup>
           )}
-          <Label muted>
-            @mention agents or choose recipients in the chat. Otherwise,
-            messages go to whoever you last addressed, then the lead agent.
-          </Label>
-          {canManage && (
-            <ActionButton
-              label={groupId ? "Save changes" : "Create crew"}
-              onPress={() => void save()}
-              loading={busy}
-              disabled={
-                !live.active ||
-                !name.trim() ||
-                !members.length ||
-                agents.isError ||
-                detail.isError ||
-                (!!groupId && !dirty) ||
-                (!!org && participants.isError)
-              }
+          {!!org && participants.isError && (
+            <Notice
+              message="Could not load organization members."
+              tone="error"
             />
+          )}
+          {canManage && (
+            <SettingsGroup inset={false}>
+              <SettingsRow
+                tone="action"
+                centered
+                label={
+                  busy
+                    ? groupId
+                      ? "Saving…"
+                      : "Creating…"
+                    : groupId
+                      ? "Save changes"
+                      : "Create crew"
+                }
+                accessibilityLabel={groupId ? "Save changes" : "Create crew"}
+                onPress={() => void save()}
+                disabled={
+                  busy ||
+                  !live.active ||
+                  !name.trim() ||
+                  !members.length ||
+                  agents.isError ||
+                  detail.isError ||
+                  (!!groupId && !dirty) ||
+                  (!!org && participants.isError)
+                }
+              />
+            </SettingsGroup>
           )}
           {baseline && currentGroup && groupCanLeave(currentGroup) && (
-            <ActionButton
-              label="Leave crew"
-              variant="secondary"
-              disabled={busy || !live.active}
-              onPress={() => confirmDestructive("leave")}
-            />
+            <SettingsGroup inset={false}>
+              <SettingsRow
+                tone="danger"
+                label="Leave crew"
+                disabled={busy || !live.active}
+                onPress={() => confirmDestructive("leave")}
+              />
+            </SettingsGroup>
           )}
           {baseline && canManage && (
-            <ActionButton
-              label="Delete crew"
-              variant="danger"
-              disabled={busy || !live.active}
-              onPress={() => confirmDestructive("delete")}
-            />
+            <SettingsGroup
+              inset={false}
+              footer="Deletes the crew and its messages. Your agents and their own threads stay."
+            >
+              <SettingsRow
+                centered
+                destructive
+                label="Delete Crew"
+                accessibilityLabel="Delete crew"
+                disabled={busy || !live.active}
+                onPress={() => confirmDestructive("delete")}
+              />
+            </SettingsGroup>
           )}
         </>
       )}
-    </WorkspacePage>
+    </SettingsPage>
   );
 }

@@ -121,6 +121,9 @@ type SetupOptions = {
   agentError?: boolean;
   refetchAgents?: () => Promise<unknown>;
   live?: boolean;
+  agentsPending?: boolean;
+  groupsPending?: boolean;
+  agentsFetching?: boolean;
 };
 
 function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
@@ -205,10 +208,22 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
         const { queryKey } = query;
         if (queryKey.includes("agents")) agentQueries.push(query);
         return {
-          data: queryKey.includes("agents") ? { agents: liveAgents } : groups,
-          isSuccess: !queryKey.includes("agents") || !options.agentError,
-          isPending: false,
-          isFetching: false,
+          data: (
+            queryKey.includes("agents")
+              ? options.agentsPending
+              : options.groupsPending
+          )
+            ? undefined
+            : queryKey.includes("agents")
+              ? { agents: liveAgents }
+              : groups,
+          isSuccess: queryKey.includes("agents")
+            ? !options.agentError && !options.agentsPending
+            : !options.groupsPending,
+          isPending: queryKey.includes("agents")
+            ? !!options.agentsPending
+            : !!options.groupsPending,
+          isFetching: queryKey.includes("agents") && !!options.agentsFetching,
           isError: queryKey.includes("agents") && !!options.agentError,
           refetch: async (args: unknown) => {
             if (queryKey.includes("agents")) {
@@ -266,6 +281,7 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
     "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
     "../../theme/designTokens": { fonts: {} },
     "./WorkspaceChatBrowser": { WorkspaceChatBrowser: "WorkspaceChatBrowser" },
+    "../Skeleton": { SkeletonRows: "SkeletonRows" },
     "./workspaceChatListModel": listHelpers,
   });
   type Props = typeof props;
@@ -1189,7 +1205,9 @@ test("thread rows show newest first, relative times, running and needs-you state
       formatRelativeTimeFromMs(Date.parse(source[0]!.last_message_at)),
     ),
   );
-  assert.ok(content(rows[0]!).includes("Current · Running"));
+  // The highlight alone marks the current thread; no "Current" label.
+  assert.ok(content(rows[0]!).includes("Running"));
+  assert.ok(!content(rows[0]!).includes("Current"));
   assert.equal(rows[0]!.props.style({ pressed: false })[0].minHeight, 44);
   env.press("Collapse chats for Agent 1");
   assert.equal(env.chatRows().length, 0);
@@ -1389,5 +1407,50 @@ test("grouped sidebar agent subtitles keep persona/channel/status without repeat
     assert.equal(style.fontSize, sidebarSectionTitle.fontSize);
     assert.equal(style.fontFamily, sidebarSectionTitle.fontFamily);
   }
+  env.harness.unmount();
+});
+
+test("first loads of agents, crews and chats show row skeletons, not spinners", () => {
+  const skeletons = (env: ReturnType<typeof setup>) =>
+    env
+      .all()
+      .filter((row) => row.type === "SkeletonRows")
+      .map((row) => row.props.accessibilityLabel);
+  const agentsEnv = setup(undefined, { agentsPending: true });
+  assert.deepEqual(skeletons(agentsEnv), ["Loading agents"]);
+  assert.equal(
+    agentsEnv.all().some((row) => row.type === "ActivityIndicator"),
+    false,
+  );
+  agentsEnv.harness.unmount();
+
+  const crewsEnv = setup(
+    { kind: "group", groupId: groups[0]!.id },
+    { groupsPending: true },
+  );
+  assert.deepEqual(skeletons(crewsEnv), ["Loading crews"]);
+  crewsEnv.harness.unmount();
+
+  const chatsEnv = setup(
+    { kind: "agent", agentId: "agent-1" },
+    { history: "pending" },
+  );
+  assert.deepEqual(skeletons(chatsEnv), ["Loading chats"]);
+  chatsEnv.more("View all agents (9)");
+  assert.equal(chatsEnv.browser().loadingLabel, undefined);
+  chatsEnv.pressBrowserItem("agent-7");
+  assert.equal(chatsEnv.browser().loadingLabel, "Loading chats");
+  chatsEnv.harness.unmount();
+});
+
+test("background agent polling never shows the refresh spinner", () => {
+  const env = setup(undefined, { agentsFetching: true });
+  assert.equal(
+    env.label("Refresh agents").props.accessibilityState.busy,
+    false,
+  );
+  assert.equal(env.scroll().props.refreshControl.props.refreshing, false);
+  env.more("View all agents (9)");
+  assert.equal(env.browser().refreshing, false);
   env.harness.unmount();
 });

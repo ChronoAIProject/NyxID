@@ -45,15 +45,15 @@ export function OperationScopeCard({
       </CardHeader>
       <CardContent className="space-y-3">
         {query.isLoading ? (
-          <p className="text-12 text-muted-foreground">Loading operations…</p>
+          <p className="text-14 text-muted-foreground">Loading operations…</p>
         ) : null}
         {query.error ? (
-          <p role="alert" className="text-12 text-destructive">
+          <p role="alert" className="text-14 text-destructive">
             Could not load operations.
           </p>
         ) : null}
         {query.data && !query.data.length ? (
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             This key has no services to limit yet.
           </p>
         ) : null}

@@ -59,6 +59,8 @@ pub struct GatewayBotMentionSupport {
 /// (`"direct"`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotChannel {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_specialist: Option<super::org_channel::Binding>,
     #[serde(default)]
     pub gateway_source: Option<GatewaySource>,
     /// `preparing` admits provider binding only; `ready` permits native turns.
@@ -66,6 +68,9 @@ pub struct NyxbotChannel {
     pub gateway_native_phase: Option<String>,
     #[serde(default)]
     pub gateway_native_activation: Option<String>,
+    /// Bounded gateway problem code only; never upstream error prose.
+    #[serde(default)]
+    pub gateway_native_activation_detail: Option<String>,
     #[serde(default)]
     pub gateway_native_delivery: Option<String>,
     #[serde(default)]

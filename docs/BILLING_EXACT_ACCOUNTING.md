@@ -108,6 +108,21 @@ and terminal markers retry. Purchased-credit expiry retains its operation until
 all entries are confirmed. Provider balance updates and postings commit together.
 Dedupe keys, charge IDs and v1 canonical bytes remain unchanged.
 
+### Reporting grant flows
+
+The admin Grant credits report reads immutable issuance and consumption in the
+same bounded UTC window. Exact v2 `grant_issued` takes the credit posting to
+`platform:promotions`; `grant_consumed` takes the credit posting to
+`grant:{reference_id}`. Summing both balanced legs doubles the movement. Legacy
+events use micros when present, otherwise whole credits. Period consumption can
+exceed period issuance because older grants remain spendable. Financial owner
+IDs separate person and organization accounts; service slugs exist on consumption
+and never imply a service allocation of shared issuance. Full totals, daily
+buckets and independently paginated account/service breakdowns come from one
+snapshot aggregation. See [billing analytics](BILLING_ANALYTICS.md#grant-credits-granted-and-used)
+for the response, filters and bounds. These reads do not change funding order,
+settlement, deduplication or ledger writes.
+
 ### Canonical encoding
 
 v1 bytes are unchanged. v2 HMAC-SHA256 input starts with
@@ -478,3 +493,36 @@ is durable. Lago fee/tax cent rounding remains an ordinary provider-refresh
 `external:lago` adjustment. No ledger/hash encoding, dedupe key or checkpoint
 protocol changes. Legacy rows without tax fields settle pre-tax. Deploy all
 replicas before enabling Lago customer taxes; see [operations](BILLING_OPERATIONS.md).
+
+## Organization channel guest budgets
+
+Default-off `nyxbot:org-specialist-channels` adds one typed payer exception to
+`BillingOwnerResolver::resolve_for_execution`. A verified org-specialist channel
+**guest** with live admin-enabled exposure bills its organization's provisioned
+wallet for model and delegated tool usage, including platform keys. Members keep
+org BYOK → org and platform key → person. Ordinary platform-key execution keeps
+the billing principal and `PaysFrom::Personal` classification without an owner-type
+read, including org-owned API keys whose principal is the org. Those keys never
+enter the guest lane. No auto-provisioning or transport-admin sponsorship is used
+for guests.
+
+The admin must set a positive exact Credits cap per binding per UTC day (the UI
+suggests 1 credit before enabling). `org_channel_guest_budgets` and
+`org_channel_guest_holds` reserve the existing billing estimate in the same
+transaction as exact allowance/grant/wallet admission. Concurrent admissions
+cannot spend the same remaining budget. The hold includes allowance/grant value
+and the wallet's tax-inclusive reservation; benefits are not taxed. Usage-ID settlement/release is idempotent;
+crashes retain the reservation until the normal funding reconciler settles it.
+The admission day remains fixed across midnight. Actual consumed usage must still
+settle if a provider exceeds the estimate; the cap governs new billed admission,
+not cancellation of an already consumed provider effect. Lowering policy never
+resets today's spend or outstanding reservations. Guests receive a short
+unavailable reply when admission fails; members do not consume this cap.
+
+Usage retains org `billing_owner_id` and additive `org_channel_guest` metadata
+(binding ID and a scoped sender hash, never message text or credentials). The
+org's billing usage and bot settings show spend; settings also show reserved
+credits, exposure and delegated services. Financial rows follow accounting
+retention and are never discarded while unsettled. Every executing replica must
+support the typed lane before exposure is enabled; use the existing security
+readiness roster and drain controls, not a new environment variable.

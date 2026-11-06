@@ -262,10 +262,13 @@ async fn key_scope(
     Ok(())
 }
 
-/// A task watch may observe through its current personal key without borrowing
-/// a new live turn. Every additional read still obeys that key's exact scopes.
+/// Legacy personal watches may enrich an authenticated observation without a
+/// live turn. Task-marked watches need admission for each actual supplemental
+/// route; a declared lifecycle permission cannot authorize these extra reads.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn watch_scope(
     db: &Database,
+    nodes: &super::node_ws_manager::NodeWsManager,
     watch: &crate::models::async_service_operation::AsyncServiceOperation,
     service: &str,
     method: &str,
@@ -273,13 +276,62 @@ pub(crate) async fn watch_scope(
     query: Option<&str>,
     body: &[u8],
 ) -> AppResult<()> {
-    if method != "GET" || !body.is_empty() || watch.shared_execution.is_some() {
+    use super::{assistant_service_execution as execution, mcp_service};
+    let now = chrono::Utc::now();
+    if method != "GET"
+        || !body.is_empty()
+        || watch.shared_execution.is_some()
+        || watch.execution_task.is_some()
+        || watch.state != "waiting"
+        || watch.lease_id.is_none()
+        || watch.lease_until.is_none_or(|until| until <= now)
+        || watch.deadline <= now
+        || watch.expires_at <= now
+        || super::cma_operation::poll_id(watch).is_none()
+    {
         return Err(refused());
     }
-    let current=db.collection::<bson::Document>(crate::models::async_service_operation::COLLECTION_NAME).find_one(doc! {
-        "_id":&watch.id,"user_id":&watch.user_id,"conversation_id":&watch.conversation_id,"api_key_id":&watch.api_key_id,
-        "state":"waiting","lease_id":&watch.lease_id,"deadline":{"$gt":bson::DateTime::now()}
-    }).await?;
+    let cma = watch.cma.as_ref().ok_or_else(refused)?;
+    if watch.authority_version > 0
+        && (watch.execution_binding.is_none()
+            || watch.contract_binding.is_none()
+            || cma.observer_binding.is_none())
+    {
+        return Err(refused());
+    }
+    let mut identity = doc! {
+        "_id":&watch.id,"user_id":&watch.user_id,"conversation_id":&watch.conversation_id,
+        "api_key_id":&watch.api_key_id,"agent_id":&watch.agent_id,"turn_id":&watch.turn_id,
+        "service_id":&watch.service_id,"submit_endpoint_id":&watch.submit_endpoint_id,
+        "operation_id":&watch.operation_id,"contract":bson::to_bson(&watch.contract).map_err(|_|refused())?,
+        "contract_binding":&watch.contract_binding,"execution_binding":&watch.execution_binding,
+        "execution_task":null,"shared_execution":null,
+        "cma.kind":bson::to_bson(&cma.kind).map_err(|_|refused())?,
+        "cma.observer_binding":&cma.observer_binding,
+        "delivery.invocation_id":&watch.delivery.invocation_id,
+        "state":"waiting","lease_id":&watch.lease_id,"lease_until":{"$gt":bson::DateTime::now()},
+        "deadline":bson::DateTime::from_chrono(watch.deadline),
+        "expires_at":bson::DateTime::from_chrono(watch.expires_at),
+    };
+    if watch.authority_version == 0 {
+        identity.insert(
+            "$or",
+            vec![
+                doc! {"authority_version":0},
+                doc! {"authority_version":null},
+            ],
+        );
+    } else {
+        identity.insert("authority_version", i32::from(watch.authority_version));
+    }
+    if watch.operation_id.is_none() {
+        identity.insert("cma.agent_id", super::cma_operation::poll_id(watch));
+    }
+    let current = db
+        .collection::<bson::Document>(crate::models::async_service_operation::COLLECTION_NAME)
+        .find_one(identity.clone())
+        .projection(doc! {"_id":1})
+        .await?;
     if current.is_none() {
         return Err(refused());
     }
@@ -297,6 +349,72 @@ pub(crate) async fn watch_scope(
     if !chat_has_cma_grant(db, &chat).await? {
         return Err(refused());
     }
+    let connection = db
+        .collection::<crate::models::user_service::UserService>(crate::models::user_service::COLLECTION_NAME)
+        .find_one(doc! {"_id":&watch.service_id,"user_id":&watch.user_id,"is_active":true,"deleted_at":null})
+        .await?
+        .ok_or_else(refused)?;
+    if connection.catalog_service_id.as_deref() != Some(service) {
+        return Err(refused());
+    }
+    // Restore the original key/watch lineage. Legacy descendants are explicitly
+    // excluded from fresh task enrollment by this existing authentication path.
+    let key = super::key_service::get_api_key(db, &watch.user_id, &watch.api_key_id).await?;
+    let auth = Box::pin(crate::mw::auth::api_key_auth_user_for_watch(
+        db, &key, watch,
+    ))
+    .await?;
+    super::org_agent_service::authorize_execution(db, &auth, Some(&watch.service_id)).await?;
+    if !auth.allow_all_services && !auth.allowed_service_ids.contains(&watch.service_id) {
+        return Err(refused());
+    }
+    let node_scope = if auth.allow_all_nodes {
+        mcp_service::NodeScope::Unrestricted
+    } else {
+        mcp_service::NodeScope::Allowed(&auth.allowed_node_ids)
+    };
+    let catalog = Box::pin(mcp_service::load_operation_catalog(
+        db,
+        nodes,
+        &watch.user_id,
+        node_scope,
+        mcp_service::ServiceScope::Unrestricted,
+    ))
+    .await?;
+    let original_service = catalog
+        .services
+        .iter()
+        .find(|service| service.service_id == watch.service_id)
+        .ok_or_else(refused)?;
+    let submit = original_service
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.endpoint_id == watch.submit_endpoint_id)
+        .ok_or_else(refused)?;
+    if submit.async_operation.as_ref() != Some(&watch.contract) {
+        return Err(refused());
+    }
+    let contract = execution::async_contract_binding(original_service, submit)?;
+    if watch
+        .contract_binding
+        .as_ref()
+        .is_some_and(|original| original != &contract)
+    {
+        return Err(refused());
+    }
+    if let Some(invocation) = watch.delivery.invocation_id.as_deref()
+        && db
+            .collection::<bson::Document>(crate::models::assistant_invocation::COLLECTION_NAME)
+            .find_one(
+                doc! {"_id":invocation,"user_id":&watch.user_id,"terminal_status":null,
+                "cancel_requested":false,"conversation_deleted":false},
+            )
+            .projection(doc! {"_id":1})
+            .await?
+            .is_none()
+    {
+        return Err(refused());
+    }
     key_scope(
         db,
         &watch.user_id,
@@ -307,7 +425,45 @@ pub(crate) async fn watch_scope(
         query,
         body,
     )
-    .await
+    .await?;
+    let personal = super::cma_session_origin::personal_binding(
+        db,
+        &watch.user_id,
+        &watch.service_id,
+        Some(&watch.api_key_id),
+    )
+    .await?
+    .ok_or_else(refused)?;
+    if cma
+        .observer_binding
+        .as_ref()
+        .is_some_and(|original| original != &personal)
+    {
+        return Err(refused());
+    }
+    let binding = execution::connection_binding(db, &watch.service_id, &watch.api_key_id).await?;
+    if watch
+        .execution_binding
+        .as_ref()
+        .is_some_and(|original| original != &binding)
+    {
+        return Err(refused());
+    }
+    // Catalog and credential checks may take time. Recheck the exact current
+    // descendant immediately before returning to the provider send boundary.
+    identity.insert("lease_until", doc! {"$gt":bson::DateTime::now()});
+    if watch.deadline <= chrono::Utc::now()
+        || watch.expires_at <= chrono::Utc::now()
+        || db
+            .collection::<bson::Document>(crate::models::async_service_operation::COLLECTION_NAME)
+            .find_one(identity)
+            .projection(doc! {"_id":1})
+            .await?
+            .is_none()
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 pub async fn execute(

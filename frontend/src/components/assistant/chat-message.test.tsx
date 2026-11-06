@@ -297,7 +297,7 @@ describe("canonical chat presentation", () => {
     expect(retry).toHaveBeenCalledTimes(1);
   });
 
-  it("exposes Retry for a failed reply", async () => {
+  it("keeps legacy failed replies unchanged without inventing an action outcome", async () => {
     const retry = vi.fn();
     render(
       <ChatMessageBubble
@@ -305,8 +305,47 @@ describe("canonical chat presentation", () => {
         onRetry={retry}
       />,
     );
+    expect(screen.queryByText("No actions were taken.")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Retrying may repeat/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("shows proven empty actions without a retry warning", () => {
+    const retry = vi.fn();
+    render(<ChatMessageBubble message={{ ...BASE, status: "error", error: "Timed out",
+      actionOutcome: { summary: "No actions were taken.", complete: true, actions: [], retry_warning: null },
+    }} onRetry={retry} />);
+    expect(screen.getByText("No actions were taken.")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("shows completed actions and requires confirmation before retry", () => {
+    const retry = vi.fn();
+    render(<ChatMessageBubble message={{ ...BASE, content: "", status: "error", error: "Timed out",
+      actionOutcome: { summary: "These actions completed before the reply failed.", complete: true,
+        actions: [{ activity_id: "a1", label: "nyxid__create_schedule", status: "completed", summary: "Created a scheduled automation" }],
+        retry_warning: "This request already did the following: Created a scheduled automation. Retrying may repeat it.",
+      },
+    }} onRetry={retry} />);
+    expect(screen.getByText("Created a scheduled automation")).toBeVisible();
+    expect(screen.getByText(/Retrying may repeat it/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(retry).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry anyway" }));
+    expect(retry).toHaveBeenCalledOnce();
+  });
+
+  it("does not describe uncertain or missing evidence as no actions", () => {
+    render(<ChatMessageBubble message={{ ...BASE, status: "error", error: "Timed out",
+      actionOutcome: { summary: "Some actions may have taken effect. Review their results before trying again.", complete: false,
+        actions: [{ activity_id: "a1", label: "nyxid__create_schedule", status: "uncertain", summary: "Outcome uncertain: nyxid__create_schedule" }],
+        retry_warning: "Some actions may already have taken effect. Retrying may repeat them.",
+      },
+    }} />);
+    expect(screen.getByText("The action record may be incomplete.")).toBeVisible();
+    expect(screen.queryByText("No actions were taken.")).not.toBeInTheDocument();
   });
 
   it("shows a rejected retry beside its Retry button", async () => {
@@ -1433,19 +1472,19 @@ it.each([
 
 
 describe("message body copy integration", () => {
-  it("copies sanitized assistant Markdown without thinking, activities or controls", async () => {
+  it("copies readable assistant text without thinking, activities or controls", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     const markdown = "**回答**\n\n```rust\n    let n = 1;\n```";
     render(<ChatMessageBubble message={{ ...BASE, content: `${markdown}\n<function_calls><invoke>private-tool-input</invoke></function_calls>`, thinking: "private-thought" }} />);
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
-    expect(writeText).toHaveBeenCalledExactlyOnceWith(markdown);
+    expect(writeText).toHaveBeenCalledExactlyOnceWith("回答\n\n    let n = 1;\n");
     expect(await screen.findByRole("button", { name: "Copied" })).toBeVisible();
   });
   it("copies the user's original body including literal markup and whitespace", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
-    const original = "  <function_calls>example</function_calls>\n```js\n  x()\n```  ";
+    const original = "  **literal** <function_calls>example</function_calls>\n```js\n  x()\n```  ";
     render(<ChatMessageBubble message={{ ...BASE, role: "user", content: original }} />);
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy message" })));
     expect(writeText).toHaveBeenCalledExactlyOnceWith(original);

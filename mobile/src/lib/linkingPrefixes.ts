@@ -1,14 +1,14 @@
 type LinkEnvironment = {
   appScheme: string;
-  apiBaseUrl: string;
-  frontendUrl: string;
+  apiBaseUrls: readonly string[];
+  frontendUrls: readonly string[];
   universalLinkHost: string;
   allowHttp: boolean;
 };
 
 export function buildLinkingPrefixes(env: LinkEnvironment): string[] {
   const prefixes = new Set([`${env.appScheme}://`]);
-  const urls = [env.apiBaseUrl, env.frontendUrl];
+  const urls = [...env.apiBaseUrls, ...env.frontendUrls];
   if (env.universalLinkHost) {
     urls.push(`https://${env.universalLinkHost}`);
     if (env.allowHttp) urls.push(`http://${env.universalLinkHost}`);

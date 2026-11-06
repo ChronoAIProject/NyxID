@@ -128,6 +128,7 @@ pub async fn create_user(
     role_service::add_platform_role_id(&mut role_ids, platform_role, &platform_role_ids);
 
     let new_user = User {
+        execution_permission_enrollment: None,
         id: user_id.clone(),
         email: normalized,
         password_hash: Some(password_hash),
@@ -509,6 +510,13 @@ pub(crate) async fn apply_user_security_state_in_session(
             "Account state changed; refresh before retrying".into(),
         ));
     }
+    super::execution_permission_enrollment::lifecycle::apply(
+        db,
+        user_id,
+        super::execution_permission_enrollment::lifecycle::Change::Account { active },
+        session,
+    )
+    .await?;
     if let Some(policy) = &owner_deletion_policy {
         // Same transaction as the account/source fence. These
         // retained lifecycle records outlive the user cascade;
@@ -720,6 +728,7 @@ mod tests {
     async fn seed_person(db: &mongodb::Database, user_id: &str, email: &str) {
         let now = Utc::now();
         let user = User {
+            execution_permission_enrollment: None,
             id: user_id.to_string(),
             email: email.to_string(),
             password_hash: Some(crate::crypto::password::hash_password(&test_password()).unwrap()),
@@ -1601,6 +1610,7 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let now = Utc::now();
         let user = User {
+            execution_permission_enrollment: None,
             id: user_id.clone(),
             email: "social@example.com".to_string(),
             password_hash: None,

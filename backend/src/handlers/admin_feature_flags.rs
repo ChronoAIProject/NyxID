@@ -86,6 +86,22 @@ impl AdminOrgFeatureFlagOverride {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct ExecutionEnrollmentProgress {
+    pub org_id: String,
+    pub generation: String,
+    pub state: String,
+    pub processed: i64,
+    pub updated_at: String,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ExecutionEnrollmentStatus {
+    pub jobs: Vec<ExecutionEnrollmentProgress>,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AdminFeatureFlagItem {
     pub key: String,
     /// The description to show: the admin-authored one when set, otherwise the
@@ -109,6 +125,8 @@ pub struct AdminFeatureFlagItem {
     pub global_override: Option<bool>,
     pub org_overrides: Vec<AdminOrgFeatureFlagOverride>,
     pub user_overrides: Vec<AdminUserFeatureFlagOverride>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_enrollment: Option<ExecutionEnrollmentStatus>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -367,7 +385,31 @@ pub async fn list_feature_flags(
             .collect::<AppResult<Vec<_>>>()?;
         let meta = metadata.get(&def.key);
         let custom_description = meta.and_then(|row| row.description.clone());
+        let execution_enrollment = if def.key
+            == crate::services::execution_permission_enrollment::FLAG
+        {
+            let rows =
+                crate::services::execution_permission_enrollment::jobs::progress(&state.db).await?;
+            Some(ExecutionEnrollmentStatus {
+                has_more: rows.len() > 100,
+                jobs: rows
+                    .into_iter()
+                    .take(100)
+                    .map(|row| ExecutionEnrollmentProgress {
+                        org_id: row.org_id,
+                        generation: row.generation,
+                        state: row.state,
+                        processed: row.processed,
+                        updated_at: row.updated_at.to_rfc3339(),
+                        last_error: row.last_error,
+                    })
+                    .collect(),
+            })
+        } else {
+            None
+        };
         flags.push(AdminFeatureFlagItem {
+            execution_enrollment,
             key: def.key.to_string(),
             description: custom_description
                 .clone()

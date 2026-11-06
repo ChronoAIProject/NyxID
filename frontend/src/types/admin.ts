@@ -193,6 +193,8 @@ export type AdminAuditLogFilterField =
   DataTableFilterField<AdminAuditLogFilterKey>;
 
 export type AdminAuditLogSearchFieldKey =
+  | "user_id_exact"
+  | "api_key_id_exact"
   | "event_type"
   | "user_id"
   | "api_key"
@@ -212,7 +214,8 @@ export interface AdminAuditLogFilterOptions {
 
 export interface AdminAuditLogListResponse {
   readonly entries: readonly AdminAuditLogEntry[];
-  readonly total: number;
+  readonly total?: number;
+  readonly has_more?: boolean;
   readonly page: number;
   readonly per_page: number;
   /** Absent on older backends that predate the admin table controls. */
@@ -224,6 +227,8 @@ export type AdminAuditLogPerPage = 10 | 25 | 50 | 100;
 export interface AdminAuditLogListParams {
   readonly page: number;
   readonly per_page: AdminAuditLogPerPage;
+  readonly user_id?: string;
+  readonly api_key_id?: string;
   readonly search?: string;
   readonly search_filters?: string;
   readonly custom_filters?: string;
@@ -240,6 +245,8 @@ export interface AdminAuditLogListParams {
 export interface AdminAuditLogSearchState {
   readonly page?: number;
   readonly per_page?: AdminAuditLogPerPage;
+  readonly user_id?: string;
+  readonly api_key_id?: string;
   readonly search?: string;
   readonly search_filters?: string;
   readonly custom_filters?: string;

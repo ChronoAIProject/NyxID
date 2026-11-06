@@ -571,6 +571,7 @@ fn resolve_social_login(
     let email_lower = profile.email.to_lowercase();
 
     let new_user = User {
+        execution_permission_enrollment: None,
         id: user_id,
         email: email_lower,
         password_hash: None,
@@ -863,6 +864,7 @@ mod tests {
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
             instance_name: "test-backend".to_string(),
+            automation_continuation_v2_enabled: false,
             security_rollout: Default::default(),
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
@@ -1073,6 +1075,7 @@ mod tests {
     ) -> User {
         let now = Utc::now();
         User {
+            execution_permission_enrollment: None,
             id: Uuid::new_v4().to_string(),
             email: email.to_string(),
             password_hash: Some("hashed".to_string()),

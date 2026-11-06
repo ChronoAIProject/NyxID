@@ -45,13 +45,32 @@ pub(crate) fn hash_conversation_id(id: &str) -> String {
     hex::encode(&digest[..8])
 }
 
+/// The authenticated receive path, never inferred from a registration snapshot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InboundSource {
+    Webhook,
+    Poll,
+    DiscordGateway,
+}
+
+impl InboundSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Webhook => "webhook",
+            Self::Poll => "poll",
+            Self::DiscordGateway => "discord_gateway",
+        }
+    }
+}
+
 pub(crate) async fn process_inbound_messages(
+    source: InboundSource,
     state: InboundDeps<'_>,
     bot: &crate::models::channel_bot::ChannelBot,
     adapter: &dyn crate::services::channel_platform::PlatformAdapter,
     messages: &[crate::services::channel_platform::InboundMessage],
 ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    process_messages(state, bot, adapter, messages, None).await
+    process_messages(source, state, bot, adapter, messages, None).await
 }
 
 pub(crate) async fn process_discord_gateway_message(
@@ -75,6 +94,7 @@ pub(crate) async fn process_discord_gateway_message(
         )));
     }
     process_messages(
+        InboundSource::DiscordGateway,
         InboundDeps::from(state),
         bot,
         adapter,
@@ -85,6 +105,7 @@ pub(crate) async fn process_discord_gateway_message(
 }
 
 async fn process_messages(
+    source: InboundSource,
     state: InboundDeps<'_>,
     bot: &crate::models::channel_bot::ChannelBot,
     adapter: &dyn super::channel_platform::PlatformAdapter,
@@ -143,7 +164,7 @@ async fn process_messages(
             if let Some((fence, _)) = gateway {
                 fence.record_inbound(state.db).await?;
             } else {
-                super::channel_bot_service::record_inbound_success(state.db, bot).await;
+                super::channel_bot_service::record_inbound_success(state.db, bot, source).await;
             }
             stamped = true;
         }
@@ -171,6 +192,7 @@ async fn process_messages(
         {
             Ok(Some(r)) => r,
             Ok(None) => {
+                super::channel_bot_service::record_inbound_route(state.db, bot, "no_route").await;
                 if bot.platform == "x" {
                     tracing::warn!(bot_id = %bot.id, stage = "routing", "X webhook has no eligible agent route");
                 }
@@ -182,6 +204,8 @@ async fn process_messages(
                 continue;
             }
             Err(e) => {
+                super::channel_bot_service::record_inbound_route(state.db, bot, "unavailable")
+                    .await;
                 tracing::warn!(
                     bot_id = %bot.id,
                     error_code = e.error_code(),
@@ -193,10 +217,12 @@ async fn process_messages(
         };
 
         if route.conversation.user_id != bot.user_id {
+            super::channel_bot_service::record_inbound_route(state.db, bot, "unavailable").await;
             complete = false;
             continue;
         }
         super::ownership_transfer_service::require_current_bot(state.db, bot).await?;
+        super::channel_bot_service::record_inbound_route(state.db, bot, "matched").await;
 
         let mut metadata = channel_relay_service::inbound_metadata(
             &bot.id,

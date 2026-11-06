@@ -10,10 +10,10 @@ pub async fn list_children(
     cursor: Option<&str>,
     limit: u32,
 ) -> AppResult<(Vec<NyxbotThread>, Option<String>)> {
-    access(db, owner, channel).await?;
+    let row = access(db, owner, channel).await?;
     list_allowed(
         db,
-        owner,
+        &row.user_id,
         &[channel.to_owned()],
         parent,
         state,
@@ -36,11 +36,21 @@ pub async fn list_allowed(
     if !matches!(state, "active" | "all") || !(1..=50).contains(&limit) {
         return Err(AppError::ValidationError("Invalid thread page".into()));
     }
+    for channel in channels {
+        access(db, owner, channel).await?;
+    }
     let rows = db.collection::<NyxbotThread>(THREADS);
-    let mut filter = doc! {"user_id":owner,"channel_id":{"$in":channels},"record_scope":SCOPE};
+    let mut filter = doc! {"channel_id":{"$in":channels},"record_scope":SCOPE};
     if let Some(parent) = parent {
-        if rows.find_one(doc! {"_id":parent,"user_id":owner,"channel_id":{"$in":channels},"record_scope":{"$ne":SCOPE}})
-            .await?.is_none() {return Err(not_found());}
+        if rows
+            .find_one(
+                doc! {"_id":parent,"channel_id":{"$in":channels},"record_scope":{"$ne":SCOPE}},
+            )
+            .await?
+            .is_none()
+        {
+            return Err(not_found());
+        }
         filter.insert("parent_chat_id", parent);
     }
     if state == "active" {

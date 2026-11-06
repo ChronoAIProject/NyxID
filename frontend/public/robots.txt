@@ -14,4 +14,4 @@ Disallow: /cli-auth
 Disallow: /oauth-consent
 Disallow: /ssh
 
-Sitemap: https://nyx.chrono-ai.fun/sitemap.xml
+Sitemap: https://nyxid.ai/sitemap.xml

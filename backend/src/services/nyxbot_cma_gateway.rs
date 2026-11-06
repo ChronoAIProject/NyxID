@@ -355,7 +355,10 @@ pub struct CatalogCmaGateway {
         super::assistant_acknowledgement_service::ChatAuthority,
         crate::models::assistant_settings::AccessMode,
     )>,
-    watch_authority: Option<crate::models::async_service_operation::AsyncServiceOperation>,
+    watch_authority: Option<(
+        crate::models::async_service_operation::AsyncServiceOperation,
+        Arc<super::node_ws_manager::NodeWsManager>,
+    )>,
 }
 
 pub(crate) fn catalog_execution_fingerprint(service: &DownstreamService) -> String {
@@ -430,8 +433,9 @@ impl CatalogCmaGateway {
     pub(crate) fn with_watch_authority(
         mut self,
         watch: &crate::models::async_service_operation::AsyncServiceOperation,
+        nodes: Arc<super::node_ws_manager::NodeWsManager>,
     ) -> Self {
-        self.watch_authority = Some(watch.clone());
+        self.watch_authority = Some((watch.clone(), nodes));
         self
     }
 
@@ -784,7 +788,7 @@ impl CatalogCmaGateway {
             .await
             .map_err(|_| CmaGatewayError::Forbidden)?;
         }
-        if let Some(watch) = &self.watch_authority {
+        if let Some((watch, nodes)) = &self.watch_authority {
             if watch.user_id != owner_id {
                 return Err(CmaGatewayError::Forbidden);
             }
@@ -792,6 +796,7 @@ impl CatalogCmaGateway {
             authorize_native_route(&service, request.method().as_str(), &path)?;
             super::nyxbot_cma_tools::watch_scope(
                 &self.db,
+                nodes,
                 watch,
                 &service.id,
                 request.method().as_str(),
@@ -966,6 +971,275 @@ fn authorize_native_route(service: &DownstreamService, method: &str, path: &str)
 #[cfg(test)]
 mod native_policy_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cma_watch_enrichment_requires_leased_original_legacy_authority() {
+        use crate::models::async_service_operation::{
+            AsyncServiceOperation, COLLECTION_NAME as WATCHES,
+        };
+        use crate::services::{
+            assistant_authority_tests::orchestrator_fixture,
+            assistant_service_execution as execution, cma_session_origin, mcp_service,
+        };
+        use crate::test_utils::{
+            test_auto_connected_catalog_service, test_service_endpoint, test_user_endpoint,
+            test_user_service,
+        };
+        use axum::{Json, Router, routing::get};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let f = orchestrator_fixture("cma_watch_enrichment_authority").await;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let observed = reads.clone();
+        let app = Router::new().route(
+            "/api/v1/agents/agt_observed",
+            get(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Json(json!({
+                        "id":"agt_observed","status":"working","revision":1
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let db = &f.state.db;
+        let mut catalog = test_auto_connected_catalog_service();
+        catalog.slug = "cma".into();
+        catalog.base_url = base.clone();
+        catalog.identity_propagation_mode = "jwt".into();
+        db.collection::<DownstreamService>("downstream_services")
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let connection_id = uuid::Uuid::new_v4().to_string();
+        db.collection("user_endpoints")
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &f.owner,
+                "CMA",
+                &base,
+                None,
+                Some(&catalog.id),
+            ))
+            .await
+            .unwrap();
+        let mut connection = test_user_service(
+            &connection_id,
+            &f.owner,
+            "sandbox",
+            &endpoint_id,
+            Some(&catalog.id),
+            None,
+        );
+        connection.identity_propagation_mode = "jwt".into();
+        connection.identity_jwt_audience = catalog.identity_jwt_audience.clone();
+        db.collection("user_services")
+            .insert_one(connection)
+            .await
+            .unwrap();
+        db.collection::<bson::Document>("api_keys")
+            .update_one(
+                doc! {"_id":&f.row.credential_api_key_id},
+                doc! {"$set":{"allow_all_services":true}},
+            )
+            .await
+            .unwrap();
+        let mut submit = test_service_endpoint(
+            &catalog.id,
+            "submit_response",
+            "POST",
+            "/api/v2/agents/{agent_id}/responses",
+        );
+        submit.parameters = Some(json!([{
+            "name":"agent_id","in":"path","required":true,"schema":{"type":"string"}
+        }]));
+        let mut status = test_service_endpoint(
+            &catalog.id,
+            "response_status",
+            "GET",
+            "/api/v2/responses/{response_id}",
+        );
+        status.parameters = Some(json!([{
+            "name":"response_id","in":"path","required":true,"schema":{"type":"string"}
+        }]));
+        db.collection::<crate::models::service_endpoint::ServiceEndpoint>("service_endpoints")
+            .insert_many([&submit, &status])
+            .await
+            .unwrap();
+        let published = mcp_service::load_operation_catalog(
+            db,
+            &f.state.node_ws_manager,
+            &f.owner,
+            mcp_service::NodeScope::Unrestricted,
+            mcp_service::ServiceScope::Unrestricted,
+        )
+        .await
+        .unwrap();
+        let service = published
+            .services
+            .iter()
+            .find(|service| service.service_id == connection_id)
+            .unwrap();
+        let submit = service
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == submit.id)
+            .unwrap();
+        let now = Utc::now();
+        let mut watch: AsyncServiceOperation = bson::from_document(doc! {
+            "_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.owner,
+            "conversation_id":&f.row.id,"agent_id":&f.row.agent_id,
+            "turn_id":&f.row.active_turn.as_ref().unwrap().turn_id,
+            "api_key_id":&f.row.credential_api_key_id,"service_id":&connection_id,
+            "submit_endpoint_id":&submit.endpoint_id,"contract":bson::to_bson(submit.async_operation.as_ref().unwrap()).unwrap(),
+            "contract_binding":execution::async_contract_binding(service,submit).unwrap(),
+            "execution_binding":execution::connection_binding(db,&connection_id,&f.row.credential_api_key_id).await.unwrap(),
+            "authority_version":1_i32,"operation_id":"resp_observed",
+            "cma":{"kind":"cma_response","agent_id":"agt_observed",
+                "observer_binding":cma_session_origin::personal_binding(db,&f.owner,&connection_id,Some(&f.row.credential_api_key_id)).await.unwrap()},
+            "delivery":{"origin":"user"},"state":"waiting","attempts":0,
+            "lease_id":null,"lease_until":null,"created_at":bson::DateTime::from_chrono(now),
+            "deadline":bson::DateTime::from_chrono(now+chrono::Duration::hours(1)),
+            "poll_at":bson::DateTime::from_chrono(now),
+            "expires_at":bson::DateTime::from_chrono(now+chrono::Duration::hours(2)),
+        })
+        .unwrap();
+        let watches = db.collection::<bson::Document>(WATCHES);
+        watches
+            .insert_one(bson::to_document(&watch).unwrap())
+            .await
+            .unwrap();
+        let read = |watch: &AsyncServiceOperation| {
+            CatalogCmaGateway::for_service(&f.state, &catalog.id)
+                .with_watch_authority(watch, f.state.node_ws_manager.clone())
+        };
+        assert!(
+            read(&watch)
+                .get_agent(&f.owner, "agt_observed")
+                .await
+                .is_err(),
+            "submission receipts have no polling lease"
+        );
+        watch.lease_id = Some("original-lease".into());
+        watch.lease_until = Some(now + chrono::Duration::minutes(1));
+        watches
+            .replace_one(doc! {"_id":&watch.id}, bson::to_document(&watch).unwrap())
+            .await
+            .unwrap();
+        read(&watch)
+            .get_agent(&f.owner, "agt_observed")
+            .await
+            .unwrap();
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+
+        // A same-ID lease expiry must stop the next supplemental provider read.
+        watches
+            .update_one(
+                doc! {"_id":&watch.id},
+                doc! {"$set":{"lease_until":bson::DateTime::from_millis(0)}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            read(&watch)
+                .get_agent(&f.owner, "agt_observed")
+                .await
+                .is_err()
+        );
+        watches
+            .replace_one(doc! {"_id":&watch.id}, bson::to_document(&watch).unwrap())
+            .await
+            .unwrap();
+
+        // The gateway's canonical catalog route cannot bless a changed original connection.
+        db.collection::<bson::Document>("user_endpoints")
+            .update_one(
+                doc! {"_id":&endpoint_id},
+                doc! {"$set":{"url":format!("{base}/changed")}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            read(&watch)
+                .get_agent(&f.owner, "agt_observed")
+                .await
+                .is_err()
+        );
+        db.collection::<bson::Document>("user_endpoints")
+            .update_one(doc! {"_id":&endpoint_id}, doc! {"$set":{"url":&base}})
+            .await
+            .unwrap();
+
+        // Endpoint-only drift is outside the connection digest and needs the live contract gate.
+        db.collection::<bson::Document>("service_endpoints")
+            .update_one(
+                doc! {"_id":&status.id},
+                doc! {"$set":{"path":"/api/v2/responses/{response_id}/changed"}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            read(&watch)
+                .get_agent(&f.owner, "agt_observed")
+                .await
+                .is_err()
+        );
+        db.collection::<bson::Document>("service_endpoints")
+            .update_one(doc! {"_id":&status.id}, doc! {"$set":{"path":&status.path}})
+            .await
+            .unwrap();
+
+        // Optional reads have no independent execution-task route admission yet.
+        // Refuse both a marked snapshot and an older snapshot of the marked row.
+        let legacy = watch.clone();
+        let mut task =
+            crate::services::execution_permission_dispatch::phase_b_tests::task(db, &f.row).await;
+        task.parent_turn_id = Some(watch.turn_id.clone());
+        watch.execution_task = Some(task.clone());
+        watches
+            .replace_one(doc! {"_id":&watch.id}, bson::to_document(&watch).unwrap())
+            .await
+            .unwrap();
+        for snapshot in [&watch, &legacy] {
+            assert!(
+                read(snapshot)
+                    .get_agent(&f.owner, "agt_observed")
+                    .await
+                    .is_err()
+            );
+        }
+        db.collection::<bson::Document>("assistant_messages")
+            .update_one(doc! {"_id":&task.task.root_id},doc! {"$set":{"execution_task.cancelled":true},"$inc":{"execution_task.epoch":1_i64}})
+            .await.unwrap();
+        assert!(
+            read(&watch)
+                .get_agent(&f.owner, "agt_observed")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "denied enrichments never reach the provider"
+        );
+
+        // Removing only this fixture's marked descendant restores the legacy path.
+        watches
+            .replace_one(doc! {"_id":&legacy.id}, bson::to_document(&legacy).unwrap())
+            .await
+            .unwrap();
+        read(&legacy)
+            .get_agent(&f.owner, "agt_observed")
+            .await
+            .unwrap();
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
     #[test]
     fn native_catalog_policy_denies_unpublished_file_changes() {
         let mut catalog = crate::test_utils::test_auto_connected_catalog_service();

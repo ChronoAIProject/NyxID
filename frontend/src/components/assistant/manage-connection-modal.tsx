@@ -1,16 +1,9 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import {
-  AlertTriangle,
-  Copy,
-  ExternalLink,
-  Loader2,
-  Lock,
-  RefreshCw,
-} from "lucide-react";
+import { Copy, ExternalLink, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { ServiceIcon } from "@/components/service-icon";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -19,7 +12,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedInput,
+  GroupedSaveBar,
+} from "@/components/ui/grouped-list";
 import { Switch } from "@/components/ui/switch";
 import {
   useDeleteKey,
@@ -56,11 +54,13 @@ import {
 function canModifyKey(key: KeyInfo): boolean {
   const source = key.credential_source;
   const readOnly = source?.type === "org" && source.role !== "admin";
-  return !readOnly && !key.auto_connected;
+  return (
+    !readOnly && !key.auto_connected && key.credential_binding !== "platform"
+  );
 }
 
 function readOnlyReason(key: KeyInfo): string {
-  if (key.auto_connected) {
+  if (key.auto_connected || key.credential_binding === "platform") {
     return "Platform-managed connection — manage it from the service catalog.";
   }
   return "Managed by your organization — an org admin can change it.";
@@ -102,79 +102,6 @@ function canReconnect(
   );
 }
 
-/**
- * Explains a connection that isn't working, and offers the way out.
- *
- * Without this the modal showed a lone red `failed` pill: a status the user
- * has no way to interpret (it covers both "the authorization never came
- * back" and "the provider rejected our stored grant"), no sight of the
- * `error_message` the backend already recorded on the row, and no action
- * other than leaving for the Studio page. `tooltip` from the status registry
- * is the general meaning; `errorMessage` is the provider's specific reason,
- * so both are shown when both exist.
- */
-function ConnectionStatusNotice({
-  status,
-  errorMessage,
-  onReconnect,
-}: {
-  readonly status: string;
-  readonly errorMessage: string | null;
-  /** Omitted when this status isn't repairable by re-authorizing. */
-  readonly onReconnect?: () => void;
-}) {
-  const meta = credentialStatusMeta(status);
-  const destructive = meta.variant === "destructive";
-
-  return (
-    <div
-      className={
-        destructive
-          ? "flex items-start gap-3 rounded-xl border border-destructive/15 bg-destructive/[0.04] px-4 py-3"
-          : "flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3"
-      }
-    >
-      <span
-        className={
-          destructive
-            ? "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-destructive/10 text-destructive"
-            : "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-warning/10 text-warning"
-        }
-      >
-        <AlertTriangle className="h-4 w-4" />
-      </span>
-      <div className="min-w-0 flex-1 space-y-1.5">
-        <p
-          className={
-            destructive
-              ? "text-12 text-destructive"
-              : "text-12 text-warning"
-          }
-        >
-          {meta.tooltip}
-        </p>
-        {errorMessage && (
-          <p className="break-words font-mono text-11 text-muted-foreground">
-            {errorMessage}
-          </p>
-        )}
-        {onReconnect && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="mt-0.5"
-            onClick={onReconnect}
-          >
-            <RefreshCw />
-            {reconnectLabel(status)}
-          </Button>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function DetailRow({
   label,
   children,
@@ -182,16 +109,7 @@ function DetailRow({
   readonly label: string;
   readonly children: React.ReactNode;
 }) {
-  return (
-    <div className="flex items-baseline justify-between gap-4 py-2">
-      <span className="shrink-0 text-11 uppercase tracking-[0.5px] text-text-tertiary">
-        {label}
-      </span>
-      <span className="min-w-0 text-right text-12 text-foreground">
-        {children}
-      </span>
-    </div>
-  );
+  return <GroupedRow title={label} accessory={children} />;
 }
 
 /** Inline credential replacement — the one rotation path a plugin user needs,
@@ -222,69 +140,69 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
     );
   }
 
-  if (!open) {
+  if (!open)
     return (
-      <div className="flex items-center justify-between gap-4 py-2.5">
-        <div>
-          <p className="text-12 font-medium text-foreground">Credential</p>
-          <p className="text-11 text-text-tertiary">
-            Paste a new secret to replace the stored one.
-          </p>
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => setOpen(true)}
-        >
-          Replace
-        </Button>
-      </div>
+      <GroupedList footer="Paste a new secret to replace the stored one.">
+        <GroupedRow asChild interactive>
+          <button type="button" onClick={() => setOpen(true)}>
+            Replace
+          </button>
+        </GroupedRow>
+      </GroupedList>
     );
-  }
-
   return (
-    <div className="space-y-2 py-2.5">
-      <p className="text-12 font-medium text-foreground">
-        Replace credential
-      </p>
-      <Input
-        type="password"
-        autoFocus
-        value={credential}
-        onChange={(event) => setCredential(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter") {
-            event.preventDefault();
-            submit();
-          }
-        }}
-        placeholder="New credential"
-        aria-label="New credential"
-      />
-      <div className="flex justify-end gap-2">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={() => {
-            setCredential("");
-            setOpen(false);
-          }}
-        >
-          Cancel
-        </Button>
-        <Button
-          type="button"
-          variant="primary"
-          size="sm"
-          disabled={!credential.trim()}
-          isLoading={updateApiKey.isPending}
-          onClick={submit}
-        >
-          Save
-        </Button>
-      </div>
+    <div>
+      <GroupedList title="Replace credential">
+        <GroupedRow>
+          <Label className="w-full text-text-tertiary">
+            New credential
+            <GroupedInput
+              type="password"
+              autoFocus
+              value={credential}
+              onChange={(event) => setCredential(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+              placeholder="New credential"
+            />
+          </Label>
+        </GroupedRow>
+        {!credential && (
+          <GroupedRow asChild interactive>
+            <button type="button" onClick={() => setOpen(false)}>Cancel</button>
+          </GroupedRow>
+        )}
+      </GroupedList>
+      {credential && (
+        <GroupedSaveBar>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={updateApiKey.isPending}
+            onClick={() => {
+              setCredential("");
+              setOpen(false);
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="primary"
+            size="sm"
+            disabled={!credential.trim()}
+            isLoading={updateApiKey.isPending}
+            onClick={submit}
+          >
+            Save
+          </Button>
+        </GroupedSaveBar>
+      )}
     </div>
   );
 }
@@ -375,7 +293,7 @@ function ConnectionPanel({
   if (error || !key) {
     return (
       <div className="flex h-40 flex-col items-center justify-center gap-3 text-center">
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           Couldn't load this connection.
         </p>
         <Button
@@ -403,109 +321,82 @@ function ConnectionPanel({
 
   return (
     <>
-      <section>
-        {showLabel && (
-          <div className="flex items-center justify-between gap-2 pb-1">
-            <p className="min-w-0 truncate text-12 font-medium text-foreground">
-              {key.label}
-            </p>
-            <Badge variant={statusMeta.variant}>{statusMeta.label}</Badge>
-          </div>
-        )}
-
-        {/* A broken connection is the reason this modal gets opened, so the
-            explanation leads rather than sitting under the detail rows. */}
-        {(isProblemStatus(key.status) || key.credential_missing) && (
-          <div className="pb-3">
-            {key.credential_missing ? (
-              <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
-                <div className="min-w-0 flex-1 space-y-1.5">
-                  <p className="text-12 text-warning">
-                    The stored credential is missing. Reconnect or delete this service.
+      <div className="space-y-6">
+        <GroupedList
+          title={showLabel ? key.label : undefined}
+          footer={
+            <>
+              {key.credential_missing ? (
+                <p className="text-warning">
+                  The stored credential is missing. Reconnect or delete this
+                  service.
+                </p>
+              ) : isProblemStatus(key.status) ? (
+                <>
+                  <p
+                    className={
+                      statusMeta.variant === "destructive"
+                        ? "workspace-status-destructive"
+                        : "text-warning"
+                    }
+                  >
+                    {statusMeta.tooltip}
                   </p>
-                  {reconnectable && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setReconnectOpen(true)}
-                    >
-                      <RefreshCw />
-                      Reconnect
-                    </Button>
-                  )}
-                </div>
-              </div>
-            ) : (
-              <ConnectionStatusNotice
-                status={key.status}
-                errorMessage={key.error_message}
-                onReconnect={
-                  reconnectable ? () => setReconnectOpen(true) : undefined
-                }
-              />
-            )}
-          </div>
-        )}
-
-        <div className="divide-y divide-border/60">
-          {/* Multi-connection panels carry status beside their label; a lone
-            connection has no label row, so it reads as a field instead. */}
-          {!showLabel && (
-            <DetailRow label="Status">
-              <Badge variant={statusMeta.variant}>{statusMeta.label}</Badge>
-            </DetailRow>
-          )}
+                  {key.error_message ? (
+                    <p className="break-words">{key.error_message}</p>
+                  ) : null}
+                </>
+              ) : null}
+              {modifiable ? (
+                <p>
+                  Disable to stop the assistant using this connection. Your
+                  credential is kept — you can enable it again any time.
+                </p>
+              ) : (
+                <p>{readOnlyReason(key)}</p>
+              )}
+            </>
+          }
+        >
+          <DetailRow label="Status">{statusMeta.label}</DetailRow>
           <DetailRow label="Credential">
             {key.credential_missing
               ? "Missing - reconnect or delete"
               : key.credential_type.replaceAll("_", " ")}
           </DetailRow>
-          {grantedScopes && grantedScopes.length > 0 && (
+          {grantedScopes && grantedScopes.length > 0 ? (
             <DetailRow label="Scopes">
-              <span className="flex flex-wrap justify-end gap-1">
-                {grantedScopes.map((scope) => (
-                  <span
-                    key={scope}
-                    className="rounded bg-overlay-strong px-1.5 py-0.5 font-mono text-10 text-muted-foreground"
-                  >
-                    {scope}
-                  </span>
-                ))}
+              <span className="break-words">{grantedScopes.join(" · ")}</span>
+            </DetailRow>
+          ) : null}
+          {key.proxy_url ? (
+            <DetailRow label="Proxy URL">
+              <span className="inline-flex max-w-full items-start gap-2">
+                <span className="min-w-0 break-all text-right text-13">
+                  {key.proxy_url}
+                </span>
+                <button
+                  type="button"
+                  data-icon-button=""
+                  aria-label="Copy proxy URL"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(key.proxy_url ?? "");
+                    toast.success("Proxy URL copied");
+                  }}
+                  className="text-text-tertiary hover:text-foreground"
+                >
+                  <Copy className="size-[1em] shrink-0" />
+                </button>
               </span>
             </DetailRow>
-          )}
-          {key.proxy_url && (
-            <DetailRow label="Proxy URL">
-              <button
-                type="button"
-                onClick={() => {
-                  void navigator.clipboard?.writeText(key.proxy_url ?? "");
-                  toast.success("Proxy URL copied");
-                }}
-                className="inline-flex max-w-full items-center gap-1.5 font-mono text-11 text-muted-foreground transition-colors hover:text-foreground"
-              >
-                <span className="truncate">{key.proxy_url}</span>
-                <Copy className="h-3 w-3 shrink-0" />
-              </button>
-            </DetailRow>
-          )}
+          ) : null}
           <DetailRow label="Last used">
             {key.last_used_at ? formatDate(key.last_used_at) : "Never"}
           </DetailRow>
           {modifiable ? (
-            <>
-              <div className="flex items-center justify-between gap-4 py-2.5">
-                <div>
-                  <p className="text-12 font-medium text-foreground">
-                    Enabled
-                  </p>
-                  <p className="text-11 text-text-tertiary">
-                    Disable to stop the assistant using this connection. Your
-                    credential is kept — you can enable it again any time.
-                  </p>
-                </div>
+            <GroupedRow
+              title="Enabled"
+              accessory={
                 <Switch
                   checked={key.is_active}
                   disabled={
@@ -515,38 +406,44 @@ function ConnectionPanel({
                   onCheckedChange={toggleActive}
                   aria-label="Toggle connection enabled"
                 />
-              </div>
-              {canReplaceCredential(key) && !key.credential_missing && (
-                <ReplaceCredential apiKeyId={key.api_key_id as string} />
-              )}
-            </>
-          ) : (
-            <div className="flex items-center gap-2 py-2.5 text-11 text-text-tertiary">
-              <Lock className="h-3 w-3 shrink-0" />
-              {readOnlyReason(key)}
-            </div>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-2 pt-2.5">
-          <Button asChild variant="ghost" size="sm">
+              }
+            />
+          ) : null}
+          {reconnectable ? (
+            <GroupedRow asChild interactive>
+              <button type="button" onClick={() => setReconnectOpen(true)}>
+                {key.credential_missing
+                  ? "Reconnect"
+                  : reconnectLabel(key.status)}
+              </button>
+            </GroupedRow>
+          ) : null}
+        </GroupedList>
+        {modifiable && canReplaceCredential(key) && !key.credential_missing ? (
+          <ReplaceCredential apiKeyId={key.api_key_id as string} />
+        ) : null}
+        <GroupedList>
+          <GroupedRow asChild interactive>
             <Link to="/keys/$keyId" params={{ keyId: key.id }}>
-              Advanced settings
-              <ExternalLink />
+              <span className="flex-1">Advanced settings</span>
+              <ExternalLink
+                aria-hidden
+                className="size-[1.125em] text-text-tertiary"
+              />
             </Link>
-          </Button>
-          {modifiable && (
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-destructive hover:text-destructive"
-              onClick={() => setConfirmingRevoke(true)}
-            >
-              Delete
-            </Button>
-          )}
-        </div>
-      </section>
+          </GroupedRow>
+          {modifiable ? (
+            <GroupedRow asChild interactive className="text-destructive">
+              <button
+                type="button"
+                onClick={() => setConfirmingRevoke(true)}
+              >
+                Delete
+              </button>
+            </GroupedRow>
+          ) : null}
+        </GroupedList>
+      </div>
       {/* Confirmation is a modal, not an inline swap in the footer: the
           grant-revoking copy is a full sentence about de-authorizing an
           upstream account, and rendered in-card it read as an error the app
@@ -607,10 +504,10 @@ export function ManageConnectionModal({
 
   return (
     <Dialog open onOpenChange={(next) => (next ? undefined : onClose())}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="bg-background md:max-w-md">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2.5">
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted text-12 font-semibold text-muted-foreground">
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-muted type-body-strong text-muted-foreground">
               {iconSlug || iconUrl ? (
                 <ServiceIcon slug={iconSlug} iconUrl={iconUrl} size="md" />
               ) : (
@@ -619,9 +516,9 @@ export function ManageConnectionModal({
             </span>
             <span className="min-w-0 truncate">{serviceName}</span>
             {multiple && (
-              <Badge variant="secondary" className="ml-1">
+              <span className="type-secondary text-text-tertiary">
                 {keyIds.length} connections
-              </Badge>
+              </span>
             )}
           </DialogTitle>
           <DialogDescription className="sr-only">
@@ -629,9 +526,9 @@ export function ManageConnectionModal({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="divide-y divide-border">
+        <div className="space-y-6 pb-5 md:pb-0">
           {keyIds.map((keyId) => (
-            <div key={keyId} className="py-4 first:pt-0 last:pb-0">
+            <div key={keyId} className="space-y-6">
               <ConnectionPanel
                 keyId={keyId}
                 showLabel={multiple}

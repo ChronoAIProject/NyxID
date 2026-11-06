@@ -129,6 +129,55 @@ async fn fence_key(
     Ok(())
 }
 
+/// Move only the catalog-controlled destination, preserving the remote channel,
+/// source policy, identity and credentials. Reuse the live dispatch fences.
+pub(crate) async fn rebase_host(
+    state: &AppState,
+    catalog: &super::nyxbot_gateway_host_move::Catalog,
+    row: &PlatformEntryGateway,
+) -> AppResult<bool> {
+    use super::nyxbot_gateway_host_move as host_move;
+    let EntryTransport::NyxagentGateway {
+        gateway_channel_id, ..
+    } = &row.configuration.transport
+    else {
+        return Ok(false);
+    };
+    let expected = format!("{}/callbacks/{gateway_channel_id}", catalog.base);
+    if !matches!(row.state.as_str(), "active" | "prepared")
+        || !host_move::valid_callback_id(gateway_channel_id)
+        || (row.callback_url == expected && row.gateway_base == catalog.base)
+        || (row.callback_url != expected
+            && host_move::rebase_callback(&row.callback_url, &catalog.base).as_deref()
+                != Some(expected.as_str()))
+        || !row.request_policy["sources"][0]["issuer"]
+            .as_str()
+            .is_some_and(|issuer| state.config.accepts_jwt_issuer(issuer))
+    {
+        return Ok(false);
+    }
+    super::transaction_service::run_db_only(&state.db,&(state,catalog,row,expected), |tx,(state,catalog,row,expected)|Box::pin(async move {
+        let db = &state.db;
+        let Some(key) = db.collection::<ApiKey>(KEYS).find_one(doc! {
+            "_id":&row.route_api_key_id,"user_id":&row.credential_owner_id,"callback_url":&row.callback_url,
+            "is_active":true,"purpose":"shared_entry_transport",
+        }).session(&mut *tx).await? else {return Ok(false);};
+        catalog.fence(db,tx).await?;
+        fence_gateway(state,tx,row).await?;
+        fence_key(db,tx,&key).await?;
+        if db.collection::<Document>(GATEWAYS).update_one(doc! {
+            "_id":&row.id,"gateway_base":&row.gateway_base,"callback_url":&row.callback_url,"revision":row.revision,
+            "configuration":bson::to_bson(&row.configuration).map_err(|_|refused())?,
+        },doc! {"$set":{"gateway_base":&catalog.base,"callback_url":expected,"updated_at":bson::DateTime::now()}})
+            .session(&mut *tx).await?.matched_count != 1 {return Err(refused());}
+        if super::api_key_mutation_service::update_one(db,doc! {"_id":&key.id,"user_id":&key.user_id,"callback_url":&row.callback_url,"purpose":"shared_entry_transport"},
+            doc! {"$set":{"callback_url":expected}},Some(&mut *tx)).await?.matched_count != 1 {return Err(refused());}
+        let old = if row.callback_url == *expected {&row.gateway_base} else {&row.callback_url};
+        host_move::audit(db,tx,&row.configured_by,"platform_entry",&row.id,old,expected).await?;
+        Ok(true)
+    })).await
+}
+
 /// Called before ordinary provider_channel performs ownership cleanup. A
 /// matching retired/malformed shared transport returns an error, never None.
 pub(crate) async fn authenticate(
@@ -814,6 +863,7 @@ fn transport_key(owner: &str) -> (ApiKey, Zeroizing<String>) {
         .unwrap_or(issued_at);
     let now = bson::DateTime::from_chrono(issued_at).to_chrono();
     let key = ApiKey {
+        permission_policy_id: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: owner.into(),
         name: "NyxID shared entry transport".into(),

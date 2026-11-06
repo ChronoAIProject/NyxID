@@ -8151,6 +8151,19 @@ configuration, stored-policy boundaries and sticky platform cutover/recovery.
 
 Manage notification channels and approval preferences. All endpoints require authentication (human-only, no service accounts or delegated tokens).
 
+GET/PUT settings also expose additive `group_mentions_enabled` (boolean, default
+`true` for legacy absent fields; omitted PUT preserves the preference). This
+controls **Mentions in groups** pushes through registered FCM/APNs devices and
+also requires `push_enabled`. It does not disable in-app unread/mention counts.
+Mention pushes omit transcript previews, coalesce per person/group for five
+minutes, and deep-link to the collaboration group; no Telegram or email is sent.
+Collaboration responses include optional `last_seen_seq`, `unread_count`, and
+`mention_count` inside `collaboration`. Human participants advance the marker
+with `POST /api/v1/assistant/nyxagent/groups/{id}/read` and
+`{"last_seen_seq": 42}` (204). The server clamps to existing history and never
+moves the marker backwards. Nonparticipants receive not-found. New writes and
+pushes require the sharing flag and collaboration readiness gate.
+
 ### Get Notification Settings
 
 ```
@@ -8585,6 +8598,27 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
   http://localhost:3001/api/v1/approvals/requests/550e8400-e29b-41d4-a716-446655440000/decide
 ```
 
+### Decide an assistant execution permission (default off)
+
+`POST /api/v1/approvals/requests/{request_id}/execution-decision` is a dedicated
+first-party-human endpoint for `execution_proposal` cards. The body contains
+`approved`, `expected_revision`, `choice_id`, `choice_digest`, and an
+`idempotency_key`; denial uses null choice fields. Operation is the default.
+The response is the current approval-request DTO, including the additive proposal
+review and independent operation status. A saved permission is not proof that the
+provider call completed. The server resumes the retained effect; clients must not
+reconstruct or automatically retry it.
+
+Only enrolled assistant MCP/proxy sources with live server task lineage create
+these cards. The authoring readiness capability is required, along with reader
+and dispatch readiness; enrollment is per-person only. The legacy `/decide` path
+refuses every proposal before mutation. Card detail and approved scope/input
+review are visible only to the acting first-party human, including requester-only
+group cards. Existing list/revoke routes manage the resulting execution grants.
+Mobile/Telegram offer a web link. See [execution permissions](EXECUTION_PERMISSIONS.md#permission-updates-and-resume-2195-part-a)
+for supported request shapes, four validity choices, encrypted retention limits
+and crash/recovery behavior. Existing legacy requests keep their semantics.
+
 ### List Active Grants
 
 ```
@@ -8909,6 +8943,30 @@ Changing a trigger's `delivery` through `PATCH` intentionally mints a replacemen
 
 The CLI adds `nyxid trigger deliveries <id>`, `nyxid trigger redeliver <id> <event_id>`, and `nyxid trigger rotate-delivery-secret <id>` alongside the existing management commands; use `--org` for org-owned triggers.
 
+#### Automation coordinator completion
+
+When coordinator completion is enabled and every serving replica advertises
+`automation:coordinator-completion-v2`, newly admitted assistant runs track
+specialist assignments and group handoffs through the coordinator's final reply.
+Existing runs retain their admission protocol. See [schedules and rollout](NYXBOT_SCHEDULES.md)
+for the default-off configuration, bounds and downgrade procedure.
+
+Run-history responses from `GET /api/v1/triggers/{id}/runs` add
+`coordinator_deadline` (RFC 3339), `wait_kind` and `can_cancel` for enrolled runs;
+legacy runs omit these fields. `wait_kind: "coordinator"` means delegated work is
+pending. The hard deadline terminates the run with `reason: "coordinator_timeout"`.
+
+`POST /api/v1/triggers/{id}/runs/{run_id}/cancel` returns the owner's updated run
+metadata with HTTP 200. It cancels an enrolled run and fences its delegated work;
+already completed external actions remain completed. This route requires a
+first-party human session and rejects API keys, delegated tokens, service-account
+tokens and relay tokens. An unrelated waiting run survives ordinary chat Stop.
+
+`GET /api/v1/admin/automation-continuations/readiness` requires admin or operator
+access and returns `configured`, fleet `readiness`, `rollback_safe` and
+`drain_blockers`. It reads bounded, indexed metadata only; it neither changes
+rollout state nor returns instructions, transcripts, result bodies or credentials.
+
 #### Public ingress
 
 ```http
@@ -9158,6 +9216,18 @@ and personal connections without creating a thread, reserving funds, or authoriz
 a call. Supplying `conversation_id` retains the live thread and source checks above;
 call startup always reauthorizes the selected connection against its actual thread.
 
+Devices use a published Bot Voice service with their own ordinary Agent Key.
+The human owner publishes a connection through
+`GET, PUT /api/v1/assistant/nyxagent/agents/{id}/voice-service` and grants its
+exact `UserService.id` through existing Key service scope. The service URL is
+`{BASE_URL}/api/v1/proxy/nyxbot-voice/{service_id}`; it exposes `/voice/options`,
+`/voice/sessions`, session status/control/stream and bounded announcements.
+Each connection fixes one Bot, and each call binds the actual login child
+credential. Existing browser routes remain first-party human only.
+See [Agent Key voice service](chat/12-agent-key-voice.md) for the operation table,
+independent Bot/device grants and lifecycle. Ending audio leaves accepted Bot
+work running; explicit Stop cancels it.
+
 Dictation adds two first-party human browser routes:
 
 | Route | Contract |
@@ -9181,6 +9251,24 @@ immediately while the server drains forwarded audio within a bounded deadline
 and settles provider-confirmed input duration. See the
 [transport and accounting contract](chat/11-voice.md#bounded-transcription-transport-and-accounting)
 for limits, exact duration handling and recovery.
+
+## Generated Sandbox attachments
+
+The default-off `assistant:generated-artifacts` flag enables private generated
+files on owner Web conversations. History adds optional attachment metadata and
+`artifact_delivery` state only while enabled. Existing attachment values remain
+unchanged. See [generated files](chat/10-uploads.md#generated-sandbox-files) for
+limits, retention, rollout order and recovery semantics.
+
+| Endpoint | Contract |
+| --- | --- |
+| `GET /api/v1/assistant/nyxagent/conversations/{id}/attachments/{attachment_id}` | Existing authenticated owner attachment route. Generated rows additionally bind conversation keys to their own conversation and return a complete HTTP 200 response with safe download/preview headers; Range is ignored. Retained owner reads remain available while the flag is off, until live expiry. |
+| `POST /api/v1/assistant/nyxagent/conversations/{id}/messages/{message_id}/artifact-delivery` | First-party human owner only, enabled feature and no active turn. Requires an empty body. Recovers saved bytes onto the original associated reply without another Sandbox execution; returns `{ "status": "materialized" }`. Disabled routes return 404; active turns return 409; expired attachments return 410. |
+
+Eligible owner NyxAgent chat keys also receive `nyx__artifact_delivery`, accepting
+an empty object. The server freezes its original-reply target and preflights
+recoverability before auditing or requesting an owner confirmation. Disabled or
+ineligible callers retain the ordinary unknown-tool response.
 
 ## Assistant skill review and image input
 
@@ -9537,3 +9625,43 @@ Native tools and MCP expose `create_collaboration_group`,
 writes remain first-party human only. Flag-off preserves authorized retained
 history, cancellation, departure and deletion; binary rollback requires the
 archive/drain procedure in the design.
+
+
+## CMA Sandbox billing producer API
+
+The routes below require a verified service-account JWT from the single
+configured CMA producer and issued/live `billing:sandbox:write` scope. They do
+not accept user sessions, user access tokens, API keys, delegated or relay
+credentials. New admission defaults to disabled. Full request/response examples,
+units, retry semantics and rollout requirements are in [CMA billing](CMA_BILLING.md).
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/api/v1/billing/sandboxes/quotes` | Quote the existing catalog service prices for an owner and full Sandbox allocation. |
+| POST | `/api/v1/billing/sandboxes/windows` | Atomically reserve at most 300 seconds across all applicable resource metrics. |
+| GET | `/api/v1/billing/sandboxes/cursors/{sandbox_id}` | Recover the durable ordered allocation-evidence checkpoint. |
+| GET | `/api/v1/billing/sandboxes/receipts/{request_id}` | Recover an already committed producer request, including during an admission/provider outage. |
+| POST | `/api/v1/billing/sandboxes/windows/{window_id}/evidence` | Finalize retained allocation intervals and queue the existing settlement/reconciliation path. |
+
+Bodies are bounded to 512 KiB; evidence is bounded to 1,024 intervals. Client
+price/amount fields and other unknown fields are rejected. A reused request ID
+with different input, changed final evidence, or changed retained ledger
+revision is a conflict. Evidence acceptance is distinct from provider emission.
+
+CMA service-owned producer settings: `GET` (admin/operator) and `PUT` (platform
+admin only) at `/api/v1/admin/billing/services/{id}/sandbox`. `{id}` must be the
+unique active catalog service with slug `cma`. GET returns `service_id`,
+`authorized_producer_service_account_id` (null when unset), and `revision` (0
+before configuration). PUT requires both `expected_revision` and
+`authorized_producer_service_account_id` (a canonical UUID v4 or explicit null).
+Stale revisions and changes with unreported funded windows return 409. Only an
+active General-purpose account with `billing:sandbox:write` can be selected;
+saving protects its credential management and atomically appends a chained audit.
+No setting means no authorized producer. These settings do not enable admission
+or alter prices; `experimental:cma-sandbox-billing` controls admission rollout.
+
+CMA runtime price configuration: `GET /api/v1/admin/billing/cma-rate-cards`
+(admin/operator) and `POST /api/v1/admin/billing/cma-rate-cards` (admin-only)
+list and publish immutable effective-dated resource prices. See
+[CMA billing](CMA_BILLING.md#enablement-and-runtime-rate-configuration) for
+exact decimal payloads, validation, audit and activation semantics.

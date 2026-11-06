@@ -108,8 +108,8 @@ function CmaAgentView({
   return (
     <div className="mx-auto w-full max-w-5xl space-y-6">
       <header>
-        <p className="mb-2 text-11 text-text-tertiary">Cloud assistant</p>
-        <h1 className="text-24 font-semibold tracking-tight">
+        <p className="mb-2 type-secondary text-text-tertiary">Cloud assistant</p>
+        <h1 className="type-compact-page-title sm:type-page-title tracking-tight">
           {agent.data?.label ?? "Cloud assistant"}
         </h1>
         <div className="mt-3 flex flex-wrap items-center gap-3 text-12">
@@ -158,7 +158,7 @@ function CmaAgentView({
         </TabsList>
         <TabsContent value="conversation" className="mt-5 space-y-5">
           <div className="flex flex-wrap items-center gap-3">
-            <p className="min-w-0 flex-1 text-12 leading-relaxed text-text-tertiary">
+            <p className="min-w-0 flex-1 type-secondary text-text-tertiary">
               Work requests and replies from all NyxBot chats that use this
               assistant. Recent activity appears first.
             </p>
@@ -252,7 +252,7 @@ function CmaAgentView({
             </Button>
           )}
           {live && (
-            <div className="flex flex-wrap items-center gap-3 text-11 text-text-tertiary">
+            <div className="flex flex-wrap items-center gap-3 type-secondary text-text-tertiary">
               <span role="status">
                 {stream.state === "connected"
                   ? "Live updates connected"
@@ -268,7 +268,7 @@ function CmaAgentView({
             </div>
           )}
           <CmaDisclosure title="Assistant details">
-            <dl className="space-y-2 text-11 text-text-tertiary">
+            <dl className="space-y-2 type-secondary text-text-tertiary">
               <div>
                 <dt>Assistant reference</dt>
                 <dd className="break-all font-mono">{remote}</dd>
@@ -295,7 +295,7 @@ function CmaAgentView({
               </Button>
             )}
           </CmaDisclosure>
-          <p className="text-12 leading-relaxed text-text-tertiary">
+          <p className="type-secondary text-text-tertiary">
             Continue working with this assistant through NyxBot. Results return
             to the original chat.
           </p>

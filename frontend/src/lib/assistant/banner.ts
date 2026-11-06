@@ -3,7 +3,7 @@
  * notices) share one frame and one row so they match in height, radius and
  * where their icon and text start.
  */
-export const BANNER_FRAME = "overflow-hidden rounded-lg border text-11";
+export const BANNER_FRAME = "overflow-hidden rounded-lg border text-13";
 /** Tool-call receipts (machine tool cards). */
 export const RECEIPT_MAX_W = "max-w-[900px]";
 /** The two transcript accordions, kept the same width: a turn's summary and the NyxID notices that woke it. */

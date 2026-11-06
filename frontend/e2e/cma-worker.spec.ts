@@ -383,7 +383,7 @@ for (const width of [1440, 390]) {
     await expect(environment.getByText("4 GiB", { exact: true })).toBeVisible();
     await expect(
       page.getByText(/Price and accrued charges are unknown here/),
-    ).toBeVisible();
+    ).toHaveCount(0);
     await expect(
       page.getByRole("tab", { name: "Desktop", exact: true }),
     ).toHaveCount(0);

@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { ApiError } from "@/lib/api-client";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { steeringNotice } from "@/lib/assistant/nyxagent-steering";
+import { useNyxAgentModels } from "@/hooks/use-nyxbot-agents";
+import { modelCannotViewImages } from "@/lib/assistant/nyxbot-labels";
 import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
 import { ComposerSettings } from "./composer-settings";
 import { ComposerConnectionChip, ComposerConnectionPicker } from "./composer-connection-picker";
@@ -28,6 +30,9 @@ type Props = Omit<UploadProps, "onSend"> & {
 /** Key by person + thread: pending guidance must never move with navigation. */
 export function NyxAgentComposer({ conversation, agentModel, agentOverride, onVoiceSettings, ...props }: Props) {
   const [draftModel, setDraftModel] = useState<string>();
+  const models = useNyxAgentModels();
+  const selectedModel = conversation?.model ?? draftModel ?? agentModel ?? "nyxagent/chat";
+  const cannotViewImages = modelCannotViewImages(models.data?.find((model) => model.id === selectedModel));
   const [connection, setConnection] = useState<KeyInfo>();
   const [connectionPickerOpen, setConnectionPickerOpen] = useState(false);
   const connections = useKeys();
@@ -51,10 +56,11 @@ export function NyxAgentComposer({ conversation, agentModel, agentOverride, onVo
   const connectionLocked = Boolean(props.active || props.sending || submitting || props.disabled);
 
   return <UploadComposer {...props}
+    imageWarning={cannotViewImages ? "This model can’t view images. You can still send, choose another model, or describe the image in text." : undefined}
     onVoiceSettings={onVoiceSettings}
     footerControls={<ComposerSettings
       conversationId={conversation?.id}
-      model={conversation?.model ?? draftModel ?? agentModel ?? "nyxagent/chat"}
+      model={selectedModel}
       onDraftModelChange={setDraftModel}
       agentOverride={agentOverride}
       active={props.active || props.sending || submitting}
@@ -80,7 +86,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentOverride, onVo
         disabled={connectionLocked} />
       {connection && <ComposerConnectionChip connection={connection} unavailable={connectionUnavailable}
         disabled={connectionLocked} onRemove={() => setConnection(undefined)} />}
-      {notice && <div className="mb-2 ml-[30px] text-12 text-muted-foreground" role="status">
+      {notice && <div className="mb-2 ml-[30px] text-14 text-muted-foreground" role="status">
       <p>{steeringNotice(notice.code, notice.outcome)}</p>
       {notice.code === "no_active_turn" && notice.text && <Button type="button" size="sm" variant="outline"
         disabled={submitting || props.active}

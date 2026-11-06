@@ -88,10 +88,54 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
         || channel.route_id != captured.route_id
         || channel.agent_id != captured.agent_id
         || channel.follow_binding_generation != captured.follow_binding_generation
-        || !channel.owner_sender_ids.contains(&request.sender_id)
+        || channel.org_specialist != captured.org_specialist
     {
         return Err(refused());
     }
+    let member = if channel.org_specialist.is_some() {
+        super::org_channel_service::enabled(db, &channel.user_id).await?;
+        let (identity, _) = super::org_channel_service::sender(
+            db,
+            &channel,
+            &request.sender_id,
+            true,
+            request
+                .agent_id
+                .as_ref()
+                .or(channel.agent_id.as_ref())
+                .ok_or_else(refused)?,
+        )
+        .await?;
+        if identity.guest {
+            return Err(refused());
+        }
+        if let Some(origin) = &request.origin {
+            if origin.org_execution.as_deref() != Some(&identity) {
+                return Err(refused());
+            }
+            let access = super::org_channel_service::validate(
+                db,
+                origin,
+                &identity.actor_id,
+                &identity.agent_id,
+            )
+            .await?;
+            let conversation = db.collection::<crate::models::assistant_conversation::AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+                .find_one(doc! {"_id":request.conversation_id.as_deref().ok_or_else(refused)?,"user_id":&identity.actor_id}).await?.ok_or_else(refused)?;
+            access
+                .channel()
+                .ok_or_else(refused)?
+                .check_conversation(&conversation)?;
+        } else if request.conversation_id.is_some() {
+            return Err(refused());
+        }
+        Some(identity)
+    } else {
+        if !channel.owner_sender_ids.contains(&request.sender_id) {
+            return Err(refused());
+        }
+        None
+    };
     if db
         .collection::<mongodb::bson::Document>(crate::models::user::COLLECTION_NAME)
         .find_one(doc! {"_id": &channel.user_id, "is_active":true})
@@ -161,7 +205,9 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
             }
             super::channel_thread_follow_service::validate_delivery(
                 db,
-                &channel.user_id,
+                member
+                    .as_ref()
+                    .map_or(channel.user_id.as_str(), |m| m.actor_id.as_str()),
                 origin,
                 request.conversation_id.as_deref().ok_or_else(refused)?,
             )
@@ -169,11 +215,23 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
         }
     }
     if let Some(id) = request.agent_id.as_ref().or(channel.agent_id.as_ref()) {
-        let agent = super::assistant_team_service::agent(db, &channel.user_id, id).await?;
+        let actor = member
+            .as_ref()
+            .map_or(channel.user_id.as_str(), |m| m.actor_id.as_str());
+        let agent = if let Some(member) = &member {
+            db.collection::<crate::models::assistant_agent::AssistantAgent>(
+                crate::models::assistant_agent::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":id,"user_id":&member.org_id,"kind":"specialist"})
+            .await?
+            .ok_or_else(refused)?
+        } else {
+            super::assistant_team_service::agent(db, actor, id).await?
+        };
         if agent.destroyed_at.is_some()
             || (requires_nyxbot && !agent.is_nyxbot())
             || !super::org_agent_service::can_use(
-                &super::org_agent_service::access(db, &channel.user_id, &agent.user_id).await?,
+                &super::org_agent_service::access(db, actor, &agent.user_id).await?,
             )
         {
             return Err(refused());

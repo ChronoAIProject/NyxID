@@ -460,6 +460,8 @@ fn readiness_2092_route_diagnostic_requires_matching_recent_attempt() {
 fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -618,6 +620,8 @@ fn failure_matrix_maps_transport_failures_to_recoverable_classes() {
 fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -656,6 +660,8 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
             via: None,
         },
         AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -705,6 +711,8 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 #[test]
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
+        automation_work: None,
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -739,6 +747,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
         created_at: Utc::now(),
         activities: (0..40)
             .map(|i| crate::models::assistant_conversation::TurnActivity {
+                retry_identity: None,
                 failure: None,
                 machine: None,
                 id: i.to_string(),
@@ -784,6 +793,8 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 #[test]
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
+        automation_work: None,
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -817,6 +828,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            retry_identity: None,
             failure: None,
             machine: None,
             id: "a".into(),
@@ -827,8 +839,10 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
             ended_at: None,
         }],
         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+            artifact: Default::default(),
             chat_delivery: None,
             image_input: None,
+            image_input_reason: None,
             image_inspection: None,
             origin: "tool".into(),
             pages: None,
@@ -850,6 +864,8 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 #[test]
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
+        automation_work: None,
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -883,6 +899,7 @@ fn guest_recap_omits_owner_tool_metadata() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            retry_identity: None,
             failure: None,
             machine: None,
             id: "owner-action".into(),
@@ -893,8 +910,10 @@ fn guest_recap_omits_owner_tool_metadata() {
             ended_at: None,
         }],
         attachments: vec![crate::models::assistant_conversation::TurnAttachment {
+            artifact: Default::default(),
             chat_delivery: None,
             image_input: None,
+            image_input_reason: None,
             image_inspection: None,
             origin: "tool".into(),
             pages: None,
@@ -916,6 +935,8 @@ fn guest_recap_omits_owner_tool_metadata() {
 #[test]
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
+        automation_work: None,
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -949,6 +970,7 @@ fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            retry_identity: None,
             failure: None,
             machine: None,
             id: "activity-42".into(),
@@ -1234,6 +1256,8 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        automation_v2: false,
+        artifact_head: None,
         collaboration: None,
         owner_model_route: None,
         invocation_controlled: false,
@@ -1259,6 +1283,11 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            automation_work: None,
+            artifact_watch_id: None,
+            execution_task: None,
+            channel_context: None,
+            business_system_success: false,
             delegated_images: Default::default(),
             timing: Default::default(),
             collaboration: None,
@@ -1575,6 +1604,7 @@ async fn shared_owner_admission_commits_proof_input_and_key_together_without_hom
     template.agent_id = Some(agent.id.clone());
     let proof = platform_test_origin(&template);
     let ids = OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: template.id,
         turn_id: Uuid::new_v4().to_string(),
         message_id: Uuid::new_v4().to_string(),
@@ -3518,6 +3548,8 @@ async fn reset_context_is_fenced_and_drops_the_checkpoint() {
 #[test]
 fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
+        automation_work: None,
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -4339,6 +4371,7 @@ fn memory_remembered_in_one_thread_keeps_another_threads_binding() {
 fn channel_review_links_and_skill_selections_survive_prompt_formatting() {
     let mut row = stale_test_row(Utc::now());
     row.channel = Some(crate::models::assistant_conversation::ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "bot".into(),
         platform: "telegram".into(),
@@ -4599,6 +4632,8 @@ fn production_recap_keeps_unrendered_tail_owners_in_requirements_and_omission_co
 #[test]
 fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
+        automation_work: None,
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -4661,6 +4696,8 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
 #[test]
 fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
+        automation_work: None,
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -4736,6 +4773,7 @@ async fn reset_recap_queries_owner_rules_and_expired_manifest_outside_tail() {
             message
                 .attachments
                 .push(crate::models::assistant_conversation::TurnAttachment {
+                    artifact: Default::default(),
                     chat_delivery: None,
                     id: upload_id.clone(),
                     label: "Old source.txt".into(),
@@ -4744,6 +4782,7 @@ async fn reset_recap_queries_owner_rules_and_expired_manifest_outside_tail() {
                     pages: Some(1),
                     origin: "user_upload".into(),
                     image_input: None,
+                    image_input_reason: None,
                     image_inspection: None,
                 });
             db.collection::<bson::Document>(crate::models::assistant_upload_retention::TOMBSTONES)
@@ -5056,6 +5095,7 @@ fn answer_routing_matches_image_and_settlement_destinations_in_768_rows() {
     use crate::models::channel_thread_follow::ThreadTurnBinding;
     fn origin(partition: &str, bound: bool) -> ChannelOrigin {
         ChannelOrigin {
+            org_execution: None,
             native_event_id: None,
             nyxbot_channel_id: "channel".into(),
             platform: "telegram-new".into(),
@@ -5199,6 +5239,7 @@ fn answer_routing_matches_image_and_settlement_destinations_in_768_rows() {
 fn channel_note_follows_the_turn_destination_and_keeps_image_ordering_explicit() {
     let mut row = stale_test_row(Utc::now());
     row.channel = Some(ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "channel".into(),
         platform: "lark".into(),
@@ -5227,6 +5268,7 @@ fn reply_length_guidance_follows_all_channel_destinations_but_never_app_only() {
     use crate::models::assistant_conversation::PlatformReplyRouting;
     let mut row = stale_test_row(Utc::now());
     let telegram = ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "telegram-channel".into(),
         platform: "telegram".into(),
@@ -5395,6 +5437,7 @@ async fn tool_image_chat_resolves_x_public_dm_and_trigger_destinations() {
         "transport":"direct", "status":"active", "route_api_key_id":"key", "created_at":date, "updated_at":date,
     }).await.unwrap();
     let origin = ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "channel".into(),
         platform: "x".into(),
@@ -5549,6 +5592,8 @@ async fn platform_stop_capture_is_exact_transactional_and_keeps_independent_work
         .await
         .unwrap();
     let job = |id: &str, issuing_turn: Option<String>| MachineJob {
+        automation_run_id: None,
+        execution_task: None,
         id: id.into(),
         user_id: row.user_id.clone(),
         conversation_id: row.id.clone(),
@@ -5710,6 +5755,7 @@ async fn in_progress_excludes_other_people_channel_and_guest_threads() {
     channel.id = format!("channel-{}", Uuid::new_v4().simple());
     channel.agent_id = Some("agent".into());
     channel.channel = Some(crate::models::assistant_conversation::ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         thread: None,
         nyxbot_channel_id: "channel".into(),
@@ -5787,6 +5833,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
     row.platform_thread = Some(fresh.thread.clone());
     row.active_turn.as_mut().unwrap().platform_origin = Some(fresh.clone());
     let delivery = DeliveryBinding {
+        automation_work: None,
         invocation_id: None,
         platform_reply: Some(
             crate::models::assistant_conversation::PlatformReplyRouting::Captured {
@@ -5808,6 +5855,11 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
     };
     let watch = AsyncServiceOperation {
+        artifact_catalog_service_id: None,
+        artifact_mode: None,
+        artifact_result: None,
+        artifact_event_turn_id: None,
+        execution_task: None,
         instruction_receipt_version: 0,
         shared_execution: None,
         secret_context_versions: Default::default(),
@@ -7338,6 +7390,7 @@ async fn checking_notice_requires_external_work_and_five_seconds_and_claims_once
     turn.started_at = now;
     turn.origin = TurnOrigin::Channel;
     turn.asked_from = Some(ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         thread: None,
         nyxbot_channel_id: "channel".into(),
@@ -7430,6 +7483,7 @@ async fn checking_notice_is_fenced_by_stop_replacement_settlement_and_capacity_n
         turn.external_check_started = true;
         turn.origin = TurnOrigin::Channel;
         turn.asked_from = Some(ChannelOrigin {
+            org_execution: None,
             native_event_id: None,
             thread: None,
             nyxbot_channel_id: "channel".into(),
@@ -7682,5 +7736,166 @@ fn channel_model_first_output_excludes_keepalives_and_reports_once() {
         observer.event(None, data);
         assert!(observer.take_first_output());
         assert!(!observer.take_first_output());
+    }
+}
+
+#[test]
+fn response_notices_accept_only_the_bounded_known_image_code() {
+    for (code, expected) in [
+        (json!("image_input_unsupported"), true),
+        (json!("unknown_notice"), false),
+        (json!("IMAGE_INPUT_UNSUPPORTED"), false),
+        (json!("image_input_unsupported\n"), false),
+        (json!("a".repeat(65)), false),
+        (json!("private prose"), false),
+        (json!(null), false),
+        (json!(17), false),
+    ] {
+        let mut event = terminal("response.completed", 0, "Answer");
+        event["response"]["nyxagent_notices"] =
+            json!([{"code":code,"message":"private notice prose"}]);
+        let mut decoder = ResponseStream::default();
+        decoder.push(&frame(event)).unwrap();
+        assert_eq!(decoder.image_input_unsupported, expected);
+        assert_eq!(decoder.text, "Answer");
+    }
+}
+
+#[tokio::test]
+async fn real_work_signal_is_retained_at_settlement_and_legacy_is_false() {
+    let db = connect_transaction_test_database("real_work_settlement").await;
+    ensure_indexes(&db).await.unwrap();
+    let owner = Uuid::new_v4().to_string();
+    db.collection(USERS)
+        .insert_one(test_user(&owner, UserType::Person))
+        .await
+        .unwrap();
+    let state = test_app_state(db.clone());
+    let mut previous = None;
+    for success in [false, true] {
+        let row = Box::pin(begin_turn(
+            &db,
+            &owner,
+            &request(previous.as_deref(), "Work"),
+            &state.encryption_keys,
+        ))
+        .await
+        .unwrap();
+        if success {
+            db.collection::<bson::Document>(CONVERSATIONS)
+                .update_one(
+                    doc! {"_id":&row.id},
+                    doc! {"$set":{"active_turn.business_system_success":true}},
+                )
+                .await
+                .unwrap();
+        }
+        Box::pin(settle(
+            &db,
+            &state.encryption_keys,
+            &owner,
+            &row,
+            "Done",
+            None,
+        ))
+        .await;
+        let reply = db
+            .collection::<AssistantMessage>(MESSAGES)
+            .find_one(
+                doc! {"turn_id":&row.active_turn.as_ref().unwrap().turn_id,"role":"assistant"},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let evidence = reply.turn_metadata.unwrap().work.unwrap();
+        assert_eq!(evidence.business_system_success, success);
+        assert_eq!(evidence.owner_id, owner);
+        assert!(evidence.settled_at.is_some());
+        previous = Some(row.id);
+    }
+    let mut legacy = bson::to_document(&stale_test_row(Utc::now())).unwrap();
+    legacy
+        .get_document_mut("active_turn")
+        .unwrap()
+        .remove("business_system_success");
+    assert!(
+        !bson::from_document::<AssistantConversation>(legacy)
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .business_system_success
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn real_work_run_signal_accumulates_across_continuations_under_same_owner() {
+    let db = connect_transaction_test_database("real_work_continuations").await;
+    for event in [false, true] {
+        let run = Uuid::new_v4().to_string();
+        let mut row = stale_test_row(Utc::now());
+        row.agent_owner_id = Some("organization".into());
+        let turn = row.active_turn.as_mut().unwrap();
+        turn.trigger_run_id = Some(run.clone());
+        turn.business_system_success = true;
+        db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME).insert_one(doc!{
+            "_id":&run,"user_id":&row.user_id,"turn_id":&turn.turn_id,
+            "confirmation_policy":if event{bson::Bson::String("confirm_every_change".into())}else{bson::Bson::Null}
+        }).await.unwrap();
+        for success in [true, false] {
+            row.active_turn.as_mut().unwrap().business_system_success = success;
+            let turn = row.active_turn.as_ref().unwrap();
+            let data = crate::services::assistant_turn_observability::metadata(turn, Utc::now());
+            let mut session = db.client().start_session().await.unwrap();
+            session.start_transaction().await.unwrap();
+            crate::services::assistant_turn_observability::run_metadata_in_session(
+                &db,
+                &mut session,
+                &row,
+                turn,
+                &data,
+            )
+            .await
+            .unwrap();
+            session.commit_transaction().await.unwrap();
+        }
+        let saved = db
+            .collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
+            .find_one(doc! {"_id":&run})
+            .await
+            .unwrap()
+            .unwrap();
+        let work = saved.get_document("work").unwrap();
+        assert!(work.get_bool("business_system_success").unwrap());
+        assert_eq!(work.get_str("owner_id").unwrap(), "organization");
+        assert_eq!(
+            work.get_str("source").unwrap(),
+            if event { "event" } else { "scheduled" }
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn connect_guidance_gives_link_and_existing_facts_immediately_for_both_roles() {
+    let mut row = stale_test_row(Utc::now());
+    for role in [AgentRole::Orchestrator, AgentRole::Subagent] {
+        row.role = role;
+        let prompt = base_prompt(&row, None);
+        for guidance in [
+            "call nyx__connect_service immediately",
+            "Give its hosted link immediately",
+            "existing connections in one short line",
+            "Never ask whether to proceed",
+            "suggest reusing an existing connection instead",
+            "never guess the provider account identity",
+            "Honor one-step success",
+            "For already_connected",
+            "no separate account to add",
+            "Explain connect_unavailable reasons plainly",
+            "Specialists cannot mint links",
+        ] {
+            assert!(prompt.contains(guidance), "missing {guidance} for {role:?}");
+        }
     }
 }

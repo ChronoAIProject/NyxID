@@ -60,7 +60,7 @@ export function ChannelConnectLinkPage() {
           />
         </ChannelConnectLinkContext.Provider>
       ) : (
-        <p role="status" className="text-sm text-muted-foreground">
+        <p role="status" className="text-14 text-muted-foreground">
           Loading connection request…
         </p>
       )}
@@ -95,13 +95,13 @@ function ConnectSession({
   return (
     <div className="space-y-4">
       {current.requested_by && (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Requested by {current.requested_by}
         </p>
       )}
       {action.error && <ErrorBanner message={action.error.message} />}
       {current.telegram_requires_original_actor && !terminal ? (
-        <p role="status" className="text-sm">
+        <p role="status" className="text-14">
           Another administrator started this Telegram setup. Continue using the NyxID account that started it. This page will update when setup finishes.
         </p>
       ) : showSetup &&
@@ -125,7 +125,7 @@ function ConnectSession({
         />
       ) : (
         <div className="space-y-3">
-          <p role="status" className="text-sm">
+          <p role="status" className="text-14">
             {current.status === "completed"
               ? `${current.label} is connected.`
               : current.status === "pending"

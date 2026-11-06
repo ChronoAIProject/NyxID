@@ -6,6 +6,8 @@ use crate::services::assistant_guest_model_setup as setup;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct WaitingGuest {
+    #[serde(default)]
+    channel_context: Option<crate::models::assistant_conversation::ChannelTurnContext>,
     conversation: String,
     agent: String,
     profile: String,
@@ -29,17 +31,23 @@ pub(super) async fn wait(
     if !start.guest {
         return Ok(None);
     }
+    let org_origin = start
+        .channel
+        .as_ref()
+        .or(start.reply_channel.as_ref())
+        .filter(|o| o.org_execution.is_some());
+    let actor = org_origin
+        .and_then(|o| o.org_execution.as_ref())
+        .map_or(channel.user_id.as_str(), |e| e.actor_id.as_str());
     let Some(agent_id) = start.agent_id.as_deref() else {
         return Ok(None);
     };
-    let agent =
-        crate::services::assistant_team_service::agent(&state.db, &channel.user_id, agent_id)
-            .await?;
-    if !setup::eligible(&state.db, &channel.user_id, &agent).await? {
+    let agent = crate::services::assistant_team_service::agent(&state.db, actor, agent_id).await?;
+    if !setup::eligible(&state.db, actor, &agent).await? {
         return Ok(None);
     }
     let existing = if let Some(id) = start.conversation_id.as_deref() {
-        Some(engine::get(&state.db, &channel.user_id, id).await?)
+        Some(engine::get(&state.db, actor, id).await?)
     } else {
         None
     };
@@ -53,7 +61,12 @@ pub(super) async fn wait(
         .as_ref()
         .map(|r| r.model.as_str())
         .unwrap_or_else(|| start.model.as_deref().unwrap_or(&agent.model));
-    if setup::kick(state, &channel.user_id, agent_id, profile, false).await? {
+    let ready = if let Some(origin) = org_origin {
+        setup::kick_org_channel(state, origin, profile).await?
+    } else {
+        setup::kick(state, actor, agent_id, profile, false).await?
+    };
+    if ready {
         return Ok(None);
     }
     // Preserve the existing no-effect busy response when the channel pool is
@@ -63,7 +76,7 @@ pub(super) async fn wait(
         .direct_chat_limiter
         .try_acquire_pool(
             "assistant_channel",
-            &channel.user_id,
+            actor,
             crate::services::assistant_team_service::CHANNEL_TURNS_PER_OWNER,
         )
         .await?
@@ -81,6 +94,7 @@ pub(super) async fn wait(
         .or(start.new_id.as_deref())
         .ok_or(AppError::AssistantTurnRequired)?;
     let payload = WaitingGuest {
+        channel_context: start.channel_context.clone(),
         conversation: conversation.into(),
         agent: agent_id.into(),
         profile: profile.into(),
@@ -156,7 +170,7 @@ async fn resume(state: &AppState, id: &str) -> AppResult<Option<Inbound>> {
             | AppError::ErasurePreparing,
         ) => {
             retire(state, id).await?;
-            Ok(Some(Inbound::Silent))
+            Ok(Some(Inbound::Silent("refused_policy")))
         }
         outcome => outcome,
     };
@@ -206,6 +220,25 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
         )
         .await?
         .ok_or(AppError::AssistantTurnRequired)?;
+    let actor = payload
+        .origin
+        .org_execution
+        .as_ref()
+        .map_or(owner, |e| e.actor_id.as_str())
+        .to_owned();
+    let org_access = if let Some(e) = &payload.origin.org_execution {
+        Some(
+            crate::services::org_channel_service::validate(
+                &state.db,
+                &payload.origin,
+                &actor,
+                &e.agent_id,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let source: NyxbotEvent = bson::from_document(event.clone()).map_err(|_| invalid())?;
     let live_agent = thread.agent_id.as_deref().or(channel.agent_id.as_deref());
     let agent_matches = payload.origin.thread.is_some()
@@ -261,12 +294,12 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
         && agent_matches;
     if !allowed {
         retire(state, id).await?;
-        return Ok(Some(Inbound::Silent));
+        return Ok(Some(Inbound::Silent("refused_policy")));
     }
     if payload.origin.thread.is_some() {
         crate::services::channel_thread_follow_service::validate_delivery(
             &state.db,
-            owner,
+            &actor,
             &payload.origin,
             &payload.conversation,
         )
@@ -276,21 +309,25 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
         .get_datetime("guest_setup_deadline")
         .is_ok_and(|at| at.to_chrono() <= Utc::now());
     if expired {
-        setup::expire_wait(state, owner, &payload.agent, &payload.profile).await?;
+        setup::expire_wait(state, &actor, &payload.agent, &payload.profile).await?;
     }
-    let record = setup::record(&state.db, owner, &payload.agent, &payload.profile).await?;
+    let record = setup::record(&state.db, &actor, &payload.agent, &payload.profile).await?;
     let failed = record
         .as_ref()
         .is_some_and(|r| r.get_str("status") == Ok("failed"));
     if !expired
         && !failed
-        && !setup::kick(state, owner, &payload.agent, &payload.profile, false).await?
+        && !(if payload.origin.org_execution.is_some() {
+            setup::kick_org_channel(state, &payload.origin, &payload.profile).await?
+        } else {
+            setup::kick(state, owner, &payload.agent, &payload.profile, false).await?
+        })
     {
         return Ok(None);
     }
     // Ordinary begin_turn rechecks live agent, org, key, source and thread
     // authority and binds this event atomically. Competing workers cannot run it twice.
-    let exists = engine::get(&state.db, owner, &payload.conversation)
+    let exists = engine::get(&state.db, &actor, &payload.conversation)
         .await
         .is_ok();
     let mut start = TurnStart::from(&engine::TurnRequest {
@@ -305,19 +342,21 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
     });
     start.new_id = (!exists).then_some(payload.conversation);
     start.guest = true;
+    start.org_access = org_access;
     start.origin = TurnOrigin::Channel;
     start.channel = Some(payload.origin);
     start.reply_channel = payload.reply_channel;
     start.channel_event_id = Some(id.into());
+    start.channel_context = payload.channel_context;
     start.note = payload.note;
     start.title = payload.title;
     start.question = payload.question;
     start.question_key = payload.question_key;
     match Box::pin(start_server_turn(
         state,
-        owner,
+        &actor,
         start,
-        Pool::Channel { owner },
+        Pool::Channel { owner: &actor },
     ))
     .await?
     {

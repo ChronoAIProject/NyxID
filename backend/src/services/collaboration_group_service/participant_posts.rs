@@ -6,7 +6,8 @@ use crate::{
 };
 
 /// `Some([])` is explicit people-only delivery. Omitted targeting only defaults
-/// to people when there are no usable agents and no mentions to refuse.
+/// to people when only people are mentioned, or when no usable agents and no
+/// agent mentions remain. Neither case changes sticky agent recipients.
 pub async fn try_post(
     db: &Database,
     actor: &str,
@@ -20,7 +21,7 @@ pub async fn try_post(
     }
     require_available(db, actor).await?;
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run(
+    session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run(
         (db.clone(), actor.to_owned(), id.to_owned(), text.to_owned(), recipients.map(<[String]>::to_vec), uploads.to_vec()),
         |session, context| {
         let (db, actor, id, text, recipients, uploads) = &*context;
@@ -31,12 +32,13 @@ pub async fn try_post(
             let group = read_group(db, actor, id, session).await?;
             let access = identity::for_group(db, actor, group, session).await?;
             let roster: Vec<_> = access.agents.values().map(|a| a.agent.clone()).collect();
-            if recipients.is_none() && assistant_group_service::ambiguous_mention(text, &roster) {
+            let people=people::resolve(text, &access.participants, &roster, true)?;
+            if recipients.is_none() && assistant_group_service::ambiguous_mention(&people.agent_text, &roster) {
                 return Err(invalid("More than one agent has that name; choose an exact recipient"));
             }
-            let mentions = assistant_group_service::mentions(text, &roster);
+            let mentions = assistant_group_service::mentions(&people.agent_text, &roster);
             if recipients.is_none() && (!mentions.is_empty()
-                || access.agents.values().any(|a| a.authority().is_some())) {
+                || (!people.has_people && access.agents.values().any(|a| a.authority().is_some()))) {
                 return Ok(None);
             }
             if !uploads.is_empty() {
@@ -48,7 +50,11 @@ pub async fn try_post(
             }
             fence_person(db, actor, session).await?;
             fence_group(db, &access.group, session).await?;
-            let message = append(db, &access.group, actor, text, None, session).await?;
+            let mut message = append(db, &access.group, actor, text, None, session).await?;
+            message.mentioned_participant_ids=people.ids;
+            message.author_display_name=access.participants.iter().find(|p|p.id==actor).map(|p|p.display_name.clone());
+            db.collection::<GroupMessage>(MESSAGES_COLLECTION_NAME).replace_one(doc! {"_id":&message.id},&message).session(&mut *session).await?;
+            notifications::enqueue(db, &access.group, &message, session).await?;
             for agent in mentions {
                 if access.agent(&agent).and_then(AgentIdentity::authority).is_none() {
                     append(db, &access.group, actor, REFUSAL, Some(&agent), session).await?;
@@ -86,6 +92,7 @@ async fn append(
         agent_name: None,
         request_id: None,
         recipient_agent_ids: vec![],
+        mentioned_participant_ids: vec![],
         attachments: vec![],
         activities: vec![],
         org_group: false,

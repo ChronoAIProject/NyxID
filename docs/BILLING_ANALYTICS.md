@@ -13,9 +13,69 @@ its members: platform-key requests bill the acting person. Choose the last
 
 NyxBot shows assistant activity, turn outcomes, and reply feedback using the same
 chart styling. Its date range and feedback filters are independent of the billing
-workspace, and access requires an admin or operator role. See the
+workspace. Admins, operators and Usage Viewers can read metadata; thread
+previews require Admin or Operator. See the
 [NyxBot activity contract](chat/08-nyxagent-engine.md#admin-nyxbot-activity) for
 metric definitions, endpoint bounds, and feedback semantics.
+
+## Grant credits: granted and used
+
+Dashboard and List show **Grant credits** above their usage views. Granted is
+credits actually issued; Used is grant-funded consumption during the same
+selected UTC window. These are period flows, not a cohort utilization rate or a
+remaining balance: consumption can come from older grants and exceed issuance.
+The daily chart compares both flows and has an accessible exact-value table.
+Collapsed copy identifies its scope: time and billing-account filters, all
+services. The Account / Service breakdown starts collapsed.
+
+`GET /api/v1/admin/usage/free-grants` retains `require_admin_usage_read`
+authorization. It accepts only `period` (24h/7d/30d), `from`/`to`, `owners`
+(billing-account UUIDs), and independent one-based `page` and `service_page`
+(1–100000, default 1). Unknown parameters are rejected. The positive UTC window
+is at most 31 days, with inclusive start and exclusive end. Acting-user and
+service filters do not apply. Service selection in the disclosure changes the
+breakdown, not the report's filter or overall granted amount.
+
+One bounded snapshot aggregation reads the immutable billing ledger. Legacy
+`grant_issued` and `grant_consumed` events use integer micros when present,
+otherwise whole-credit amounts. Exact v2 movements count only the credit source
+leg: `platform:promotions` for `grant_issued`, and
+`grant:{reference_id}` for `grant_consumed`. The corresponding debit leg must
+never be added again. Wallet usage, allowance units, expiry, revocation, top-ups,
+pending/unledgered grants and future schedules are excluded. Scheduled issuance
+counts once through its existing journal deduplication identity. Financial
+ownership comes from ledger `owner_id`; no membership expansion participates.
+Personal, organization and historical deleted accounts remain separate.
+
+The response retains exact decimal `issued`, `grants`, `total_accounts`,
+`accounts`, `page`, `per_page`, `window` and `generated_at`, and adds:
+
+- Exact decimal `used` globally and on each account row. Accounts include
+  issuance-only and usage-only owners. They sort by issued descending, used
+  descending, then owner ID ascending.
+- `services: [{ service_slug, used }]`, `total_services` and `service_page`.
+  Services report actual grant-funded usage only, sorted by used descending
+  then slug ascending (null first on ties). Null identifies historical usage
+  without a recorded service. Universal and multi-service grants are shared
+  credits; no per-service issuance allocation is inferred or duplicated.
+- `interval: "day"` and `trend: [{ start, end, issued, used }]`. UTC daily
+  buckets are clipped to the effective window, include empty days as zero,
+  and are bounded to at most 32 buckets for a 31-day window.
+
+Both breakdowns return at most 50 rows. Totals, account/service counts and trend
+cover the full filtered population on every page. All money uses exact
+Credits/Decimal128; the chart converts values only to draw coordinates, while
+tooltips and chart data retain exact strings. Identity labels are resolved only
+for the loaded accounts. Existing ledger event/date/owner indexes bound the
+match; database execution has a 20-second maxTime and an outer 22-second deadline
+(timeout code 12200). The facets share one snapshot, so paging never changes
+which population contributes to a response's totals.
+
+Paging either breakdown pins the effective window and preserves independent
+positions. Polling can refresh that fixed window; explicit Usage Refresh resets
+both pages and resolves a new current relative window. The UI labels stale
+refreshes and shows readable UTC boundaries. Authorization loss clears totals,
+chart data and breakdown details. The report is absent from the NyxBot tab.
 
 ## Design and library decision
 
@@ -559,3 +619,85 @@ a mixed-version rollout, an old writer ignores the new source field and can fold
 newly captured free usage into a summary without attribution. Those summaries
 remain uncovered and excluded by the scoped report; a recent meter timestamp
 alone does not establish coverage.
+
+## Weekly NyxBot real work
+
+Usage → NyxBot adds a weekly merchant measure to
+`GET /api/v1/admin/assistant/analytics?from=…&to=…&threshold=3`.
+`threshold` is an integer from 1 to 1000, defaults to 3, and changes no stored
+records. Existing response fields and date semantics remain unchanged. The
+additive `real_work` object contains the threshold, `Asia/Singapore` timezone,
+and zero-filled Monday–Sunday weeks. The existing exclusive-end, at-most-31-day
+range still applies: boundary weeks are clipped and marked `partial`, never
+silently expanded into a larger query.
+
+A piece of real work is a completed turn (including specialists) or completed
+scheduled/event run with at least one observed HTTP 2xx through the agent owner's
+own business connection, credential, or node. Resource ownership must match the
+agent owner, not merely the acting person or billing payer. Personal and org
+owners are distinct. User OAuth tokens obtained through a NyxID OAuth application
+still belong to the connected owner and qualify. Shared platform/master keys,
+model/inference services (including BYOK and `llm-nyx`), provider/internal services,
+and automatically provisioned credential-free connections do not qualify.
+Ordinary chat and failed HTTP calls do not set the signal. This measures successful
+business-system use, including reads; it does not claim that every 2xx changed
+business state or that a later asynchronous business job succeeded.
+
+The proxy and MCP HTTP/node paths use already-resolved authority and credential
+metadata. Only the first qualifying success attempts a conditional, turn/key-fenced
+point write to `active_turn.business_system_success`; subsequent authority loads
+already carry that flag. There are no analytics reads on the proxy hot path. The
+write has a two-second bound and is best effort: a failure can undercount, but
+cannot fail or repeat the business operation. Settlement copies the signal,
+owner, source and original settlement timestamp into `TurnMetadata.work`.
+No prompt, reply, arguments, response body, credential or connection identifier is
+added. Copies share the turn ID and settlement timestamp, even when a copy arrives in
+a later week; a delayed cancellation overrides completion in the original week. Trigger runs OR the signal across continuation turns and
+count once from the terminal run row; constituent turns are excluded.
+
+Each week reports:
+
+- `merchants` and `internal_owners`: distinct owners meeting the threshold.
+- Completed work, attempted work with a successful business call, triggered work,
+  helpful votes and total votes, separately for external and internal owners.
+- Up to 100 owners, ordered by completed work then owner ID. `owners_truncated`
+  indicates omitted detail; all aggregate totals remain complete.
+- The activation funnel for owners created in the selected portion of that week,
+  observed through `to`: retained NyxBot → retained business connection → admitted
+  channel work → completed real work. Stages require all prior stages, but do not
+  impose a chronological order among them. Organization-owned specialists satisfy
+  “has NyxBot,” because organizations cannot own a personal NyxBot. Channel
+  assignment comes from server-generated admission metadata, including running
+  or subsequently failed turns. It does not inspect messages. Median time from
+  account creation to first real work uses MongoDB's approximate median among
+  owners reaching every stage; no activated owners yields null.
+
+The success rate is completed work divided by all settled work **with the signal**,
+including later failures and Stops. It does not measure requests that failed before
+any successful business call. Helpful rate is helpful/all retained feedback on
+completed real work, deduplicated by voter and turn (latest vote across voice
+copies); triggered runs use their final turn's feedback. No votes yields no rate.
+
+`GET /api/v1/admin/assistant/analytics/internal-owners` shares Usage's read roles
+(admin, operator, Usage Viewer). `PUT` replaces `{ "owner_ids": […] }`, accepts at
+most 5,000 existing person/org UUIDs, and requires a first-party human admin or
+operator. The list is deduplicated and updated transactionally with the
+metadata-only `assistant_internal_owners_updated` audit. No privilege is changed.
+Current classification applies to historical weeks. The UI exposes read-only
+classification to Usage Viewers and editing to admins/operators.
+
+Startup creates additive signal/time, owner/time, feedback-turn, and cohort join
+indexes. The five message/run work indexes are partial on the evidence owner ID
+existing; weekly and funnel queries explicitly require that field, so rows
+without work evidence add no entries. Aggregations have ten-second MongoDB
+deadlines plus a twenty-second weekly-report deadline. If this optional report
+fails (including `AdminUsageQueryTimeout`), the endpoint still returns the existing
+activity/outcome fields with `real_work: null` and `real_work_unavailable: true`.
+Only the weekly section shows unavailable, with a retry action; warnings contain
+only the numeric error code.
+Projection and response size are bounded, and funnel lookups use indexed owner
+keys and creation/settlement time bounds. The report uses retained resources,
+messages, runs and votes: deletion can change history. Old rows without evidence
+count as no real work; no transcript backfill or migration runs. Old replicas
+ignore the additive fields and may omit evidence, so rollout-period totals are
+conservative. The UI tolerates responses from replicas without `real_work`.

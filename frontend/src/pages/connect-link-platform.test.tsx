@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   complete: vi.fn(),
   preview: vi.fn(),
   navigate: vi.fn(),
+  actor: "person" as string | undefined,
+  token: "hosted-token",
   available: true,
   intentLocked: false,
   choice: undefined as boolean | undefined,
@@ -24,24 +26,29 @@ const mocks = vi.hoisted(() => ({
   requiresGatewayUrl: false,
   authKeyName: "Authorization",
   connectMethod: "api_key",
+  catalogUnavailable: false,
+  fields: null as { name: string; label: string; secret: boolean }[] | null,
 }));
 vi.mock("@tanstack/react-router", () => ({
-  useParams: () => ({ token: "hosted-token" }),
+  useParams: () => ({ token: mocks.token }),
   useNavigate: () => mocks.navigate,
 }));
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: () => ({
-    isAuthenticated: true,
+    isAuthenticated: !!mocks.actor,
     isLoading: false,
-    user: { email: "person@example.test" },
+    user: mocks.actor ? { id: mocks.actor, email: "person@example.test" } : null,
   }),
 }));
 vi.mock("@/hooks/use-keys", () => ({
   useCatalogEntry: () => ({
-    data: {
-      platform_key: { available: mocks.available, pricing: null },
-      byok_pricing: null,
-    },
+    data: mocks.catalogUnavailable
+      ? undefined
+      : {
+          platform_key: { available: mocks.available, pricing: null },
+          byok_pricing: null,
+          token_exchange_credential_fields: mocks.fields,
+        },
   }),
 }));
 vi.mock("@/hooks/use-connect-links", () => ({
@@ -57,6 +64,9 @@ vi.mock("@/hooks/use-connect-links", () => ({
       expires_at: "2099-01-01T00:00:00Z",
       connect_method: mocks.connectMethod,
       auth_key_name: mocks.authKeyName,
+      token_exchange_credential_fields: mocks.catalogUnavailable
+        ? mocks.fields
+        : undefined,
       endpoint_url: mocks.endpointUrl,
       requires_gateway_url: mocks.requiresGatewayUrl,
       use_platform_key: mocks.choice,
@@ -81,6 +91,8 @@ vi.mock("@/hooks/use-connect-links", () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.available = true;
+  mocks.actor = "person";
+  mocks.token = "hosted-token";
   mocks.intentLocked = false;
   mocks.choice = undefined;
   mocks.scopes = [];
@@ -88,6 +100,8 @@ beforeEach(() => {
   mocks.requiresGatewayUrl = false;
   mocks.authKeyName = "Authorization";
   mocks.connectMethod = "api_key";
+  mocks.fields = null;
+  mocks.catalogUnavailable = false;
   sessionStorage.clear();
   mocks.preview.mockResolvedValue({});
   mocks.complete.mockResolvedValue({ status: "completed" });
@@ -97,6 +111,54 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+it.each(["another-person", undefined])(
+  "clears entered credentials and refreshes the preview when the account becomes %s",
+  async (actor) => {
+    mocks.available = false;
+    const view = render(<ConnectLinkPage />);
+    const credential = await screen.findByPlaceholderText(
+      "Paste API key or token for xAI",
+    );
+    await userEvent.type(credential, "private-entered-credential");
+    await waitFor(() => expect(mocks.preview).toHaveBeenCalledTimes(1));
+    mocks.actor = actor;
+    view.rerender(<ConnectLinkPage />);
+    expect(credential).not.toBeInTheDocument();
+    expect(
+      screen.queryByDisplayValue("private-entered-credential"),
+    ).not.toBeInTheDocument();
+    if (actor) {
+      await waitFor(() => expect(mocks.preview).toHaveBeenCalledTimes(2));
+      expect(
+        screen.getByPlaceholderText("Paste API key or token for xAI"),
+      ).toHaveValue("");
+    } else {
+      expect(mocks.navigate).toHaveBeenCalledWith({
+        to: "/login",
+        search: { return_to: `${window.location.origin}/connect/hosted-token` },
+      });
+    }
+    expect(mocks.complete).not.toHaveBeenCalled();
+  },
+);
+it("clears entered credentials when opening a different connection request", async () => {
+  mocks.available = false;
+  const view = render(<ConnectLinkPage />);
+  const credential = await screen.findByPlaceholderText(
+    "Paste API key or token for xAI",
+  );
+  await userEvent.type(credential, "private-entered-credential");
+  mocks.token = "another-hosted-token";
+  view.rerender(<ConnectLinkPage />);
+  expect(credential).not.toBeInTheDocument();
+  expect(
+    screen.getByPlaceholderText("Paste API key or token for xAI"),
+  ).toHaveValue("");
+  await waitFor(() =>
+    expect(mocks.preview).toHaveBeenLastCalledWith("another-hosted-token"),
+  );
+  expect(mocks.complete).not.toHaveBeenCalled();
 });
 it("defaults to platform and completes without any secret", async () => {
   render(<ConnectLinkPage />);
@@ -293,6 +355,37 @@ it("prefills an editable gateway URL and submits it with the credential", async 
   });
 });
 
+it("collects declared token-exchange fields and submits them as one JSON credential", async () => {
+  mocks.available = false;
+  mocks.catalogUnavailable = true;
+  mocks.fields = [
+    { name: "app_id", label: "App ID", secret: false },
+    { name: "app_secret", label: "App Secret", secret: true },
+  ];
+  render(<ConnectLinkPage />);
+  const approve = screen.getByRole("button", { name: "Approve & connect" });
+  await userEvent.type(screen.getByLabelText("App ID"), "cli_app");
+  expect(approve).toBeDisabled();
+  fireEvent.submit(approve.closest("form")!);
+  await screen.findByText("Enter App Secret.");
+  expect(mocks.complete).not.toHaveBeenCalled();
+  expect(screen.getByLabelText("App Secret")).toHaveAttribute(
+    "type",
+    "password",
+  );
+  await userEvent.type(screen.getByLabelText("App Secret"), "app-secret");
+  await userEvent.click(approve);
+  expect(mocks.complete).toHaveBeenCalledWith({
+    token: "hosted-token",
+    values: expect.objectContaining({
+      credential: JSON.stringify({
+        app_id: "cli_app",
+        app_secret: "app-secret",
+      }),
+    }),
+  });
+});
+
 it("polls a provider device code at its server interval and displays completion", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-09-28T00:00:00Z"));
@@ -377,7 +470,11 @@ it("keeps retrying after a transient device poll failure without offering a new 
 it("hides credential switching and completes the stored assistant personal intent", async () => {
   mocks.intentLocked = true;
   mocks.choice = false;
-  mocks.complete.mockResolvedValue({ id: "id", status: "completed", service_slug: "llm-xai" });
+  mocks.complete.mockResolvedValue({
+    id: "id",
+    status: "completed",
+    service_slug: "llm-xai",
+  });
   render(<ConnectLinkPage />);
   expect(screen.queryByText("Use platform key")).not.toBeInTheDocument();
   expect(screen.getByText(/fixed/i)).toBeVisible();

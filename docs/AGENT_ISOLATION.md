@@ -515,3 +515,17 @@ NyxBot compatibility; the exact MCP/HTTP request path must also pass acceptance.
 ### NyxBot access authority
 
 Specialist agents cannot widen access or grant permissions. For work NyxBot assigned, or in a personal group NyxBot is a member of, access requests go through NyxBot and the backend rejects card and connection-link creation from specialist chat keys with the stable `access_request_denied` refusal. When a person talks to a specialist directly, that work is not NyxBot's: an ungranted call returns a neutral `missing_access` result (scope, target, "no request was created", a link to the agent's details) and the specialist continues; it never asks NyxBot to take over. Only the owner, in the agent's details, or a legitimately involved NyxBot under routed mode can widen a specialist's access.
+
+
+Specialist service grants describe durable authorization, independent of a node's
+current availability. The grant editor retains authorized active connections
+while their node is offline or their ordinary credential is unavailable, and
+shows an advisory without blocking a save. Organization grants still require
+same-organization ownership and the maintainer's live resource/admin-only ACL;
+revoked platform-key access is not a temporary availability exception. Disabled,
+deleted and inaccessible connections cannot be newly granted. Unknown and
+inaccessible IDs share a generic refusal to avoid revealing foreign resources.
+Execution discovery remains executable-only. An explicitly invoked, granted
+operation reports the unavailable credential or offline node (named only with
+node-read permission); it never falls back to direct HTTP around a pinned node.
+An online configured fallback remains usable, and reconnecting needs no regrant.

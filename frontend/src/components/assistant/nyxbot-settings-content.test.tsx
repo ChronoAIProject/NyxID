@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import {
   Dialog,
   DialogBody,
@@ -8,6 +9,7 @@ import {
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -28,6 +30,7 @@ vi.mock("@/lib/platform-personal", async (importOriginal) => ({
 
 vi.mock("@/hooks/use-orgs", () => ({
   useOrgs: () => ({ data: [], isPending: false, error: null }),
+  useOrg: () => ({ data: undefined, isPending: false, error: null }),
 }));
 
 vi.mock("@/hooks/use-channel-adapters", () => ({
@@ -238,7 +241,11 @@ beforeEach(() => {
         return new Promise<Response>(() => {});
       if (method === "GET" && settingsRead === "error")
         return json({ message: "Settings unavailable" }, 503);
-      if (method === "PUT" && saveError)
+      if (
+        method === "PUT" &&
+        saveError &&
+        (body as Record<string, unknown>).max_live_subagents !== undefined
+      )
         return json({ message: "Save unavailable" }, 503);
       if (method === "PUT") settings = { ...settings, ...(body as object) };
       return json(settings);
@@ -291,7 +298,7 @@ function renderPage() {
       </Dialog>
     </QueryClientProvider>,
   );
-  return userEvent.setup();
+  return userEvent.setup({ delay: null });
 }
 
 it("exposes phone setup only after the server enables the adapter rollout", async () => {
@@ -325,8 +332,9 @@ it("confirms destructive actions by default and saves only a changed access mode
       "Acts on its own; asks before sensitive or destructive actions.",
     ),
   ).toBeVisible();
-  const save = within(page).getByRole("button", { name: "Save settings" });
-  expect(save).toBeDisabled();
+  expect(
+    within(page).queryByRole("button", { name: "Save changes" }),
+  ).not.toBeInTheDocument();
   expect(
     within(page).queryByText(/without asking you first/),
   ).not.toBeInTheDocument();
@@ -339,8 +347,10 @@ it("confirms destructive actions by default and saves only a changed access mode
       /deletes keys, channel bots, services and\s+nodes and changes access without asking you first/,
     ),
   ).toBeVisible();
+  const save = within(page).getByRole("button", { name: "Save changes" });
   expect(save).toBeEnabled();
   await user.click(save);
+  await confirmChanges();
   await waitFor(() =>
     expect(writes).toEqual([
       {
@@ -350,7 +360,11 @@ it("confirms destructive actions by default and saves only a changed access mode
       },
     ]),
   );
-  await waitFor(() => expect(save).toBeDisabled());
+  await waitFor(() =>
+    expect(
+      within(page).queryByRole("button", { name: "Save changes" }),
+    ).not.toBeInTheDocument(),
+  );
   expect(mode).toHaveTextContent("Full access");
 });
 
@@ -396,7 +410,8 @@ it("asks before every change in Ask every time and explains the specialist reque
       /A specialist you talk to directly still tells you what it is missing/,
     ),
   ).toBeVisible();
-  await user.click(within(page).getByRole("button", { name: "Save settings" }));
+  await user.click(within(page).getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(writes.at(-1)?.body).toEqual({
       access_mode: "ask_every_time",
@@ -415,12 +430,13 @@ it("validates specialist limits against the server limits before saving", async 
   expect(within(page).getByText(/spend credits faster/)).toBeVisible();
   await user.clear(live);
   await user.type(live, "40");
-  await user.click(within(page).getByRole("button", { name: "Save settings" }));
+  await user.click(within(page).getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   expect(await within(page).findByText("Must be at most 32")).toBeVisible();
   expect(writes).toEqual([]);
-  await user.clear(live);
-  await user.type(live, "12");
-  await user.click(within(page).getByRole("button", { name: "Save settings" }));
+  fireEvent.change(live, { target: { value: "12" } });
+  await user.click(within(page).getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(writes.at(-1)?.body).toEqual({ max_live_subagents: 12 }),
   );
@@ -440,14 +456,16 @@ it("saves group hand-off limits within the server's bounds", async () => {
   expect(perHour).toHaveValue(60);
   await user.clear(perMessage);
   await user.type(perMessage, "30");
-  await user.click(within(page).getByRole("button", { name: "Save settings" }));
+  await user.click(within(page).getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   expect(await within(page).findByText("Must be at most 24")).toBeVisible();
   expect(writes).toEqual([]);
   await user.clear(perMessage);
   await user.type(perMessage, "0");
   await user.clear(perHour);
   await user.type(perHour, "120");
-  await user.click(within(page).getByRole("button", { name: "Save settings" }));
+  await user.click(within(page).getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
     expect(writes.at(-1)?.body).toEqual({
       max_group_handoffs: 0,
@@ -484,6 +502,9 @@ it("lists connected bots with their agent, relinks one, and connects another to 
   await waitFor(() => expect(agentFor).toHaveTextContent("writer"));
 
   // A connected bot is not offered again; the other connects to the chosen agent.
+  await user.click(
+    within(page).getByRole("button", { name: "Connect another bot" }),
+  );
   const available = within(page).getByRole("list", {
     name: "Channel bots you can connect",
   });
@@ -530,9 +551,11 @@ it("opens a bot's chats and saves who can talk and how it answers", async () => 
   const toggle = within(connected).getByRole("button", {
     name: "Chats and who can talk",
   });
-  expect(toggle).toHaveAttribute("aria-expanded", "false");
   await user.click(toggle);
-  const list = await within(connected).findByRole("list", {
+  expect(
+    within(page).getByRole("heading", { name: "Home bot · Chats" }),
+  ).toHaveFocus();
+  const list = await within(page).findByRole("list", {
     name: "Chats of Home bot",
   });
   // Groups have reply and member settings; private chats do not.
@@ -580,7 +603,7 @@ it("opens a bot's chats and saves who can talk and how it answers", async () => 
     }),
   );
   await user.click(
-    within(connected).getByRole("combobox", {
+    within(page).getByRole("combobox", {
       name: "Who can talk to Home bot in private chats",
     }),
   );
@@ -596,7 +619,7 @@ it("opens a bot's chats and saves who can talk and how it answers", async () => 
 
 function settingsSection(title: string) {
   const heading = screen.getByRole("heading", { name: title });
-  return within(heading.parentElement!.parentElement!);
+  return within(heading.closest("section")!);
 }
 
 it("keeps Automations and Channel bots available while General loads", async () => {
@@ -651,7 +674,7 @@ it("shows General's load error with retry without hiding the other sections", as
     settingsSection("General").getByRole("button", { name: "Retry" }),
   );
   expect(
-    await settingsSection("General").findByRole("form", {
+    await screen.findByRole("form", {
       name: "NyxBot preferences",
     }),
   ).toBeVisible();
@@ -667,64 +690,93 @@ it("keeps dirty values and reports a failed General save inline", async () => {
   const live = await screen.findByRole("spinbutton", {
     name: "Live specialists",
   });
-  await user.clear(live);
-  await user.type(live, "12");
-  await user.click(screen.getByRole("button", { name: "Save settings" }));
+  fireEvent.change(live, { target: { value: "12" } });
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   expect(await screen.findByRole("alert")).toHaveTextContent(
     "NyxBot is temporarily unavailable. Try again shortly.",
   );
   expect(live).toHaveValue(12);
-  expect(screen.getByRole("button", { name: "Save settings" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
 });
 
-it("saves Automation preferences independently from dirty General settings", async () => {
+it("saves dirty General and Automation forms in order through one bar with independent payloads", async () => {
   settings.timezone = "UTC";
   const user = renderPage();
   const live = await screen.findByRole("spinbutton", {
     name: "Live specialists",
   });
-  await user.clear(live);
-  await user.type(live, "12");
+  fireEvent.change(live, { target: { value: "12" } });
   await user.click(
     screen.getByRole("button", { name: "Timezone and automation budgets" }),
   );
   const hourly = screen.getByRole("spinbutton", { name: "Runs per hour" });
-  await user.clear(hourly);
-  await user.type(hourly, "4");
-  const automationSave = screen.getByRole("button", {
-    name: "Save preferences",
-  });
+  fireEvent.change(hourly, { target: { value: "4" } });
   expect(
-    automationSave.closest("form")?.parentElement?.closest("form"),
-  ).toBeNull();
-  await user.click(automationSave);
+    screen.getAllByRole("region", { name: "Unsaved changes" }),
+  ).toHaveLength(1);
+  expect(
+    screen.getByText("Unsaved: NyxBot preferences, automation preferences"),
+  ).toBeInTheDocument();
+  expect(
+    [...document.forms].every((form) => !form.parentElement?.closest("form")),
+  ).toBe(true);
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
   await waitFor(() =>
-    expect(writes).toEqual([
+    expect(writes.map((write) => write.body)).toEqual([
+      { max_live_subagents: 12 },
       {
-        method: "PUT",
-        endpoint: "/assistant/nyxagent/settings",
-        body: {
-          timezone: "UTC",
-          schedule_minimum_minutes: 5,
-          trigger_runs_per_hour: 4,
-          trigger_runs_per_day: 300,
-        },
+        timezone: "UTC",
+        schedule_minimum_minutes: 5,
+        trigger_runs_per_hour: 4,
+        trigger_runs_per_day: 300,
       },
     ]),
   );
-  expect(
-    screen.queryByRole("button", { name: "Save preferences" }),
-  ).not.toBeInTheDocument();
-  expect(live).toHaveValue(12);
-  expect(screen.getByRole("button", { name: "Save settings" })).toBeEnabled();
-  await user.click(screen.getByRole("button", { name: "Save settings" }));
   await waitFor(() =>
-    expect(writes.at(-1)?.body).toEqual({ max_live_subagents: 12 }),
+    expect(
+      screen.queryByRole("region", { name: "Unsaved changes" }),
+    ).not.toBeInTheDocument(),
+  );
+});
+
+it("keeps failed General changes dirty while Automation preferences succeed", async () => {
+  settings.timezone = "UTC";
+  const user = renderPage();
+  const live = await screen.findByRole("spinbutton", {
+    name: "Live specialists",
+  });
+  fireEvent.change(live, { target: { value: "12" } });
+  saveError = true;
+  await user.click(
+    screen.getByRole("button", { name: "Timezone and automation budgets" }),
+  );
+  const hourly = screen.getByRole("spinbutton", { name: "Runs per hour" });
+  fireEvent.change(hourly, { target: { value: "4" } });
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
+  await waitFor(() => expect(writes).toHaveLength(2));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "NyxBot is temporarily unavailable",
+  );
+  expect(live).toHaveValue(12);
+  expect(screen.getByText("Unsaved: NyxBot preferences")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("spinbutton", { name: "Runs per hour" }),
+  ).not.toBeInTheDocument();
+  saveError = false;
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("region", { name: "Unsaved changes" }),
+    ).not.toBeInTheDocument(),
   );
 });
 
 it("defaults new private chat posting off on legacy responses and saves without changing existing chats", async () => {
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   renderPage();
   const connected = await screen.findByRole("list", {
     name: "Connected channel bots",
@@ -744,7 +796,7 @@ it("defaults new private chat posting off on legacy responses and saves without 
     body: { private_chat_posts: true, apply_to_existing: false },
   });
   await user.click(
-    screen.getByRole("checkbox", {
+    screen.getByRole("switch", {
       name: "Also apply to existing private chats",
     }),
   );
@@ -767,7 +819,7 @@ it("defaults new private chat posting off on legacy responses and saves without 
   });
 });
 it("keeps the posting switch unchanged and exposes a save failure", async () => {
-  const user = userEvent.setup();
+  const user = userEvent.setup({ delay: null });
   renderPage();
   postsError = true;
   const connected = await screen.findByRole("list", {

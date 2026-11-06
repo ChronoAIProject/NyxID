@@ -35,6 +35,7 @@ enum Adapter {
     OAuthState,
     AssistantCredential,
     Attachment,
+    GeneratedArtifact,
     Public,
     Header,
     Capability,
@@ -298,6 +299,11 @@ const REGISTRY: &[Entry] = &[
         collection: "user_service_connections",
         adapter: Adapter::Connection,
         fields: &["credential_encrypted"],
+    },
+    Entry {
+        collection: "async_service_operation_artifacts",
+        adapter: Adapter::GeneratedArtifact,
+        fields: &["data_encrypted"],
     },
 ];
 
@@ -639,6 +645,7 @@ async fn verify(
         Adapter::Attachment => {
             super::assistant_record_service::verify_current_attachment(db, keys, row).await
         }
+        Adapter::GeneratedArtifact => super::generated_artifacts::storage::verify(keys, row).await,
         Adapter::Public => {
             super::platform_public_record_service::verify_current_snapshot(
                 db,
@@ -745,6 +752,9 @@ async fn migrate(
         }
         Adapter::Attachment => {
             super::assistant_record_service::migrate_attachment_snapshot(db, keys, row).await
+        }
+        Adapter::GeneratedArtifact => {
+            super::generated_artifacts::storage::rewrap(db, keys, row).await
         }
         Adapter::Public => {
             super::platform_public_record_service::migrate_snapshot(db, keys, entry.collection, row)
@@ -959,11 +969,26 @@ pub async fn lookup_finding(
         }
         filter.insert("_id", doc! {"$gt":cursor.after.as_str()});
     }
+    let large = matches!(
+        entry.adapter,
+        Adapter::GeneratedArtifact | Adapter::Attachment
+    );
+    let _artifact_budget = if large {
+        Some(
+            super::assistant_upload_service::byte_budget::reserve(
+                super::generated_artifacts::sandbox::RESERVATION * 2,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let batch = if large { 1 } else { BATCH };
     let rows = db
         .collection::<Document>(entry.collection)
         .find(filter)
         .sort(doc! {"_id":1})
-        .limit(BATCH)
+        .limit(batch)
         .await?
         .try_collect::<Vec<_>>()
         .await?;
@@ -1019,7 +1044,7 @@ pub async fn lookup_finding(
         };
         return Ok(result);
     }
-    if rows.len() == BATCH as usize {
+    if rows.len() == batch as usize {
         let after = rows
             .last()
             .and_then(|row| row.get_str("_id").ok())
@@ -1098,11 +1123,26 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
     if let Some(cursor) = run.get("cursor").filter(|cursor| **cursor != Bson::Null) {
         filter.insert("_id", doc! {"$gt":cursor});
     }
+    let large = matches!(
+        entry.adapter,
+        Adapter::GeneratedArtifact | Adapter::Attachment
+    );
+    let _artifact_budget = if large {
+        Some(
+            super::assistant_upload_service::byte_budget::reserve(
+                super::generated_artifacts::sandbox::RESERVATION * 2,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let batch = if large { 1 } else { BATCH };
     let rows = db
         .collection::<Document>(entry.collection)
         .find(filter)
         .sort(doc! {"_id":1})
-        .limit(BATCH)
+        .limit(batch)
         .await?
         .try_collect::<Vec<_>>()
         .await?;
@@ -1244,7 +1284,7 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
         super::transaction_service::commit(&mut session).await?;
         cursor = id.clone();
     }
-    let finished = rows.len() < BATCH as usize;
+    let finished = rows.len() < batch as usize;
     let next = if finished { index + 1 } else { index };
     // One final bounded cleanup phase follows the collection walk.
     let phase = "running";

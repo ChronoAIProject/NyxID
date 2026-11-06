@@ -15,7 +15,7 @@ export function AssistantCmaSandboxDetailPage() {
   return (
     <div className="mx-auto w-full max-w-4xl">
       <div className="mb-6 flex items-center justify-between gap-3">
-        <h1 className="text-24 font-semibold">
+        <h1 className="type-compact-page-title sm:type-page-title">
           {query.data?.label ?? "Sandbox"}
         </h1>
         <Button
@@ -36,7 +36,7 @@ export function AssistantCmaSandboxDetailPage() {
       {query.data && (
         <CmaSandboxCard key={query.data.id} sandbox={query.data} detail />
       )}
-      <p className="mt-6 text-12 leading-relaxed text-text-tertiary">
+      <p className="mt-6 type-secondary text-text-tertiary">
         Billed through CMA. Price and accrued charges are unknown here. Pausing
         or deleting an Agent does not confirm that all resource charges have
         stopped.

@@ -1,34 +1,29 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { URL as NodeURL } from "node:url";
 import test from "node:test";
-import { runInNewContext } from "node:vm";
-import ts from "typescript";
-
-import { ApiError } from "./ApiError";
-import { createSessionRefresh } from "../auth/sessionRefresh";
-import { executeAuthenticatedRequest } from "./authenticatedTransport";
-import { guardedJsonTransport } from "./guardedTransport";
+import { loadApiConsumers, loadTestModule } from "./apiUrlTestHarness";
 
 type ApiUrlModule = typeof import("./baseUrl");
-type HttpModule = typeof import("./http");
-type MobileApiModule = typeof import("./mobileApi");
+type DomainsModule = typeof import("../domains");
 
-function loadModule<T>(filename: string, context: Record<string, unknown>): T {
-  const source = readFileSync(new NodeURL(filename, import.meta.url), "utf8");
-  const js = ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  const exported = {};
-  runInNewContext(js, { exports: exported, ...context });
-  return exported as T;
+function loadResolver(configuredUrl?: string, extraEnv: Record<string, string> = {}) {
+  const env: Record<string, string | undefined> = { EXPO_PUBLIC_API_BASE_URL: configuredUrl, ...extraEnv };
+  const domains = loadTestModule<DomainsModule>("../domains.ts", { process: { env } });
+  const api = loadTestModule<ApiUrlModule>("./baseUrl.ts", {
+    require: (name: string) => {
+      assert.equal(name, "../domains");
+      return domains;
+    },
+  });
+  return { api, domains, env };
 }
 
-function loadResolver(configuredUrl?: string) {
-  const env = { EXPO_PUBLIC_API_BASE_URL: configuredUrl };
-  const api = loadModule<ApiUrlModule>("./baseUrl.ts", { process: { env } });
-  return { api, env };
-}
+const NEW_DOMAIN_ENV = {
+  EXPO_PUBLIC_FRONTEND_URL: "https://nyx.chrono-ai.fun",
+  EXPO_PUBLIC_LEGAL_BASE_URL: "https://nyx.chrono-ai.fun",
+  EXPO_PUBLIC_NEW_API_BASE_URL: "https://api.nyxid.ai/api/v1/",
+  EXPO_PUBLIC_NEW_FRONTEND_URL: "https://nyxid.ai",
+  EXPO_PUBLIC_NEW_LEGAL_BASE_URL: "https://nyxid.ai",
+};
 
 for (const [configuredUrl, expected] of [
   ["https://nyx-api.chrono-ai.fun/api/v1", "https://nyx-api.chrono-ai.fun/api/v1"],
@@ -38,9 +33,9 @@ for (const [configuredUrl, expected] of [
   ["https://self-host.example/gateway/api/v1", "https://self-host.example/gateway/api/v1"],
 ] as const) {
   test(`resolves and joins endpoint paths for ${configuredUrl.trim()}`, () => {
-    const { api } = loadResolver(configuredUrl);
+    const { api, domains } = loadResolver(configuredUrl);
     assert.equal(api.getApiBaseUrl(), expected);
-    assert.equal(api.NYXID_API_BASE_URL, expected);
+    assert.equal(domains.activeDomains().apiBaseUrl, expected);
     assert.equal(api.buildApiUrl("/users/me"), `${expected}/users/me`);
     assert.equal(api.buildApiUrl("auth/device/preview"), `${expected}/auth/device/preview`);
   });
@@ -55,11 +50,81 @@ test("keeps one resolved API base for the app lifetime", () => {
 
 test("missing API configuration fails before a request instead of choosing a default host", () => {
   for (const configuredUrl of [undefined, "", " "]) {
-    const { api } = loadResolver(configuredUrl);
-    assert.equal(api.NYXID_API_BASE_URL, "");
+    const { api, domains } = loadResolver(configuredUrl);
+    assert.equal(domains.activeDomains().apiBaseUrl, "");
     assert.throws(() => api.getApiBaseUrl(), /API base URL is not configured/);
     assert.throws(() => api.buildApiUrl("/users/me"), /API base URL is not configured/);
   }
+});
+
+test("the launch selection switches every request to the embedded new domain set", () => {
+  const { api, domains } = loadResolver("https://nyx-api.chrono-ai.fun/api/v1", NEW_DOMAIN_ENV);
+  assert.throws(() => api.buildApiUrl("/users/me"), /Domains have not been selected/);
+  domains.selectNewDomains(true);
+  assert.equal(api.buildApiUrl("/users/me"), "https://api.nyxid.ai/api/v1/users/me");
+  assert.equal(domains.getFrontendUrl(), "https://nyxid.ai");
+  assert.equal(domains.getLegalBaseUrl(), "https://nyxid.ai");
+  assert.equal(domains.activeDomains(), domains.DOMAIN_SETS.new);
+  domains.selectNewDomains(false);
+  assert.equal(api.buildApiUrl("/users/me"), "https://nyx-api.chrono-ai.fun/api/v1/users/me");
+  assert.equal(domains.getFrontendUrl(), "https://nyx.chrono-ai.fun");
+});
+
+test("consumers imported before selection resolve auth, legal and frontend URLs when used", async () => {
+  const { api, domains } = loadResolver("https://nyx-api.chrono-ai.fun/api/v1", NEW_DOMAIN_ENV);
+  const env = loadTestModule<typeof import("../env")>("../env.ts", {
+    process: { env: {} },
+    require: (name: string) => { assert.equal(name, "./domains"); return domains; },
+  });
+  const legal = loadTestModule<typeof import("../../features/legal/legalDocumentUrl")>("../../features/legal/legalDocumentUrl.ts", {
+    require: (name: string) => { assert.equal(name, "../../lib/env"); return env; },
+  });
+  const requests: string[] = [];
+  const { http, mobileApi } = loadApiConsumers(api, async (input) => {
+    requests.push(String(input));
+    return new Response(JSON.stringify(String(input).endsWith("/auth/refresh")
+      ? { access_token: "fresh", refresh_token: "next", expires_in: 3600 }
+      : { user_id: "test-user" }), { status: requests.length === 1 ? 401 : 200 });
+  });
+
+  for (const read of [api.getApiBaseUrl, env.getFrontendUrl, env.getLegalBaseUrl, env.firstPartyFrontendUrls,
+    () => legal.resolveLegalDocumentUrl("privacy"),
+    () => mobileApi.getSocialAuthorizeUrl("google", "nyxid://auth/social/callback")]) {
+    assert.throws(read, /Domains have not been selected/);
+  }
+  assert.deepEqual(requests, []);
+  for (const enabled of [true, false, true]) {
+    domains.selectNewDomains(enabled);
+    const selected = enabled ? domains.DOMAIN_SETS.new! : domains.DOMAIN_SETS.legacy;
+    assert.equal(api.buildApiUrl("/auth/login"), `${selected.apiBaseUrl}/auth/login`);
+    for (const provider of ["google", "github", "apple"] as const) {
+      const social = new URL(mobileApi.getSocialAuthorizeUrl(provider, "nyxid://auth/social/callback"));
+      assert.equal(`${social.origin}${social.pathname}`, `${selected.apiBaseUrl}/auth/social/${provider}`);
+      assert.equal(social.searchParams.get("client"), "mobile");
+      assert.equal(social.searchParams.get("redirect_uri"), "nyxid://auth/social/callback");
+    }
+    for (const key of ["privacy", "terms"] as const)
+      assert.equal(legal.resolveLegalDocumentUrl(key), `${selected.legalBaseUrl}/legal/${key}.md`);
+    assert.equal(env.firstPartyFrontendUrls()[0], selected.frontendUrl);
+    assert.equal(env.NYXID_TRUSTED_API_BASE_URLS.length, 2);
+    assert.equal(env.NYXID_TRUSTED_FRONTEND_URLS.length, 2);
+  }
+  await http.requestJson("/users/me");
+  assert.deepEqual(requests, ["users/me", "auth/refresh", "users/me"].map((path) => `https://api.nyxid.ai/api/v1/${path}`));
+  await mobileApi.loginWithPassword({ email: "review@example.test", password: "test-password" });
+  assert.equal(requests.at(-1), "https://api.nyxid.ai/api/v1/auth/login");
+});
+
+test("builds without a complete new set ignore the flag", () => {
+  const { api, domains } = loadResolver("https://nyx-api.chrono-ai.fun/api/v1", {
+    ...NEW_DOMAIN_ENV,
+    EXPO_PUBLIC_NEW_LEGAL_BASE_URL: "",
+  });
+  assert.equal(domains.DOMAIN_SETS.new, null);
+  assert.equal(domains.CONFIGURED_DOMAIN_SETS.length, 1);
+  domains.selectNewDomains(true);
+  assert.equal(api.getApiBaseUrl(), "https://nyx-api.chrono-ai.fun/api/v1");
+  assert.equal(domains.activeDomains(), domains.DOMAIN_SETS.legacy);
 });
 
 test("endpoint inputs cannot select a different host or scheme", () => {
@@ -68,48 +133,6 @@ test("endpoint inputs cannot select a different host or scheme", () => {
     assert.throws(() => api.buildApiUrl(path), /API endpoints must be relative paths/);
   }
 });
-
-function loadApiConsumers(api: ApiUrlModule, fetch: typeof globalThis.fetch) {
-  let session = { accessToken: "access-before-refresh", refreshToken: "refresh-test", sessionGeneration: 1 };
-  const dependencies: Record<string, unknown> = {
-    "./connectionState": { assistantConnection: { observe: (send: () => Promise<unknown>) => send() } },
-    "../auth/sessionRefresh": { createSessionRefresh },
-    "expo/fetch": { fetch },
-    "./authenticatedTransport": { executeAuthenticatedRequest },
-    "./approvalAdapter": {},
-    "../auth/authEpoch": { getAuthEpoch: () => 0 },
-    "./readBoundedBytes": {},
-    "./guardedTransport": { guardedJsonTransport },
-    "../analyticsConsentState": { analyticsDeviceHeaders: () => ({}) },
-    "../auth/jwt": {},
-    "../auth/mfaChallenge": {},
-    "./ApiError": { ApiError },
-    "./baseUrl": api,
-    "expo-constants": { default: { expoConfig: { version: "test" } } },
-    "../accountDeletionPolicy": { ACCOUNT_DELETION_POLICY_VERSION: "test" },
-    "../auth/sessionStore": {
-      loadStoredAuthSession: async () => session,
-      authSessionGeneration: () => 1,
-      commitRefreshedAuthSession: async (_expected: unknown, next: typeof session) => {
-        session = { ...next, sessionGeneration: 1 };
-        return true;
-      },
-      clearStoredAuthSession: async () => {},
-    },
-    "./authDeviceApi": {},
-    "./idempotency": {},
-  };
-  const requireDependency = (name: string) => {
-    assert.ok(Object.hasOwn(dependencies, name), `Unexpected API dependency: ${name}`);
-    return dependencies[name];
-  };
-  const http = loadModule<HttpModule>("./http.ts", {
-    require: requireDependency, fetch, __DEV__: false, setTimeout,
-  });
-  dependencies["./http"] = http;
-  const { mobileApi } = loadModule<MobileApiModule>("./mobileApi.ts", { require: requireDependency });
-  return { http, mobileApi };
-}
 
 for (const base of ["https://nyx-api.chrono-ai.fun/api/v1", "https://api.nyxid.ai/api/v1"]) {
   test(`HTTP requests, social login, refresh and retries share ${base}`, async () => {

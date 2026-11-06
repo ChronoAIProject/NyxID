@@ -6,7 +6,7 @@ export function GuestReadiness({ readiness }: { readiness?: Readiness | null }) 
   const ready = readiness.status === "ready";
   const settingUp = readiness.status === "setting_up";
   return (
-    <div role="status" className="space-y-1 text-11">
+    <div role="status" className="space-y-1 text-13">
       <p className={ready || settingUp ? "text-muted-foreground" : "text-warning"}>
         {ready ? "Model ready for visitors" : settingUp ? "Setting up for visitors…" : "Visitor setup needs attention"}
       </p>

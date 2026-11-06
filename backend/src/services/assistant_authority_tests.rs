@@ -325,6 +325,13 @@ pub(crate) async fn chat_for_row(
 
 fn orchestrator_chat() -> acks::ChatAuthority {
     acks::ChatAuthority {
+        automation_work: None,
+        execution_group_id: None,
+        execution_unsupported: false,
+        execution_voice_task: false,
+        execution_task: None,
+        execution_permission: None,
+        business_system_success: false,
         collaboration_thread: false,
         channel_adapter_origin: None,
         invocation_controlled: false,
@@ -401,7 +408,7 @@ async fn acknowledgement_service_allow_is_atomic_scoped_and_versions_the_key() {
         a["instructions"]
             .as_str()
             .unwrap()
-            .starts_with("NyxID asked your orchestrator for this permission.")
+            .starts_with("This pending request is for your orchestrator to decide.")
     );
     let id = a["acknowledgement_id"].as_str().unwrap();
     for (user, conversation) in [
@@ -2578,6 +2585,97 @@ async fn cma_owner_cancel_queues_one_event_and_skips_generic_denial_retry() {
 }
 
 #[tokio::test]
+async fn cma_owner_decision_keeps_original_task_and_is_removed_when_it_stops() {
+    let mut f = direct_fixture("cma_owner_original_task").await;
+    let db = &f.state.db;
+    super::execution_permission_dispatch::phase_b_tests::enroll(db, &f.owner).await;
+    let mut task = super::execution_permission_dispatch::phase_b_tests::task(db, &f.row).await;
+    task.hard_deadline = bson::DateTime::from_chrono(task.hard_deadline).to_chrono();
+    f.chat = acks::for_key(db, &f.owner, Some(&f.row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(f.chat.execution_task.as_ref(), Some(&task));
+    let (card, _) = cma_owner_card(&f, "Finish the desktop step for this task").await;
+    assert!(card.execution_task.is_some());
+    let decided = acks::decide(db, &f.owner, &f.row.id, &card.id, true)
+        .await
+        .unwrap();
+    let current = engine::get(db, &f.owner, &f.row.id).await.unwrap();
+    assert_eq!(current.pending_events.len(), 1);
+    assert_eq!(
+        current.pending_events[0].execution_task, card.execution_task,
+        "the exact original task, epoch, deadline, audience and parent turn must survive Done"
+    );
+    assert_eq!(
+        Some(&current.pending_events[0].id),
+        decided.continuation_receipt_id.as_ref()
+    );
+    super::execution_permission_dispatch::tasks::stop(db, &current)
+        .await
+        .unwrap();
+    assert!(
+        engine::get(db, &f.owner, &f.row.id)
+            .await
+            .unwrap()
+            .pending_events
+            .is_empty()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn cma_owner_automation_decision_keeps_work_without_generic_retry_event() {
+    let f = direct_fixture("cma_owner_automation_work").await;
+    let db = &f.state.db;
+    let (mut card, _) = cma_owner_card(&f, "Complete the automation desktop step").await;
+    let work = crate::models::trigger_run::AutomationWork {
+        run_id: Uuid::new_v4().to_string(),
+        work_id: Uuid::new_v4().to_string(),
+        coordinator_thread_id: f.nyxbot_thread.clone(),
+        role: "direct".into(),
+        confirmation_policy: None,
+    };
+    card.automation_work = Some(work.clone());
+    db.collection::<bson::Document>(ACKS)
+        .update_one(
+            doc! {"_id": &card.id},
+            doc! {"$set": {"automation_work": bson::to_bson(&work).unwrap()}},
+        )
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(super::trigger_schedule::WORK)
+        .insert_one(
+            doc! {"_id": &work.run_id, "at": bson::DateTime::now(), "wake_generation": 0_i64},
+        )
+        .await
+        .unwrap();
+    assert_eq!(card.automation_work.as_ref(), Some(&work));
+    let decided = acks::decide(db, &f.owner, &f.row.id, &card.id, true)
+        .await
+        .unwrap();
+    let current = engine::get(db, &f.owner, &f.row.id).await.unwrap();
+    assert_eq!(
+        current.pending_events.len(),
+        1,
+        "Done must not queue a second provider-retry instruction"
+    );
+    let event = &current.pending_events[0];
+    assert_eq!(event.kind, acks::CMA_OWNER_EVENT_KIND);
+    assert_eq!(event.automation_work, card.automation_work);
+    assert_eq!(Some(&event.id), decided.continuation_receipt_id.as_ref());
+    assert!(!event.text.contains("Retry the exact approved call"));
+    let queued = db
+        .collection::<bson::Document>(super::trigger_schedule::WORK)
+        .find_one(doc! {"_id": &work.run_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(queued.get_i64("wake_generation").unwrap(), 1);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn cma_owner_decision_rolls_back_when_queue_is_full_and_cannot_be_evicted() {
     let f = direct_fixture("cma_owner_queue_durability").await;
     let db = &f.state.db;
@@ -2643,6 +2741,81 @@ async fn cma_owner_decision_rolls_back_when_queue_is_full_and_cannot_be_evicted(
             .pending_events
             .iter()
             .any(|event| Some(&event.id) == decided.continuation_receipt_id.as_ref())
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn automation_queue_notice_eviction_preserves_cma_owner_decision() {
+    let f = direct_fixture("automation_cma_queue_durability").await;
+    let db = &f.state.db;
+    let (card, _) = cma_owner_card(&f, "Finish the desktop step").await;
+    let decided = acks::decide(db, &f.owner, &f.row.id, &card.id, true)
+        .await
+        .unwrap();
+    let mut events = engine::get(db, &f.owner, &f.row.id)
+        .await
+        .unwrap()
+        .pending_events;
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        Some(&events[0].id),
+        decided.continuation_receipt_id.as_ref()
+    );
+    let mut automation =
+        super::assistant_team_service::event("automation_work", "pending work".into(), None);
+    automation.automation_work = Some(crate::models::trigger_run::AutomationWork {
+        run_id: Uuid::new_v4().to_string(),
+        work_id: Uuid::new_v4().to_string(),
+        coordinator_thread_id: f.row.id.clone(),
+        role: "direct".into(),
+        confirmation_policy: None,
+    });
+    events.push(automation.clone());
+    while events.len() < engine::MAX_PENDING_EVENTS {
+        events.push(super::assistant_team_service::event(
+            "notice",
+            "ordinary notice".into(),
+            None,
+        ));
+    }
+    let evictable = events[2].id.clone();
+    db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.row.id},
+            doc! {"$set": {"pending_events": bson::to_bson(&events).unwrap()}},
+        )
+        .await
+        .unwrap();
+    let notice = super::assistant_team_service::event("notice", "new notice".into(), None);
+    let current = engine::push_events(db, &f.owner, &f.row.id, vec![notice.clone()])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.pending_events.len(), engine::MAX_PENDING_EVENTS);
+    assert!(
+        current
+            .pending_events
+            .iter()
+            .any(|event| { Some(&event.id) == decided.continuation_receipt_id.as_ref() })
+    );
+    assert!(
+        current
+            .pending_events
+            .iter()
+            .any(|event| event.id == automation.id)
+    );
+    assert!(
+        current
+            .pending_events
+            .iter()
+            .any(|event| event.id == notice.id)
+    );
+    assert!(
+        !current
+            .pending_events
+            .iter()
+            .any(|event| event.id == evictable)
     );
     db.drop().await.unwrap();
 }

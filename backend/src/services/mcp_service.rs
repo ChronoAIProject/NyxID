@@ -69,6 +69,7 @@ pub(crate) struct McpBillingRouteContextBuilder {
     user_service_id: Option<String>,
     is_user_service: bool,
     credential_class_override: Option<CredentialClass>,
+    auto_connected: bool,
     credential_source: Option<String>,
 }
 
@@ -90,6 +91,7 @@ impl McpBillingRouteContextBuilder {
                 .master_credential
                 .then_some(CredentialClass::NyxidManagedMaster),
             credential_source: resolution.credential_source.clone(),
+            auto_connected: resolution.is_auto_connected,
         }
     }
 
@@ -99,6 +101,7 @@ impl McpBillingRouteContextBuilder {
             user_service_id: None,
             is_user_service: false,
             credential_class_override: None,
+            auto_connected: false,
             credential_source: None,
         }
     }
@@ -169,11 +172,15 @@ impl McpBillingRouteContextBuilder {
 /// node allow-list enforcement. OAuth and session callers pass `api_key_id:
 /// None` and `allow_all_nodes: true`, preserving their existing behavior.
 pub struct McpExecContext<'a> {
+    pub(crate) execution_permission:
+        Option<&'a std::sync::Arc<super::execution_permission_dispatch::RequestContext>>,
     /// Original authenticated turn fence. Credential/catalog awaits must never
     /// downgrade a live foreground request to legacy idle compatibility.
     pub assistant_chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
     /// Background result readers may stop buffering after this many bytes.
     pub response_body_limit: Option<usize>,
+    /// Strict, allocation-bounded UTF-8 for an admitted artifact result only.
+    pub strict_response_utf8: bool,
     /// Acting person/SA when credential resolution runs as another owner.
     pub actor_user_id: Option<&'a str>,
     /// Supplied caller bearer; absent for API-key-only or session-fallback calls.
@@ -393,6 +400,9 @@ pub struct McpCatalogDiagnostics {
 }
 
 pub struct McpOperationCatalog {
+    /// Authorized but unavailable rows, for refusal diagnostics only. Never execute
+    /// or advertise these as callable; node-scope exclusions are not included.
+    pub unavailable_connections: Vec<McpToolService>,
     pub unpublished_services: Vec<McpToolService>,
     pub services: Vec<McpToolService>,
     pub diagnostics: McpCatalogDiagnostics,
@@ -956,6 +966,46 @@ pub async fn load_operation_catalog(
     node_scope: NodeScope<'_>,
     service_scope: ServiceScope<'_>,
 ) -> AppResult<McpOperationCatalog> {
+    load_operation_catalog_inner(
+        db,
+        node_ws_manager,
+        user_id,
+        node_scope,
+        service_scope,
+        None,
+    )
+    .await
+}
+
+/// Authorization configuration keeps temporary credential/route outages visible.
+/// This view must never be used to advertise executable tools. All ownership,
+/// platform ACL, operation-contract and node-scope rules remain shared.
+pub async fn load_authorization_catalog(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    user_id: &str,
+    service_scope: ServiceScope<'_>,
+    targets: &[String],
+) -> AppResult<McpOperationCatalog> {
+    load_operation_catalog_inner(
+        db,
+        node_ws_manager,
+        user_id,
+        NodeScope::Unrestricted,
+        service_scope,
+        Some(targets),
+    )
+    .await
+}
+
+async fn load_operation_catalog_inner(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    user_id: &str,
+    node_scope: NodeScope<'_>,
+    service_scope: ServiceScope<'_>,
+    authorization_targets: Option<&[String]>,
+) -> AppResult<McpOperationCatalog> {
     let node_scope_restricted = matches!(node_scope, NodeScope::Allowed(_));
     let grants =
         crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
@@ -963,8 +1013,9 @@ pub async fn load_operation_catalog(
     let options = UserToolLoadOptions {
         providers: &providers,
         service_scope,
+        authorization_targets,
     };
-    let (mut visible, shadowed_connections) = load_user_tools_with_grants(
+    let (visible, shadowed_connections) = load_user_tools_with_grants(
         db,
         node_ws_manager,
         user_id,
@@ -1014,7 +1065,14 @@ pub async fn load_operation_catalog(
                 && !node_scope_excluded_service_ids.contains(service.service_id.as_str())
         })
         .count();
-    visible.retain(|service| service.executable);
+    let (mut visible, mut unavailable_connections): (Vec<_>, Vec<_>) = visible
+        .into_iter()
+        .partition(|service| authorization_targets.is_some() || service.executable);
+    unavailable_connections.retain(|service| {
+        !node_scope_excluded_service_ids.contains(&service.service_id)
+            && operation_set_is_publishable(service)
+    });
+    retain_unambiguous_identities(&mut unavailable_connections);
 
     visible.sort_by(|left, right| left.service_id.cmp(&right.service_id));
     for service in &mut visible {
@@ -1057,6 +1115,7 @@ pub async fn load_operation_catalog(
         .filter(|service| service.is_generic_proxy)
         .count();
     Ok(McpOperationCatalog {
+        unavailable_connections,
         unpublished_services,
         services: visible,
         diagnostics: McpCatalogDiagnostics {
@@ -1070,6 +1129,39 @@ pub async fn load_operation_catalog(
             shadowed_connections,
         },
     })
+}
+
+/// Metadata-only refusal for a service already filtered by the caller's ACL.
+/// Node names require their own read authorization; unknown topology stays hidden.
+pub async fn unavailable_service_error(
+    db: &mongodb::Database,
+    actor: &str,
+    service: &McpToolService,
+) -> AppResult<AppError> {
+    if let McpToolSource::UserManaged {
+        node_id: Some(node_id),
+        ..
+    } = &service.source
+        && !node_id.is_empty()
+    {
+        let nodes =
+            super::node_service::get_nodes_by_ids(db, std::slice::from_ref(node_id)).await?;
+        if let Some(node) = nodes.first() {
+            let access = super::org_service::resolve_owner_access(db, actor, &node.user_id).await?;
+            if super::node_service::node_access_can_read(&access) {
+                return Ok(AppError::NodeOffline(format!(
+                    "{} ({})",
+                    node.name, node.id
+                )));
+            }
+        }
+        return Ok(AppError::NodeOffline(
+            "Configured node is unavailable".into(),
+        ));
+    }
+    Ok(AppError::BadRequest(
+        "Service credential unavailable; reconnect the service before executing".into(),
+    ))
 }
 
 fn operation_set_is_publishable(service: &McpToolService) -> bool {
@@ -1188,6 +1280,7 @@ async fn load_user_tools_inner(
     let options = UserToolLoadOptions {
         providers: &providers,
         service_scope,
+        authorization_targets: None,
     };
     let (services, _) = load_user_tools_with_grants(
         db,
@@ -1203,6 +1296,7 @@ async fn load_user_tools_inner(
 }
 
 struct UserToolLoadOptions<'scope, 'data> {
+    authorization_targets: Option<&'data [String]>,
     providers: &'data HashMap<String, crate::models::provider_config::ProviderConfig>,
     service_scope: ServiceScope<'scope>,
 }
@@ -2298,6 +2392,10 @@ async fn load_callable_user_services(
     // temporarily unavailable preferred connection still owns its slug.
     let mut candidates = Vec::new();
     for us in personal_services {
+        // A retained deletion marker is not a temporary execution outage.
+        if options.authorization_targets.is_some() && us.deleted_at.is_some() {
+            continue;
+        }
         let primary_in_scope = us
             .node_id
             .as_deref()
@@ -2320,6 +2418,12 @@ async fn load_callable_user_services(
             providers,
             grants,
         ) {
+            // Unavailable platform bindings can mean the live audience grant
+            // was revoked. Authorization must preserve that boundary; only
+            // ordinary credential and node outages are grantable while offline.
+            Some(info) if options.authorization_targets.is_some() && !info.is_executable => {
+                continue;
+            }
             Some(info) => info,
             None => classify_credential(&us, &active_key_map, has_route),
         };
@@ -2331,6 +2435,10 @@ async fn load_callable_user_services(
         });
     }
     for (us, org_user_id) in org_services {
+        // A retained deletion marker is not a temporary execution outage.
+        if options.authorization_targets.is_some() && us.deleted_at.is_some() {
+            continue;
+        }
         let primary_in_scope = us
             .node_id
             .as_deref()
@@ -2353,6 +2461,12 @@ async fn load_callable_user_services(
             providers,
             grants,
         ) {
+            // Unavailable platform bindings can mean the live audience grant
+            // was revoked. Authorization must preserve that boundary; only
+            // ordinary credential and node outages are grantable while offline.
+            Some(info) if options.authorization_targets.is_some() && !info.is_executable => {
+                continue;
+            }
             Some(info) => info,
             None => classify_credential(&us, &active_key_map, has_route),
         };
@@ -2367,7 +2481,11 @@ async fn load_callable_user_services(
     // Choose a winner independently for each slug, then retain the original
     // catalog order for the selected rows. Preference IDs affect collision
     // ownership, not the slots used by discovery ordering.
-    let winner_indices = select_slug_winner_indices(&candidates, service_scope, user_id);
+    let preference_scope = options
+        .authorization_targets
+        .map(ServiceScope::Preferring)
+        .unwrap_or(service_scope);
+    let winner_indices = select_slug_winner_indices(&candidates, preference_scope, user_id);
     let shadowed_connections = candidates.len().saturating_sub(winner_indices.len());
     let mut selected: Vec<ResolvedUserService> = candidates
         .into_iter()
@@ -2684,9 +2802,18 @@ pub fn generate_tool_definitions(
     tools.push(McpToolDefinition {
         name: "nyx__connect_service".to_string(),
         description: "Connect to an available service. If a credential is required and omitted, \
-            returns a hosted connection URL that the user can open. Provide service_id or service_slug. For assistant chats, connecting the owner's own credential always returns a hosted link with personal intent, including when an organization connection exists. Specialists must use NyxBot or Plugins then receive a separate grant. Optional scopes request \
-            additional OAuth permissions on top of provider defaults through that hosted link; \
-            omit credential when requesting scopes."
+            returns a hosted connection URL that the user can open. Provide service_id or service_slug. \
+            For assistant chats, call immediately when asked to connect, even if connections exist. \
+            Give the hosted link immediately and mention existing_connections in one short line \
+            (ownership, label, enabled/disabled; provider account identity is unknown). Never ask \
+            whether to proceed, suggest reusing an existing connection instead, or substitute a page link. \
+            Platform-key connects create a connection in one step. Other non-hosted connects keep \
+            the one-step service connection; already_connected means there is no separate account \
+            to add: say it is already connected in one short line. Explain connect_unavailable \
+            reasons plainly. Specialists cannot mint links: ask the owner to have NyxBot handle \
+            setup, sending a hosted link when supported, followed by a separate specialist grant. Optional scopes request additional OAuth \
+            permissions on top of provider defaults through that hosted link; omit credential \
+            when requesting scopes. Never enter credentials through assistant chat."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -3781,6 +3908,121 @@ pub struct PreparedProxyCall {
 }
 
 impl PreparedProxyCall {
+    pub(crate) async fn admit_execution_permission(
+        &self,
+        state: &crate::AppState,
+        auth: &crate::mw::auth::AuthUser,
+        service: &McpToolService,
+        endpoint: &McpToolEndpoint,
+    ) -> AppResult<()> {
+        if auth.execution_permission.is_none() || self.managed_base.is_some() {
+            return Ok(());
+        }
+        // Only retain calls whose exact prepared bytes can use the ordinary
+        // HTTP replay seam. Managed materialization keeps its legacy decisions.
+        let mut retained_headers = axum::http::HeaderMap::new();
+        for (name, value) in &self.parameter_headers {
+            if let (Ok(name), Ok(value)) = (
+                axum::http::HeaderName::from_bytes(name.as_bytes()),
+                axum::http::HeaderValue::from_str(value),
+            ) {
+                retained_headers.insert(name, value);
+            }
+        }
+        if endpoint.async_operation.is_none()
+            && self.async_submission.is_none()
+            && self.async_continuation.is_none()
+            && self.acknowledgement_id.is_none()
+            && self.lark_message.is_none()
+            && self.attachment_binding.is_none()
+            && self.resource_source.is_none()
+            && self.server_owned_headers.is_empty()
+            && proxy_service::collect_forward_headers_with_defaults(&retained_headers, &[])
+                == self.parameter_headers
+        {
+            auth.execution_permission
+                .as_ref()
+                .expect("participating")
+                .enable_authoring();
+        } else {
+            // A later HTTP admission must not override this adapter's inability
+            // to replay the effect. Already retained watch adapters own their
+            // continuation; a claimed resume never authors another proposal.
+            auth.execution_permission
+                .as_ref()
+                .expect("participating")
+                .retain_adapter(
+                    crate::models::execution_proposal::PreparedAdapter::Unsupported,
+                    &axum::http::HeaderMap::new(),
+                );
+            tracing::info!(
+                reason = "mcp_effect_not_retainable",
+                "Execution proposal uses legacy prompts"
+            );
+        }
+        let McpToolSource::UserManaged {
+            user_service_id,
+            effective_owner_id,
+            ..
+        } = &service.source
+        else {
+            return Ok(());
+        };
+        let mut resolved = proxy_service::read_proxy_authority_snapshot_with_access(
+            &state.db,
+            &state.encryption_keys,
+            &auth.user_id.to_string(),
+            user_service_id,
+            None,
+            auth.org_agent_access.as_deref(),
+        )
+        .await?
+        .ok_or_else(|| AppError::NotFound("Service unavailable".into()))?;
+        self.resolve_destination(&mut resolved.target)?;
+        let mut headers = axum::http::HeaderMap::new();
+        for (name, value) in &self.parameter_headers {
+            headers.insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes())
+                    .map_err(|_| AppError::BadRequest("Invalid header".into()))?,
+                axum::http::HeaderValue::from_str(value)
+                    .map_err(|_| AppError::BadRequest("Invalid header".into()))?,
+            );
+        }
+        if let Some(content_type) = &self.body_content_type {
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_str(content_type)
+                    .map_err(|_| AppError::BadRequest("Invalid content type".into()))?,
+            );
+        }
+        let mut operation = super::assistant_service_execution::http_operation(
+            &resolved.target,
+            self.method.as_str(),
+            &self.path,
+            self.query.as_deref(),
+            self.body.as_deref().unwrap_or_default(),
+        );
+        super::assistant_service_execution::bind_headers(&mut operation, &self.parameter_headers);
+        operation["endpoint_id"] = serde_json::json!(endpoint.endpoint_id);
+        operation["endpoint_contract"] = serde_json::json!(endpoint_contract_digest(endpoint));
+        super::execution_permission_dispatch::admit_http(
+            state,
+            auth,
+            Some(user_service_id),
+            Some(effective_owner_id),
+            &mut resolved.target,
+            self.method.as_str(),
+            &self.path,
+            self.query.as_deref(),
+            self.body.as_deref().unwrap_or_default(),
+            &headers,
+            Some(&endpoint.endpoint_id),
+            &self.operation_descriptor(),
+            resolved.is_auto_connected,
+            Some(&operation),
+        )
+        .await
+    }
     pub(crate) fn bind_resource(
         &mut self,
         source: crate::models::assistant_resource::ResourceSource,
@@ -5108,6 +5350,13 @@ fn resolve_tool_target(
             catalog_service_slug,
         ) = resolved;
         prepared.resolve_destination(&mut target)?;
+        target.execution_request = exec_ctx
+            .execution_permission
+            .filter(|c| c.participating())
+            .cloned();
+        if let Some(permit) = exec_ctx.execution_permission.and_then(|c| c.permit()) {
+            target.execution_permission = Some(permit.clone());
+        }
         Ok(ResolvedToolTarget {
             target,
             node_route,
@@ -5243,9 +5492,9 @@ impl std::fmt::Debug for ToolMedia {
     }
 }
 
-/// A downstream tool response. `text` is exactly what callers received before
-/// media support (lossy UTF-8 of the body), so digests and existing consumers
-/// are unchanged; `media` is set only for verified images.
+/// Ordinary responses retain their existing text/media decoding. Admitted
+/// artifact results carry a private failure when bounded strict decoding fails;
+/// status and downstream provenance remain independent of body validity.
 #[derive(Debug)]
 pub struct ToolResponse {
     pub resources: Option<Box<super::resource_adapter::ResourceRead>>,
@@ -5254,6 +5503,13 @@ pub struct ToolResponse {
     pub text: String,
     pub media: Option<ToolMedia>,
     origin: ToolResponseOrigin,
+    body_error: Option<ToolResponseBodyError>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ToolResponseBodyError {
+    TooLarge,
+    MalformedUtf8,
 }
 
 #[derive(Debug)]
@@ -5263,6 +5519,18 @@ enum ToolResponseOrigin {
 }
 
 impl ToolResponse {
+    pub(crate) fn execution_receipt(status: u16, text: String) -> Self {
+        Self {
+            resources: None,
+            concurrency: None,
+            status,
+            text,
+            media: None,
+            origin: ToolResponseOrigin::Downstream,
+            body_error: None,
+        }
+    }
+
     /// Only the server's execution gate can construct this control response.
     /// Provider bodies are always downstream content, even if they resemble it.
     fn policy_refusal(refusal: serde_json::Value) -> Self {
@@ -5273,7 +5541,16 @@ impl ToolResponse {
             text: refusal.to_string(),
             media: None,
             origin: ToolResponseOrigin::AssistantPolicy,
+            body_error: None,
         }
+    }
+
+    pub(crate) fn is_body_too_large(&self) -> bool {
+        self.body_error == Some(ToolResponseBodyError::TooLarge)
+    }
+
+    pub(crate) fn is_malformed_utf8(&self) -> bool {
+        self.body_error == Some(ToolResponseBodyError::MalformedUtf8)
     }
 
     pub(crate) fn is_policy_refusal(&self) -> bool {
@@ -5330,6 +5607,46 @@ pub(crate) fn tool_response(status: u16, content_type: Option<&str>, body: &[u8]
         text: String::from_utf8_lossy(body).to_string(),
         media: tool_media(status, content_type, body),
         origin: ToolResponseOrigin::Downstream,
+        body_error: None,
+    }
+}
+
+// Node bodies and bounded direct bodies are already owned. Strict decoding
+// consumes that allocation and never makes an image or replacement-text copy.
+fn owned_tool_response(
+    status: u16,
+    content_type: Option<&str>,
+    mut body: Vec<u8>,
+    limit: Option<usize>,
+    strict_utf8: bool,
+) -> ToolResponse {
+    if let Some(limit) = limit {
+        body.truncate(limit.saturating_add(1));
+    }
+    if !strict_utf8 {
+        return tool_response(status, content_type, &body);
+    }
+    let (text, body_error) = if limit.is_some_and(|n| body.len() > n) {
+        // A cap+1 prefix may split a valid UTF-8 character. Size wins.
+        drop(body);
+        (String::new(), Some(ToolResponseBodyError::TooLarge))
+    } else {
+        match String::from_utf8(body) {
+            Ok(text) => (text, None),
+            Err(error) => {
+                drop(error); // Drop malformed raw bytes before returning the marker.
+                (String::new(), Some(ToolResponseBodyError::MalformedUtf8))
+            }
+        }
+    };
+    ToolResponse {
+        resources: None,
+        concurrency: None,
+        status,
+        text,
+        media: None,
+        origin: ToolResponseOrigin::Downstream,
+        body_error,
     }
 }
 
@@ -5353,16 +5670,37 @@ fn node_dispatch_failure_disposition(dispatched: bool) -> NodeDispatchFailureDis
     }
 }
 
+// Stop at cap+1 before any decoding, including a split multibyte prefix.
+async fn read_bounded_tool_body(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<(Vec<u8>, usize), reqwest::Error> {
+    let mut bytes = Vec::new();
+    let mut received = 0usize;
+    while let Some(chunk) = response.chunk().await? {
+        received = received.saturating_add(chunk.len());
+        let take = chunk
+            .len()
+            .min(limit.saturating_add(1).saturating_sub(bytes.len()));
+        bytes.extend_from_slice(&chunk[..take]);
+        if bytes.len() > limit {
+            break;
+        }
+    }
+    Ok((bytes, received))
+}
+
 async fn collect_node_stream_response(
     stream: impl Into<crate::services::node_ws_manager::NodeProxyStream>,
     limit: Option<usize>,
-) -> AppResult<(u16, Vec<(String, String)>, Vec<u8>)> {
+) -> AppResult<(u16, Vec<(String, String)>, Vec<u8>, usize)> {
     let mut stream = stream.into();
     use crate::services::node_ws_manager::StreamChunk;
 
     let mut status = 200u16;
     let mut headers = Vec::new();
     let mut body = Vec::new();
+    let mut received = 0usize;
     while let Some(chunk) = stream.recv().await {
         match chunk {
             StreamChunk::Start {
@@ -5373,15 +5711,17 @@ async fn collect_node_stream_response(
                 headers = stream_headers;
             }
             StreamChunk::Data(data) => {
+                received = received.saturating_add(data.len());
                 let take = limit.map_or(data.len(), |n| {
-                    data.len().min((n + 1).saturating_sub(body.len()))
+                    data.len()
+                        .min(n.saturating_add(1).saturating_sub(body.len()))
                 });
                 body.extend_from_slice(&data[..take]);
                 if limit.is_some_and(|n| body.len() > n) {
-                    return Ok((status, headers, body));
+                    return Ok((status, headers, body, received));
                 }
             }
-            StreamChunk::End => return Ok((status, headers, body)),
+            StreamChunk::End => return Ok((status, headers, body, received)),
             StreamChunk::Error(error) => {
                 tracing::error!(%error, "Node stream failed after provider dispatch");
                 return Err(AppError::Internal(
@@ -5857,7 +6197,7 @@ async fn execute_tool_resolved_inner(
         }
         if let Some(mut admission) = decision.admission {
             if let Some(watch) = prepared.async_submission.as_deref() {
-                admission.bind_async_submission(db, watch).await?;
+                admission.bind_async_submission(db, watch, &target).await?;
             }
             admission
                 .materialize_http(
@@ -5878,6 +6218,17 @@ async fn execute_tool_resolved_inner(
 
     target.require_credential_materialized()?;
     box_mcp_forwarding(move || async move {
+        if let Some(permit) = &target.execution_permission {
+            let mut headers = axum::http::HeaderMap::new();
+            for (name, value) in &prepared.parameter_headers {
+                headers.insert(axum::http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| AppError::BadRequest("Invalid header".into()))?,
+                    axum::http::HeaderValue::from_str(value).map_err(|_| AppError::BadRequest("Invalid header".into()))?);
+            }
+            if let Some(content_type) = &prepared.body_content_type {
+                headers.insert(axum::http::header::CONTENT_TYPE, content_type.parse().map_err(|_| AppError::BadRequest("Invalid content type".into()))?);
+            }
+            permit.validate_prepared_headers(&headers)?;
+        }
         let PreparedProxyCall {
             lark_message: _,
             managed_base,
@@ -6139,6 +6490,7 @@ async fn execute_tool_resolved_inner(
                     && match &service.source { McpToolSource::UserManaged { effective_owner_id, .. } => effective_owner_id == user_id, _ => true },
                 catalog_service_slug,&target,method.as_str(),&canonical.as_policy_path(),query.as_deref(),body.as_deref().unwrap_or_default(),&effective,node_route.is_some()).await?
         } else { None };
+        let auto_connected = billing_context_builder.auto_connected;
         let resource_owner_id = billing_context_builder.effective_owner_id.clone();
         let billing_ctx = billing_context_builder
             .build(
@@ -6190,6 +6542,7 @@ async fn execute_tool_resolved_inner(
             billing_ctx.credential_class,
         );
         request_audit.assistant(assistant_chat.as_ref());
+        request_audit.business_service(assistant_chat.as_ref(), &target.service, auto_connected);
         if super::telnyx_platform_service::contract(&target.service).is_some() {
             if node_route.is_some() || !delegated.is_empty() || !server_owned_headers.is_empty() {
                 return Err(AppError::BadRequest(
@@ -6230,7 +6583,7 @@ async fn execute_tool_resolved_inner(
                 }
             };
             destination_audit.complete(managed.status);
-            request_audit.response(managed.status);
+            request_audit.response(managed.status).await;
             if let (Some(chat), Some(admission)) =
                 (assistant_chat.as_ref(), assistant_admission.as_ref())
             {
@@ -6248,6 +6601,7 @@ async fn execute_tool_resolved_inner(
                     .map_err(|_| AppError::Internal("Invalid managed response encoding".into()))?,
                 media: None,
                 origin: ToolResponseOrigin::Downstream,
+                body_error: None,
             }));
         }
         let metered = box_mcp_forwarding(|| billing.open(&billing_ctx))
@@ -6277,7 +6631,7 @@ async fn execute_tool_resolved_inner(
             };
             billing.settle(&metered,mcp_platform_usage_for_path(text.as_bytes(),request_len,&target.service,&path,status),None,None).await?;
             destination_audit.complete(status);
-            request_audit.response(status);
+            request_audit.response(status).await;
             if let Some(chat)=assistant_chat.as_ref() {
                 if let Some(receipt)=&automatic_receipt {receipt.record(db,chat).await;}
                 else {admission.receipt(db,chat,assistant_auto).await;}
@@ -6397,31 +6751,48 @@ async fn execute_tool_resolved_inner(
                 } else if super::lark_im_tool::kind(endpoint).is_some() {
                     super::lark_attachment_tool::validate_contract(db,service,endpoint).await?;
                 }
-                match node_ws_manager
+                if let Some(context) = &target.execution_request
+                    && let Err(error) = context.check_drain().await {
+                        billing.reject_before_send(&metered, "execution_enrollment_changed", false).await?;
+                        return Err(error);
+                }
+                if let Some(permit) = &target.execution_permission {
+                    let validation = async {
+                        permit.validate_effect(&target, method.as_str(), &path, query.as_deref(), body.as_deref().unwrap_or_default(), &req_headers)?;
+                        permit.before_send(&target).await
+                    }.await;
+                    if let Err(error) = validation {
+                        billing.reject_before_send(&metered, "execution_permission_changed", false).await?;
+                        return Err(error);
+                    }
+                }
+                let node_result = node_ws_manager
                     .send_proxy_request_classified(
                         nid,
                         attempt,
                         signing_secret.as_ref().map(|s| s.as_slice()),
                         billing_egress_permit,
                     )
-                    .await
-                {
+                    .await;
+                if let Some(permit) = &target.execution_permission { permit.complete(node_result.is_ok()).await?; }
+                match node_result {
                     Ok(ProxyResponseType::Complete(resp)) => {
                         box_mcp_forwarding(|| billing.settle(
                                 &metered,
-                                mcp_platform_usage_for_path(
-                                    &resp.body,
-                                    request_len,
-                                    &target.service,
-                                    &path,
-                                    resp.status,
-                                ),
+                                if exec_ctx.strict_response_utf8 {
+                                    mcp_artifact_usage(
+                                        &resp.body[..exec_ctx.response_body_limit.map_or(resp.body.len(), |n| resp.body.len().min(n.saturating_add(1)))],
+                                        resp.body.len(), request_len, &target.service, &path, resp.status,
+                                    )
+                                } else {
+                                    mcp_platform_usage_for_path(&resp.body, request_len, &target.service, &path, resp.status)
+                                },
                                 None,
                                 None,
                             ))
                             .await?;
                         destination_audit.complete(resp.status);
-                        request_audit.response(resp.status);
+                        request_audit.response(resp.status).await;
                         if (200..300).contains(&resp.status)
                             && let (Some(chat), Some(admission)) =
                                 (assistant_chat.as_ref(), assistant_admission.as_ref())
@@ -6432,16 +6803,16 @@ async fn execute_tool_resolved_inner(
                                 admission.receipt(db, chat, assistant_auto).await;
                             }
                         }
-                        return Ok(McpToolExecutionOutcome::Response(tool_response(
+                        return Ok(McpToolExecutionOutcome::Response(owned_tool_response(
                             resp.status,
                             header_value(&resp.headers, "content-type"),
-                            &resp.body[..exec_ctx
-                                .response_body_limit
-                                .map_or(resp.body.len(), |n| resp.body.len().min(n + 1))],
+                            resp.body,
+                            exec_ctx.response_body_limit,
+                            exec_ctx.strict_response_utf8,
                         )));
                     }
                     Ok(ProxyResponseType::Streaming(rx)) => {
-                        let (status, headers, body_buf) = match collect_node_stream_response(
+                        let (status, headers, body_buf, received) = match collect_node_stream_response(
                             rx,
                             exec_ctx.response_body_limit,
                         )
@@ -6454,19 +6825,17 @@ async fn execute_tool_resolved_inner(
                         };
                         box_mcp_forwarding(|| billing.settle(
                                 &metered,
-                                mcp_platform_usage_for_path(
-                                    &body_buf,
-                                    request_len,
-                                    &target.service,
-                                    &path,
-                                    status,
-                                ),
+                                if exec_ctx.strict_response_utf8 {
+                                    mcp_artifact_usage(&body_buf, received, request_len, &target.service, &path, status)
+                                } else {
+                                    mcp_platform_usage_for_path(&body_buf, request_len, &target.service, &path, status)
+                                },
                                 None,
                                 None,
                             ))
                             .await?;
                         destination_audit.complete(status);
-                        request_audit.response(status);
+                        request_audit.response(status).await;
                         if (200..300).contains(&status)
                             && let (Some(chat), Some(admission)) =
                                 (assistant_chat.as_ref(), assistant_admission.as_ref())
@@ -6477,10 +6846,12 @@ async fn execute_tool_resolved_inner(
                                 admission.receipt(db, chat, assistant_auto).await;
                             }
                         }
-                        return Ok(McpToolExecutionOutcome::Response(tool_response(
+                        return Ok(McpToolExecutionOutcome::Response(owned_tool_response(
                             status,
                             header_value(&headers, "content-type"),
-                            &body_buf,
+                            body_buf,
+                            exec_ctx.response_body_limit,
+                            exec_ctx.strict_response_utf8,
                         )));
                     }
                     Err(failure) => match node_dispatch_failure_disposition(failure.dispatched) {
@@ -6653,7 +7024,10 @@ async fn execute_tool_resolved_inner(
             match super::cma_operation::submission::read_receipt(
                 response.bytes_stream(), &agent, exec_ctx.response_body_limit.unwrap_or(64 * 1024),
             ).await {
-                Ok(receipt) => Ok((receipt, None)),
+                Ok(receipt) => Ok((owned_tool_response(
+                    status, None, receipt.into_bytes(), exec_ctx.response_body_limit,
+                    exec_ctx.strict_response_utf8,
+                ), None)),
                 Err(reason) => {
                     tracing::warn!(reason, "CMA submission receipt could not be observed");
                     return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
@@ -6662,17 +7036,17 @@ async fn execute_tool_resolved_inner(
                 }
             }
         } else if let Some(limit) = exec_ctx.response_body_limit {
-            let mut response = response;
-            let mut bytes = Vec::new();
             let result: Result<_, reqwest::Error> = async {
-                while let Some(chunk) = response.chunk().await? {
-                    let take = chunk.len().min((limit + 1).saturating_sub(bytes.len()));
-                    bytes.extend_from_slice(&chunk[..take]);
-                    if bytes.len() > limit {
-                        break;
-                    }
-                }
-                Ok((String::from_utf8_lossy(&bytes).into_owned(), None))
+                let (bytes, received) = read_bounded_tool_body(response, limit).await?;
+                // Preserve received-byte accounting before strict decoding consumes
+                // the buffer. Ordinary callers retain their historical text meter.
+                let raw_usage = exec_ctx.strict_response_utf8.then(|| {
+                    mcp_artifact_usage(&bytes, received, request_len, &target.service, &path, status)
+                });
+                let response = owned_tool_response(
+                    status, None, bytes, Some(limit), exec_ctx.strict_response_utf8,
+                );
+                Ok((response, raw_usage))
             }
             .await;
             result
@@ -6683,9 +7057,15 @@ async fn execute_tool_resolved_inner(
                     (String::from_utf8_lossy(&bytes).to_string(), media)
                 }),
                 None => response.text().await.map(|text| (text, None)),
-            }
+            }.map(|(text, media)| (ToolResponse {
+                resources: None,
+                concurrency: None,
+                status, text, media,
+                origin: ToolResponseOrigin::Downstream,
+                body_error: None,
+            }, None))
         };
-        let (body_text, media) = match read {
+        let (mut response, raw_usage) = match read {
             Ok(read) => read,
             Err(error) => {
                 tracing::error!(
@@ -6701,20 +7081,20 @@ async fn execute_tool_resolved_inner(
         };
         box_mcp_forwarding(|| billing.settle(
                 &metered,
-                mcp_platform_usage_for_path(
-                    body_text.as_bytes(),
+                raw_usage.unwrap_or_else(|| mcp_platform_usage_for_path(
+                    response.text.as_bytes(),
                     request_len,
                     &target.service,
                     &path,
                     status,
-                ),
+                )),
                 None,
                 None,
             ))
             .await?;
 
         destination_audit.complete(status);
-        request_audit.response(status);
+        request_audit.response(status).await;
         if (200..300).contains(&status)
             && let (Some(chat), Some(admission)) =
                 (assistant_chat.as_ref(), assistant_admission.as_ref())
@@ -6725,18 +7105,19 @@ async fn execute_tool_resolved_inner(
                 admission.receipt(db, chat, assistant_auto).await;
             }
         }
-        let body_text = super::cma_operation::agent_lifecycle_receipt(
-            catalog_service_slug, method.as_str(), &path, status, &body_text,
-        ).unwrap_or(body_text);
-        let body_text = super::assistant_service_execution::cma::credential_setup_result(catalog_service_slug,&target.service,status,&body_text).unwrap_or(body_text);
-        Ok(McpToolExecutionOutcome::Response(ToolResponse {
-            resources: None,
-            concurrency: None,
-            status,
-            text: body_text,
-            media,
-            origin: ToolResponseOrigin::Downstream,
-        }))
+        if response.body_error.is_none() {
+            if let Some(receipt) = super::cma_operation::agent_lifecycle_receipt(
+                catalog_service_slug, method.as_str(), &path, status, &response.text,
+            ) {
+                response.text = receipt;
+            }
+            if let Some(setup) = super::assistant_service_execution::cma::credential_setup_result(
+                catalog_service_slug, &target.service, status, &response.text,
+            ) {
+                response.text = setup;
+            }
+        }
+        Ok(McpToolExecutionOutcome::Response(response))
     })
     .await
 }
@@ -6760,6 +7141,27 @@ fn mcp_platform_usage_for_path(
     llm_usage_service::platform_usage(
         usage.as_ref(),
         request_len.saturating_add(body.len() as i64),
+        crate::services::billing::metric_resolution::captures_tokens(service),
+    )
+}
+
+fn mcp_artifact_usage(
+    body: &[u8],
+    received: usize,
+    request_len: i64,
+    service: &DownstreamService,
+    path: &str,
+    status: u16,
+) -> PlatformUsage {
+    use crate::services::llm_usage_service;
+    // The ordinary usage extractor has a lossy SSE fallback. Never send
+    // malformed artifact bytes there: validation borrows the bounded prefix.
+    let usage = std::str::from_utf8(body)
+        .ok()
+        .and_then(|_| llm_usage_service::usage_from_body(body, path, (200..300).contains(&status)));
+    llm_usage_service::platform_usage(
+        usage.as_ref(),
+        request_len.saturating_add(i64::try_from(received).unwrap_or(i64::MAX)),
         crate::services::billing::metric_resolution::captures_tokens(service),
     )
 }
@@ -7646,6 +8048,188 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn admitted_artifact_direct_reader_keeps_raw_usage_and_strict_body_failures() {
+        use axum::{Router, routing::get};
+        let router = Router::new()
+            .route("/valid", get(|| async { br#"{"success":true}"#.to_vec() }))
+            .route(
+                "/malformed",
+                get(|| async { (axum::http::StatusCode::BAD_GATEWAY, vec![0xff_u8, 0xfe]) }),
+            )
+            .route(
+                "/overlimit",
+                get(|| async {
+                    // A valid multibyte character split by the retained cap+1 prefix.
+                    let mut bytes = vec![b' '; 4];
+                    bytes.extend_from_slice("€".as_bytes());
+                    bytes.extend_from_slice(&[b' '; 57]);
+                    bytes
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::new();
+        let service = crate::models::downstream_service::test_helpers::dummy_service();
+        for (path, limit, status, malformed, overlimit) in [
+            ("valid", 100, 200, false, false),
+            ("malformed", 100, 502, true, false),
+            ("overlimit", 4, 200, false, true),
+        ] {
+            let downstream = client.get(format!("{base}/{path}")).send().await.unwrap();
+            assert_eq!(downstream.status().as_u16(), status);
+            let (body, received) = read_bounded_tool_body(downstream, limit).await.unwrap();
+            let usage = mcp_artifact_usage(&body, received, 7, &service, path, status);
+            assert_eq!(usage.bytes, 7 + received as i64);
+            assert_eq!(usage.requests, 1);
+            assert_eq!(usage.tokens, 0);
+            let allocation = body.as_ptr();
+            if overlimit {
+                assert_eq!(body.len(), limit + 1);
+                assert!(received >= body.len() && received <= 64);
+                assert!(std::str::from_utf8(&body).is_err());
+            } else {
+                assert_eq!(received, body.len());
+            }
+            let response = owned_tool_response(status, None, body, Some(limit), true);
+            assert_eq!(response.status, status);
+            assert!(matches!(response.origin, ToolResponseOrigin::Downstream));
+            assert!(!response.is_policy_refusal());
+            assert_eq!(response.is_malformed_utf8(), malformed);
+            assert_eq!(response.is_body_too_large(), overlimit);
+            assert!(response.media.is_none());
+            if malformed || overlimit {
+                assert!(response.text.is_empty());
+                assert_eq!(response.text.capacity(), 0);
+            } else {
+                assert_eq!(response.text, r#"{"success":true}"#);
+                assert_eq!(response.text.as_ptr(), allocation);
+            }
+        }
+        server.abort();
+
+        // The explicit opt-in leaves ordinary bounded text replacement intact.
+        let ordinary = owned_tool_response(200, None, vec![0xff, b'x'], Some(100), false);
+        assert_eq!(ordinary.text, "\u{fffd}x");
+        assert!(!ordinary.is_malformed_utf8());
+        assert!(!ordinary.is_body_too_large());
+        // Strict artifact reads never duplicate even an image-shaped body.
+        let image = owned_tool_response(
+            200,
+            Some("image/png"),
+            b"\x89PNG\r\n\x1a\n".to_vec(),
+            Some(100),
+            true,
+        );
+        assert!(image.is_malformed_utf8());
+        assert!(image.media.is_none());
+        let mut token_service = service;
+        token_service.billing = Some(crate::models::service_billing::ServiceBilling {
+            platform_key_pricing: Some(
+                serde_json::from_value(serde_json::json!({
+                    "metric":"tokens", "credits_per_unit":"1"
+                }))
+                .unwrap(),
+            ),
+            ..Default::default()
+        });
+        let malformed_usage = mcp_artifact_usage(&[0xff], 4096, 7, &token_service, "", 200);
+        assert_eq!(malformed_usage.bytes, 4103);
+        assert!(malformed_usage.tokens > 0);
+        let reported = br#"{"usage":{"total_tokens":57,"prompt_tokens":50,"completion_tokens":7}}"#;
+        let valid_usage = mcp_artifact_usage(reported, reported.len(), 7, &token_service, "", 200);
+        assert_eq!(valid_usage.bytes, 7 + reported.len() as i64);
+        assert_eq!(valid_usage.tokens, 57);
+    }
+
+    #[tokio::test]
+    async fn admitted_artifact_node_complete_and_stream_keep_status_usage_and_cap_precedence() {
+        use crate::services::node_ws_manager::{NodeProxyResponse, StreamChunk};
+        let service = crate::models::downstream_service::test_helpers::dummy_service();
+        for (body, limit, malformed, overlimit) in [
+            (br#"{"success":true}"#.to_vec(), 100, false, false),
+            (vec![0xff, 0xfe], 100, true, false),
+            (
+                [b"    ".as_slice(), "€".as_bytes(), &[b'x'; 57]].concat(),
+                4,
+                false,
+                true,
+            ),
+        ] {
+            let complete = NodeProxyResponse {
+                request_id: "node-result".into(),
+                status: 503,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: body.clone(),
+            };
+            // Node completion settles the whole received body before conversion.
+            let usage = mcp_artifact_usage(
+                &complete.body[..complete.body.len().min(limit + 1)],
+                complete.body.len(),
+                7,
+                &service,
+                "executions/op/result",
+                complete.status,
+            );
+            assert_eq!(usage.bytes, 7 + body.len() as i64);
+            assert_eq!(usage.requests, 1);
+            let response = owned_tool_response(
+                complete.status,
+                header_value(&complete.headers, "content-type"),
+                complete.body,
+                Some(limit),
+                true,
+            );
+            assert_eq!(response.status, 503);
+            assert!(matches!(response.origin, ToolResponseOrigin::Downstream));
+            assert_eq!(response.is_malformed_utf8(), malformed);
+            assert_eq!(response.is_body_too_large(), overlimit);
+            assert!(response.media.is_none());
+
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tx.send(StreamChunk::Start {
+                status: 503,
+                headers: vec![],
+            })
+            .await
+            .unwrap();
+            tx.send(StreamChunk::Data(body.clone())).await.unwrap();
+            if overlimit {
+                // This queued chunk is never consumed or billed after the cap.
+                tx.send(StreamChunk::Data(vec![b'z'; 17])).await.unwrap();
+            }
+            tx.send(StreamChunk::End).await.unwrap();
+            drop(tx);
+            let (status, _, retained, received) =
+                collect_node_stream_response(rx, Some(limit)).await.unwrap();
+            assert_eq!(received, body.len());
+            assert_eq!(retained.len(), body.len().min(limit + 1));
+            if overlimit {
+                assert!(received > retained.len());
+            }
+            let usage = mcp_artifact_usage(
+                &retained,
+                received,
+                7,
+                &service,
+                "executions/op/result",
+                status,
+            );
+            assert_eq!(usage.bytes, 7 + body.len() as i64);
+            assert_eq!(usage.requests, 1);
+            let response = owned_tool_response(status, None, retained, Some(limit), true);
+            assert_eq!(response.status, 503);
+            assert!(matches!(response.origin, ToolResponseOrigin::Downstream));
+            assert_eq!(response.is_malformed_utf8(), malformed);
+            assert_eq!(response.is_body_too_large(), overlimit);
+            assert!(response.media.is_none());
+            if malformed || overlimit {
+                assert_eq!(response.text.capacity(), 0);
+            }
+        }
+    }
+
     #[test]
     fn mcp_usage_estimates_only_token_services_and_preserves_reported_usage() {
         use crate::models::downstream_service::test_helpers::dummy_service;
@@ -7870,6 +8454,8 @@ mod tests {
                     &state.token_exchange_cache,
                     &state.cloud_response_cache,
                     &McpExecContext {
+                        strict_response_utf8: false,
+                        execution_permission: None,
                         assistant_chat: None,
                         response_body_limit: None,
                         actor_user_id: None,
@@ -9610,6 +10196,13 @@ mod tests {
         role: crate::models::assistant_conversation::AgentRole,
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            automation_work: None,
+            execution_group_id: None,
+            execution_unsupported: false,
+            execution_voice_task: false,
+            execution_task: None,
+            execution_permission: None,
+            business_system_success: false,
             collaboration_thread: false,
             channel_adapter_origin: None,
             invocation_controlled: false,
@@ -10366,6 +10959,9 @@ mod tests {
             .unwrap();
         assert!(connect.input_schema["properties"]["service_id"].is_object());
         assert!(connect.input_schema["properties"]["service_slug"].is_object());
+        for guidance in ["already_connected", "no separate account", "one short line"] {
+            assert!(connect.description.contains(guidance), "missing {guidance}");
+        }
     }
 
     #[test]
@@ -10679,6 +11275,7 @@ mod tests {
         let options = UserToolLoadOptions {
             providers: &providers,
             service_scope: ServiceScope::Unrestricted,
+            authorization_targets: None,
         };
 
         let (visible_while_disabled, _) = load_callable_user_services(
@@ -14460,6 +15057,8 @@ mod tests {
         let service = crate::models::downstream_service::test_helpers::dummy_service();
         proxy_service::UserServiceResolution {
             target: proxy_service::ProxyTarget {
+                execution_request: None,
+                execution_permission: None,
                 credential_deferred: false,
                 workspace_destinations_pending: false,
                 target_id: None,

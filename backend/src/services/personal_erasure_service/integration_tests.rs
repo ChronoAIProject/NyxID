@@ -76,6 +76,18 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
     let mut removed = Vec::<(&str, bson::Bson)>::new();
     for (collection, mut row) in [
         (
+            "async_service_operation_artifacts",
+            doc! {"_id":"pending-file","user_id":&owner,"conversation_id":"deleted-thread","data_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1,2,3]}},
+        ),
+        (
+            "assistant_artifact_deliveries",
+            doc! {"_id":"delivery","user_id":&owner,"conversation_id":"deleted-thread"},
+        ),
+        (
+            "generated_artifact_content_series",
+            doc! {"_id":"series","user_id":&owner,"conversation_id":"deleted-thread"},
+        ),
+        (
             "service_preferences",
             doc! {"_id":&owner,"ordered":["catalog-a"]},
         ),
@@ -122,6 +134,20 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
         (
             "assistant_resources",
             doc! {"_id":"personal-resource","user_id":&owner,"conversation_id":"private-chat"},
+        ),
+        // An older replica may have deleted the group before it knew these
+        // additive collections. Erasure must not depend on a surviving parent.
+        (
+            "assistant_group_read_states",
+            doc! {"_id":"read-state","user_id":&owner,"group_id":"deleted-group","last_seen_seq":42_i64},
+        ),
+        (
+            "assistant_group_mention_notifications",
+            doc! {"_id":"pending-mention","user_id":&owner,"group_id":"deleted-group"},
+        ),
+        (
+            "assistant_voice_announcements",
+            doc! {"_id":"private-notice","user_id":&owner,"conversation_id":"private-chat","text":"Private notification"},
         ),
         (
             "assistant_agent_learning_members",
@@ -213,6 +239,10 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
         (
             "assistant_resources",
             doc! {"_id":"org-resource","user_id":&other,"created_by":&owner},
+        ),
+        (
+            "assistant_voice_announcements",
+            doc! {"_id":"other-notice","user_id":&other,"conversation_id":"other-chat","text":"Other notification"},
         ),
         (
             "channel_conversations",
@@ -572,4 +602,50 @@ async fn accepted_node_admission_closes_and_unavailable_or_restarted_replica_nee
             .is_some()
     );
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn automation_receipts_are_erased_by_exact_owner_and_block_final_completion() {
+    let (db, owner) = tests::fixture().await;
+    let state = test_app_state(db.clone());
+    let receipts = db.collection::<Document>("assistant_direct_handoffs");
+    receipts
+        .insert_many([
+            doc! {"_id": "pending", "user_id": &owner, "state": "pending"},
+            doc! {"_id": "terminal", "user_id": &owner, "state": "delivered"},
+            doc! {"_id": "other-owner", "user_id": "another-person", "state": "pending"},
+        ])
+        .await
+        .unwrap();
+    accept(&db, &owner, &owner, None).await.unwrap();
+    let job = db
+        .collection::<PersonalErasureJob>(JOBS)
+        .find_one(doc! {"user_id": &owner})
+        .await
+        .unwrap()
+        .unwrap();
+    until_source_removed(&state, &owner).await;
+    assert_eq!(
+        receipts
+            .count_documents(doc! {"user_id": &owner})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        receipts
+            .find_one(doc! {"_id": "other-owner"})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // The final check uses the same exact-owner inventory even with no hint on
+    // the deleted person row. A leftover cannot be declared complete.
+    receipts
+        .insert_one(doc! {"_id": "leftover", "user_id": &owner, "state": "pending"})
+        .await
+        .unwrap();
+    assert!(!local::source(&db, &job).await.unwrap());
+    receipts.delete_one(doc! {"_id": "leftover"}).await.unwrap();
+    assert!(local::source(&db, &job).await.unwrap());
 }

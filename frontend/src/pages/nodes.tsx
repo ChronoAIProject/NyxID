@@ -163,24 +163,24 @@ function RegisterNodeDialog({
                 value={createdToken.token}
               />
               <div className="rounded-lg bg-muted p-3 space-y-2">
-                <p className="text-xs font-medium text-text-tertiary">
+                <p className="type-secondary-emphasis text-text-tertiary">
                   Run on your node
                 </p>
                 <div>
-                  <p className="text-10 text-muted-foreground mb-0.5">
+                  <p className="text-12 text-muted-foreground mb-0.5">
                     File-based storage (default, works on servers)
                   </p>
-                  <code className="text-xs text-foreground break-all">
+                  <code className="text-14 text-foreground break-all">
                     nyxid node register --token {createdToken.token}
                     {urlFlag}
                   </code>
                 </div>
                 <div>
-                  <p className="text-10 text-muted-foreground mb-0.5">
+                  <p className="text-12 text-muted-foreground mb-0.5">
                     OS keychain storage (macOS Keychain, Windows Credential
                     Manager)
                   </p>
-                  <code className="text-xs text-foreground break-all">
+                  <code className="text-14 text-foreground break-all">
                     nyxid node register --token {createdToken.token}
                     {urlFlag} --keychain
                   </code>
@@ -205,7 +205,7 @@ function RegisterNodeDialog({
                 className="space-y-4"
               >
                 {form.formState.errors.root && (
-                  <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
+                  <div className="rounded-lg bg-destructive/10 p-3 text-14 text-destructive">
                     {form.formState.errors.root.message}
                   </div>
                 )}
@@ -362,16 +362,16 @@ export function NodesPage() {
               <>
                 <div className="flex items-center justify-center gap-2">
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                  <p className="text-12 font-medium text-foreground">Waiting for your node to connect…</p>
+                  <p className="type-row-title text-foreground">Waiting for your node to connect…</p>
                 </div>
-                <p className="text-12 text-muted-foreground">
+                <p className="text-14 text-muted-foreground">
                   Run the registration command on the node. We&apos;ll take you to its page automatically.
                 </p>
               </>
             ) : (
               <>
-                <p className="text-12 font-medium text-foreground">No Credential Nodes</p>
-                <p className="text-12 text-muted-foreground">
+                <p className="type-row-title text-foreground">No Credential Nodes</p>
+                <p className="text-14 text-muted-foreground">
                   Create a registration token to get started.
                 </p>
               </>
@@ -403,10 +403,10 @@ export function NodesPage() {
                     </Button>
                   </div>
                 )}
-                <p className="pr-10 text-13 font-semibold text-foreground truncate">
+                <p data-machine-card-title="" className="pr-10 type-card-title text-foreground truncate">
                   {node.name}
                   {node.metadata?.agent_version && (
-                    <span className="ml-2 text-11 font-normal text-muted-foreground">
+                    <span className="ml-2 type-secondary text-muted-foreground">
                       v{node.metadata.agent_version}
                     </span>
                   )}
@@ -416,7 +416,7 @@ export function NodesPage() {
                   <Badge variant="secondary">{nodeOwnerLabel(node.owner, currentUserId)}</Badge>
                   {node.machine ? <MachineIsolationBadge machine={node.machine} /> : null}
                 </div>
-                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
                   <span>{formatRelativeTime(node.last_heartbeat_at) ?? "No heartbeat"}</span>
                   <span>Created {formatRelativeTime(node.created_at)}</span>
                 </div>
@@ -449,10 +449,10 @@ export function NodesPage() {
                       </Button>
                     </div>
                   )}
-                  <p className="pr-10 text-13 font-semibold text-foreground truncate">
+                  <p data-machine-card-title="" className="pr-10 type-card-title text-foreground truncate">
                     {node.name}
                     {node.metadata?.agent_version && (
-                      <span className="ml-2 text-11 font-normal text-muted-foreground">
+                      <span className="ml-2 type-secondary text-muted-foreground">
                         v{node.metadata.agent_version}
                       </span>
                     )}
@@ -462,7 +462,7 @@ export function NodesPage() {
                     <Badge variant="secondary">{nodeOwnerLabel(node.owner, currentUserId)}</Badge>
                   {node.machine ? <MachineIsolationBadge machine={node.machine} /> : null}
                   </div>
-                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
+                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
                     <span>{formatRelativeTime(node.last_heartbeat_at) ?? "No heartbeat"}</span>
                     <span>Created {formatRelativeTime(node.created_at)}</span>
                   </div>
@@ -499,7 +499,7 @@ export function NodesPage() {
                           {node.name}
                         </span>
                         {node.metadata?.agent_version && (
-                          <span className="ml-2 text-xs text-muted-foreground">
+                          <span className="ml-2 text-13 text-muted-foreground">
                             v{node.metadata.agent_version}
                           </span>
                         )}

@@ -48,6 +48,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { cn } from "@/lib/utils";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import type { AdminUsageSearch } from "@/types/admin";
+import { FreeGrantsReport } from "@/components/admin/free-grants-report";
 import { NyxbotUsage } from "@/components/admin/nyxbot-usage";
 import { canReadAdminUsage } from "@/types/api";
 
@@ -177,6 +178,7 @@ export function AnalyticsWorkspace({
   const view = sample
     ? config.draft
     : { ...config.draft, layout: "operations" as const };
+  const [grantsRefresh, setGrantsRefresh] = useState(0);
   const [localTab, setLocalTab] = useState<"dashboard" | "list">("dashboard");
   const activeTab = tab ?? localTab;
   const canReadNyxbot = useAuthStore((state) => canReadAdminUsage(state.user));
@@ -204,7 +206,7 @@ export function AnalyticsWorkspace({
     new TextEncoder().encode(name.trim()).length <= 100;
   return (
     <div className="space-y-5 pb-6">
-      <UsageHeader />
+      <UsageHeader onRefresh={() => setGrantsRefresh((n) => n + 1)} />
       <fieldset
         disabled={Boolean(workspace.pendingRecovery)}
         className="min-w-0 space-y-2"
@@ -217,7 +219,7 @@ export function AnalyticsWorkspace({
             setConfig({ ...config, draft: { ...view, filters } })
           }
         />
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Applies to Dashboard and List totals and charts. Users select who made
           requests; Users / organizations selects the billing account that paid.
           NyxBot has its own filters.
@@ -226,7 +228,7 @@ export function AnalyticsWorkspace({
       {import.meta.env.DEV &&
         import.meta.env.VITE_USAGE_SEEDED === "true" &&
         !sample && (
-          <p className="text-12 text-muted-foreground" role="note">
+          <p className="text-14 text-muted-foreground" role="note">
             <strong className="font-medium text-foreground">
               Local seed data.
             </strong>{" "}
@@ -234,13 +236,16 @@ export function AnalyticsWorkspace({
           </p>
         )}
       {sample && (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-info/25 bg-info/5 px-4 py-2.5 text-11 text-info">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-info/25 bg-info/5 px-4 py-2.5 text-13 text-info">
           <span>
             <strong>Automated test fixture.</strong> Synthetic data for browser
             tests only.
           </span>
           <span>Interactive filters · charts · saved views</span>
         </div>
+      )}
+      {!sample && (activeTab === "dashboard" || activeTab === "list") && (
+        <FreeGrantsReport filters={view.filters} refreshKey={grantsRefresh} />
       )}
       <Tabs
         value={activeTab}
@@ -299,14 +304,14 @@ export function AnalyticsWorkspace({
                           : "text-muted-foreground",
                       )}
                     />
-                    <span className="text-13 font-semibold">
+                    <span className="type-card-title">
                       {TEMPLATE_COPY[layout].name}
                     </span>
                     <span className="sr-only">
                       {TEMPLATE_COPY[layout].reference}
                     </span>
                     {TEMPLATE_COPY[layout].recommended && (
-                      <span className="rounded-md border border-nyx-secondary-400/30 bg-nyx-secondary-400/10 px-1.5 py-0.5 text-10 font-medium text-nyx-secondary-400">
+                      <span className="rounded-md border border-nyx-secondary-400/30 bg-nyx-secondary-400/10 px-1.5 py-0.5 type-group-label text-nyx-secondary-400">
                         Recommended
                       </span>
                     )}
@@ -318,14 +323,14 @@ export function AnalyticsWorkspace({
         )}
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
-            <h2 className="truncate text-15 font-semibold">
+            <h2 className="truncate type-card-title">
               {activeTab === "dashboard" ? view.name : "Usage records"}
             </h2>
             <span
               role="status"
               aria-label="Workspace save status"
               className={cn(
-                "flex items-center gap-1.5 text-10",
+                "flex items-center gap-1.5 text-12",
                 workspace.error ? "text-warning" : "text-muted-foreground",
               )}
             >
@@ -376,15 +381,15 @@ export function AnalyticsWorkspace({
                 </PopoverTrigger>
                 <PopoverContent align="end" className="w-80 space-y-4 p-4">
                   <div>
-                    <h3 className="text-13 font-semibold">Your saved views</h3>
-                    <p className="mt-1 text-11 text-muted-foreground">
+                    <h3 className="type-card-title">Your saved views</h3>
+                    <p className="mt-1 text-13 text-muted-foreground">
                       Private to your account. Exploring never overwrites a
                       named view.
                     </p>
                   </div>
                   <div className="max-h-64 space-y-1 overflow-auto">
                     {config.saved_views.length === 0 && (
-                      <p className="py-3 text-12 text-muted-foreground">
+                      <p className="py-3 text-14 text-muted-foreground">
                         Save a starting point to return to later.
                       </p>
                     )}
@@ -466,7 +471,7 @@ export function AnalyticsWorkspace({
           <div
             role="status"
             aria-label="Recovered workspace"
-            className="mt-3 space-y-3 rounded-lg border border-border bg-card p-3 text-12"
+            className="mt-3 space-y-3 rounded-lg border border-border bg-card p-3 text-14"
           >
             <p>
               Showing your saved view. An older or incomplete draft is still
@@ -490,7 +495,7 @@ export function AnalyticsWorkspace({
         {workspace.error && (
           <div
             role="alert"
-            className="flex flex-wrap items-center gap-2 rounded-lg border border-warning/30 bg-warning/5 p-3 text-12"
+            className="flex flex-wrap items-center gap-2 rounded-lg border border-warning/30 bg-warning/5 p-3 text-14"
           >
             <p className="mr-auto">{workspace.error}</p>
             <Button size="sm" onClick={workspace.retry}>
@@ -505,13 +510,13 @@ export function AnalyticsWorkspace({
           </div>
         )}
         {workspace.storageError && (
-          <p role="alert" className="text-11 text-warning">
+          <p role="alert" className="text-13 text-warning">
             Browser recovery storage is unavailable. Keep this page open until
             changes are saved.
           </p>
         )}
         {workspace.validationError && (
-          <p role="alert" className="text-11 text-warning">
+          <p role="alert" className="text-13 text-warning">
             {workspace.validationError}
           </p>
         )}
@@ -535,7 +540,7 @@ export function AnalyticsWorkspace({
           <AdminUsagePreload filters={view.filters} search={preloadSearch} />
         )}
       </Tabs>
-      <p className="text-10 leading-relaxed text-muted-foreground">
+      <p className="text-12 text-muted-foreground">
         Usage windows are UTC and end-exclusive. Gross cost includes wallet,
         grant, and allowance funding. Billing-account filters select who paid;
         acting-user filters select who made the request.
@@ -554,7 +559,7 @@ function UsageTabList({ canReadNyxbot }: { canReadNyxbot: boolean }) {
   );
 }
 
-function UsageHeader() {
+function UsageHeader({ onRefresh }: { onRefresh?: () => void }) {
   const client = useQueryClient();
   return (
     <PageHeader
@@ -563,20 +568,22 @@ function UsageHeader() {
       actions={
         <Button
           variant="outline"
-          onClick={() =>
+          onClick={() => {
+            onRefresh?.();
             void Promise.all([
               client.invalidateQueries({
                 queryKey: ["usage-analytics", useAuthStore.getState().user?.id],
               }),
               client.invalidateQueries({ queryKey: ["admin", "usage"] }),
+              client.invalidateQueries({ queryKey: ["admin", "free-grants"] }),
               client.invalidateQueries({
                 queryKey: ["admin", "assistant-analytics"],
               }),
               client.invalidateQueries({
                 queryKey: ["admin", "assistant-feedback"],
               }),
-            ])
-          }
+            ]);
+          }}
         >
           <RefreshCw className="size-3" />
           Refresh

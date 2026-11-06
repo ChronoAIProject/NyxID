@@ -2,6 +2,7 @@ import { useLayoutEffect, useMemo } from "react";
 import { buildCustomColorCss } from "@/lib/theme-colors";
 import {
   useThemeStore,
+  DISPLAY_TEXT_BASE,
   resolveTheme,
   type ResolvedTheme,
 } from "@/stores/theme-store";
@@ -49,10 +50,10 @@ export function useApplyTheme(surface?: "assistant"): void {
   const customCss = useMemo(() => buildCustomColorCss(customColors), [customColors]);
 
   // Text size: a percentage root font size keeps the user's browser default
-  // as the 100% baseline. Only rem text follows it; spacing is px.
+  // as the baseline, rebased to 85%. Only rem text follows it; spacing is px.
   useLayoutEffect(() => {
     const root = document.documentElement;
-    root.style.fontSize = textScale === 1 ? "" : `${textScale * 100}%`;
+    root.style.fontSize = `${textScale * DISPLAY_TEXT_BASE * 100}%`;
     return () => {
       root.style.fontSize = "";
     };
@@ -63,12 +64,12 @@ export function useApplyTheme(surface?: "assistant"): void {
     const root = document.documentElement;
     if (density === 1) root.style.removeProperty("--spacing");
     else root.style.setProperty("--spacing", `${4 * density}px`);
-    if (surface === "assistant") root.style.setProperty("--assistant-density", String(density));
+    root.style.setProperty("--display-density", String(density));
     return () => {
       root.style.removeProperty("--spacing");
-      if (surface === "assistant") root.style.removeProperty("--assistant-density");
+      root.style.removeProperty("--display-density");
     };
-  }, [density, surface]);
+  }, [density]);
 
   useLayoutEffect(() => {
     const root = document.documentElement;

@@ -33,7 +33,7 @@ export function TelegramManagers() {
   });
   return (
     <DetailSection title="Telegram managers">
-      <div className="space-y-4 p-4 text-12">
+      <div className="space-y-4 p-4 text-14">
         <p>
           Connect additional BotFather managers here. Enable bot management in
           BotFather for each one. Each manager has its own webhook and can use

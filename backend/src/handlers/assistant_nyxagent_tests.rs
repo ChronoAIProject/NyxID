@@ -1,4 +1,6 @@
 use super::*;
+#[path = "assistant_first_byte_outcome_tests.rs"]
+mod first_byte_outcome_tests;
 #[path = "assistant_guest_turn_tests.rs"]
 mod guest_turn_tests;
 use crate::services::assistant_engine_policy as engine_policy;
@@ -61,6 +63,8 @@ fn stream_timeout_is_the_earlier_of_transport_idle_and_no_progress() {
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {
+        automation_work: None,
+        execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
         media_queue_notice_id: None,
@@ -580,6 +584,12 @@ async fn delayed_headers_fail_as_first_byte_with_internal_stage() {
         reply.upstream_error_code, None,
         "a NyxID timeout is not an upstream code"
     );
+    let outcome = serde_json::to_value(MessageResponse::from(reply.clone())).unwrap();
+    assert_eq!(
+        outcome["action_outcome"]["summary"],
+        "No actions were taken."
+    );
+    assert_eq!(outcome["action_outcome"]["retry_warning"], Value::Null);
     let detail = reply.error_detail.unwrap();
     assert_eq!(detail.stage, "first_byte");
     assert_eq!(detail.response_id, None);
@@ -1974,12 +1984,13 @@ async fn lagged_browser_subscription_keeps_full_text_and_terminal_event() {
 }
 
 #[tokio::test]
-async fn model_fallbacks_are_uncached_and_successes_are_cached() {
+async fn model_fallbacks_are_cached_and_expire_for_later_success() {
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
     let (state, _, server) = setup(None, Duration::ZERO).await;
+    let cache_key = format!("{}:{OWNER}", state.db.name());
     let upstream = MockServer::start().await;
     state
         .db
@@ -2001,13 +2012,8 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         .await
         .unwrap();
     assert_eq!(fallback[0].id, engine::DEFAULT_MODEL);
-    assert!(
-        !MODELS
-            .lock()
-            .await
-            .contains_key(&format!("{}:{OWNER}", state.db.name()))
-    );
-    engine::begin_turn(
+    assert!(MODELS.lock().await[&cache_key].1.is_none());
+    let row = engine::begin_turn(
         &state.db,
         OWNER,
         &engine::TurnRequest {
@@ -2024,6 +2030,37 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
     )
     .await
     .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id": &row.id}, doc! {"$set": {"group_id": "crew"}})
+        .await
+        .unwrap();
+    MODELS.lock().await.get_mut(&cache_key).unwrap().0 = Instant::now() - Duration::from_secs(61);
+    let Json(fallback) = models(State(state.clone()), test_auth_user(OWNER), request())
+        .await
+        .unwrap();
+    assert_eq!(fallback.len(), 1);
+    assert_eq!(fallback[0].id, engine::DEFAULT_MODEL);
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(
+                crate::models::assistant_agent_credential::COLLECTION_NAME
+            )
+            .count_documents(doc! {"user_id": OWNER})
+            .await
+            .unwrap(),
+        1
+    );
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id": &row.id}, doc! {"$unset": {"group_id": ""}})
+        .await
+        .unwrap();
+    MODELS.lock().await.get_mut(&cache_key).unwrap().0 = Instant::now() - Duration::from_secs(61);
     Mock::given(method("GET"))
         .and(path("/v1/models"))
         .respond_with(ResponseTemplate::new(503))
@@ -2039,15 +2076,16 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         .with_priority(2)
         .mount(&upstream)
         .await;
-    let _ = models(State(state.clone()), test_auth_user(OWNER), request())
-        .await
-        .unwrap();
-    assert!(
-        !MODELS
-            .lock()
+    for _ in 0..2 {
+        let Json(fallback) = models(State(state.clone()), test_auth_user(OWNER), request())
             .await
-            .contains_key(&format!("{}:{OWNER}", state.db.name()))
-    );
+            .unwrap();
+        assert_eq!(fallback[0].id, engine::DEFAULT_MODEL);
+    }
+    assert!(MODELS.lock().await[&cache_key].1.is_none());
+    assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+    // Expire the failure without sleeping; the next successful load replaces it.
+    MODELS.lock().await.get_mut(&cache_key).unwrap().0 = Instant::now() - Duration::from_secs(61);
     for _ in 0..2 {
         let Json(rows) = models(State(state.clone()), test_auth_user(OWNER), request())
             .await
@@ -2055,6 +2093,7 @@ async fn model_fallbacks_are_uncached_and_successes_are_cached() {
         assert_eq!(rows.len(), 2);
     }
     assert_eq!(upstream.received_requests().await.unwrap().len(), 2);
+    assert_eq!(MODELS.lock().await[&cache_key].1.as_ref().unwrap().len(), 2);
     server.abort();
 }
 
@@ -2609,6 +2648,7 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
             .await
             .unwrap();
     let request = |label: &str, status: &str, minutes: i64| ApprovalRequest {
+        execution_proposal: None,
         assistant_group: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: OWNER.to_string(),
@@ -2700,6 +2740,8 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        automation_work: None,
+        execution_task: None,
         connect_own: None,
         activity_id: None,
         invocation_id: None,
@@ -2803,7 +2845,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
             .unwrap()
             .starts_with(engine::SYSTEM_PROMPT)
     );
-    assert!(first.contains("Chat card decisions the user made since your previous reply"));
+    assert!(first.contains("Chat card states recorded since your previous reply"));
     assert!(first.contains(prepared.binding.marker.as_deref().unwrap()));
     assert!(calls[0].body["conversation"].as_str() == Some(SESSION));
     assert!(first.contains("\n- allowed: service github"));
@@ -2820,7 +2862,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
     assert!(!first.contains("IGNORE") && !first.contains("Summary text"));
     // The next turn does not repeat decisions it has already been told about.
     let second = calls[1].body["input"].as_str().unwrap();
-    assert!(!second.contains("Chat card decisions"));
+    assert!(!second.contains("Chat card states"));
     server.abort();
 }
 
@@ -3286,6 +3328,7 @@ async fn channel_thread_execution_rechecks_orphaned_binding_before_upstream() {
     // A claimed turn can retain this snapshot after its channel is removed
     // while first-turn history or upload preparation is in flight.
     row.channel = Some(ChannelOrigin {
+        org_execution: None,
         native_event_id: None,
         nyxbot_channel_id: "removed-channel".into(),
         partition: "thread_v1_removed".into(),
@@ -4484,6 +4527,7 @@ fn activity_response_failure_contract_omits_absent_http_status() {
         ("internal", None),
     ] {
         let response: ActivityResponse = TurnActivity {
+            retry_identity: None,
             digest: None,
             machine: None,
             id: "activity".into(),
@@ -6137,4 +6181,27 @@ async fn channel_start_retry_does_not_shorten_a_later_continuation() {
     );
     server.abort();
     state.db.drop().await.unwrap();
+}
+
+#[path = "assistant_nyxagent_model_image_tests.rs"]
+mod model_image_tests;
+
+#[test]
+fn generated_active_turn_fields_are_hidden_when_disabled_in_all_conversation_responses() {
+    let row: AssistantConversation = bson::from_document(doc!{
+        "_id":"nyxa-view","user_id":OWNER,"title":"view","model":"nyxagent/chat","credential_api_key_id":"key","message_count":1,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+        "active_turn":{"turn_id":"view-turn","origin":"event","started_at":bson::DateTime::now(),"attachments":[
+            {"id":"legacy","origin":"tool","content_type":"image/png","size":8_i64,"label":"tool"},
+            {"id":"generated","origin":"generated_artifact","content_type":"video/mp4","size":8_i64,"label":"result","filename":"private.mp4","preview_kind":"video"}
+        ]}
+    }).unwrap();
+    for enabled in [false, true] {
+        let response =
+            serde_json::to_value(ConversationResponse::from(row.clone()).with_artifacts(enabled))
+                .unwrap();
+        let files = response["active_turn"]["attachments"].as_array().unwrap();
+        assert_eq!(files.len(), if enabled { 2 } else { 1 });
+        assert_eq!(files[0]["origin"], "tool");
+        assert!(files[0].get("filename").is_none());
+    }
 }

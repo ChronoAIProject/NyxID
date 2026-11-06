@@ -141,7 +141,7 @@ function ConversationEntry({
         />
         <span className="min-w-0 flex-1 space-y-2">
           <span className="flex flex-wrap items-center gap-2">
-            <span className="text-12 font-medium">{label}</span>
+            <span className="type-group-label">{label}</span>
             <CmaStatus status={status} />
             <span className="ml-auto">
               <CmaTime value={turn.started_at} />
@@ -186,7 +186,7 @@ function ConversationEntry({
             title="Execution details"
             count={activity.length + technicalMessages.length}
           >
-            <p className="mb-3 text-11 text-text-tertiary">
+            <p className="mb-3 type-secondary text-text-tertiary">
               Work reference: {turn.turn_sequence}
             </p>
             <div className="max-h-[32rem] divide-y divide-hairline overflow-y-auto">
@@ -195,7 +195,7 @@ function ConversationEntry({
                   key={message.sequence ?? message.id ?? index}
                   className="space-y-2 py-3 first:pt-0"
                 >
-                  <h3 className="text-12 font-medium">
+                  <h3 className="type-group-label">
                     {cmaReadableLabel(message.role)} message
                   </h3>
                   <p className="whitespace-pre-wrap break-words text-12 text-text-tertiary [overflow-wrap:anywhere]">
@@ -206,7 +206,7 @@ function ConversationEntry({
               {activity.map((event) => (
                 <article key={event.key} className="space-y-2 py-3 first:pt-0">
                   <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="text-12 font-medium">
+                    <h3 className="type-group-label">
                       {cmaReadableLabel(event.type)}
                     </h3>
                     {event.status && <CmaStatus status={event.status} />}

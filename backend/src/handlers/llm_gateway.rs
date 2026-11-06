@@ -347,6 +347,17 @@ pub async fn pool_aliases(
 /// Forward the request to the provider's API using the user's stored credential.
 /// This is a passthrough proxy -- no request/response translation.
 pub async fn llm_proxy_request(
+    state: State<AppState>,
+    auth_user: AuthUser,
+    path: Path<(String, String)>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    if let Some(context) = &auth_user.execution_permission {
+        context.bind_cancellation(crate::downstream_disconnect::request_cancellation(&request));
+    }
+    Box::pin(llm_proxy_request_inner(state, auth_user, path, request)).await
+}
+async fn llm_proxy_request_inner(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path((provider_slug, path)): Path<(String, String)>,
@@ -394,6 +405,16 @@ pub async fn llm_proxy_request(
     let body_bytes =
         super::body_limit::read_request_body(request, state.config.llm_max_body_size, "LLM proxy")
             .await?;
+
+    capture_permission_input(
+        &auth_user,
+        Some(&provider_slug),
+        &path,
+        &method,
+        query.as_deref(),
+        &body_bytes,
+        &headers,
+    );
 
     let operation_path = if !auth_user.assistant_operation_scopes.is_empty()
         && provider_slug == "openai-codex"
@@ -593,6 +614,51 @@ pub async fn llm_proxy_request(
         }
     }
 
+    let mut target = target;
+    projection.apply(&mut target);
+    // Only enrolled callers can carry coverage; unenrolled requests skip this work.
+    if auth_user.execution_permission.is_some() {
+        let mut permission_operation = operation_descriptor::build_llm_descriptor(
+            &request_method_str,
+            &dispatch_path,
+            Some(&dispatch_body),
+        );
+        operation_descriptor::apply_inference_contract(
+            &mut permission_operation,
+            &target.service,
+            Some(&dispatch_body),
+            crate::services::mcp_service::http_carries_method_override(
+                &request_method_str,
+                &headers,
+                query.as_deref(),
+                &dispatch_body,
+            ),
+            llm_scope.guest,
+        );
+        let permission_headers = if provider_slug == "openai-codex" {
+            chatgpt_translator::execution_header_map()
+        } else {
+            headers.clone()
+        };
+        crate::services::execution_permission_dispatch::admit_http(
+            &state,
+            &auth_user,
+            operation_user_service_id.as_deref(),
+            owner_for_approval.as_deref(),
+            &mut target,
+            &request_method_str,
+            &dispatch_path,
+            query.as_deref(),
+            &dispatch_body,
+            &permission_headers,
+            None,
+            &permission_operation,
+            is_auto_connected_for_approval,
+            None,
+        )
+        .await?;
+    }
+
     // Check approval against the owner selected by credential resolution.
     // Legacy credentials are personal, so `None` retains the actor fallback.
     let approval_auto = check_llm_approval(
@@ -619,8 +685,6 @@ pub async fn llm_proxy_request(
     )
     .await?;
 
-    let mut target = target;
-    projection.apply(&mut target);
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let billing_resource_owner_id = owner_for_approval
         .as_deref()
@@ -899,6 +963,7 @@ pub async fn llm_proxy_request(
                 Some(usage_context),
                 Some(usage_complete),
                 billing_egress_permit,
+                Some(&target),
             )
             .await?
         } else {
@@ -1015,7 +1080,7 @@ pub async fn llm_proxy_request(
         })),
     );
 
-    request_audit.response(response.status().as_u16());
+    request_audit.response(response.status().as_u16()).await;
     Ok(response)
 }
 
@@ -1030,7 +1095,12 @@ pub fn gateway_request(
     path: Path<String>,
     request: Request<Body>,
 ) -> futures::future::BoxFuture<'static, AppResult<Response>> {
-    Box::pin(gateway_request_inner(state, auth_user, path, request))
+    Box::pin(async move {
+        if let Some(context) = &auth_user.execution_permission {
+            context.bind_cancellation(crate::downstream_disconnect::request_cancellation(&request));
+        }
+        Box::pin(gateway_request_inner(state, auth_user, path, request)).await
+    })
 }
 
 async fn gateway_request_inner(
@@ -1069,6 +1139,16 @@ async fn gateway_request_inner(
         "LLM gateway",
     )
     .await?;
+
+    capture_permission_input(
+        &auth_user,
+        None,
+        &path,
+        &method,
+        query.as_deref(),
+        &body_bytes,
+        &headers,
+    );
 
     // Parse body as JSON to extract model
     let body_json: serde_json::Value = if body_bytes.is_empty() {
@@ -1388,6 +1468,51 @@ async fn gateway_provider_request(
         &headers,
     )?;
 
+    let mut target = target;
+    projection.apply(&mut target);
+    // Only enrolled callers can carry coverage; unenrolled requests skip this work.
+    if auth_user.execution_permission.is_some() {
+        let mut permission_operation = operation_descriptor::build_llm_descriptor(
+            "POST",
+            &final_path,
+            final_body_bytes.as_deref(),
+        );
+        operation_descriptor::apply_inference_contract(
+            &mut permission_operation,
+            &target.service,
+            final_body_bytes.as_deref(),
+            crate::services::mcp_service::http_carries_method_override(
+                "POST",
+                &headers,
+                query.as_deref(),
+                final_body_bytes.as_deref().unwrap_or_default(),
+            ),
+            llm_scope.guest,
+        );
+        let permission_headers = if provider_slug == "openai-codex" {
+            chatgpt_translator::execution_header_map()
+        } else {
+            headers.clone()
+        };
+        crate::services::execution_permission_dispatch::admit_http(
+            &state,
+            &auth_user,
+            operation_user_service_id.as_deref(),
+            effective_owner_for_approval.as_deref(),
+            &mut target,
+            "POST",
+            &final_path,
+            query.as_deref(),
+            final_body_bytes.as_deref().unwrap_or_default(),
+            &permission_headers,
+            None,
+            &permission_operation,
+            is_auto_connected_for_approval,
+            None,
+        )
+        .await?;
+    }
+
     // Check approval if user has it enabled (uses cascade if the service
     // turned out to be org-owned).
     let approval_auto = check_llm_approval(
@@ -1414,8 +1539,6 @@ async fn gateway_provider_request(
     )
     .await?;
 
-    let mut target = target;
-    projection.apply(&mut target);
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let billing_resource_owner_id = effective_owner_for_approval
         .as_deref()
@@ -1709,6 +1832,7 @@ async fn gateway_provider_request(
                 Some(usage_context),
                 Some(usage_complete),
                 billing_egress_permit,
+                Some(&target),
             )
             .await?
         } else {
@@ -1828,7 +1952,7 @@ async fn gateway_provider_request(
         })),
     );
 
-    request_audit.response(response.status().as_u16());
+    request_audit.response(response.status().as_u16()).await;
     Ok(response)
 }
 
@@ -2596,7 +2720,8 @@ async fn check_llm_approval(
             .as_deref()
             .is_some_and(|chat| chat.guest && chat.turn_live),
     );
-    let (approval_outcome, automatic) = approval_service::evaluate_for_chat(
+    let (approval_outcome, automatic) = crate::services::execution_permission_dispatch::approval(
+        auth_user.execution_permission.as_ref(),
         &state.db,
         &approval_owner_user_id,
         owner_for_resolution,
@@ -2610,6 +2735,12 @@ async fn check_llm_approval(
     )
     .await?;
 
+    let approval_outcome = crate::services::execution_permission_dispatch::approval_for_catalog(
+        auth_user.execution_permission.as_ref(),
+        owner_for_resolution,
+        service_id,
+        approval_outcome,
+    );
     crate::services::agent_operation_scope_service::check_guest_approval(
         operation_guest,
         &approval_outcome,
@@ -3138,6 +3269,8 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.requires_user_credential = true;
         let target = crate::services::proxy_service::ProxyTarget {
+            execution_request: None,
+            execution_permission: None,
             credential_deferred: false,
             workspace_destinations_pending: false,
             target_id: None,
@@ -3706,4 +3839,43 @@ mod agent_operation_tests {
         }
         f.state.db.drop().await.unwrap();
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_permission_input(
+    auth: &AuthUser,
+    provider: Option<&str>,
+    path: &str,
+    method: &Method,
+    query: Option<&str>,
+    body: &[u8],
+    headers: &axum::http::HeaderMap,
+) {
+    let Some(context) = &auth.execution_permission else {
+        return;
+    };
+    use crate::models::execution_proposal::PreparedAdapter;
+    let adapter = if body.len() + 2048
+        <= crate::services::execution_permission_dispatch::proposals::MAX_PAYLOAD
+        && serde_json::from_slice::<serde_json::Value>(body).is_ok()
+    {
+        PreparedAdapter::Llm {
+            provider: provider.map(str::to_owned),
+            path: path.into(),
+            method: method.to_string(),
+            query: query.map(str::to_owned),
+            body: String::from_utf8_lossy(body).into_owned(),
+            headers: crate::services::proxy_service::collect_forward_headers_with_defaults(
+                headers,
+                &[],
+            ),
+        }
+    } else {
+        tracing::info!(
+            reason = "llm_input_not_retainable",
+            "Execution proposal uses legacy prompts"
+        );
+        PreparedAdapter::Unsupported
+    };
+    context.retain_adapter(adapter, headers);
 }

@@ -5,10 +5,14 @@ import { renderSegmentControl } from "../../components/SegmentControl.testHarnes
 import { hookHarness } from "../assistant/assistantHookTestHarness";
 import * as connectionPresentation from "./connectionPresentation";
 import * as serviceContracts from "./serviceContracts";
+import * as designTokens from "../../theme/designTokens";
 import type { CatalogEntry, ServiceConnection } from "./serviceContracts";
 
 type Element = { type: unknown; props: Record<string, any> };
 type ApiCall = { method: string; args: unknown[] };
+class ApiError extends Error {
+  errorCode?: number;
+}
 
 const renderElement = (type: unknown, props: unknown) =>
   type === renderSegmentControl
@@ -20,7 +24,8 @@ const renderElement = (type: unknown, props: unknown) =>
 function elements(root: Element): Element[] {
   return [
     root,
-    ...[root.props.children]
+    // Settings rows carry their icon and inline control outside children.
+    ...[root.props.children, root.props.leading, root.props.accessory]
       .flat(Infinity)
       .flatMap((child) =>
         child && typeof child === "object" && "props" in child
@@ -30,8 +35,16 @@ function elements(root: Element): Element[] {
   ];
 }
 
+// Groups and rows carry their visible text in props.
+const TEXT_PROPS = ["title", "label", "detail", "value", "footer", "message"];
 function textContent(root: Element): string {
-  return [root.props.children]
+  return [
+    ...TEXT_PROPS.map((name) =>
+      typeof root.props[name] === "string" ? `${root.props[name]}\n` : "",
+    ),
+    root.props.children,
+    root.props.accessory,
+  ]
     .flat(Infinity)
     .map((child) =>
       child && typeof child === "object" && "props" in child
@@ -82,12 +95,21 @@ function setup({
   row = connection,
   catalogEntry = entry,
   add = false,
+  sharedGrant = false,
 }: {
   row?: ServiceConnection;
   catalogEntry?: CatalogEntry;
   add?: boolean;
+  /** The first removal reports a provider grant shared with other services. */
+  sharedGrant?: boolean;
 } = {}) {
+  let shared = sharedGrant;
   const calls: ApiCall[] = [];
+  const alerts: {
+    title: string;
+    message: string;
+    buttons: { text: string; style?: string; onPress?: () => void }[];
+  }[] = [];
   const browsers: string[] = [];
   const copied: string[] = [];
   const queryClient = {
@@ -117,6 +139,10 @@ function setup({
       },
       Keyboard: { dismiss: () => {} },
       Linking: { openURL: async () => {} },
+      Alert: {
+        alert: (title: string, message: string, buttons: never) =>
+          alerts.push({ title, message, buttons }),
+      },
       ...Object.fromEntries(
         [
           "ActivityIndicator",
@@ -127,7 +153,7 @@ function setup({
           "View",
         ].map((name) => [name, name]),
       ),
-      StyleSheet: { create: (styles: unknown) => styles },
+      StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 0.5 },
     },
     "@react-navigation/native": {
       useIsFocused: () => true,
@@ -166,12 +192,17 @@ function setup({
         (name) => [name, name],
       ),
     ),
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
-      ["ActionButton", "Card", "Field", "Label", "Notice", "WorkspacePage"].map(
-        (name) => [name, name],
-      ),
+      ["Notice", "WorkspacePage"].map((name) => [name, name]),
     ),
-    "../../lib/api/ApiError": { ApiError: class ApiError extends Error {} },
+    "../../components/settings/SettingsList": Object.fromEntries(
+      ["SettingsGroup", "SettingsRow", "SettingsTextField"].map((name) => [
+        name,
+        name,
+      ]),
+    ),
+    "../../lib/api/ApiError": { ApiError },
     "../../lib/api/servicesApi": {
       servicesApi: {
         initiateOAuth: record("initiateOAuth", {
@@ -189,12 +220,19 @@ function setup({
         create: record("create", { ...row, id: "created-connection" }),
         setActive: record("setActive"),
         replaceCredential: record("replaceCredential"),
-        remove: record("remove", { deleted: true }),
+        remove: async (...args: unknown[]) => {
+          calls.push({ method: "remove", args });
+          if (shared) {
+            shared = false;
+            throw Object.assign(new ApiError("shared"), { errorCode: 11500 });
+          }
+          return { deleted: true };
+        },
       },
     },
-    "../../lib/env": { NYXID_FRONTEND_URL: "https://nyxid.example" },
+    "../../lib/env": { getFrontendUrl: () => "https://nyxid.example" },
     "../../app/WorkspaceHeader": { useWorkspaceBack: () => {} },
-    "../../theme/designTokens": { fonts: {} },
+    "../../theme/designTokens": designTokens,
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "./serviceContracts": serviceContracts,
     "./connectionPresentation": connectionPresentation,
@@ -217,20 +255,23 @@ function setup({
     assert.ok(item, "Expected a matching control in the rendered screen");
     return item;
   };
-  const button = (label: string) =>
-    find((item) => item.type === "ActionButton" && item.props.label === label);
+  // Actions are tinted settings rows; their label is the visible text.
+  const isAction = (item: Element, label: string) =>
+    item.type === "SettingsRow" &&
+    item.props.label === label &&
+    typeof item.props.onPress === "function";
+  const button = (label: string) => find((item) => isAction(item, label));
   return {
     harness,
     calls,
+    alerts,
     browsers,
     copied,
     button,
     find,
     text: () => textContent(harness.flush()),
     hasButton: (label: string) =>
-      elements(harness.flush()).some(
-        (item) => item.type === "ActionButton" && item.props.label === label,
-      ),
+      elements(harness.flush()).some((item) => isAction(item, label)),
     header: (label: string) =>
       find((item) => item.props.accessibilityLabel === label),
     tab: (label: string) =>
@@ -274,7 +315,12 @@ test("failed and missing OAuth credentials offer recovery even with active conne
     const env = setup({ row: { ...connection, ...override } });
     assert.equal(env.hasButton("Reconnect"), true);
     assert.equal(env.hasButton("Continue authentication"), false);
-    assert.doesNotMatch(env.text(), /● Connected/);
+    assert.notEqual(
+      env.find(
+        (item) => item.type === "SettingsRow" && item.props.label === "Status",
+      ).props.value,
+      "Connected",
+    );
     assert.deepEqual(env.calls, []);
     env.harness.unmount();
   }
@@ -406,7 +452,7 @@ test("paused and restricted connections explain their access prerequisite before
   const paused = setup({ row: { ...connection, is_active: false } });
   assert.match(
     paused.text(),
-    /Turn on Connection enabled below before using it in Chat/,
+    /Turn on Connection enabled above before using it in Chat/,
   );
   assert.equal(paused.header("Connection enabled").props.value, false);
   assert.deepEqual(paused.calls, []);
@@ -450,14 +496,29 @@ test("developer and destructive actions stay in Advanced and passive navigation 
   assert.deepEqual(env.copied, [connection.proxy_url]);
   env.header("Replace API key or credential").props.onPress();
   const field = env.find(
-    (item) => item.type === "Field" && item.props.label === "New credential",
+    (item) =>
+      item.type === "SettingsTextField" &&
+      item.props.accessibilityLabel === "New credential",
   );
   assert.equal(field.props.secureTextEntry, true);
   field.props.onChangeText("temporary-credential-draft");
-  env.button("Remove connection").props.onPress();
-  assert.equal(env.hasButton("Confirm removal"), true);
-  env.button("Cancel").props.onPress();
-  assert.equal(env.hasButton("Confirm removal"), false);
+  const remove = env.button("Remove connection");
+  assert.equal(remove.props.centered, true);
+  assert.equal(remove.props.destructive, true);
+  remove.props.onPress();
+  assert.equal(env.alerts.length, 1, "removal asks for confirmation first");
+  assert.match(env.alerts[0]!.title, /Remove “Cloudflare Personal”\?/);
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(env.alerts[0]!.buttons.map((item) => [item.text, item.style])),
+    ),
+    [
+      ["Cancel", "cancel"],
+      ["Remove", "destructive"],
+    ],
+  );
+  env.alerts[0]!.buttons[0]!.onPress!();
+  await env.harness.settle();
   env.tab("Overview");
   assert.equal(env.hasButton("Copy proxy address"), false);
   assert.equal(env.hasButton("Remove connection"), false);
@@ -468,6 +529,47 @@ test("developer and destructive actions stay in Advanced and passive navigation 
     false,
   );
   assert.equal(env.hasButton("Save new credential"), false);
+  assert.deepEqual(env.calls, []);
+  env.harness.unmount();
+});
+
+test("confirmed removal deletes the connection; a shared grant switches to removing only this service", async () => {
+  const env = setup({
+    row: { ...connection, credential_type: "bearer", granted_scopes: [] },
+    catalogEntry: { ...entry, provider_type: "api_key" },
+    sharedGrant: true,
+  });
+  env.tab("Advanced");
+  env.button("Remove connection").props.onPress();
+  env.alerts.at(-1)!.buttons[1]!.onPress!();
+  await env.harness.settle();
+  assert.deepEqual(env.calls.at(-1), {
+    method: "remove",
+    args: ["existing-connection", false],
+  });
+  assert.match(env.text(), /remove only this service below/);
+  env.button("Remove only this service").props.onPress();
+  const tokenOnly = env.alerts.at(-1)!;
+  assert.equal(tokenOnly.title, "Remove only this service?");
+  assert.equal(tokenOnly.buttons[1]!.text, "Remove only this service");
+  tokenOnly.buttons[1]!.onPress!();
+  await env.harness.settle();
+  assert.deepEqual(env.calls.at(-1), {
+    method: "remove",
+    args: ["existing-connection", true],
+  });
+  env.harness.unmount();
+});
+
+test("overview reads as label/value rows with the enable switch inline", () => {
+  const env = setup();
+  const row = (label: string) =>
+    env.find((item) => item.type === "SettingsRow" && item.props.label === label);
+  assert.equal(row("Status").props.value, "Connected");
+  assert.equal(row("Last used").props.value, "Never");
+  assert.equal(row("Granted permissions").props.value, "2 granted permissions");
+  assert.equal(row("Connection enabled").props.accessory.type, "Switch");
+  assert.equal(row("Refresh status").props.tone, "action");
   assert.deepEqual(env.calls, []);
   env.harness.unmount();
 });

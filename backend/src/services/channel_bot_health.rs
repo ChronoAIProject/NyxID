@@ -173,7 +173,7 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
         "verify"
     };
     Some(match code {
-        "discord_event_webhooks_wrong_endpoint" => advice("verify", "Move the callback URL from Event Webhooks to General Information > Interactions Endpoint URL. Event Webhooks do not deliver ordinary bot chat messages. For ordinary chat, enable channel:discord-gateway in NyxID and Message Content Intent in Discord.".into()),
+        "discord_event_webhooks_wrong_endpoint" => advice("verify", "Event Webhooks do not deliver ordinary bot chat messages. The Interactions Endpoint URL under General Information is optional and only needed for slash commands/components. Ordinary chat uses NyxBot's Discord gateway when enabled for your account; other relay bots need channel:discord-gateway. Enable Message Content Intent in Discord.".into()),
         "discord_gateway_intents_required" => advice("verify", "Enable Message Content Intent in Discord Developer Portal > Bot > Privileged Gateway Intents (verified apps need approval). NyxID retries automatically within five minutes.".into()),
         "discord_gateway_invalid_token" | "discord_gateway_identity_mismatch" => advice("reconnect", "Replace this Discord bot's token in NyxID with the token for the same bot. The Gateway session will restart automatically.".into()),
         "discord_gateway_capacity" => advice("contact_admin", "Discord ingress capacity is full on this replica. Another replica can claim this bot; add capacity if it keeps waiting.".into()),

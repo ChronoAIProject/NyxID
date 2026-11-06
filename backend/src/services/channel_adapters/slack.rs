@@ -844,21 +844,22 @@ impl PlatformAdapter for SlackAdapter {
     ) -> AppResult<BotIdentity> {
         let bot_token = credentials.token;
         let url = format!("{}/auth.test", self.base_url);
-        let resp: serde_json::Value = http
+        let response = http
             .post(&url)
             .header("Authorization", format!("Bearer {bot_token}"))
             .send()
             .await
             .map_err(|e| {
                 AppError::ChannelPlatformError(format!("Slack auth.test request failed: {e}"))
-            })?
-            .json()
-            .await
-            .map_err(|e| {
-                AppError::ChannelPlatformError(format!(
-                    "Slack auth.test response parse failed: {e}"
-                ))
             })?;
+        super::check_token_verification_status(
+            &response,
+            "Slack auth.test",
+            "Slack rejected the bot token. Copy the Bot User OAuth Token from your Slack app's OAuth & Permissions page and try again.",
+        )?;
+        let resp: serde_json::Value = response.json().await.map_err(|e| {
+            AppError::ChannelPlatformError(format!("Slack auth.test response parse failed: {e}"))
+        })?;
 
         if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             let error = resp
@@ -911,6 +912,37 @@ impl PlatformAdapter for SlackAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn token_verification_classifies_http_rejections_before_json() {
+        let server = wiremock::MockServer::start().await;
+        let adapter = SlackAdapter {
+            base_url: server.uri(),
+        };
+        super::super::assert_token_verification_statuses(
+            &adapter,
+            &server,
+            "private-token",
+            "Slack auth.test",
+        )
+        .await;
+        server.reset().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"ok":true,"bot_id":"B123","user_id":"U123","user":"TestBot"}),
+            ))
+            .mount(&server)
+            .await;
+        let identity = adapter
+            .verify_bot_token(
+                &reqwest::Client::new(),
+                &crate::services::channel_platform::BotCredentials::from("private-token"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(identity.platform_bot_id, "B123");
+        assert_eq!(identity.platform_bot_username, "TestBot");
+    }
 
     #[test]
     fn update_message_body_preserves_blocks_and_omits_threading() {

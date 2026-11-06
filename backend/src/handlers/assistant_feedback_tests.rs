@@ -33,6 +33,8 @@ mod fixtures {
     /// A completed assistant reply; override fields with struct update syntax.
     pub fn message(id: String, conversation_id: String, user_id: String) -> AssistantMessage {
         AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -74,6 +76,7 @@ mod fixtures {
 
     pub fn activity(label: &str, status: &str) -> TurnActivity {
         TurnActivity {
+            retry_identity: None,
             failure: None,
             machine: None,
             id: uuid::Uuid::new_v4().to_string(),
@@ -89,6 +92,7 @@ mod fixtures {
         GroupMessage {
             collaboration: None,
             recipient_agent_ids: Vec::new(),
+            mentioned_participant_ids: vec![],
             activities: vec![],
             org_group: false,
             author_user_id: None,
@@ -141,6 +145,8 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -194,6 +200,8 @@ async fn feedback_concurrent_first_puts_share_one_row() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -377,6 +385,8 @@ async fn feedback_put_change_withdraw_and_ineligible_reply() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -449,6 +459,8 @@ async fn feedback_vote_change_preserves_comment_without_comment_field() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -505,6 +517,8 @@ async fn feedback_withdraw_is_idempotent_after_first_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -654,6 +668,8 @@ async fn feedback_routes_reject_when_engine_flag_is_disabled() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -736,6 +752,8 @@ async fn feedback_rejects_user_failed_and_stopped_replies() {
         insert_feedback_message(
             &f,
             AssistantMessage {
+                automation_work: None,
+                execution_task: None,
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
                 media_pending: None,
@@ -834,6 +852,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .insert_one(GroupMessage {
             collaboration: None,
             recipient_agent_ids: Vec::new(),
+            mentioned_participant_ids: vec![],
             activities: vec![],
             org_group: false,
             author_user_id: None,
@@ -935,6 +954,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .insert_one(GroupMessage {
             collaboration: None,
             recipient_agent_ids: Vec::new(),
+            mentioned_participant_ids: vec![],
             activities: vec![],
             org_group: true,
             author_user_id: None,
@@ -1005,6 +1025,8 @@ async fn feedback_existing_conversation_rejects_other_user_put_and_delete() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1102,6 +1124,8 @@ async fn feedback_rejects_message_from_another_owned_conversation() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1226,6 +1250,8 @@ async fn feedback_revoked_org_member_cannot_vote_on_org_agent_thread() {
     insert_feedback_message(
         &f,
         AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1444,6 +1470,8 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
     let answered = asked + Duration::milliseconds(1500);
     for message in [
         AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -1460,6 +1488,8 @@ async fn feedback_vote_persists_reply_context_and_logs_metadata_only() {
             ..fixtures::message("ctx-user".into(), conversation_id.into(), f.owner.clone())
         },
         AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
             media_pending: None,
@@ -2148,4 +2178,427 @@ async fn assistant_analytics_counts_real_activity_deduplicates_voice_and_separat
             "{path}"
         );
     }
+}
+
+#[tokio::test]
+async fn feedback_thread_preview_pages_anchor_and_redact_personal_and_group_context() {
+    use crate::services::assistant_feedback_thread::preview;
+    let f = fixture("feedback-thread-preview", false).await;
+    let now = bson::DateTime::now();
+    let mut first_cursor: Option<String> = None;
+    for group in [false, true] {
+        let parent = Uuid::new_v4().to_string();
+        let feedback_id = Uuid::new_v4().to_string();
+        let (parents, collection, scope) = if group {
+            ("assistant_groups", GROUP_MESSAGES, "group_id")
+        } else {
+            (
+                "assistant_conversations",
+                ASSISTANT_MESSAGES,
+                "conversation_id",
+            )
+        };
+        f.state
+            .db
+            .collection::<Document>(parents)
+            .insert_one(doc! {"_id": &parent})
+            .await
+            .unwrap();
+        let ids = (0..14)
+            .map(|_| Uuid::new_v4().to_string())
+            .collect::<Vec<_>>();
+        for (i, id) in ids.iter().enumerate() {
+            f.state
+                .db
+                .collection::<Document>(collection)
+                .insert_one(doc! {
+                    "_id": id, scope: &parent, "seq": ((i+1)*10) as i64, "user_id": &f.owner,
+                    "role": if i % 2 == 0 {"user"} else if group {"agent"} else {"assistant"},
+                    "text": match i {
+                        9 => format!("password: {}", "x".repeat(3_000)),
+                        10 => "sk-a ".repeat(200),
+                        _ => format!("message {} api_key=sk-secretcredential123456789", i+1),
+                    },
+                    "created_at": now, "activities": [{"arguments": "DO_NOT_EXPOSE_TOOL_BODY"}],
+                    "attachments": [{"url": "DO_NOT_EXPOSE_ATTACHMENT_SECRET"}],
+                })
+                .await
+                .unwrap();
+        }
+        f.state
+            .db
+            .collection::<Document>(FEEDBACK)
+            .insert_one(doc! {
+                "_id": &feedback_id, "user_id": &f.owner, "message_id": &ids[11],
+                "conversation_id": if group {bson::Bson::Null} else {parent.clone().into()},
+                "group_id": if group {parent.clone().into()} else {bson::Bson::Null},
+                "vote": "down", "created_at": now, "updated_at": now,
+            })
+            .await
+            .unwrap();
+        for (offset, role) in ["system", "tool", "notice"].into_iter().enumerate() {
+            f.state
+                .db
+                .collection::<Document>(collection)
+                .insert_one(doc! {
+                    "_id": Uuid::new_v4().to_string(), scope: &parent, "seq": 111_i64 + offset as i64,
+                    "role": role, "text": "PRIVATE_SYSTEM_TOOL", "created_at": now,
+                })
+                .await
+                .unwrap();
+        }
+        if !group {
+            f.state
+                .db
+                .collection::<Document>(collection)
+                .insert_one(doc! {
+                    "_id": Uuid::new_v4().to_string(), scope: &parent, "seq": 114_i64,
+                    "role": "user", "origin": "event", "text": "PRIVATE_WAKEUP", "created_at": now,
+                })
+                .await
+                .unwrap();
+        }
+        let one = preview(&f.state.db, &feedback_id, None).await.unwrap();
+        assert_eq!(one.messages.len(), 6);
+        assert_eq!(one.messages.last().unwrap().id, ids[11]);
+        assert!(one.messages.last().unwrap().rated);
+        assert!(one.messages.iter().all(|m| !m.text.contains("sk-secret")));
+        assert!(
+            !one.messages
+                .iter()
+                .find(|m| m.id == ids[9])
+                .unwrap()
+                .truncated
+        );
+        assert!(
+            one.messages
+                .iter()
+                .find(|m| m.id == ids[10])
+                .unwrap()
+                .truncated
+        );
+        let encoded = serde_json::to_string(&one.messages).unwrap();
+        assert!(!encoded.contains("DO_NOT_EXPOSE"));
+        let two = preview(&f.state.db, &feedback_id, one.next_cursor.as_deref())
+            .await
+            .unwrap();
+        assert_eq!(two.messages.len(), 6);
+        assert_eq!(two.messages[0].id, ids[0]);
+        assert!(two.next_cursor.is_none());
+        assert!(
+            !two.messages
+                .iter()
+                .any(|m| one.messages.iter().any(|n| n.id == m.id))
+        );
+        if let Some(cursor) = &first_cursor {
+            assert!(
+                preview(&f.state.db, &feedback_id, Some(cursor))
+                    .await
+                    .is_err()
+            );
+        }
+        // Even a matching envelope cannot move into another conversation.
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        let foreign_id = Uuid::new_v4().to_string();
+        f.state.db.collection::<Document>(collection).insert_one(doc! {
+            "_id": &foreign_id, scope: "foreign-parent", "seq": 1_i64, "role": "user", "text": "PRIVATE", "created_at": now,
+        }).await.unwrap();
+        let forged = URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&[&feedback_id, &ids[11], &foreign_id]).unwrap());
+        assert!(matches!(
+            preview(&f.state.db, &feedback_id, Some(&forged)).await,
+            Err(crate::errors::AppError::BadRequest(_))
+        ));
+        first_cursor = one.next_cursor;
+        let path = format!("/api/v1/admin/assistant/feedback/{feedback_id}/thread");
+        let (status, body) = request(&f.state, "GET", &path, &f.human_token, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["messages"].as_array().unwrap().len(), 6);
+        // Another rater on the same group reply retains an independent row identity.
+        let second_rating = Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection::<Document>(FEEDBACK)
+            .insert_one(doc! {
+                "_id": &second_rating, "message_id": &ids[11],
+                "conversation_id": if group {bson::Bson::Null} else {parent.clone().into()},
+                "group_id": if group {parent.clone().into()} else {bson::Bson::Null},
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            preview(&f.state.db, &second_rating, None)
+                .await
+                .unwrap()
+                .messages
+                .last()
+                .unwrap()
+                .id,
+            ids[11]
+        );
+        f.state
+            .db
+            .collection::<Document>(FEEDBACK)
+            .delete_one(doc! {"_id": &second_rating})
+            .await
+            .unwrap();
+        assert!(matches!(
+            preview(&f.state.db, &second_rating, None).await,
+            Err(crate::errors::AppError::NotFound(_))
+        ));
+        f.state
+            .db
+            .collection::<Document>(collection)
+            .delete_one(doc! {"_id": &ids[11]})
+            .await
+            .unwrap();
+        assert!(
+            preview(&f.state.db, &feedback_id, None)
+                .await
+                .unwrap()
+                .unavailable
+        );
+    }
+    // Metadata-only usage permission never confers transcript permission.
+    let roles = crate::services::role_service::get_platform_role_ids(&f.state.db)
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(
+            doc! {"_id": &f.owner},
+            doc! {"$set": {"is_admin": false, "role_ids": [&roles.operator]}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            "/api/v1/admin/assistant/feedback/missing/thread",
+            &f.human_token,
+            None
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let viewer = f
+        .state
+        .db
+        .collection::<Document>(crate::models::role::COLLECTION_NAME)
+        .find_one(doc! {"slug": "usage_viewer"})
+        .await
+        .unwrap()
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(
+            doc! {"_id": &f.owner},
+            doc! {"$set": {"role_ids": [viewer.get_str("_id").unwrap()]}},
+        )
+        .await
+        .unwrap();
+    let (status, body) = request(
+        &f.state,
+        "GET",
+        "/api/v1/admin/assistant/feedback",
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["can_preview_threads"], false);
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            "/api/v1/admin/usage/free-grants?period=7d",
+            &f.human_token,
+            None
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            "/api/v1/admin/assistant/feedback/missing/thread",
+            &f.human_token,
+            None
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(doc! {"_id": &f.owner}, doc! {"$set": {"role_ids": []}})
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            "/api/v1/admin/usage/free-grants?period=7d",
+            &f.human_token,
+            None
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn real_work_internal_owner_list_allows_operator_writes_but_usage_viewer_reads_only() {
+    let f = fixture("real-work-roles", false).await;
+    let path = "/api/v1/admin/assistant/analytics/internal-owners";
+    assert_eq!(
+        request(
+            &f.state,
+            "GET",
+            "/api/v1/admin/assistant/analytics?threshold=0",
+            &f.human_token,
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, report) = request(
+        &f.state,
+        "GET",
+        "/api/v1/admin/assistant/analytics?threshold=5",
+        &f.human_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["real_work"]["threshold"], 5);
+
+    let roles = crate::services::role_service::get_platform_role_ids(&f.state.db)
+        .await
+        .unwrap();
+    for role in [&roles.admin, &roles.operator] {
+        f.state
+            .db
+            .collection::<Document>(USERS)
+            .update_one(
+                doc! {"_id":&f.owner},
+                doc! {"$set":{"is_admin":false,"role_ids":[role]}},
+            )
+            .await
+            .unwrap();
+        let (status, body) = request(
+            &f.state,
+            "PUT",
+            path,
+            &f.human_token,
+            Some(json!({"owner_ids":[&f.owner]})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["owner_ids"], json!([&f.owner]));
+    }
+    let viewer = f
+        .state
+        .db
+        .collection::<Document>(crate::models::role::COLLECTION_NAME)
+        .find_one(doc! {"slug":"usage_viewer"})
+        .await
+        .unwrap()
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(
+            doc! {"_id":&f.owner},
+            doc! {"$set":{"role_ids":[viewer.get_str("_id").unwrap()]}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&f.state, "GET", path, &f.human_token, None).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            &f.state,
+            "PUT",
+            path,
+            &f.human_token,
+            Some(json!({"owner_ids":[]}))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    f.state
+        .db
+        .collection::<Document>(USERS)
+        .update_one(doc! {"_id":&f.owner}, doc! {"$set":{"role_ids":[]}})
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&f.state, "GET", path, &f.human_token, None).await.0,
+        StatusCode::FORBIDDEN
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn real_work_failure_preserves_existing_analytics_and_recovers() {
+    let f = fixture("real-work-degraded", false).await;
+    let at = bson::DateTime::from_chrono(Utc::now() - Duration::minutes(1));
+    f.state.db.collection::<Document>(ASSISTANT_MESSAGES).insert_many([
+        doc! {"_id":"input","conversation_id":"thread","seq":1,"user_id":&f.owner,"turn_id":"turn","role":"user","created_at":at},
+        doc! {"_id":"reply","conversation_id":"thread","seq":2,"user_id":&f.owner,"turn_id":"turn","role":"assistant","status":"completed","created_at":at},
+    ]).await.unwrap();
+    let path = "/api/v1/admin/assistant/analytics";
+    let (status, baseline) = request(&f.state, "GET", path, &f.human_token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(baseline["active_sessions"], 1);
+    assert_eq!(baseline["outcomes"]["completed"], 1);
+    assert!(baseline["real_work"].is_object());
+    assert_eq!(baseline["real_work_unavailable"], false);
+    // A corrupt optional-report setting fails the real aggregation only. Never
+    // expose the underlying database error or stored material in the response.
+    let settings = f
+        .state
+        .db
+        .collection::<Document>("assistant_analytics_settings");
+    settings
+        .insert_one(doc! {"_id":"internal_owners","owner_ids":"PRIVATE_SENTINEL"})
+        .await
+        .unwrap();
+    let (status, degraded) = request(&f.state, "GET", path, &f.human_token, None).await;
+    assert_eq!(status, StatusCode::OK, "{degraded}");
+    assert_eq!(degraded["real_work"], Value::Null);
+    assert_eq!(degraded["real_work_unavailable"], true);
+    for field in [
+        "active_sessions",
+        "active_accounts",
+        "running_now",
+        "outcomes",
+        "daily_sessions",
+        "daily_turns",
+    ] {
+        assert_eq!(degraded[field], baseline[field], "{field}");
+    }
+    assert!(!degraded.to_string().contains("PRIVATE_SENTINEL"));
+    settings
+        .delete_one(doc! {"_id":"internal_owners"})
+        .await
+        .unwrap();
+    let (status, restored) = request(&f.state, "GET", path, &f.human_token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(restored["real_work"].is_object());
+    assert_eq!(restored["real_work_unavailable"], false);
+    f.state.db.drop().await.unwrap();
 }

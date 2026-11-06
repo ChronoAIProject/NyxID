@@ -84,14 +84,14 @@ export function FlagHistory({
   );
   return (
     <div className="space-y-3">
-      <p className="text-12 text-muted-foreground">
+      <p className="text-14 text-muted-foreground">
         Who changed this flag, what changed, and when. Code-defined flags
         originate in source control; this history includes recorded admin
         changes.
       </p>
       {history.isLoading && <Skeleton className="h-24" />}
       {history.error && (
-        <div role="alert" className="flex items-center gap-3 text-12">
+        <div role="alert" className="flex items-center gap-3 text-14">
           Unable to load flag history.
           <Button size="sm" onClick={() => void history.refetch()}>
             Retry history
@@ -101,12 +101,12 @@ export function FlagHistory({
       {!history.isLoading &&
         !history.error &&
         !history.data?.entries.length && (
-          <p className="py-6 text-center text-12 text-muted-foreground">
+          <p className="py-6 text-center text-14 text-muted-foreground">
             No recorded changes for this flag.
           </p>
         )}
       {history.data && (
-        <p className="text-12">
+        <p className="text-14">
           {history.data.origin.created_by ? (
             <>
               Created by{" "}
@@ -125,7 +125,7 @@ export function FlagHistory({
         </p>
       )}
       {history.data?.legacy_ambiguous_omitted && (
-        <p className="text-11 text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Some older changes may have been omitted because this flag key was
           reused and their identity cannot be verified.
         </p>
@@ -138,7 +138,7 @@ export function FlagHistory({
               aria-hidden
             />
             <div className="min-w-0 flex-1 space-y-1">
-              <div className="flex flex-wrap items-center justify-between gap-2 text-12">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-14">
                 <span>
                   <span
                     className="font-medium"
@@ -162,20 +162,20 @@ export function FlagHistory({
                 <time
                   dateTime={entry.created_at}
                   title={new Date(entry.created_at).toISOString()}
-                  className="text-11 text-muted-foreground"
+                  className="text-13 text-muted-foreground"
                 >
                   {new Date(entry.created_at).toLocaleString()}
                 </time>
               </div>
               {entry.legacy && (
-                <p className="text-11 text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Legacy record · flag identity inferred from available records
                 </p>
               )}
               {changes(entry).map((change, i) => (
                 <p
                   key={i}
-                  className="break-words text-12 text-muted-foreground"
+                  className="break-words text-14 text-muted-foreground"
                 >
                   {change}
                 </p>
@@ -185,7 +185,7 @@ export function FlagHistory({
         ))}
       </ol>
       {(cursors.length > 1 || history.data?.next_cursor) && (
-        <div className="flex items-center justify-end gap-3 text-12">
+        <div className="flex items-center justify-end gap-3 text-14">
           <Button
             size="sm"
             disabled={cursors.length === 1 || history.isFetching}

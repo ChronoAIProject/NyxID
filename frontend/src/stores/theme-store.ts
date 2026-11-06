@@ -34,8 +34,10 @@ export const DISPLAY_SCALE_MIN = 0.5;
 export const DISPLAY_SCALE_MAX = 2;
 export const DISPLAY_SCALE_STEP = 0.01;
 export const DISPLAY_SCALE_DEFAULT = 1;
+/** New 1× uses the former 0.85× reading size on every themed surface. */
+export const DISPLAY_TEXT_BASE = 0.85;
 
-function validDisplayScale(value: unknown): number {
+function validDisplayScale(value: unknown, snap = true): number {
   if (
     typeof value !== "number" ||
     !Number.isFinite(value)
@@ -43,7 +45,7 @@ function validDisplayScale(value: unknown): number {
     return DISPLAY_SCALE_DEFAULT;
   }
   const bounded = Math.min(DISPLAY_SCALE_MAX, Math.max(DISPLAY_SCALE_MIN, value));
-  return Math.round(bounded / DISPLAY_SCALE_STEP) / (1 / DISPLAY_SCALE_STEP);
+  return snap ? Math.round(bounded / DISPLAY_SCALE_STEP) / (1 / DISPLAY_SCALE_STEP) : bounded;
 }
 
 /** `system` follows the OS reduced-motion setting; `reduce` always reduces. */
@@ -207,7 +209,19 @@ export const useThemeStore = create<ThemeState>()(
     }),
     {
       name: "nyxid.theme",
-      version: 1,
+      version: 2,
+      migrate: (persisted) => {
+        const p = (persisted ?? {}) as Record<string, unknown>;
+        const old = p.textScale;
+        return {
+          ...p,
+          // Default users adopt the smaller baseline; custom choices retain
+          // their rendered size (within the slider bounds), without rounding.
+          textScale: typeof old === "number" && Number.isFinite(old) && old !== 1
+            ? validDisplayScale(old / DISPLAY_TEXT_BASE, false)
+            : DISPLAY_SCALE_DEFAULT,
+        };
+      },
       // Persist only the user's intent; the OS preference is environmental.
       partialize: (s) => ({
         mode: s.mode,
@@ -225,7 +239,7 @@ export const useThemeStore = create<ThemeState>()(
         return {
           ...current,
           mode: oneOf(THEME_MODES, p.mode, current.mode),
-          textScale: validDisplayScale(p.textScale),
+          textScale: validDisplayScale(p.textScale, false),
           density: validDisplayScale(p.density),
           motion: oneOf(MOTION_PREFERENCES, p.motion, current.motion),
           customColors: sanitizeCustomColors(p.customColors),

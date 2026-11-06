@@ -15,6 +15,7 @@ use crate::models::service_billing::BillingMetric;
 use crate::models::usage_meter::COLLECTION_NAME;
 
 pub mod analytics;
+pub mod free_grants;
 pub mod identities;
 pub mod nyxbot;
 

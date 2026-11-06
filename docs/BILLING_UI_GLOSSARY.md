@@ -246,10 +246,14 @@ mutations, so standalone deployments fail closed instead of writing partial gran
 
 ### Visible balance and expandable breakdown
 
-The Wallet card retains its existing Add credits dialog, balance, freshness and
-View breakdown interaction. A help icon beside Wallet explains funding order and
-why the available balance can differ from the provider balance. A Suspended badge
-appears when applicable. Owner IDs and normal collection-state badges are not displayed.
+The compact Available credits card is the single primary balance on Billing and
+Usage, including the embedded account panel. Add credits, Provision Wallet or
+Finish wallet setup sits alongside it, retaining organization selection,
+payment readiness, checkout deep links and the existing dialog. Wallet actions
+remain accessible while benefits are loading. The wallet's signed balance,
+last provider-sync time and accounting rows are inside **View breakdown**, below
+the total. A suspension warning stays visible when applicable. Owner IDs and
+normal collection-state badges are not displayed.
 
 | Label         | Meaning                                                                                                        | API field                                                 |
 | ------------- | -------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
@@ -262,38 +266,48 @@ appears when applicable. Owner IDs and normal collection-state badges are not di
 | **Overdraft** | Configured extra capacity, shown when nonzero. Actual eligibility also depends on plan and payment instrument. | `overdraft_cap` (legacy: `overdraft_cap_credits`)         |
 | **Plan**      | Configured plan kind.                                                                                          | `plan_kind`                                               |
 
-All rows after Updated are in the expandable breakdown. Its formula reads
+All wallet rows are in the expandable breakdown. Its formula reads
 `Available = Balance - Reserved - Pending - Expiring`. The API's
 `available_with_overdraft_credits` is not used as the spendable balance.
 
-### Credit grants & free usage
+### Available credits, grants and free usage
 
-One compact card uses `GET /billing/grants`, `GET /billing/allowances` and catalog names.
-Grant rows group by eligible service scope and show available credits (remaining minus
-reserved), a used/original gauge and Details. The short amount rounds to two decimals;
-hover/focus and Details use six decimals. Sub-display-precision nonzero values show `<threshold`; accounting remains exact to twelve decimals.
+Billing and Usage, including the embedded account panel, share a prominent current
+**Available credits** card. It adds `max(wallet.available, 0)` and the authoritative
+`GET /api/v1/billing/benefits` summary's exact `unreserved` grant credits with
+picocredit arithmetic. A negative wallet remains visible separately; it does not
+reduce grants that can independently fund usage. Overdraft is excluded. Suspension
+or a missing wallet makes the spendable headline zero and explains the restriction;
+pre-restriction balances remain visible in the breakdown. The default compact
+view shows the total, a subdued credit unit, wallet action and a chevron
+**View breakdown** button with expanded state and controlled-region semantics.
+Wallet/grant subtotals and allowances are below that disclosure. Allowances
+retain native requests, tokens, images or other units, with no monetary conversion.
 
-Free usage groups by service, with separate Tokens, Cache and Other coverage values.
-Only identical metrics, recurrence and period boundaries share a subtotal. Unlike units
-and different windows never share one balance. A subtle grayscale bar gives each allowance
-an equal-width segment; each segment's consumed, reserved and remaining portions are
-relative to its own limit. One tooltip explains percentage used, excluding reservations,
-and lists each metric's percentage. Zero usage stays zero.
+The endpoint accepts an authorized optional `owner_id` and a one-based grant-history
+`page` (50 rows). The complete summary streams all active grants independently of
+history pagination. It uses effective holds, including unapplied extra settlements,
+and realizable service ceilings. Pending activation/reclaim and expired grants
+never inflate availability. The expanded breakdown lists these separate states, held
+credits, and restricted availability; individual grants retain available, held,
+remaining, status, expiry, scope and allocation-local service ceilings. Paging
+keeps the disclosure open and never derives the headline from the loaded rows.
 
-Details retain each grant's original, used, remaining and reserved amount, expiry,
-issuance, status and activation. Free usage details use the same Metrics multiselect
-as quantity comparisons. Each selected metric/window has a separate balance panel;
-options identify different windows and flag exhausted allowances. Compact balance rows retain
-each allowance's independent limit, consumed, reserved and remaining quantity.
-The gauge distinguishes consumed units from reserved units with a patterned segment;
-its percentage and meter value still report consumption only. Remaining quantities
-use readable foreground text. Each group shows recurrence,
-period start and reset/expiry once; at most five allowances appear per page.
-Exhausted allowances are flagged even when another allowance for the same metric
-still has available units. Expiry dates stay in these expansions.
-Help beside Credit grants and Free usage derives scope and cadence from the API response.
-Funding remains matching platform allowances first, then eligible grants in expiry order,
-then wallet credits. Empty benefits are omitted; loading, retry and rollout states remain.
+Free usage groups by service. Only identical metrics, recurrence and period
+boundaries share a subtotal. Different units and windows retain separate balances.
+The existing Metrics selector and allowance gauges remain inside the breakdown.
+Each selected metric/window shows independent frozen-period limits, consumed,
+effectively held and remaining units, plus reset/expiry. Patterned holds remain
+distinct from consumption; at most five allowances appear per group page.
+
+Wallet and benefit queries are scoped to the signed-in identity and selected
+billing owner and refresh every 30 seconds while the page is visible. Switching
+between Personal and an administered organization resets the grant page and
+prevents the previous account's balances from carrying over. Incomplete reads show Unavailable, not a
+partial total. Failed refreshes label retained balances stale and expose Retry;
+authorization denial clears protected balance details. Balances remain independent
+of historical usage filters. Funding stays matching allowances first, then eligible
+grants in expiry order, then wallet credits.
 
 ### Empty / error states
 

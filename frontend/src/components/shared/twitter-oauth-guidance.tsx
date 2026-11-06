@@ -50,13 +50,13 @@ export function OAuthCallbackGuidance({
   if (!callbackUrl) {
     if (isLoading) {
       return (
-        <p className="rounded-md border border-border bg-background/60 p-2 text-xs text-muted-foreground">
+        <p className="rounded-md border border-border bg-background/60 p-2 text-13 text-muted-foreground">
           Loading callback URL...
         </p>
       );
     }
     return (
-      <p className="rounded-md border border-warning/30 bg-warning/10 p-2 text-xs text-warning">
+      <p className="rounded-md border border-warning/30 bg-warning/10 p-2 text-13 text-warning">
         {isError
           ? "Couldn't load callback URL. Please retry. If this persists, contact support."
           : "Callback URL not yet available. Please retry. If this persists, contact support."}
@@ -82,7 +82,7 @@ export function OAuthCallbackGuidance({
           href="https://developer.x.com/en/portal/dashboard"
           target="_blank"
           rel="noopener noreferrer"
-          className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
+          className="inline-flex items-center gap-1 type-row-title text-primary-text hover:underline"
         >
           Where do I get Client ID and Client Secret? Open Keys &amp; Tokens in
           X Developer Console

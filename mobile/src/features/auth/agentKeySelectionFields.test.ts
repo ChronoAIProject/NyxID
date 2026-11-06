@@ -64,6 +64,10 @@ function commonMocks() {
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "./deviceLoginStyles": { createDeviceLoginStyles: () => ({}) },
     "../../components/PrimaryButton": { PrimaryButton: "PrimaryButton" },
+    "../../components/settings/SettingsList": {
+      SettingsGroup: "SettingsGroup",
+      SettingsRow: "SettingsRow",
+    },
     "../../components/workspace/WorkspaceSelectionField": {
       WorkspaceSelectionField: "WorkspaceSelectionField",
     },
@@ -277,7 +281,7 @@ function setupLogin({ inSheet = false, mint = true } = {}) {
       ...commonMocks()["react-native"],
       Platform: { OS: "ios" },
     },
-    "lucide-react-native": { ChevronLeft: "ChevronLeft" },
+    "lucide-react-native": { ChevronLeft: "ChevronLeft", KeyRound: "KeyRound", UserRound: "UserRound" },
     "../../components/ScreenContainer": { ScreenContainer: "ScreenContainer" },
     "../../lib/api/agentKeyLoginApi": { agentKeyLoginApi: {} },
     "../../lib/api/loginCodeApi": {

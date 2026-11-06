@@ -57,10 +57,17 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     let seconds = (call.closed_at.unwrap_or_else(Utc::now) - call.created_at)
         .num_seconds()
         .clamp(0, 1800);
-    let text = render(seconds, &requests, &source_map, &cards);
+    let mut text = render(seconds, &requests, &source_map, &cards);
+    text.push_str("\n\n");
+    text.push_str(&super::progress::close_notice(
+        call.end_reason.as_deref(),
+        requests.iter().any(super::progress::pending),
+    ));
     let id = uuid::Uuid::new_v4().to_string();
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            automation_work: None,
+            execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
             media_queue_notice_id: None,
@@ -172,6 +179,10 @@ mod tests {
 
     fn request(state: RequestState, id: &str, message_id: &str) -> VoiceRequest {
         VoiceRequest {
+            execution_enrolled: false,
+            model_task: None,
+            progress: None,
+            timing: Default::default(),
             started_at: None,
             terminal_error_code: None,
             async_operation_pending: false,
@@ -217,6 +228,8 @@ mod tests {
         let sources = HashMap::from([(
             "m1".into(),
             AssistantMessage {
+                automation_work: None,
+                execution_task: None,
                 delegated_images: Default::default(),
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,

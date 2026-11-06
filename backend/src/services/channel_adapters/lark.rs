@@ -198,6 +198,17 @@ impl LarkFamilyAdapter {
         app_id: &str,
         app_secret: &str,
     ) -> AppResult<zeroize::Zeroizing<String>> {
+        self.get_tenant_access_token_for(http, app_id, app_secret, false)
+            .await
+    }
+
+    async fn get_tenant_access_token_for(
+        &self,
+        http: &reqwest::Client,
+        app_id: &str,
+        app_secret: &str,
+        registration: bool,
+    ) -> AppResult<zeroize::Zeroizing<String>> {
         let config = lark_family_token_exchange_config();
         let credential_json = zeroize::Zeroizing::new(
             serde_json::json!({
@@ -209,6 +220,24 @@ impl LarkFamilyAdapter {
         let mut credential_map = serde_json::Map::new();
         credential_map.insert("app_id".to_string(), serde_json::json!(app_id));
         credential_map.insert("app_secret".to_string(), serde_json::json!(app_secret));
+
+        if registration {
+            let key = provider_token_exchange_service::cache_key(
+                &self.base_url,
+                &credential_json,
+                &config,
+            );
+            return self.token_exchange_cache.get_or_fetch(&key, || async {
+                provider_token_exchange_service::fetch_exchange_token_with_response_check(
+                    http, &self.base_url, &config, &credential_map,
+                    |response| super::check_token_verification_status(
+                        response,
+                        &format!("{} credential verification", self.platform),
+                        &format!("{} rejected the app credentials. Check the App ID and App Secret in the developer console and try again.", self.display_name()),
+                    ),
+                ).await
+            }).await;
+        }
 
         provider_token_exchange_service::get_cached_exchange_token(
             &self.token_exchange_cache,
@@ -965,6 +994,10 @@ impl PlatformAdapter for LarkFamilyAdapter {
         ))
     }
 
+    fn records_verification_result(&self) -> bool {
+        true
+    }
+
     fn validate_stored_verification(&self, bot: &ChannelBot) -> AppResult<()> {
         if bot.lark_verification_token_encrypted.is_none() {
             return Err(AppError::ValidationError(format!(
@@ -1412,9 +1445,10 @@ impl PlatformAdapter for LarkFamilyAdapter {
             ))
         })?;
 
-        // This will fail with an API error if credentials are invalid
+        // Registration classifies HTTP rejections before parsing; runtime
+        // token exchange callers keep their existing error contract and cache.
         let _token = self
-            .get_tenant_access_token(http, app_id, app_secret)
+            .get_tenant_access_token_for(http, app_id, app_secret, true)
             .await?;
 
         Ok(BotIdentity {
@@ -1434,6 +1468,20 @@ mod tests {
     use super::*;
     use cbc::cipher::{BlockEncryptMut, block_padding::Pkcs7};
 
+    #[tokio::test]
+    async fn token_verification_classifies_http_rejections_before_json() {
+        for platform in ["lark", "feishu"] {
+            let server = wiremock::MockServer::start().await;
+            let adapter = LarkFamilyAdapter::media_test_adapter(&server.uri(), platform);
+            super::super::assert_token_verification_statuses(
+                &adapter,
+                &server,
+                "app:private-token",
+                &format!("{platform} credential verification"),
+            )
+            .await;
+        }
+    }
     type Aes256CbcEnc = cbc::Encryptor<Aes256>;
 
     /// Tests only exercise parsing/signature verification paths, so they

@@ -760,7 +760,8 @@ from ordinary bot guild and DM chat.
 
 The **Interactions Endpoint URL** under Developer Portal > General Information
 and the **Webhooks / Event Webhooks** page are different features. Paste NyxID's
-callback URL only into **Interactions Endpoint URL**. Its signed `type:1` PING
+callback URL only into **Interactions Endpoint URL** when using slash commands
+or components; this setting is optional for ordinary chat. Its signed `type:1` PING
 receives the existing `type:1` PONG, and commands/components keep their existing
 behavior. NyxID does not register slash commands. Event Webhooks carry application
 events and Social SDK lobby/game messages, not ordinary bot guild/DM messages. NyxID deliberately **refuses** an
@@ -769,10 +770,32 @@ Ed25519-authenticated Event Webhooks `type:0` PING with HTTP 400 and
 the correct field. It does not return the 204 that would validate the wrong
 setup. Unauthenticated PINGs cannot change bot diagnostics.
 
-Ordinary chat uses a separate, default-off **`channel:discord-gateway`** feature
-flag, resolved for the bot owner (global/user cohorts, including org-owned bot
-IDs). `nyxbot:gateway-discord` selects the Agent Event Gateway transport;
+Bots linked to NyxBot or a specialist use NyxBot's Discord gateway when
+**`nyxbot:gateway-discord`** is enabled for the linking person and the Agent Event
+Gateway accepts the bot. That path does not require `channel:discord-gateway`.
+If native activation fails, the channel-agent API and UI explicitly identify
+NyxID relay fallback, its bounded `gateway_native_activation`/detail, and the
+next automatic retry eligibility time (23 hours after the last attempt). A
+successful relay reply or connected relay WebSocket does not establish native
+CMA acceptance. The owner may choose **Retry native gateway now** in bot settings
+or agent details, or use NyxBot's `nyxid__retry_channel_gateway`. The human-only
+REST action is `POST /api/v1/assistant/nyxagent/channels/{id}/retry-native-gateway`;
+it preserves owner verification, live org-admin authority, gateway flag,
+idle-turn and release/drain fences, and limits attempts to once per ten minutes.
+Refusal leaves the relay in place; re-linking agents does not itself retry.
+The retained native source identity is diagnostic, not a transport selection:
+followed-thread answers admitted on the direct relay still use the relay.
+An answer originating from a native event cannot borrow a relay reply target.
+See [native status and retry](CHANNEL_EVENT_GATEWAY.md#discord-transport-and-provider-boundary).
+Other relay bots (including a bot whose gateway enrollment is refused) need the
+separate, default-off **`channel:discord-gateway`** flag, resolved for the bot
+owner (global/user cohorts, including org-owned bot IDs).
 NyxID opens a Discord socket **only for relay-transport bots**. No additional
+webhook is required for ordinary chat: the first authenticated Gateway message
+promotes a `pending_webhook` bot to `active`, fenced by the current bot identity,
+credentials, owner and ingress lease. Authenticated native Discord provider
+admission also activates a pending bot under its current source/key/binding.
+Neither path claims an Interactions webhook was registered. No additional
 environment variable is needed. Deploy with ingress off. Activation uses the
 existing security rollout readiness roster and drain assertion: all serving
 replicas must advertise `channel:discord-gateway`, since old transport writers
@@ -789,11 +812,14 @@ Interaction-only bots require no change while the ingress flag stays off.
    only for media replies. Private threads also require the bot to be a member.
 3. Assign the agent/NyxBot route in NyxID. Send a DM, then a structured @mention
    in a guild channel and a thread. Groups use their existing `reply_mode`
-   settings; mentions compare Discord's `mentions[].id` to the bot user ID,
-   never names or words. Self messages, other bots, webhooks and system messages
+   settings; `mentions[].id` matching the bot user ID or `mention_roles[]`
+   matching its own managed integration role addresses the bot. Role identity
+   requires Discord's `managed: true` and exact `tags.bot_id`; names, highlight
+   styling and message text never count. Self messages, other bots, webhooks and system messages
    are suppressed. Followed threads use the existing `nyxbot:thread-follow`
    flag, per-chat settings and sender authority. Other-user-only mentions remain
-   quiet context; broadcasts do not become bot mentions.
+   quiet context; other roles, other bots' managed roles and @everyone/@here
+   remain broadcasts rather than bot mentions.
 4. Check **Health > Last NyxID relay Gateway state** and the recovery recommendation. A
    missing/denied intent (close 4013/4014), invalid token (4004), identity mismatch,
    or repeated transport/heartbeat/ingress failure records a stable metadata-only
@@ -801,6 +827,28 @@ Interaction-only bots require no change while the ingress flag stays off.
    minutes, and credential rotation closes the old session at lease renewal.
    Interactions remain available independently of the socket status. A reported
    historical state is not proof of current external delivery.
+
+NyxID learns that one managed role per bot/guild from authenticated
+`GUILD_CREATE`, `GUILD_ROLE_CREATE`, `GUILD_ROLE_UPDATE` and `GUILD_ROLE_DELETE`
+events. The process cache is bound to both the stored bot and its Discord user
+identity, capped at 256 guilds per identity and 2,048 entries overall, with a
+five-minute lifetime. READY clears that bot's cached roles. A role mention on a
+cache miss (including a resumed process or native source without a NyxID socket)
+uses one authenticated, size/time-bounded `GET /guilds/{guild}/roles`; unavailable
+or ambiguous role evidence confers no addressing authority. Only IDs are cached;
+role names and payloads are discarded. Ordinary group admission and thread follow
+consume the same persisted facts, including across replicas.
+
+NyxBot group messages retain an additive `nyxbot_admission` projection on their
+existing `channel_messages` record. The owner-visible bot/route Activity view
+shows disposition (`addressed_user_mention`, `addressed_managed_role`,
+`followed_thread`, `not_addressed`, or a bounded refusal), bot mention evidence,
+managed-role evidence, other-role count, @everyone/@here evidence, normalized
+address, follow selection, resolved child and turn ID. The turn ID is bound in
+the same transaction as turn admission, including queued work. Callback
+`delivered` means only callback acceptance; `received`/`queued` is not a completed
+agent turn. Quiet selections retain their reason. No text, names, raw payloads,
+mentioned role IDs or credentials enter this projection. Legacy rows omit it.
 
 The worker caps each replica at 32 bot sessions; unclaimed eligible bots beyond
 capacity receive a `waiting_capacity` status and an administrator recommendation. It scans at most 100 active
@@ -897,7 +945,7 @@ This integration supports **WhatsApp Business Platform through Meta's Cloud API*
 
 Meta subscriptions are app-wide: each bot accepts only the `whatsapp_business_account` object, `messages` field, `whatsapp` product, its exact `metadata.phone_number_id`, and its configured WABA ID when present. The bot remains `pending_webhook` until a matching signed event contains a usable inbound message or a recognized status with message ID, recipient and timestamp. Empty or unrelated signed events do not activate it. Activation checks the current owner, credentials and lifecycle; a concurrent first message may continue when another event already activated the same bot under the same credentials. Managed activation also fences rotation of the shared Meta secret. A shared app callback does not relay the app's other numbers. Use separate apps or Meta's supported [webhook overrides](https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/override) to route each number to its matching NyxID bot URL.
 
-Rotate credentials with `nyxid channel-bot update <BOT_ID> --token-env WHATSAPP_ACCESS_TOKEN --app-secret-env META_APP_SECRET`, or PATCH `bot_token`/`app_secret`. Rotation preserves the Verify Token and phone identity. The Verify Bot action preserves WhatsApp's subscription secret; existing platforms retain their original verification lifecycle and response statuses.
+Rotate credentials with `nyxid channel-bot update <BOT_ID> --token-env WHATSAPP_ACCESS_TOKEN --app-secret-env META_APP_SECRET`, or PATCH `bot_token`/`app_secret`. Rotation preserves the Verify Token and phone identity. The Verify Bot action preserves WhatsApp's subscription secret. Lark/Feishu also use credential-only verification records (see the setup observations below); other platforms retain their original verification lifecycle and response statuses.
 
 **Verify Bot checks access to the configured phone through Graph.** Detail and successful verify responses include optional `last_verification` metadata: a check ID, `pending`/`verified`/`failed`/`incomplete` status, start/completion timestamps, and a locally authored error message. Failed checks are persisted before returning the API error. They remain separate from historical `status` and `webhook_registered`; a prior webhook observation does not prove that current credentials or routing work. Credential replacement invalidates the result, and a superseded attempt cannot overwrite a newer one. A pending check older than its 30-second deadline is displayed as incomplete without mutating credentials or the stored attempt. Managed checks use the exact loaded shared-secret snapshot; rotation invalidates the observation. Managed activation and verification use MongoDB transactions to fence shared-secret changes, requiring a replica set.
 
@@ -1526,6 +1574,41 @@ Scoped to the bot owner's account -- only resolves identities linked to the user
 
 Return `202 Accepted` with an empty body, then POST the reply asynchronously. Inline HTTP 200 response bodies are not sent to the platform (ADR-013). `reply.text` is optional when declared media attachments or supported platform metadata carry the content.
 
+NyxBot also supplies structured, server-derived channel context in the current
+turn's input for Direct and gateway delivery, personal owner/guest and verified
+org member/guest messages, and followed children. `identity.platform` is
+canonical, `identity.channel_bot_id` is the stable internal Bot identity, and
+`identity.bot_username` is the current platform username/mailbox address when
+available. Usernames remain complete through 1,024 bytes; oversized values are
+omitted with `bot_username_omitted=true`. Editable labels/names are JSON-escaped
+display data bounded to 80 characters before encoding. Conversation kind, follow
+status, verified sender kind/classification and original-message eligibility are
+separate structured fields. This context grants no authority or ACL changes.
+
+Provenance is stored on the active turn, separately from the bounded prose note,
+and resolved again from the bound channel/Bot for model preparation.
+Forwarded/quoted reference and guest guidance therefore cannot be truncated by
+long labels. Guest model-setup waits preserve the same structured source.
+Verified member and personal owner questions queued while busy retain
+independently scoped context per `source_event_id`; coalescing never transfers
+one Bot's identity to another source. Pruning removes only the revoked source's
+context. Runtime notes name both queued `event_id` and source ID, and a required
+identity lookup failure fails preparation before sending a bare question to the
+model. Joining an already running repeated question adds only a reply recipient.
+An unrelated app turn inherits no channel identity from a saved reply
+destination.
+
+Org sources retain their exact server-authored origin and are revalidated
+against live org, specialist, Bot, sender-link and transport authority.
+`sender.classification` distinguishes `org_member` and `org_guest` from personal
+`owner` and `guest`; the linking administrator supplies transport only. A
+private member home can receive queued questions from different bound bots, with
+each source validated independently of the latest reply preference. Different
+org bindings do not coalesce. Matching sources retain their individual source
+IDs; group transcript and privacy guidance appear once per validated
+channel/partition per turn. Guest constraints and org billing guidance remain
+part of required source context, outside the prose-note budget.
+
 ### Agent -> NyxID (Async, HTTP 202 then POST later)
 
 If the agent needs more time (LLM inference, tool calls, etc.), it returns `202 Accepted` with an empty body, then calls back when ready. The reply endpoint accepts either the agent's API key or the per-callback reply token minted with the inbound payload:
@@ -1618,6 +1701,11 @@ flowchart TD
 | `POST` | `/api/v1/channel-bots/{id}/verify` | Re-verify bot token and webhook |
 
 The list returns active (not deleted) bots, newest first, as `{ "bots": [...], "total": N }`.
+For Discord, list/detail responses include optional `gateway_state` from the stored
+relay Gateway diagnostics. The Channel Bots **Ingestion** column and cards show
+`Gateway connected`, `Gateway <state>`, or `Gateway` when no state is available
+(#2155); `webhook_registered` continues to describe only webhook registration.
+Other platforms retain their webhook registration or polling labels.
 Each bot's `user_id` identifies its personal or organization owner. `scope=all`
 requires the same admin access as individual organization listings: member-only,
 viewer-only and revoked memberships do not contribute bots. Memberships pointing
@@ -1729,7 +1817,18 @@ To self-heal an existing bot:
 
 1. Read the bot's Event Subscriptions settings in the Lark / Feishu console.
 2. Update the bot with its Verification Token and, if enabled in the console, its Encrypt Key.
-3. Wait for the next verified inbound webhook or `url_verification` challenge. NyxID will auto-promote the bot from `pending_webhook` to `active` after successful verification.
+3. Complete the `url_verification` challenge in the platform console. NyxID verifies the configured token (and signature/encryption when configured) and records callback reachability only. A challenge does **not** activate the bot, mark a real inbound message, or verify a NyxID member.
+4. Send a real message to the bot. An authenticated non-challenge event can promote `pending_webhook` to `active`; the parsed message separately records inbound receipt, before route lookup. Activation alone does not prove routing, member identity, or an agent answer.
+
+### Lark / Feishu setup observations (#2242)
+
+**Verify Bot checks app credentials only** (tenant-token access and required stored verification configuration). Its durable result does not activate the bot or register/verify the platform callback. The standalone Channel bot page keeps six checks separate: app credentials, callback challenge, a real authenticated inbound, route/agent connection, your member identity, and outbound delivery. A missing or legacy observation means “not yet observed” or “unavailable”, never a confirmed misconfiguration. Delivery proves a platform send, not a substantive model response. Observations are historical and should be refreshed after each setup step.
+
+For an organization specialist, choose **Continue setup / Verify my chat account** on the bot page. It opens the bound agent's **Channels** tab focused on that exact connection (`/assistant?agent=<agent-id>&details=channels&connection=<binding-id>`). Each member, including admins, must independently generate a code in their own first-party session, DM it to this bot, wait for the authenticated observation, and click **Confirm my account**. The page explains waiting and offers a new code after the ten-minute expiry. Connecting the bot, verifying credentials, and completing Lark's challenge never auto-confirm a member or grant guest access. Existing membership, binding-revision and expiry checks still run at confirmation and execution.
+
+Health diagnostics add optional `last_callback_challenge_at`, `last_route_at`, and `last_route_result` (`matched`, `no_route`, `unavailable`). `last_inbound_source` comes from the actual receive path (`webhook`, `poll`, or Discord Gateway), not a pre-activation registration snapshot. A real inbound with `no_route` is still a received message even if no `ChannelMessage` was created. These observations contain no message content, member codes or credentials.
+
+Organization connection refusals distinguish the disabled `nyxbot:org-specialist-channels` flag, security rollout readiness, admin permission, and a bot/specialist owner mismatch. The existing typed refusal and readiness codes remain unchanged.
 
 You can update the bot either via the API or the CLI:
 
@@ -2613,3 +2712,12 @@ Old rows default to no assignment/references; old replicas ignore these additive
 fields and retain text-only delegated results. Upgrade all replicas for complete
 delivery coverage. Source lifetime and the existing v1/v2 rollout restrictions
 above are unchanged.
+
+### Bots linked to organization specialists
+
+The default-off `nyxbot:org-specialist-channels` feature permits a live org admin
+to link a same-org bot and specialist. Transport ownership remains unchanged.
+Verified members execute as themselves; opt-in guests have explicit delegated
+services and an org-paid daily budget. Groups/topics share public transcript
+context while execution keys remain isolated per actor. See
+[the NyxBot contract](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).

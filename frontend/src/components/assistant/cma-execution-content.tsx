@@ -35,7 +35,7 @@ export function CmaStatus({ status }: { readonly status: string }) {
 export function CmaTime({ value }: { readonly value?: string | null }) {
   if (!value || Number.isNaN(Date.parse(value))) return null;
   return (
-    <time dateTime={value} className="shrink-0 text-11 text-text-tertiary">
+    <time dateTime={value} className="shrink-0 type-meta text-text-tertiary">
       {new Date(value).toLocaleString(undefined, {
         month: "short",
         day: "numeric",
@@ -64,7 +64,7 @@ export function CmaDisclosure({
         aria-expanded={open}
         aria-controls={id}
         onClick={() => setOpen(!open)}
-        className="flex w-full items-center gap-2 rounded-xl p-4 text-left text-12 font-medium hover:bg-overlay focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
+        className="flex w-full items-center gap-2 rounded-xl p-4 text-left type-button hover:bg-overlay focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
       >
         <ChevronDown
           aria-hidden
@@ -75,7 +75,7 @@ export function CmaDisclosure({
         />
         {title}
         {count !== undefined && (
-          <span className="ml-auto text-11 font-normal text-text-tertiary">
+          <span className="ml-auto type-secondary text-text-tertiary">
             {count} records
           </span>
         )}
@@ -114,7 +114,7 @@ export function CmaMessage({
     >
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <Icon aria-hidden className="size-3.5 text-text-tertiary" />
-        <h3 className="text-12 font-medium">
+        <h3 className="type-group-label">
           {request ? "Work request" : "Assistant reply"}
         </h3>
         <span className="ml-auto">
@@ -122,7 +122,7 @@ export function CmaMessage({
         </span>
       </div>
       {request ? (
-        <p className="whitespace-pre-wrap break-words text-13 leading-relaxed [overflow-wrap:anywhere]">
+        <p className="whitespace-pre-wrap break-words type-secondary [overflow-wrap:anywhere]">
           {text}
         </p>
       ) : (
@@ -150,8 +150,8 @@ export function CmaEmptyState({
         aria-hidden
         className="mx-auto mb-3 size-6 text-text-tertiary"
       />
-      <p className="text-13 font-medium">{title}</p>
-      <p className="mx-auto mt-2 max-w-md text-12 leading-relaxed text-text-tertiary">
+      <p className="type-secondary-emphasis">{title}</p>
+      <p className="mx-auto mt-2 max-w-md type-secondary text-text-tertiary">
         {text}
       </p>
     </div>

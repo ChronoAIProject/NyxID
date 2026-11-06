@@ -28,7 +28,7 @@ export function AdminUploadRetentionPage() {
         description="Choose how long NyxID keeps assistant documents and images."
       />
       {query.isPending ? (
-        <p role="status" className="text-xs text-muted-foreground">
+        <p role="status" className="text-13 text-muted-foreground">
           Loading retention policy…
         </p>
       ) : query.isError ? (
@@ -113,8 +113,8 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
       >
         <Card className="space-y-5 p-5">
           <div className="space-y-1">
-            <h2 className="text-13 font-semibold">Files kept by NyxID</h2>
-            <p className="text-xs text-muted-foreground">
+            <h2 className="type-card-title">Files kept by NyxID</h2>
+            <p className="text-13 text-muted-foreground">
               Changes apply to existing files immediately. Expired files are
               deleted permanently; increasing a limit cannot restore them.
             </p>
@@ -131,12 +131,12 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
                 className="max-w-40"
                 {...form.register(name, { valueAsNumber: true })}
               />
-              <p className="text-xs text-muted-foreground">
+              <p className="text-13 text-muted-foreground">
                 {description} Default: {data.defaults[name]}. Range: 1–
                 {max.toLocaleString()}.
               </p>
               {form.formState.errors[name] && (
-                <p role="alert" className="text-xs text-destructive">
+                <p role="alert" className="text-13 text-destructive">
                   Enter a whole number from 1 to {max.toLocaleString()}.
                 </p>
               )}
@@ -146,7 +146,7 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
                     <Label htmlFor="images-after-turn">
                       Delete images after their first turn
                     </Label>
-                    <p className="text-xs text-muted-foreground">
+                    <p className="text-13 text-muted-foreground">
                       Delete as soon as the first turn using an image settles,
                       including stopped or failed turns. The day limit still
                       applies. Default: off.
@@ -169,7 +169,7 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
                 <Label htmlFor="keep-tool-images">
                   Keep tool images with the conversation
                 </Label>
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Default: on. Includes screenshots returned by tools.
                 </p>
               </div>
@@ -196,11 +196,11 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
                     form.setValue("tool_image_days", e.target.valueAsNumber)
                   }
                 />
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Measured from creation. Range: 1–365.
                 </p>
                 {form.formState.errors.tool_image_days && (
-                  <p role="alert" className="text-xs text-destructive">
+                  <p role="alert" className="text-13 text-destructive">
                     Enter a whole number from 1 to 365.
                   </p>
                 )}
@@ -208,7 +208,7 @@ function RetentionForm({ data }: { readonly data: UploadRetentionResponse }) {
             )}
           </div>
         </Card>
-        <Card className="space-y-2 p-4 text-xs text-muted-foreground">
+        <Card className="space-y-2 p-4 text-13 text-muted-foreground">
           <p>
             <strong className="font-medium text-foreground">
               NyxID’s copy only.

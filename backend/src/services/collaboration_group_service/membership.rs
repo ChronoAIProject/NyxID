@@ -319,6 +319,7 @@ pub(super) async fn apply_ready(
                     changed = group.participant_user_ids.contains(person_id);
                     group.participant_user_ids.retain(|id| id != person_id);
                     group.last_recipient_ids_by_actor.remove(person_id);
+                    notifications::depart(db,id,person_id,session).await?;
                 }
                 Change::Leave => {
                     if creator {
@@ -328,6 +329,7 @@ pub(super) async fn apply_ready(
                     }
                     group.participant_user_ids.retain(|id| id != actor);
                     group.last_recipient_ids_by_actor.remove(actor);
+                    notifications::depart(db,id,actor,session).await?;
                     changed = true;
                 }
                 Change::Delete => {
@@ -618,6 +620,8 @@ pub(super) async fn delete(
 ) -> AppResult<()> {
     invalidate(db, &group.id, session).await?;
     for collection in [
+        model::READ_STATES,
+        model::MENTION_NOTIFICATIONS,
         model::INVITES,
         model::AGENT_ACCESS,
         model::TRANSFERS,

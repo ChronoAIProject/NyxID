@@ -1,3 +1,4 @@
+import { confirmChanges } from "@/test-helpers/confirm-changes";
 import userEvent from "@testing-library/user-event";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { OverlayLayer } from "@/components/ui/overlay-layer";
@@ -90,9 +91,7 @@ describe("agent operation scopes", () => {
   });
   it("selects catalog reads, excludes changes, and sends the reviewed revision", async () => {
     render(<ServiceOperationForm agentId="agent" service={service} />);
-    expect(
-      screen.getByRole("button", { name: "Save operations" }),
-    ).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Save operations" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Select all reads" }));
     expect(screen.getByRole("checkbox", { name: "GET /items" })).toBeChecked();
     expect(
@@ -102,17 +101,11 @@ describe("agent operation scopes", () => {
       screen.getByRole("checkbox", { name: "DELETE /items/{id}" }),
     ).not.toBeChecked();
     fireEvent.click(screen.getByRole("button", { name: "Save operations" }));
-    await waitFor(() =>
-      expect(save).toHaveBeenCalledWith({
-        serviceId: "svc",
-        selection: {
-          expected_revision: 4,
-          all_operations: false,
-          endpoint_ids: ["read", "marked"],
-          rules: [],
-        },
-      }),
-    );
+  await confirmChanges();
+    await waitFor(() => expect(save).toHaveBeenCalledWith({
+      serviceId: "svc",
+      selection: { expected_revision: 4, all_operations: false, endpoint_ids: ["read", "marked"], rules: [] },
+    }));
   });
   it("searches without discarding selections and allows an empty deny selection", async () => {
     render(<ServiceOperationForm agentId="agent" service={service} />);
@@ -127,6 +120,7 @@ describe("agent operation scopes", () => {
       screen.getByRole("checkbox", { name: "DELETE /items/{id}" }),
     );
     fireEvent.click(screen.getByRole("button", { name: "Save operations" }));
+  await confirmChanges();
     await waitFor(() =>
       expect(save).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -145,6 +139,7 @@ describe("agent operation scopes", () => {
     render(<ServiceOperationForm agentId="agent" service={service} />);
     fireEvent.click(screen.getByRole("checkbox", { name: "GET /items" }));
     fireEvent.click(screen.getByRole("button", { name: "Save operations" }));
+  await confirmChanges();
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "reload its revision",
     );
@@ -160,6 +155,7 @@ describe("agent operation scopes", () => {
     render(<ServiceOperationForm agentId="agent" service={service} />);
     fireEvent.click(screen.getByRole("checkbox", { name: "GET /items" }));
     fireEvent.click(screen.getByRole("button", { name: "Save operations" }));
+  await confirmChanges();
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "This setting is unavailable until an administrator completes the security rollout",
     );
@@ -182,6 +178,7 @@ describe("agent operation scopes", () => {
       target: { value: "/status/{id}" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save operations" }));
+  await confirmChanges();
     await waitFor(() =>
       expect(save).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -198,9 +195,7 @@ describe("agent operation scopes", () => {
       "checkbox",
     ))
       expect(checkbox).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "Save operations" }),
-    ).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Save operations" })).not.toBeInTheDocument();
   });
 });
 
@@ -221,6 +216,7 @@ it("withholds a service from guests without changing the owner operation selecti
   await user.click(screen.getByRole("combobox", { name: "Example guest operation access" }));
   await user.click(screen.getByRole("option", { name: "No guest access" }));
   await user.click(screen.getByRole("button", { name: "Save guest operations" }));
+  await confirmChanges();
   await waitFor(() => expect(save).toHaveBeenCalledWith({
     serviceId: "svc",
     selection: { expected_revision: 4, all_operations: false, endpoint_ids: [], rules: [] },
@@ -240,8 +236,65 @@ it("saves a guest-only catalog selection and preserves its revision", async () =
   render(<ServiceOperationForm agentId="agent" service={service} guests />);
   fireEvent.click(screen.getByRole("button", { name: "Select all reads" }));
   fireEvent.click(screen.getByRole("button", { name: "Save guest operations" }));
+  await confirmChanges();
   await waitFor(() => expect(save).toHaveBeenCalledWith({
     serviceId: "svc",
     selection: { expected_revision: 4, all_operations: false, endpoint_ids: ["read", "marked"], rules: [] },
   }));
+});
+
+it("pushes a service editor, preserves its draft on Back and restores disclosure focus", async () => {
+  feature.mockReturnValue(true);
+  const user = userEvent.setup();
+  render(<div role="dialog"><button>Covered sheet control</button><AgentOperationScopes agentId="agent" drillIn /></div>);
+  const disclosure = screen.getByRole("button", { name: /Example.*selected operations/ });
+  await user.click(disclosure);
+  expect(screen.getByRole("heading", { name: "Example · Operations" })).toHaveFocus();
+  expect(screen.queryByRole("button", { name: "Covered sheet control" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("checkbox", { name: "GET /items" }));
+  await user.click(screen.getByRole("button", { name: "Back to Access" }));
+  expect(disclosure).toHaveFocus();
+  expect(screen.getByRole("button", { name: "Covered sheet control" })).toBeVisible();
+  await user.click(disclosure);
+  expect(screen.getByRole("checkbox", { name: "GET /items" })).toBeChecked();
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  await confirmChanges();
+  await waitFor(() => expect(save).toHaveBeenCalledWith({ serviceId: "svc", selection: { expected_revision: 4, all_operations: false, endpoint_ids: ["write", "read"], rules: [] } }));
+});
+
+it("places pushed content outside the scrolled panel and hides it when its tab is inactive", async () => {
+  feature.mockReturnValue(true);
+  const container = document.createElement("div");
+  container.setAttribute("role", "dialog");
+  document.body.appendChild(container);
+  const content = (visible: boolean) => <><button>Sheet control</button><div style={{ overflow: "auto" }}><AgentOperationScopes agentId="agent" drillIn visible={visible} detailContainer={container} /></div></>;
+  const view = render(content(true), { container });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: /Example.*selected operations/ }));
+  const detail = screen.getByRole("region", { name: "Example operation details" });
+  expect(detail.parentElement).toBe(container);
+  expect(screen.getByRole("heading", { name: "Example · Operations" })).toHaveFocus();
+  view.rerender(content(false));
+  expect(screen.queryByRole("region", { name: "Example operation details" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Sheet control" })).toBeVisible();
+  view.rerender(content(true));
+  expect(screen.getByRole("region", { name: "Example operation details" })).toBeVisible();
+});
+
+it.each(["flag", "service"] as const)("restores the covered drawer when the pushed editor loses its %s", async (change) => {
+  feature.mockReturnValue(true);
+  const container = document.createElement("div");
+  container.setAttribute("role", "dialog");
+  document.body.appendChild(container);
+  const content = () => <><button role="tab" aria-selected="true">Access</button><button>Sheet control</button><AgentOperationScopes agentId="agent" drillIn detailContainer={container} /></>;
+  const view = render(content(), { container });
+  await userEvent.setup().click(screen.getByRole("button", { name: /Example.*selected operations/ }));
+  expect(screen.queryByRole("button", { name: "Sheet control" })).not.toBeInTheDocument();
+  if (change === "flag") feature.mockReturnValue(false);
+  else query.mockReturnValue({ data: [] });
+  view.rerender(content());
+  expect(screen.queryByRole("region", { name: "Example operation details" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Sheet control" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Sheet control" }).inert).toBe(false);
+  expect(screen.getByRole("tab", { name: "Access" })).toHaveFocus();
 });

@@ -61,7 +61,27 @@ pub(crate) async fn post(
         addressed.push(access.group.lead_agent_id.clone());
     }
     let id = Uuid::new_v4().to_string();
+    let participating = access.execution_enrolled
+        && crate::services::execution_permission_enrollment::live_enabled(
+            &state.db,
+            &access.actor,
+            None,
+        )
+        .await?;
     let request = GroupRequest {
+        execution_task: participating.then(|| crate::models::execution_permission::TaskAdmission {
+            version: 1,
+            task: crate::models::execution_permission::TaskRef {
+                root_kind: crate::models::execution_permission::TaskRootKind::GroupRequest,
+                root_id: id.clone(),
+            },
+            actor_user_id: access.actor.clone(),
+            audience: crate::services::execution_permission_dispatch::group_audience(&access.group),
+            epoch: 1,
+            hard_deadline: Utc::now() + chrono::Duration::hours(24),
+            cancelled: false,
+            parent_turn_id: None,
+        }),
         collaboration: None,
         id: id.clone(),
         group_id: access.group.id.clone(),
@@ -173,6 +193,11 @@ async fn run_member(
     )
     .await?;
     let start = engine::TurnStart {
+        automation_work: None,
+        automation_parent: None,
+        execution_enrollment: request.execution_task.is_some(),
+        execution_parent: None,
+        channel_context: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),

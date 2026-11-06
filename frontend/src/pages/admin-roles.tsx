@@ -141,16 +141,16 @@ export function AdminRolesPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SmartRemoteIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">Failed to load roles</p>
-            <p className="text-xs text-muted-foreground">Please try again later.</p>
+            <p className="type-row-title text-muted-foreground">Failed to load roles</p>
+            <p className="text-13 text-muted-foreground">Please try again later.</p>
           </div>
         </div>
       ) : roles.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SmartRemoteIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">No roles found</p>
-            <p className="text-xs text-muted-foreground">There are no roles to display.</p>
+            <p className="type-row-title text-muted-foreground">No roles found</p>
+            <p className="text-13 text-muted-foreground">There are no roles to display.</p>
           </div>
         </div>
       ) : (
@@ -181,8 +181,8 @@ export function AdminRolesPage() {
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <p className="text-sm font-medium truncate">{r.name}</p>
-                  <p className="text-xs text-muted-foreground font-mono truncate mt-0.5">
+                  <p className="type-row-title truncate">{r.name}</p>
+                  <p className="text-13 text-muted-foreground font-mono truncate mt-0.5">
                     {r.slug}
                   </p>
                 </div>
@@ -192,7 +192,7 @@ export function AdminRolesPage() {
                   </Badge>
                 </div>
               </div>
-              <div className="mt-3 flex items-center gap-3 text-xs text-muted-foreground">
+              <div className="mt-3 flex items-center gap-3 text-13 text-muted-foreground">
                 <span>
                   {String(r.permissions.length)} permission
                   {r.permissions.length !== 1 ? "s" : ""}
@@ -241,12 +241,12 @@ export function AdminRolesPage() {
                     }
                   }}
                 >
-                  <TableCell className="font-medium">{role.name}</TableCell>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="font-normal">{role.name}</TableCell>
+                  <TableCell className="font-mono text-14">
                     {role.slug}
                   </TableCell>
                   <TableCell>
-                    <span className="text-muted-foreground text-xs">
+                    <span className="text-muted-foreground text-13">
                       {String(role.permissions.length)} permission
                       {role.permissions.length !== 1 ? "s" : ""}
                     </span>
@@ -262,7 +262,7 @@ export function AdminRolesPage() {
                     {role.is_default ? (
                       <Badge variant="success">Yes</Badge>
                     ) : (
-                      <span className="text-muted-foreground text-xs">No</span>
+                      <span className="text-muted-foreground text-13">No</span>
                     )}
                   </TableCell>
                   <TableCell className="text-muted-foreground">

@@ -5,6 +5,10 @@ pub const AGENT_DETAILS_SKILLS: &str = "skills";
 
 #[derive(Clone, Copy)]
 pub enum AssistantPage<'a> {
+    Group {
+        group: &'a str,
+    },
+    Approvals,
     Conversation {
         conversation: &'a str,
     },
@@ -52,6 +56,11 @@ impl AssistantPage<'_> {
     pub fn path(self) -> String {
         let mut query = url::form_urlencoded::Serializer::new(String::new());
         let path = match self {
+            Self::Group { group } => {
+                query.append_pair("c", group);
+                "/assistant".into()
+            }
+            Self::Approvals => "/assistant/approvals".into(),
             Self::Conversation { conversation } => {
                 query.append_pair("c", conversation);
                 "/assistant".into()
@@ -193,6 +202,7 @@ mod tests {
                 "/assistant?c=nyxa-test&card=a%26b",
             ),
             (NyxBotSettings, "/assistant?panel=nyxbot"),
+            (Approvals, "/assistant/approvals"),
             (
                 Billing { tab: "billing" },
                 "/assistant?panel=billing&panelTab=billing",
