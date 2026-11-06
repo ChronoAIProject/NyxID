@@ -211,6 +211,7 @@ pub async fn resolve_service_or_user_service(
         .await?
     {
         crate::services::retired_service_service::require_available(&service)?;
+        crate::services::platform_key_service::require_ordinary_use(&service)?;
         return Ok(ResolvedService::Catalog(Box::new(service)));
     }
 
@@ -228,6 +229,7 @@ pub async fn resolve_service_or_user_service(
             .await?
     {
         crate::services::retired_service_service::require_available(&catalog)?;
+        crate::services::platform_key_service::require_ordinary_use(&catalog)?;
     }
 
     let access =

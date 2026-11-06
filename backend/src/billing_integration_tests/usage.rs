@@ -823,6 +823,7 @@ async fn org_credential_request(platform_key: bool) {
         .await
         .unwrap();
     catalog.platform_key = Some(PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: PlatformKeyAudience::Restricted,
         allowed_owner_ids: vec![org.clone()],

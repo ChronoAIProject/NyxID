@@ -85,6 +85,13 @@ async fn check_parent(
             write_fence,
         )
         .await?;
+        if super::platform_key_service::model_only(&live)
+            && (!authority.first_party_human || !admin)
+        {
+            return Err(AppError::Forbidden(
+                "Model-only records require live Admin authority".into(),
+            ));
+        }
         if authority.admin_required && !admin {
             return Err(AppError::Forbidden("Admin authority revoked".into()));
         }
@@ -242,6 +249,32 @@ pub(crate) async fn validate_update_fields(
     authority: &Authority,
     admin: bool,
 ) -> AppResult<()> {
+    if let Some(value) = fields.get("platform_key") {
+        let next: Option<crate::models::downstream_service::PlatformKeyConfig> =
+            bson::from_bson(value.clone())
+                .map_err(|_| AppError::ValidationError("Invalid platform key policy".into()))?;
+        if super::platform_key_service::model_only(live)
+            && next.as_ref().map(|c| c.purpose) != live.platform_key.as_ref().map(|c| c.purpose)
+        {
+            return Err(AppError::ValidationError(
+                "Model-only credential purpose cannot be changed".into(),
+            ));
+        }
+    }
+    let next_model_only = fields
+        .get_document("platform_key")
+        .ok()
+        .and_then(|p| p.get_str("purpose").ok())
+        .is_some_and(|purpose| purpose != "ordinary");
+    if super::platform_key_service::model_only(live) || next_model_only {
+        let mut candidate = bson::to_document(live)
+            .map_err(|_| AppError::Internal("Invalid catalog record".into()))?;
+        candidate.extend(fields.clone());
+        super::platform_key_service::validate_model_purpose(
+            &bson::from_document(candidate)
+                .map_err(|_| AppError::ValidationError("Invalid catalog update".into()))?,
+        )?;
+    }
     if let Some(scheme) = fields.get("auth_scheme") {
         let scheme: Option<String> = bson::from_bson(scheme.clone())
             .map_err(|_| AppError::ValidationError("Invalid auth_scheme".into()))?;

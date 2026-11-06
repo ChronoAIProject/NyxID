@@ -7290,6 +7290,7 @@ async fn chat_master_and_platform_catalogs_without_platform_selection_keep_legac
         catalog.auth_method = "bearer".into();
         catalog.service_category = "internal".into();
         catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: platform_enabled,
             ..Default::default()
         });
@@ -7828,6 +7829,7 @@ async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_
     catalog.auth_method = "bearer".into();
     catalog.auth_key_name = "Authorization".into();
     catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: crate::models::downstream_service::PlatformKeyAudience::Public,
         ..Default::default()

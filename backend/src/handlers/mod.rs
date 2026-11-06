@@ -235,3 +235,5 @@ pub mod cma_sessions;
 pub mod org_specialist_channels;
 
 pub(crate) mod execution_permission_resume;
+
+pub mod platform_models;

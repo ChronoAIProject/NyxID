@@ -1390,6 +1390,7 @@ async fn load_user_tools_with_grants(
     for svc in &connected_services {
         if svc.service_type != "http"
             || svc.service_category == "provider"
+            || crate::services::platform_key_service::model_only(svc)
             || crate::services::retired_service_service::is_retired(svc)
         {
             continue;
@@ -1414,7 +1415,7 @@ async fn load_user_tools_with_grants(
     }
 
     for svc in &auto_services {
-        if seen_ids.contains(&svc.id) {
+        if seen_ids.contains(&svc.id) || crate::services::platform_key_service::model_only(svc) {
             continue;
         }
         if let Some(conn) = conn_map.get(svc.id.as_str())
@@ -1666,6 +1667,11 @@ async fn load_user_tools_with_grants(
             .catalog_service_id
             .as_deref()
             .and_then(|id| catalog_policy_by_id.get(id).copied());
+        // Hidden model infrastructure must not leak through ordinary tools or
+        // unavailable-connection diagnostics, even for stale own-key bindings.
+        if catalog_policy.is_some_and(crate::services::platform_key_service::model_only) {
+            continue;
+        }
         let retired_catalog =
             catalog_policy.is_some_and(crate::services::retired_service_service::is_retired);
         let user_endpoint = endpoints_by_id.get(us.endpoint_id.as_str()).copied();

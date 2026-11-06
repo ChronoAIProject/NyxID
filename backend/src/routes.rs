@@ -57,6 +57,11 @@ macro_rules! llm_billing_routes {
                 )
             ),
             (
+                "/models", "/api/v1/llm/models", "handlers::platform_models::public_list",
+                get(handlers::platform_models::public_list),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt("Platform model metadata; no downstream request")
+            ),
+            (
                 "/pools", "/api/v1/llm/pools", "handlers::llm_gateway::pool_aliases",
                 get(handlers::llm_gateway::pool_aliases),
                 crate::services::billing::route_inventory::BillingRoutePolicy::Exempt("AI pool alias discovery; no downstream request")
@@ -1062,6 +1067,26 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let admin_routes = Router::new()
+        .route(
+            "/platform-models",
+            get(handlers::platform_models::admin_list).post(handlers::platform_models::create),
+        )
+        .route(
+            "/platform-models/{id}",
+            get(handlers::platform_models::admin_get).put(handlers::platform_models::update),
+        )
+        .route(
+            "/platform-models/{id}/entitlements",
+            put(handlers::platform_models::entitlements),
+        )
+        .route(
+            "/platform-models/{id}/routes",
+            put(handlers::platform_models::routes),
+        )
+        .route(
+            "/platform-models/{id}/access",
+            get(handlers::platform_models::explain),
+        )
         .merge(if router_state.is_some() {
             Router::new()
                 .route(

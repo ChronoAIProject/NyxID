@@ -1036,7 +1036,7 @@ async fn voice_options_use_catalog_models_voices_and_supported_protocols_only() 
         service.visibility = "public".into(); service.is_active = true;
         service.service_category = "connection".into(); service.requires_user_credential = true;
         service.auth_method = "bearer".into(); service.base_url = "https://api.openai.com/v1".into();
-        service.platform_key = Some(PlatformKeyConfig { enabled: true, audience: PlatformKeyAudience::Public, allowed_owner_ids: vec![] });
+        service.platform_key = Some(PlatformKeyConfig { purpose: Default::default(), enabled: true, audience: PlatformKeyAudience::Public, allowed_owner_ids: vec![] });
         service.credential_encrypted = state.encryption_keys.encrypt(b"fixture-key").await.unwrap();
         service.inference = crate::services::inference_service::default_inference("llm-openai");
         let voice = service.inference.as_mut().unwrap().voice.as_mut().unwrap();

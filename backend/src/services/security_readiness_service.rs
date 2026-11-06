@@ -37,6 +37,7 @@ use crate::{
 
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
+    super::platform_model_service::REGISTRY_READINESS,
     "assistant:generated-artifacts",
     "assistant:org-agents",
     super::org_channel_service::FLAG,
@@ -329,6 +330,11 @@ async fn report_for(db: &Database, local: &Runtime, capability: &str) -> AppResu
 }
 
 pub async fn require(db: &Database, capability: &str) -> AppResult<()> {
+    if capability == super::platform_model_service::FLAG {
+        // Keep this optional foundation out of every existing flag caller's
+        // inline future layout.
+        return Box::pin(super::platform_model_service::require_execution_ready(db)).await;
+    }
     if (CAPABILITIES.contains(&capability) || capability == AUTOMATION_COMPLETION)
         && !report(db, capability).await?.ready
     {
