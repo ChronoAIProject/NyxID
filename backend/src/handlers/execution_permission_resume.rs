@@ -47,6 +47,8 @@ pub(crate) async fn send(
             let mut req = builder
                 .body(Body::from(body))
                 .map_err(|_| AppError::BadRequest("Invalid retained operation".into()))?;
+            req.extensions_mut()
+                .insert(super::invocation_diagnostics::RetainedLlmExecution);
             use crate::services::billing::route_inventory::{BillingIngress, BillingRoutePolicy};
             req.extensions_mut()
                 .insert(BillingRoutePolicy::Metered(if provider.is_some() {

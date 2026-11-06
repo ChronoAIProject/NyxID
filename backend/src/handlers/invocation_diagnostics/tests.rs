@@ -35,6 +35,15 @@ fn request() -> Request<Body> {
 }
 
 #[tokio::test]
+async fn retained_llm_execution_preserves_typed_errors_for_delivery_classification() {
+    let (state, _, _, _) = fixture().await;
+    let mut request = request();
+    request.extensions_mut().insert(RetainedLlmExecution);
+
+    assert!(HttpInvocation::start(&state, &mut request).is_none());
+}
+
+#[tokio::test]
 async fn invocation_diagnostic_preserves_raw_errors_and_authoritative_broker_errors() {
     for code in [401, 403, 404, 503, 504] {
         let (state, actor, id, server) = fixture().await;

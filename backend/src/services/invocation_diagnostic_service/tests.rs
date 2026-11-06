@@ -458,6 +458,7 @@ async fn handle_redemption_probes_once_and_completed_result_is_retry_readable() 
         &state.db,
         &state.config,
         &actor,
+        &actor,
         &AuthMethod::AccessToken,
         None,
         None,
@@ -481,6 +482,7 @@ async fn handle_redemption_probes_once_and_completed_result_is_retry_readable() 
     let second = redeem(
         &state.db,
         &state.config,
+        &actor,
         &actor,
         &AuthMethod::AccessToken,
         None,
@@ -518,6 +520,7 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
         &state.db,
         &state.config,
         &actor,
+        &actor,
         &AuthMethod::AccessToken,
         None,
         Some("oauth-client-b"),
@@ -548,6 +551,7 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
         &state.db,
         &state.config,
         &stranger,
+        &actor,
         &AuthMethod::ApiKey,
         Some("agent-key-id"),
         None,
@@ -563,6 +567,7 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
     let result = redeem(
         &state.db,
         &state.config,
+        &actor,
         &actor,
         &AuthMethod::ApiKey,
         Some("agent-key-id"),
@@ -606,6 +611,7 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
         &state.db,
         &state.config,
         &actor,
+        &actor,
         &AuthMethod::AccessToken,
         None,
         None,
@@ -617,6 +623,46 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
     .await
     .unwrap_err();
     assert!(matches!(error, AppError::NotFound(_)));
+}
+
+#[tokio::test]
+async fn service_account_redemption_revalidates_with_its_execution_owner() {
+    let (state, owner, id, server) = fixture().await;
+    let service_account_id = Uuid::new_v4().to_string();
+    let issued = issue(
+        &state.db,
+        &state.config,
+        &service_account_id,
+        &AuthMethod::ServiceAccount,
+        None,
+        None,
+        &id,
+    )
+    .await
+    .unwrap()
+    .expect("service-account diagnostic handle must be issued");
+
+    let result = redeem(
+        &state.db,
+        &state.config,
+        &service_account_id,
+        &owner,
+        &AuthMethod::ServiceAccount,
+        None,
+        None,
+        true,
+        &[],
+        &issued.handle,
+        None,
+    )
+    .await
+    .unwrap();
+    let RedeemResult::Completed { diagnostic, .. } = result else {
+        panic!("service-account diagnostic must complete without probing");
+    };
+    assert_eq!(diagnostic.outcome, Outcome::NonDelegable);
+    assert_eq!(diagnostic.observation, Observation::Unknown);
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -650,6 +696,7 @@ async fn running_claims_are_never_replayed() {
     let result = redeem(
         &state.db,
         &state.config,
+        &actor,
         &actor,
         &AuthMethod::AccessToken,
         None,
@@ -703,6 +750,7 @@ async fn concurrent_redemptions_start_only_one_probe() {
         &state.db,
         &state.config,
         &actor,
+        &actor,
         &AuthMethod::AccessToken,
         None,
         None,
@@ -714,6 +762,7 @@ async fn concurrent_redemptions_start_only_one_probe() {
     let second = redeem(
         &state.db,
         &state.config,
+        &actor,
         &actor,
         &AuthMethod::AccessToken,
         None,
@@ -784,6 +833,7 @@ async fn active_execution_capacity_keeps_the_handle_pending() {
         &state.db,
         &state.config,
         &actor,
+        &actor,
         &AuthMethod::AccessToken,
         None,
         None,
@@ -834,6 +884,7 @@ async fn issuance_does_not_read_the_feature_flag_but_redemption_respects_it() {
     let result = redeem(
         &state.db,
         &state.config,
+        &actor,
         &actor,
         &AuthMethod::AccessToken,
         None,

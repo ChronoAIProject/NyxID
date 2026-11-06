@@ -250,6 +250,7 @@ pub(crate) async fn redeem(
     db: &Database,
     config: &AppConfig,
     actor_id: &str,
+    execution_owner_id: &str,
     auth_method: &AuthMethod,
     api_key_id: Option<&str>,
     client_id: Option<&str>,
@@ -272,7 +273,9 @@ pub(crate) async fn redeem(
     if !allow_all_services && !allowed_service_ids.contains(&row.exact_user_service_id) {
         return Err(not_found());
     }
-    let Some(service) = authorized_service(db, actor_id, &row.exact_user_service_id).await? else {
+    let Some(service) =
+        authorized_service(db, execution_owner_id, &row.exact_user_service_id).await?
+    else {
         return Err(not_found());
     };
     if let Some(result) = completed(&row)? {
@@ -286,7 +289,7 @@ pub(crate) async fn redeem(
     let delegable = matches!(auth_method, AuthMethod::AccessToken)
         && client_id != Some("chrono-probe")
         && caller_token.is_some();
-    if delegable && has_active_capacity(db, actor_id, &service).await? {
+    if delegable && has_active_capacity(db, execution_owner_id, &service).await? {
         return Ok(RedeemResult::NotReady);
     }
 

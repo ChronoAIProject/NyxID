@@ -29,6 +29,11 @@ use crate::{
 pub(crate) const HANDLE_HEADER: &str = "x-nyxid-diagnostic-handle";
 pub(crate) const EXPIRES_HEADER: &str = "x-nyxid-diagnostic-expires-in";
 
+/// Internal retained LLM sends must preserve typed failures for their durable
+/// delivery coordinator, which classifies uncertain provider outcomes.
+#[derive(Clone, Copy)]
+pub(crate) struct RetainedLlmExecution;
+
 /// Only populated with exact UserService IDs selected by the execution path.
 /// Pool attempts overwrite it, so only the final selected member is diagnosed.
 #[derive(Clone, Default)]
@@ -59,7 +64,9 @@ pub(crate) struct HttpInvocation {
 impl HttpInvocation {
     pub(crate) fn start(state: &AppState, request: &mut Request<Body>) -> Option<Self> {
         // Nested gateway/pool wrappers share the outer invocation's budget.
-        if state.config.chrono_probe_url.is_none() || request.extensions().get::<Target>().is_some()
+        if state.config.chrono_probe_url.is_none()
+            || request.extensions().get::<Target>().is_some()
+            || request.extensions().get::<RetainedLlmExecution>().is_some()
         {
             return None;
         }
@@ -195,6 +202,7 @@ pub async fn redeem(
         ));
     }
     let actor_id = auth.user_id.to_string();
+    let execution_owner_id = auth.proxy_resolution_user_id();
     let supplied = proxy_service::caller_bearer_token_for_downstream(&headers, false);
     let caller_token = live_bearer(
         &auth.auth_method,
@@ -205,6 +213,7 @@ pub async fn redeem(
         &state.db,
         &state.config,
         &actor_id,
+        &execution_owner_id,
         &auth.auth_method,
         auth.api_key_id.as_deref(),
         auth.acting_client_id
