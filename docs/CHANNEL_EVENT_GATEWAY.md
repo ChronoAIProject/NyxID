@@ -747,6 +747,33 @@ broad enough for followed threads; NyxID's local policy decides whether to act.
 Routing selects only the default provider, with textual `@name` and `/to`
 directives and unknown-target notices disabled. They never establish addressing.
 
+Native management separates the desired routing policy from channel bodies.
+CMAEG rejects top-level `routing` in both `POST /v1/channels` and full
+`PUT /v1/channels/{id}`. Setup sends the stable UUID-v4 create without routing,
+records its acknowledgement, then sends `PUT /v1/channels/{id}/routing` with
+only `{expected_version,routing}` using the returned create version and the same
+creator bearer. Only create carries the credential bundle. The route-attachment
+full PUT omits routing and uses the routing response version; full PUT preserves
+saved routing. Native WhatsApp uses the same split. Relay definitions keep their
+existing requests and do not call the routing endpoint.
+
+Setup and direct-to-native handoff require the final intended source **and**
+saved routing acknowledgement before committing `ready`. Each acknowledged
+setup version is retained in the provisional release; the final response version
+is persisted on the channel. Settings/reconciliation sends full PUT without
+routing, then authors routing using that returned version and persists the final
+routing version behind the existing local binding/version CAS.
+
+A routing transport or malformed-response failure gets one exact confirmation
+attempt with the original version and identical policy. CMAEG accepts only the
+immediately following identical revision; different policy or any later version
+is 409. There is no retry with an invented/new version. Settings reconcile a
+conflict through an authenticated channel read before a later policy write;
+failed preparation retains the working direct route and retires its provisional
+channel through the existing read/delete and native-drain fences. Initial
+default-only routing, a successful direct reply, or `pending_discovery` alone
+never acknowledges the requested native policy.
+
 Deploy all replicas with readiness capability `nyxbot:native-gateway-v1` before
 native enrollment. The existing roster/drained check refuses selection during a
 mixed rollout. A persisted `preparing` phase permits binding setup but refuses
@@ -797,6 +824,10 @@ Status exposes `gateway_native_phase`, `gateway_native_activation` and
 through relay fallback and included in connect/transport audit metadata and an
 info log with the channel agent ID. Upstream prose, URLs and credentials are
 never retained; a new preparation or successful activation clears the detail.
+`gateway_native_activation_operation` records the fixed failed management step
+(`create`, `channel_update`, or `routing_update`) in the channel API/audit and
+bounded logs. It follows the same attempt fences and clearing rules. Routing
+acknowledgement failures use the fixed `policy_not_acknowledged` detail.
 
 Native Discord fallback visibility (#2183): `nyxbot_channel_connected` records
 the persisted transport after setup/fallback, plus `gateway_native_activation`

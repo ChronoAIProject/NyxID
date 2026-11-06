@@ -819,18 +819,68 @@ async fn push_gateway_groups(
     {
         return Ok(Some("gateway_reconcile_conflict"));
     }
-    let response = gateway_call(
-        state,
+    let Ok(base) = gateway_base(state).await else {
+        return Ok(Some("gateway_unavailable"));
+    };
+    let response = crate::services::nyxbot_gateway_service::gateway_call_at_base(
+        &base,
         reqwest::Method::PUT,
         &format!("/channels/{}", urlencode(channel_id)),
         creator.as_str(),
-        Some(&update),
+        Some(&crate::services::nyxbot_gateway_policy::channel_request(
+            &update,
+        )),
         None,
     )
     .await;
+    // A full PUT preserves routing. Native policies must be authored separately,
+    // using its returned version, before the final acknowledgement is persisted.
+    let mut operation = "channel_update";
+    let response = match response {
+        Ok(response) if response.status == 200 && update.get("routing").is_some() => {
+            if let Some(version) = crate::services::nyxbot_gateway_policy::next_version(
+                &response.body,
+                expected_version,
+            ) {
+                operation = "routing_update";
+                match crate::services::nyxbot_gateway_policy::put_routing_at_base(
+                    &base,
+                    creator.as_str(),
+                    channel_id,
+                    version,
+                    &update["routing"],
+                )
+                .await
+                {
+                    Ok(routed)
+                        if routed.status == 200
+                            && crate::services::nyxbot_gateway_policy::next_version(
+                                &routed.body,
+                                version,
+                            )
+                            .is_none() =>
+                    {
+                        Err(AppError::ValidationError("gateway_invalid_response".into()))
+                    }
+                    result => result,
+                }
+            } else {
+                Err(AppError::ValidationError("gateway_invalid_response".into()))
+            }
+        }
+        result => result,
+    };
     match response {
         Ok(response) if response.status == 200 => {
             if !gateway_policy_acknowledged(&response.body, &update) {
+                record_gateway_policy_failure(
+                    state,
+                    row,
+                    expected_version,
+                    operation,
+                    Some(&response),
+                )
+                .await?;
                 // A successful PUT without a trustworthy echo is an
                 // uncertain write. Read the authenticated record before
                 // retrying so an accepted update cannot leave our CAS version
@@ -858,14 +908,62 @@ async fn push_gateway_groups(
                 .await
         }
         Ok(response) if response.status == 409 => {
+            record_gateway_policy_failure(state, row, expected_version, operation, Some(&response))
+                .await?;
             // A concurrent writer may already have applied the desired
             // definition. Reconcile the fresh CAS version before deciding
             // whether another PUT is needed.
             reconcile_gateway_groups(state, row, reconciliation, creator.as_str(), &update).await
         }
-        Ok(response) => Ok(Some(gateway_error_code(&response))),
-        Err(_) => Ok(Some("gateway_unavailable")),
+        Ok(response) => {
+            record_gateway_policy_failure(state, row, expected_version, operation, Some(&response))
+                .await?;
+            Ok(Some(gateway_error_code(&response)))
+        }
+        Err(_) => {
+            record_gateway_policy_failure(state, row, expected_version, operation, None).await?;
+            if row.gateway_source.is_some() {
+                reconcile_gateway_groups(state, row, reconciliation, creator.as_str(), &update)
+                    .await
+            } else {
+                Ok(Some("gateway_unavailable"))
+            }
+        }
     }
+}
+
+async fn record_gateway_policy_failure(
+    state: &AppState,
+    row: &NyxbotChannel,
+    expected_version: i64,
+    operation: &'static str,
+    response: Option<&GatewayResponse>,
+) -> AppResult<()> {
+    let (code, detail) = match response {
+        Some(response) if response.status == 200 => {
+            ("gateway_invalid_response", Some("policy_not_acknowledged"))
+        }
+        Some(response) => (
+            gateway_error_code(response),
+            gateway_problem_code(&response.body),
+        ),
+        None => ("gateway_unavailable", None),
+    };
+    tracing::info!(operation, code, "NyxBot gateway policy not acknowledged");
+    if row.gateway_source.is_some()
+        && let Some(filter) = gateway_local_cas_filter(row, expected_version)
+    {
+        state
+            .db
+            .collection::<NyxbotChannel>(CHANNELS)
+            .update_one(
+                filter,
+                doc! {"$set":{"gateway_native_activation_operation":operation,
+                "gateway_native_activation_detail":detail}},
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 struct GatewayReconciliation<'a> {
@@ -917,6 +1015,9 @@ pub(super) fn gateway_policy_acknowledged(body: &Value, requested: &Value) -> bo
         "/bot_id",
         "/bot_username",
         "/intents",
+        "/app_id",
+        "/waba_id",
+        "/phone_number_id",
         "/admission",
     ]
     .iter()
@@ -928,15 +1029,39 @@ pub(super) fn gateway_policy_acknowledged(body: &Value, requested: &Value) -> bo
         && definition.pointer("/reply/thread_contract")
             == requested.pointer("/reply/thread_contract")
         && (expected["type"] == "nyxid_relay"
-            || [
-                "/routing",
-                "/partition/version",
-                "/partition/key",
-                "/reply/auto_final",
-                "/reply/sinks",
-            ]
-            .iter()
-            .all(|pointer| definition.pointer(pointer) == requested.pointer(pointer)))
+            || (routing_acknowledged(definition.get("routing"), requested.get("routing"))
+                && [
+                    "/partition/version",
+                    "/partition/key",
+                    "/reply/auto_final",
+                    "/reply/sinks",
+                ]
+                .iter()
+                .all(|pointer| definition.pointer(pointer) == requested.pointer(pointer))))
+}
+
+fn routing_acknowledged(actual: Option<&Value>, desired: Option<&Value>) -> bool {
+    let (Some(actual), Some(desired)) = (actual, desired) else {
+        return false;
+    };
+    // CMAEG omits empty collections in its saved definition. Accept either
+    // representation, but never extra consumers/rules or changed addressing.
+    let normalize = |value: &Value| {
+        let mut value = value.clone();
+        if let Some(fields) = value.as_object_mut() {
+            for field in ["consumers", "rules"] {
+                if fields
+                    .get(field)
+                    .and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)
+                {
+                    fields.remove(field);
+                }
+            }
+        }
+        value
+    };
+    normalize(actual) == normalize(desired)
 }
 
 async fn persist_gateway_groups(
@@ -951,17 +1076,18 @@ async fn persist_gateway_groups(
     let Some(filter) = gateway_local_cas_filter(row, expected_version) else {
         return Ok(Some("gateway_reconcile_conflict"));
     };
+    let mut set = doc! {"gateway_version": version, "gateway_groups": wanted, "gateway_no_progress": true,
+    "gateway_bot_mentions.enabled": bots, "gateway_bot_id": &row.gateway_bot_id,
+    "gateway_threads": bson::to_bson(threads).map_err(|_| crate::services::channel_thread_follow_service::not_found())?,
+    "updated_at": bson::DateTime::now()};
+    if row.gateway_source.is_some() {
+        set.insert("gateway_native_activation_operation", bson::Bson::Null);
+        set.insert("gateway_native_activation_detail", bson::Bson::Null);
+    }
     let updated = state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
-        .update_one(
-            filter,
-            doc! {"$set": {"gateway_version": version, "gateway_groups": wanted, "gateway_no_progress": true,
-            "gateway_bot_mentions.enabled": bots,
-            "gateway_bot_id": &row.gateway_bot_id,
-            "gateway_threads": bson::to_bson(threads).map_err(|_| crate::services::channel_thread_follow_service::not_found())?,
-            "updated_at": bson::DateTime::now()}},
-        )
+        .update_one(filter, doc! {"$set":set})
         .await?;
     Ok((updated.matched_count != 1).then_some("gateway_reconcile_conflict"))
 }
