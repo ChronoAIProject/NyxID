@@ -461,6 +461,7 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     let messages: Vec<_> = (0..30)
         .map(|i| AssistantMessage {
             crm_artifacts: Vec::new(),
+            automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
@@ -621,6 +622,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
     let rows = vec![
         AssistantMessage {
             crm_artifacts: Vec::new(),
+            automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
@@ -661,6 +663,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
         },
         AssistantMessage {
             crm_artifacts: Vec::new(),
+            automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
@@ -712,6 +715,7 @@ fn recap_preserves_goal_head_and_tail_under_long_last_reply() {
 fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
     let row = AssistantMessage {
         crm_artifacts: Vec::new(),
+        automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
@@ -794,6 +798,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
 fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
     let row = AssistantMessage {
         crm_artifacts: Vec::new(),
+        automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
@@ -865,6 +870,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
 fn guest_recap_omits_owner_tool_metadata() {
     let row = AssistantMessage {
         crm_artifacts: Vec::new(),
+        automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
@@ -936,6 +942,7 @@ fn guest_recap_omits_owner_tool_metadata() {
 fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
     let row = AssistantMessage {
         crm_artifacts: Vec::new(),
+        automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
@@ -1256,6 +1263,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        automation_v2: false,
         artifact_head: None,
         collaboration: None,
         owner_model_route: None,
@@ -1283,6 +1291,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         message_count: 0,
         active_turn: Some(ActiveTurn {
             crm_artifacts: Vec::new(),
+            automation_work: None,
             artifact_watch_id: None,
             execution_task: None,
             channel_context: None,
@@ -3558,6 +3567,7 @@ async fn reset_context_is_fenced_and_drops_the_checkpoint() {
 fn recap_reserves_the_goal_before_long_recent_rows() {
     let row = |seq: i64, role: &str, text: String| AssistantMessage {
         crm_artifacts: Vec::new(),
+        automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
@@ -4642,6 +4652,7 @@ fn production_recap_keeps_unrendered_tail_owners_in_requirements_and_omission_co
 fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
     let message = |i, text: String| AssistantMessage {
         crm_artifacts: Vec::new(),
+        automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
@@ -4706,6 +4717,7 @@ fn recap_sections_keep_mid_history_owner_rules_tail_and_manifest_with_cjk() {
 fn recap_owner_overflow_points_to_history_tool() {
     let message = |i: i64| AssistantMessage {
         crm_artifacts: Vec::new(),
+        automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
@@ -5601,6 +5613,7 @@ async fn platform_stop_capture_is_exact_transactional_and_keeps_independent_work
         .await
         .unwrap();
     let job = |id: &str, issuing_turn: Option<String>| MachineJob {
+        automation_run_id: None,
         execution_task: None,
         id: id.into(),
         user_id: row.user_id.clone(),
@@ -5841,6 +5854,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
     row.platform_thread = Some(fresh.thread.clone());
     row.active_turn.as_mut().unwrap().platform_origin = Some(fresh.clone());
     let delivery = DeliveryBinding {
+        automation_work: None,
         invocation_id: None,
         platform_reply: Some(
             crate::models::assistant_conversation::PlatformReplyRouting::Captured {

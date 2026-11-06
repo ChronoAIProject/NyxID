@@ -64,6 +64,7 @@ fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {
         crm_artifacts: Vec::new(),
+        automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
@@ -2887,6 +2888,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        automation_work: None,
         execution_task: None,
         connect_own: None,
         activity_id: None,

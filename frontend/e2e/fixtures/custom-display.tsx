@@ -12,8 +12,9 @@ import { useApplyTheme } from "../../src/hooks/use-theme";
 import { useThemeStore } from "../../src/stores/theme-store";
 import { SignInStep } from "../../src/features/nyxbot-onboarding/sign-in-step";
 import { nyxbotI18n } from "../../src/features/nyxbot-onboarding/i18n";
-import { BillingWalletCard } from "../../src/components/billing/billing-wallet-card";
-import { BenefitHelp } from "../../src/components/billing/benefit-help";
+import { AvailableBenefits } from "../../src/components/billing/available-benefits";
+import { useAuthStore } from "../../src/stores/auth-store";
+import { BillingWalletActions } from "../../src/components/billing/billing-wallet-card";
 import { BillingQuantityChart } from "../../src/components/billing/billing-quantity-chart";
 import { AnalyticsCanvas } from "../../src/components/billing-analytics/analytics-canvas";
 import { sampleAnalytics } from "../../src/components/billing-analytics/sample-data";
@@ -93,8 +94,30 @@ const connection: KeyInfo = {
   ssh_certificate_ttl_minutes: null,
 };
 const client = new QueryClient({
-  defaultOptions: { queries: { retry: false } },
+  defaultOptions: { queries: { retry: false, staleTime: Infinity } },
 });
+const fixtureUserId = useAuthStore.getState().user?.id;
+client.setQueryData(["billing", "wallet", fixtureUserId], wallet);
+client.setQueryData(
+  ["billing", "credits", "benefits", fixtureUserId, undefined, 1],
+  {
+    summary: {
+      remaining: "0",
+      unreserved: "0",
+      held: "0",
+      pending_activation: "0",
+      pending_reclaim: "0",
+      expired_awaiting_cleanup: "0",
+      restricted: "0",
+      generated_at: "2026-11-04T00:00:00Z",
+    },
+    grants: [],
+    allowances: [],
+    total_grants: 0,
+    page: 1,
+    per_page: 50,
+  },
+);
 client.setQueryData(["public-config"], {
   social_providers: ["google", "github", "apple"],
   email_auth_enabled: true,
@@ -142,21 +165,20 @@ export function CustomDisplayFixture() {
       ) : (
         <main className="mx-auto max-w-[900px] space-y-6 p-4 billing-page">
           <section aria-label="Wallet fixture">
-            <BillingWalletCard
-              wallet={wallet}
-              loading={false}
-              unavailable={false}
-              error={null}
-              onRetry={() => {}}
-              onProvision={() => {}}
-              provisioning={false}
-              billingReady
-              onTopUp={async () => {}}
-              topUpPending={false}
-              titleHelp={
-                <BenefitHelp label="Wallet">
-                  <p>Your spendable balance.</p>
-                </BenefitHelp>
+            <AvailableBenefits
+              actions={
+                <BillingWalletActions
+                  wallet={wallet}
+                  loading={false}
+                  unavailable={false}
+                  error={null}
+                  onRetry={() => {}}
+                  onProvision={() => {}}
+                  provisioning={false}
+                  billingReady
+                  onTopUp={async () => {}}
+                  topUpPending={false}
+                />
               }
             />
           </section>
@@ -182,8 +204,10 @@ const router = createRouter({
   routeTree: createRootRoute({ component: CustomDisplayFixture }),
   history: createMemoryHistory({ initialEntries: ["/"] }),
 });
-const container = document.getElementById("root")! as HTMLElement & { fixtureRoot?: Root };
-const root = container.fixtureRoot ??= createRoot(container);
+const container = document.getElementById("root")! as HTMLElement & {
+  fixtureRoot?: Root;
+};
+const root = (container.fixtureRoot ??= createRoot(container));
 root.render(
   <QueryClientProvider client={client}>
     <RouterProvider router={router} />

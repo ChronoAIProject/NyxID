@@ -1906,7 +1906,7 @@ async fn nyxbot_adds_services_to_a_specialist_holding_an_org_service() {
         refused[1]["reason"]
             .as_str()
             .unwrap()
-            .contains("Unknown or unavailable service: no-such-api"),
+            .contains("Unknown service or no access: no-such-api"),
         "{value}"
     );
     // Nothing grantable: an error that says why.
@@ -1932,7 +1932,7 @@ async fn nyxbot_adds_services_to_a_specialist_holding_an_org_service() {
         value["message"]
             .as_str()
             .unwrap()
-            .contains("Unknown or unavailable service: no-such-api"),
+            .contains("Unknown service or no access: no-such-api"),
         "{value}"
     );
     server.abort();
@@ -3958,7 +3958,11 @@ async fn org_channel_targets_are_refused_before_any_owner_confirmation() {
                     assert!(error, "{tool} {selector}: {value}");
                     assert_eq!(
                         value,
-                        acks::organization_agent_channel_refusal(),
+                        if selector == agent.id && tool != "nyxid__channel_bot_setup_link" {
+                            acks::organization_agent_channel_disabled_refusal()
+                        } else {
+                            acks::organization_agent_channel_refusal()
+                        },
                         "{tool} {selector} {mode:?}"
                     );
                     assert_eq!(

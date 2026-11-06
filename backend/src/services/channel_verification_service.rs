@@ -221,6 +221,21 @@ impl CredentialSnapshot {
         Ok(matched)
     }
 
+    /// Record callback reachability only after verification, fenced to these credentials.
+    pub(crate) async fn record_callback_challenge(
+        &self,
+        db: &mongodb::Database,
+    ) -> AppResult<bool> {
+        self.update(
+            db,
+            credential_filter(&self.bot)?,
+            doc! { "$set": {
+                "diagnostics.last_callback_challenge_at": bson::DateTime::now()
+            } },
+        )
+        .await
+    }
+
     pub(crate) async fn activate(&self, db: &mongodb::Database) -> AppResult<bool> {
         if !self.bot.is_active || self.bot.status != "pending_webhook" {
             return Ok(false);
@@ -298,7 +313,7 @@ async fn finish(
     };
     finished.message = result.as_ref().err().map(|error| match error {
         // WhatsApp's platform errors contain locally authored prose only.
-        AppError::ChannelPlatformError(message) => message.clone(),
+        AppError::ChannelPlatformError(message) if snapshot.bot.platform == "whatsapp" => message.clone(),
         _ => "Credential verification could not complete. Check the configured credentials and retry.".into(),
     });
     let mut filter = credential_filter(&snapshot.bot)?;
@@ -452,6 +467,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lark_verification_never_persists_upstream_error_prose() {
+        let (db, _, mut bot) = fixture(false).await;
+        bot.platform = "lark".into();
+        db.collection::<ChannelBot>(COLLECTION_NAME)
+            .replace_one(doc! {"_id":&bot.id}, &bot)
+            .await
+            .unwrap();
+        let snapshot = CredentialSnapshot::local(&bot);
+        let check = begin(&db, &snapshot).await.unwrap();
+        let finished = finish(
+            &db,
+            &snapshot,
+            &check,
+            &Err(AppError::ChannelPlatformError(
+                "upstream prose must not persist".into(),
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            finished.message.as_deref(),
+            Some(
+                "Credential verification could not complete. Check the configured credentials and retry."
+            )
+        );
+        assert_eq!(
+            read(&db, &bot).await.last_verification.unwrap().message,
+            finished.message
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn stale_pending_is_observed_as_incomplete_without_database_mutation() {
         let (db, _, bot) = fixture(false).await;
         let snapshot = CredentialSnapshot::load(&db, &WhatsAppAdapter, &bot)
@@ -497,6 +545,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(!snapshot.activate(&db).await.unwrap());
+            assert!(!snapshot.record_callback_challenge(&db).await.unwrap());
             assert!(matches!(
                 finish(&db, &snapshot, &check, &Ok(())).await,
                 Err(AppError::Conflict(_))

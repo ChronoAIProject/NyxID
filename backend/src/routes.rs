@@ -1115,6 +1115,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::health::security_readiness),
         )
         .route(
+            "/automation-continuations/readiness",
+            get(handlers::health::automation_continuations),
+        )
+        .route(
             "/feature-flag-targets",
             get(handlers::admin_feature_flags::list_feature_flag_targets),
         )
@@ -1348,6 +1352,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_assistant::drain_channel_media),
         )
         .route(
+            "/assistant/feedback/{id}/thread",
+            get(handlers::assistant_feedback::thread),
+        )
+        .route(
             "/assistant/feedback",
             get(handlers::assistant_feedback::admin),
         )
@@ -1364,6 +1372,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/assistant/learning/publications/release-stale",
             post(handlers::assistant_agent_learning::admin_release_stale),
+        )
+        .route(
+            "/usage/free-grants",
+            get(handlers::admin_usage::get_free_grants),
         )
         .route(
             "/usage/analytics",
@@ -2018,6 +2030,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route("/topups", get(handlers::billing::list_topups))
         .route("/bill", get(handlers::billing::get_bill))
         .route("/invoices", get(handlers::billing::list_invoices))
+        .route("/benefits", get(handlers::billing_benefits::get))
         .route("/grants", get(handlers::billing_credits::user_list_grants))
         .route(
             "/allowances",
@@ -3034,6 +3047,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
+        .route(
+            "/triggers/{id}/runs/{run_id}/cancel",
+            post(handlers::triggers::cancel_run),
+        )
         .route(
             "/channel-adapter-bindings",
             get(handlers::call_adapters::list).post(handlers::call_adapters::create),

@@ -2792,6 +2792,8 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
         &state,
         OWNER,
         TurnStart {
+            automation_work: None,
+            automation_parent: None,
             execution_enrollment: false,
             execution_parent: None,
             channel_context: None,
@@ -3866,6 +3868,8 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
         &state,
         OWNER,
         TurnStart {
+            automation_work: None,
+            automation_parent: None,
             execution_enrollment: false,
             execution_parent: None,
             channel_context: None,
@@ -6562,7 +6566,8 @@ async fn gateway_connect_refuses_missing_identity_and_attach_version() {
 #[tokio::test]
 async fn channel_http_links_refuse_org_specialists_with_typed_guidance() {
     use crate::errors::access_denial::{
-        ORGANIZATION_AGENT_CHANNEL_HINT, ORGANIZATION_AGENT_CHANNEL_MESSAGE,
+        ORGANIZATION_AGENT_CHANNEL_DISABLED_MESSAGE as ORGANIZATION_AGENT_CHANNEL_MESSAGE,
+        ORGANIZATION_AGENT_CHANNEL_HINT,
     };
     use crate::services::{feature_flag_service as flags, org_agent_tests::Fixture};
     use tower::ServiceExt;

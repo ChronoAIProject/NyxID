@@ -108,6 +108,21 @@ and terminal markers retry. Purchased-credit expiry retains its operation until
 all entries are confirmed. Provider balance updates and postings commit together.
 Dedupe keys, charge IDs and v1 canonical bytes remain unchanged.
 
+### Reporting grant flows
+
+The admin Grant credits report reads immutable issuance and consumption in the
+same bounded UTC window. Exact v2 `grant_issued` takes the credit posting to
+`platform:promotions`; `grant_consumed` takes the credit posting to
+`grant:{reference_id}`. Summing both balanced legs doubles the movement. Legacy
+events use micros when present, otherwise whole credits. Period consumption can
+exceed period issuance because older grants remain spendable. Financial owner
+IDs separate person and organization accounts; service slugs exist on consumption
+and never imply a service allocation of shared issuance. Full totals, daily
+buckets and independently paginated account/service breakdowns come from one
+snapshot aggregation. See [billing analytics](BILLING_ANALYTICS.md#grant-credits-granted-and-used)
+for the response, filters and bounds. These reads do not change funding order,
+settlement, deduplication or ledger writes.
+
 ### Canonical encoding
 
 v1 bytes are unchanged. v2 HMAC-SHA256 input starts with

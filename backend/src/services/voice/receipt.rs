@@ -67,6 +67,7 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
             crm_artifacts: Vec::new(),
+            automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
@@ -229,6 +230,7 @@ mod tests {
             "m1".into(),
             AssistantMessage {
                 crm_artifacts: Vec::new(),
+                automation_work: None,
                 execution_task: None,
                 delegated_images: Default::default(),
                 media_event_ids: Vec::new(),

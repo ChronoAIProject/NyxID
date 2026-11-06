@@ -1560,7 +1560,7 @@ impl From<crate::models::assistant_acknowledgement::AssistantAcknowledgement>
             review_path: crate::services::assistant_links::AssistantPage::ReviewCard { conversation: &row.conversation_id, card: &row.id }.path(),
             creation_turn_id: row.creation_turn_id,
             activity_id: row.activity_id,
-            continuation_owner: (row.continuation_receipt_id.is_some() || row.authored_skill.is_some()).then_some("server"),
+            continuation_owner: (row.continuation_receipt_id.is_some() || row.authored_skill.is_some() || row.automation_work.is_some()).then_some("server"),
             authored_skill: row.authored_skill.map(|s| json!({"agent_id":s.agent_id,"proposal_id":s.proposal_id,"revision":s.revision,"skills_revision":s.skills_revision})),
             continuation_receipt_id: row.continuation_receipt_id,
             id: row.id,
@@ -1739,9 +1739,31 @@ pub async fn stop(
 ) -> AppResult<StatusCode> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    engine::request_stop(&state.db, &user_id, &id).await?;
-    super::mcp_transport::async_operations::cancel_conversation(&state, &user_id, &id).await?;
-    super::machine_cancel::conversation(&state, &user_id, &id).await?;
+    match engine::request_stop_target(&state.db, &user_id, &id).await? {
+        engine::StopTarget::Scoped(snapshot) => {
+            super::mcp_transport::async_operations::drain_cancellations(&state, &user_id, &id)
+                .await?;
+            crate::services::machine_service::cancel_unrelated(
+                &state,
+                &user_id,
+                &id,
+                snapshot.as_deref(),
+            )
+            .await?;
+            if let Some(snapshot) = snapshot {
+                let descendants = crate::services::trigger_schedule::continuation::stopped_targets(
+                    &state.db, &snapshot,
+                )
+                .await?;
+                super::trigger_scheduler::cancel_transports(&state, &descendants).await?;
+            }
+        }
+        engine::StopTarget::Legacy => {
+            super::mcp_transport::async_operations::cancel_conversation(&state, &user_id, &id)
+                .await?;
+            super::machine_cancel::conversation(&state, &user_id, &id).await?;
+        }
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2471,6 +2493,8 @@ pub(crate) async fn start_turn_with_voice(
         ))
         .await?
     };
+    #[cfg(test)]
+    crate::test_utils::pause_committed_admission(&state.db).await;
     if let Some(watch) = crate::services::async_service_operation::bound(&state.db, &row).await? {
         crate::services::async_service_operation::apply_delivery(&mut row, &watch);
     }

@@ -544,7 +544,7 @@ fn error_result_inner(
             };
         }
 
-        AppError::ForbiddenWithGuidance { guidance, .. }
+        AppError::ForbiddenWithGuidance { message, guidance }
             if matches!(
                 guidance.as_ref(),
                 crate::errors::access_denial::AccessDenial::OrganizationAgentChannelUnsupported { .. }
@@ -553,8 +553,13 @@ fn error_result_inner(
             return ToolResult {
                 permission_request: None,
                 is_error: true,
-                value: super::assistant_acknowledgement_service::organization_agent_channel_refusal(
-                ),
+                value: if message
+                    == crate::errors::access_denial::ORGANIZATION_AGENT_CHANNEL_DISABLED_MESSAGE
+                {
+                    super::assistant_acknowledgement_service::organization_agent_channel_disabled_refusal()
+                } else {
+                    super::assistant_acknowledgement_service::organization_agent_channel_refusal()
+                },
             };
         }
         // Forbidden messages are authored for this same principal and tell

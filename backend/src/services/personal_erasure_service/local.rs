@@ -88,6 +88,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ),
         (m::trigger_delivery::COLLECTION_NAME, doc! {"user_id":owner}),
         (m::trigger_run::COLLECTION_NAME, doc! {"user_id":owner}),
+        (
+            m::assistant_direct_handoff::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
         (m::trigger::COLLECTION_NAME, doc! {"user_id":owner}),
         (super::super::trigger_schedule::WORK, doc! {"user_id":owner}),
         (

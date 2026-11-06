@@ -107,6 +107,8 @@ pub struct GroupMessage {
 /// member cards.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupFollower {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<AutomationGroupRequest>,
     pub conversation_id: String,
     /// Its post; the summary covers the messages after it.
     pub since_seq: i64,
@@ -144,4 +146,23 @@ pub struct GroupRequest {
     pub hops_remaining: i32,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+/// Bounded per-request work survives queue taking and callback crashes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AutomationGroupRequest {
+    pub id: String,
+    pub work: super::trigger_run::AutomationWork,
+    pub hops_remaining: i32,
+    pub dispatches: Vec<AutomationGroupDispatch>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AutomationGroupDispatch {
+    pub id: String,
+    pub agent_id: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }

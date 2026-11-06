@@ -1355,12 +1355,14 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
     // after it was created.
     for stale in [
         GroupFollower {
+            automation: None,
             conversation_id: home.id.clone(),
             since_seq: 1,
             created_at: Utc::now() - chrono::Duration::hours(30),
             expires_at: Some(Utc::now() - chrono::Duration::minutes(1)),
         },
         GroupFollower {
+            automation: None,
             conversation_id: home.id.clone(),
             since_seq: 1,
             created_at: Utc::now() - chrono::Duration::hours(25),
@@ -1471,18 +1473,21 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
     // classification is frozen afterwards.
     let at = Utc::now();
     let live = GroupFollower {
+        automation: None,
         conversation_id: home.id.clone(),
         since_seq: 3,
         created_at: at - chrono::Duration::hours(1),
         expires_at: Some(at + chrono::Duration::hours(1)),
     };
     let expired_at_take = GroupFollower {
+        automation: None,
         conversation_id: "nyxa-other".into(),
         since_seq: 4,
         created_at: at - chrono::Duration::hours(24),
         expires_at: Some(at - chrono::Duration::milliseconds(1)),
     };
     let legacy_expired = GroupFollower {
+        automation: None,
         conversation_id: "nyxa-legacy".into(),
         since_seq: 5,
         created_at: at - chrono::Duration::hours(25),
@@ -1518,6 +1523,8 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
         (org.id.clone(), false),
     ] {
         let start = TurnStart {
+            automation_work: None,
+            automation_parent: None,
             execution_enrollment: false,
             execution_parent: None,
             channel_context: None,

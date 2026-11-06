@@ -8943,6 +8943,30 @@ Changing a trigger's `delivery` through `PATCH` intentionally mints a replacemen
 
 The CLI adds `nyxid trigger deliveries <id>`, `nyxid trigger redeliver <id> <event_id>`, and `nyxid trigger rotate-delivery-secret <id>` alongside the existing management commands; use `--org` for org-owned triggers.
 
+#### Automation coordinator completion
+
+When coordinator completion is enabled and every serving replica advertises
+`automation:coordinator-completion-v2`, newly admitted assistant runs track
+specialist assignments and group handoffs through the coordinator's final reply.
+Existing runs retain their admission protocol. See [schedules and rollout](NYXBOT_SCHEDULES.md)
+for the default-off configuration, bounds and downgrade procedure.
+
+Run-history responses from `GET /api/v1/triggers/{id}/runs` add
+`coordinator_deadline` (RFC 3339), `wait_kind` and `can_cancel` for enrolled runs;
+legacy runs omit these fields. `wait_kind: "coordinator"` means delegated work is
+pending. The hard deadline terminates the run with `reason: "coordinator_timeout"`.
+
+`POST /api/v1/triggers/{id}/runs/{run_id}/cancel` returns the owner's updated run
+metadata with HTTP 200. It cancels an enrolled run and fences its delegated work;
+already completed external actions remain completed. This route requires a
+first-party human session and rejects API keys, delegated tokens, service-account
+tokens and relay tokens. An unrelated waiting run survives ordinary chat Stop.
+
+`GET /api/v1/admin/automation-continuations/readiness` requires admin or operator
+access and returns `configured`, fleet `readiness`, `rollback_safe` and
+`drain_blockers`. It reads bounded, indexed metadata only; it neither changes
+rollout state nor returns instructions, transcripts, result bodies or credentials.
+
 #### Public ingress
 
 ```http

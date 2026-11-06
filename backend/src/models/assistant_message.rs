@@ -13,6 +13,8 @@ pub enum MessageAuthor {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_work: Option<super::trigger_run::AutomationWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(default)]
     pub crm_artifacts: Vec<super::assistant_crm_artifact::TurnCrmArtifact>,

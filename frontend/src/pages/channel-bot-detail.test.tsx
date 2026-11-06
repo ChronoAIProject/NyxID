@@ -86,3 +86,19 @@ it("keeps the existing webhook setup instructions for other platforms", async ()
   expect(screen.getByText("Finish webhook setup")).toBeInTheDocument();
   expect(screen.getByText(/Slack's Event Subscriptions \/ webhook settings/)).toBeInTheDocument();
 });
+
+it("distinguishes Lark's callback challenge from activation and uninspected scopes", async () => {
+  const { WebhookSetupChecklist } = await import("./channel-bot-detail");
+  render(<WebhookSetupChecklist bot={{ id: "bot", platform: "lark", status: "pending_webhook", permission_setup_url: "https://example.com/permissions" } as import("@/types/channels").ChannelBotDetail} />);
+  expect(screen.getByText("Finish Lark / Feishu setup")).toBeVisible();
+  expect(screen.getByText(/The URL challenge checks callback reachability only/)).toHaveTextContent("does not activate the bot or verify a member");
+  expect(screen.getByText(/Not inspected by NyxID/)).toBeVisible();
+});
+
+
+it("does not call legacy app credentials missing after a successful check", async () => {
+  const { WebhookSetupChecklist } = await import("./channel-bot-detail");
+  render(<WebhookSetupChecklist bot={{ id: "bot", platform: "lark", status: "pending_webhook", app_secret_configured: false, last_verification: { status: "verified" } } as import("@/types/channels").ChannelBotDetail} />);
+  expect(screen.getByText("App credentials verified. Callback and member verification are separate.")).toBeVisible();
+  expect(screen.queryByText(/If credentials are missing/)).not.toBeInTheDocument();
+});

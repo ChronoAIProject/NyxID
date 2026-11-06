@@ -116,6 +116,7 @@ pub async fn reserve(
             let now = Utc::now();
             let message = AssistantMessage {
                 crm_artifacts: Vec::new(),
+            automation_work: None,
                 execution_task: None,
                 delegated_images: Default::default(),
                 media_event_ids: Vec::new(),

@@ -61,6 +61,7 @@ pub const CAPABILITIES: &[&str] = &[
     super::nyxbot_gateway_source::READINESS,
     super::nyxbot_response_recovery::RELAY_READINESS,
 ];
+pub const AUTOMATION_COMPLETION: &str = "automation:coordinator-completion-v2";
 const MAX_AGE_SECS: i64 = 45;
 
 pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
@@ -115,13 +116,36 @@ impl RolloutConfig {
     }
 }
 
+#[cfg(test)]
 pub async fn observe(
     db: &Database,
     identity: &ReplicaIdentity,
     config: &RolloutConfig,
     platform_policy_required: bool,
 ) -> AppResult<()> {
-    observe_with_capabilities(db, identity, config, platform_policy_required, CAPABILITIES).await
+    observe_with_automation(db, identity, config, platform_policy_required, false).await
+}
+
+/// Optional writer capability: disabled replicas retain the main heartbeat payload.
+pub async fn observe_with_automation(
+    db: &Database,
+    identity: &ReplicaIdentity,
+    config: &RolloutConfig,
+    platform_policy_required: bool,
+    automation_enabled: bool,
+) -> AppResult<()> {
+    let mut capabilities = CAPABILITIES.to_vec();
+    if automation_enabled {
+        capabilities.push(AUTOMATION_COMPLETION);
+    }
+    observe_with_capabilities(
+        db,
+        identity,
+        config,
+        platform_policy_required,
+        &capabilities,
+    )
+    .await
 }
 
 async fn observe_with_capabilities(
@@ -303,7 +327,9 @@ async fn report_for(db: &Database, local: &Runtime, capability: &str) -> AppResu
 }
 
 pub async fn require(db: &Database, capability: &str) -> AppResult<()> {
-    if CAPABILITIES.contains(&capability) && !report(db, capability).await?.ready {
+    if (CAPABILITIES.contains(&capability) || capability == AUTOMATION_COMPLETION)
+        && !report(db, capability).await?.ready
+    {
         return Err(AppError::SecurityReadinessUnavailable);
     }
     Ok(())
@@ -324,6 +350,16 @@ pub async fn require_platform(db: &Database, local_required: bool) -> AppResult<
 
 #[cfg(test)]
 pub(crate) async fn ready_test_replica(db: &Database) {
+    ready_test_replica_inner(db, false).await;
+}
+
+#[cfg(test)]
+pub(crate) async fn ready_automation_test_replica(db: &Database) {
+    ready_test_replica_inner(db, true).await;
+}
+
+#[cfg(test)]
+async fn ready_test_replica_inner(db: &Database, automation_enabled: bool) {
     let local = Runtime {
         identity: ReplicaIdentity {
             instance_name: "test-backend".into(),
@@ -339,7 +375,7 @@ pub(crate) async fn ready_test_replica(db: &Database) {
     RUNTIME.get_or_init(|| local);
     let db = db.clone();
     let heartbeat = || async {
-        observe_with_capabilities(
+        observe_with_automation(
             &db,
             &ReplicaIdentity {
                 instance_name: "test-backend".into(),
@@ -351,7 +387,7 @@ pub(crate) async fn ready_test_replica(db: &Database) {
                 drained: true,
             },
             false,
-            CAPABILITIES,
+            automation_enabled,
         )
         .await
         .expect("test replica observation");
@@ -360,7 +396,7 @@ pub(crate) async fn ready_test_replica(db: &Database) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            observe_with_capabilities(
+            observe_with_automation(
                 &db,
                 &ReplicaIdentity {
                     instance_name: "test-backend".into(),
@@ -372,7 +408,7 @@ pub(crate) async fn ready_test_replica(db: &Database) {
                     drained: true,
                 },
                 false,
-                CAPABILITIES,
+                automation_enabled,
             )
             .await
             .expect("test replica heartbeat");

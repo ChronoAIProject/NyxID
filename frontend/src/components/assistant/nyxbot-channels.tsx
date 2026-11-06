@@ -6,7 +6,7 @@ import {
   GroupedDisclosure,
   GroupedInput,
 } from "@/components/ui/grouped-list";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ExternalLink } from "lucide-react";
 import { GroupedDetail } from "@/components/ui/grouped-detail";
 import { Button } from "@/components/ui/button";
@@ -98,11 +98,23 @@ function AgentSelect({
 export function ChannelBotsManager({
   agents,
   agent,
+  connectionId,
 }: {
   readonly agents: readonly AssistantAgent[];
   readonly agent?: AssistantAgent;
+  readonly connectionId?: string;
 }) {
   const channels = useNyxBotChannels();
+  const focusedConnection = useRef<HTMLLIElement | null>(null);
+  const [connectedOrg, setConnectedOrg] = useState<string>();
+  const hasRequestedConnection = channels.data?.some((row) => row.id === connectionId) ?? false;
+  useEffect(() => {
+    if (connectionId && focusedConnection.current) {
+      const target = focusedConnection.current.querySelector<HTMLElement>("[data-member-verification]") ?? focusedConnection.current;
+      target.scrollIntoView?.({ block: "start" });
+      target.focus({ preventScroll: true });
+    }
+  }, [connectionId, hasRequestedConnection]);
   // The user's bots and those of the organizations they administer.
   const bots = useChannelBots({ scope: "all" });
   const orgs = useOrgs();
@@ -171,8 +183,14 @@ export function ChannelBotsManager({
 
   async function requestLink(botId: string, agentId: string | undefined) {
     setError(undefined);
+    setConnectedOrg(undefined);
     try {
       const result = await connect.mutateAsync({ botId, agentId });
+      if (result.channel_agent.org_specialist) {
+        setOwnerLink(undefined);
+        if (result.channel_agent.status === "active") setConnectedOrg(result.channel_agent.bot_label);
+        setAvailableOpen(false);
+      }
       if (!result.channel_agent.org_specialist)
         setOwnerLink({
           botId,
@@ -206,6 +224,7 @@ export function ChannelBotsManager({
 
   async function remove(row: NyxAgentChannelAgent) {
     setError(undefined);
+    setConnectedOrg(undefined);
     try {
       await disconnect.mutateAsync(row.id);
       setConfirming(undefined);
@@ -242,6 +261,10 @@ export function ChannelBotsManager({
           </GroupedRow>
         </GroupedList>
       ) : null}
+      {connectedOrg ? <p role="status" className="type-secondary text-text-secondary">
+        {connectedOrg} is connected to the organization specialist. Each member, including admins, must verify their own chat account below before using member permissions. Connecting the bot does not verify anyone.
+      </p> : null}
+      {connectionId && channels.data && !connected.some((row) => row.id === connectionId) ? <p role="status" className="type-secondary text-text-secondary">This connection is no longer available to you. Refresh connected bots or ask an organization admin.</p> : null}
       {connected.length ? (
         <ul aria-label="Connected channel bots" className="space-y-6">
           {connected.map((row) => {
@@ -256,7 +279,7 @@ export function ChannelBotsManager({
                 : a.owner_kind !== "org",
             );
             return (
-              <li key={row.id}>
+              <li key={row.id} ref={row.id === connectionId ? focusedConnection : undefined} tabIndex={-1} aria-label={`${row.bot_label} connection`} className="scroll-mt-4 focus-visible:outline focus-visible:outline-ring">
                 <GroupedList
                   title="Connected bot"
                   footer={

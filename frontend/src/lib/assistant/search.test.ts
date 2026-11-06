@@ -167,3 +167,12 @@ it("accepts UUID card links while preserving the other search fields", () => {
     expect(parseAssistantSearch({ card: invalid })).toEqual({});
   }
 });
+
+it("round-trips one connection only inside the agent Channels tab", async () => {
+  const connection = "11111111-1111-4111-8111-111111111111";
+  const router = buildAssistantRouter(`/assistant?agent=redqueen&details=channels&connection=${connection}`);
+  await router.load();
+  expect(parseAssistantSearch(router.state.location.search)).toEqual({ agent: "redqueen", details: "channels", connection });
+  expect(parseAssistantSearch({ details: "overview", connection }).connection).toBeUndefined();
+  expect(parseAssistantSearch({ details: "channels", connection: "invalid" }).connection).toBeUndefined();
+});
