@@ -240,6 +240,7 @@ impl AuthUser {
         let path = path.strip_prefix("/api/v1").unwrap_or(path);
         let execution_route = path.starts_with("/proxy")
             || path.starts_with("/llm/")
+            || path == "/monitoring/invocation-diagnostics"
             || matches!(path, "/mcp" | "/mcp/config")
             || path.starts_with("/oracle/pools/")
                 && (path.ends_with("/tasks")
@@ -4316,6 +4317,7 @@ mod tests {
         for path in [
             "/api/v1/proxy/service/path",
             "/api/v1/llm/provider",
+            "/api/v1/monitoring/invocation-diagnostics",
             "/api/v1/oracle/pools/pool/tasks",
             "/api/v1/approvals/exact-service/requests/request/redeem",
             "/api/v1/assistant-attachments/attachment/content",

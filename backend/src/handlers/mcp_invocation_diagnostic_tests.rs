@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::invocation_diagnostic_service::tests::{fixture, mount_healthy};
+use crate::services::invocation_diagnostic_service::tests::fixture;
 use crate::test_utils::set_test_approval_preference;
 use axum::body::to_bytes;
 use serde_json::{Value, json};
@@ -28,11 +28,8 @@ async fn invocation_diagnostic_direct_universal_and_agent_key_errors_preserve_or
             .await
             .unwrap();
         set_test_approval_preference(&state.db, &actor, false).await;
-        if !agent_key {
-            mount_healthy(&server, &id).await;
-        }
         let mut auth = McpAuthContext::user(
-            actor,
+            actor.clone(),
             if agent_key {
                 AuthMethod::ApiKey
             } else {
@@ -69,6 +66,7 @@ async fn invocation_diagnostic_direct_universal_and_agent_key_errors_preserve_or
             &state, &auth, None, &request, false, permit,
         ))
         .await;
+        assert_eq!(response.headers()["cache-control"], "no-store");
         let body: Value =
             serde_json::from_slice(&to_bytes(response.into_body(), 16384).await.unwrap()).unwrap();
         assert_eq!(body["result"]["isError"], true, "{body}");
@@ -83,27 +81,29 @@ async fn invocation_diagnostic_direct_universal_and_agent_key_errors_preserve_or
         let evidence: Value =
             serde_json::from_str(content.last().unwrap()["text"].as_str().unwrap()).unwrap();
         assert_eq!(
-            body["result"]["structuredContent"]["nyxid_service_diagnostic"],
-            evidence["nyxid_service_diagnostic"]
+            body["result"]["structuredContent"]["nyxid_invocation_diagnostic"],
+            evidence["nyxid_invocation_diagnostic"]
         );
-        assert_eq!(
-            evidence["nyxid_service_diagnostic"]["observation"],
-            if agent_key { "unknown" } else { "caller" },
-            "{body}"
-        );
-        if agent_key {
-            assert_eq!(
-                evidence["nyxid_service_diagnostic"]["outcome"],
-                "non_delegable"
-            );
-            assert!(server.received_requests().await.unwrap().is_empty());
-        } else {
-            assert_eq!(
-                evidence["nyxid_service_diagnostic"]["assessment"],
-                "operation_specific_likely"
-            );
-        }
+        let handle = evidence["nyxid_invocation_diagnostic"]["handle"]
+            .as_str()
+            .unwrap();
+        assert!(handle.starts_with("nyx_diag_"));
+        assert!(!handle.contains(&id));
+        assert_eq!(evidence["nyxid_invocation_diagnostic"]["expires_in"], 60);
+        let stored = state
+            .db
+            .collection::<crate::models::invocation_diagnostic::InvocationDiagnostic>(
+                crate::models::invocation_diagnostic::COLLECTION_NAME,
+            )
+            .find_one(doc! {"handle_hash":crate::crypto::token::hash_token(handle)})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.exact_user_service_id, id);
+        assert_eq!(stored.actor_user_id, actor);
+        assert!(server.received_requests().await.unwrap().is_empty());
         assert!(!body.to_string().contains("original-caller"));
         assert!(!body.to_string().contains("must_not_leak"));
+        assert!(!body.to_string().contains(&id));
     }
 }

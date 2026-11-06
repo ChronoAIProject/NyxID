@@ -96,6 +96,7 @@ fn local_denials_and_cancellation_do_not_probe() {
 use crate::{
     AppState,
     models::user::{User, UserType},
+    mw::auth::AuthMethod,
     test_utils::{
         connect_test_database, test_app_config, test_app_state_with_config, test_user,
         test_user_endpoint, test_user_service,
@@ -411,5 +412,415 @@ async fn flag_off_and_monitoring_service_aliases_do_not_recurse() {
         .await
         .is_none()
     );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn handle_redemption_probes_once_and_completed_result_is_retry_readable() {
+    let (state, actor, id, server) = fixture().await;
+    mount_healthy(&server, &id).await;
+    let issued = issue(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        &id,
+    )
+    .await
+    .unwrap();
+    assert!(!issued.handle.contains(&actor));
+    assert!(!issued.handle.contains(&id));
+
+    let first = redeem(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        true,
+        &[],
+        &issued.handle,
+        Some("original-caller"),
+    )
+    .await
+    .unwrap();
+    let RedeemResult::Completed {
+        diagnostic, fresh, ..
+    } = first
+    else {
+        panic!("first redemption must complete");
+    };
+    assert!(fresh);
+    assert_eq!(diagnostic.observation, Observation::Caller);
+    assert_eq!(diagnostic.assessment, Assessment::OperationSpecificLikely);
+
+    let second = redeem(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        true,
+        &[],
+        &issued.handle,
+        Some("original-caller"),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        second,
+        RedeemResult::Completed { fresh: false, .. }
+    ));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
+    let (state, actor, id, server) = fixture().await;
+    let client_bound = issue(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        Some("oauth-client-a"),
+        &id,
+    )
+    .await
+    .unwrap();
+    let error = redeem(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        Some("oauth-client-b"),
+        true,
+        &[],
+        &client_bound.handle,
+        Some("original-caller"),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::NotFound(_)));
+
+    let issued = issue(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::ApiKey,
+        Some("agent-key-id"),
+        None,
+        &id,
+    )
+    .await
+    .unwrap();
+
+    let stranger = uuid::Uuid::new_v4().to_string();
+    let error = redeem(
+        &state.db,
+        &state.config,
+        &stranger,
+        &AuthMethod::ApiKey,
+        Some("agent-key-id"),
+        None,
+        true,
+        &[],
+        &issued.handle,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::NotFound(_)));
+
+    let result = redeem(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::ApiKey,
+        Some("agent-key-id"),
+        None,
+        true,
+        &[],
+        &issued.handle,
+        None,
+    )
+    .await
+    .unwrap();
+    let RedeemResult::Completed { diagnostic, .. } = result else {
+        panic!("non-delegable result must complete without probing");
+    };
+    assert_eq!(diagnostic.outcome, Outcome::NonDelegable);
+    assert_eq!(diagnostic.observation, Observation::Unknown);
+    assert!(server.received_requests().await.unwrap().is_empty());
+
+    let expired = issue(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        &id,
+    )
+    .await
+    .unwrap();
+    state
+        .db
+        .collection::<mongodb::bson::Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {"handle_hash":crate::crypto::token::hash_token(&expired.handle)},
+            doc! {"$set":{"expires_at":mongodb::bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(1))}},
+        )
+        .await
+        .unwrap();
+    let error = redeem(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        true,
+        &[],
+        &expired.handle,
+        Some("original-caller"),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::NotFound(_)));
+}
+
+#[tokio::test]
+async fn running_claims_are_never_replayed() {
+    let (state, actor, id, server) = fixture().await;
+    let issued = issue(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        &id,
+    )
+    .await
+    .unwrap();
+    state
+        .db
+        .collection::<mongodb::bson::Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {"handle_hash":crate::crypto::token::hash_token(&issued.handle)},
+            doc! {"$set":{
+                "state":"running",
+                "claim_id":"dead-worker",
+                "claimed_at":mongodb::bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(30)),
+            }},
+        )
+        .await
+        .unwrap();
+    let result = redeem(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        true,
+        &[],
+        &issued.handle,
+        Some("original-caller"),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, RedeemResult::NotReady));
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn concurrent_redemptions_start_only_one_probe() {
+    let (state, actor, id, server) = fixture().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/monitoring/services/{id}/status")))
+        .and(header("authorization", "Bearer original-caller"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(150))
+                .set_body_json(status(&id, "healthy", true, "ok")),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/monitoring/services/{id}/probes")))
+        .and(header("authorization", "Bearer original-caller"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(status(&id, "healthy", true, "ok")))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let issued = issue(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        &id,
+    )
+    .await
+    .unwrap();
+
+    let first = redeem(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        true,
+        &[],
+        &issued.handle,
+        Some("original-caller"),
+    );
+    let second = redeem(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        true,
+        &[],
+        &issued.handle,
+        Some("original-caller"),
+    );
+    let (first, second) = tokio::join!(first, second);
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert!(
+        matches!(
+            (&first, &second),
+            (
+                RedeemResult::Completed { fresh: true, .. },
+                RedeemResult::NotReady
+            ) | (
+                RedeemResult::NotReady,
+                RedeemResult::Completed { fresh: true, .. }
+            )
+        ),
+        "one redemption must own the claim while the other observes it"
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn active_execution_capacity_keeps_the_handle_pending() {
+    let (state, actor, id, server) = fixture().await;
+    let catalog_id = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::user_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&id},
+            doc! {"$set":{"catalog_service_id":&catalog_id}},
+        )
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::service_concurrency::COLLECTION_NAME)
+        .insert_one(doc! {
+            "service_id":&catalog_id,
+            "person_id":&actor,
+            "leases":[{"expires_at":mongodb::bson::DateTime::from_chrono(
+                Utc::now() + chrono::Duration::seconds(5)
+            )}],
+        })
+        .await
+        .unwrap();
+    let issued = issue(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        &id,
+    )
+    .await
+    .unwrap();
+
+    let result = redeem(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        true,
+        &[],
+        &issued.handle,
+        Some("original-caller"),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, RedeemResult::NotReady));
+    let row = state
+        .db
+        .collection::<InvocationDiagnostic>(COLLECTION_NAME)
+        .find_one(doc! {"handle_hash":crate::crypto::token::hash_token(&issued.handle)})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.state, InvocationDiagnosticState::Pending);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn issuance_does_not_read_the_feature_flag_but_redemption_respects_it() {
+    let (state, actor, id, server) = fixture().await;
+    feature_flag_service::set_platform_override(
+        &state.db,
+        feature_flag_service::SERVICE_MONITORING_FLAG_KEY,
+        &feature_flag_service::FlagTarget::Global,
+        false,
+        &actor,
+    )
+    .await
+    .unwrap();
+    let issued = issue(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        &id,
+    )
+    .await
+    .unwrap();
+
+    let result = redeem(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        true,
+        &[],
+        &issued.handle,
+        Some("original-caller"),
+    )
+    .await
+    .unwrap();
+    let RedeemResult::Completed { diagnostic, .. } = result else {
+        panic!("disabled monitoring must complete without caller evidence");
+    };
+    assert_eq!(diagnostic.observation, Observation::Unknown);
+    assert_eq!(diagnostic.outcome, Outcome::Unavailable);
     assert!(server.received_requests().await.unwrap().is_empty());
 }

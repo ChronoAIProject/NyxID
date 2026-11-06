@@ -3,11 +3,16 @@
 use std::sync::{Arc, Mutex};
 
 use axum::{
+    Json,
     body::Body,
-    http::Request,
+    extract::State,
+    http::{
+        HeaderMap, HeaderValue, Request, StatusCode,
+        header::{CACHE_CONTROL, RETRY_AFTER},
+    },
     response::{IntoResponse, Response},
 };
-use tokio_util::sync::CancellationToken;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     AppState,
@@ -15,11 +20,14 @@ use crate::{
     mw::auth::{AuthMethod, AuthUser},
     services::{
         audit_service::{self, AuditActor},
-        invocation_diagnostic_service::{self as diagnostics, Diagnostic, Outcome},
-        proxy_service::{self, CallerToken},
+        invocation_diagnostic_service::{self as diagnostics, Diagnostic, Outcome, RedeemResult},
+        proxy_service,
     },
     telemetry::{TelemetryContext, TelemetryEvent, emit_event},
 };
+
+pub(crate) const HANDLE_HEADER: &str = "x-nyxid-diagnostic-handle";
+pub(crate) const EXPIRES_HEADER: &str = "x-nyxid-diagnostic-expires-in";
 
 /// Only populated with exact UserService IDs selected by the execution path.
 /// Pool attempts overwrite it, so only the final selected member is diagnosed.
@@ -44,38 +52,8 @@ impl Target {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct RequestContext {
-    pub cancellation: CancellationToken,
-    pub telemetry: TelemetryContext,
-}
-
-impl RequestContext {
-    pub(crate) fn from_request(request: &Request<Body>) -> Self {
-        Self {
-            cancellation: crate::downstream_disconnect::request_cancellation(request),
-            telemetry: request
-                .extensions()
-                .get::<TelemetryContext>()
-                .cloned()
-                .unwrap_or_else(|| TelemetryContext::from_request_headers(request.headers())),
-        }
-    }
-}
-
 pub(crate) struct HttpInvocation {
     target: Target,
-    token: Option<CallerToken>,
-    context: RequestContext,
-}
-
-#[derive(Clone, Copy)]
-struct RetainedServiceCapacity;
-
-pub(crate) fn suppress_for_retained_capacity(response: &mut Response) {
-    if response.status().is_client_error() || response.status().is_server_error() {
-        response.extensions_mut().insert(RetainedServiceCapacity);
-    }
 }
 
 impl HttpInvocation {
@@ -87,19 +65,21 @@ impl HttpInvocation {
         }
         let target = Target::default();
         request.extensions_mut().insert(target.clone());
-        Some(Self {
-            target,
-            token: proxy_service::caller_bearer_token_for_downstream(request.headers(), false),
-            context: RequestContext::from_request(request),
-        })
+        Some(Self { target })
     }
 
     pub(crate) async fn finish(
         invocation: Option<Self>,
         state: &AppState,
         auth: &AuthUser,
-        result: AppResult<Response>,
+        mut result: AppResult<Response>,
     ) -> AppResult<Response> {
+        if let Ok(response) = &mut result {
+            // These names are NyxID-owned. A downstream response must never be
+            // able to manufacture evidence that a client will redeem as ours.
+            response.headers_mut().remove(HANDLE_HEADER);
+            response.headers_mut().remove(EXPIRES_HEADER);
+        }
         let Some(invocation) = invocation else {
             return result;
         };
@@ -112,14 +92,6 @@ impl HttpInvocation {
         if !eligible {
             return result;
         }
-        if result.as_ref().is_ok_and(|response| {
-            response
-                .extensions()
-                .get::<RetainedServiceCapacity>()
-                .is_some()
-        }) {
-            return result;
-        }
         let id = invocation
             .target
             .0
@@ -127,41 +99,49 @@ impl HttpInvocation {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         let Some(id) = id else { return result };
-        let token = live_bearer(
-            &auth.auth_method,
-            auth.acting_client_id.as_deref(),
-            invocation.token.as_deref(),
-        );
-        // chrono-probe callbacks must not diagnose their own failed checks.
+        // chrono-probe callbacks must not create recursive diagnostics.
         if auth.acting_client_id.as_deref() == Some("chrono-probe") {
             return result;
         }
         let actor_id = auth.user_id.to_string();
-        let diagnostic = tokio::select! {
-            biased;
-            () = invocation.context.cancellation.cancelled() => None,
-            result = diagnostics::diagnose(&state.db, &state.config, &actor_id, &id, token) => result,
-        };
-        let Some(diagnostic) = diagnostic else {
-            return result;
-        };
-        observe(
-            state,
-            &AuditActor::from_auth_user(auth),
+        let issued = match diagnostics::issue(
+            &state.db,
+            &state.config,
+            &actor_id,
+            &auth.auth_method,
+            auth.api_key_id.as_deref(),
+            auth.acting_client_id
+                .as_deref()
+                .or(auth.oauth_client_id.as_deref()),
             &id,
-            &diagnostic,
-            &invocation.context.telemetry,
         )
-        .await;
+        .await
+        {
+            Ok(issued) => issued,
+            Err(crate::errors::AppError::MonitoringNotConfigured) => return result,
+            Err(error) => {
+                tracing::warn!(
+                    code = error.error_code(),
+                    "Invocation diagnostic handle was not issued"
+                );
+                return result;
+            }
+        };
         let mut response = match result {
             Ok(response) => response,
             Err(error) => error.into_response(),
         };
-        // Only fixed enum values. The downstream status/body/headers are kept.
-        // Never import a diagnostic header supplied by the downstream service.
+        response.headers_mut().insert(
+            HANDLE_HEADER,
+            HeaderValue::from_str(&issued.handle).expect("opaque ASCII handle"),
+        );
+        response.headers_mut().insert(
+            EXPIRES_HEADER,
+            HeaderValue::from_str(&issued.expires_in.to_string()).expect("integer header"),
+        );
         response
             .headers_mut()
-            .insert("x-nyxid-service-diagnostic", header_value(&diagnostic));
+            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
         Ok(response)
     }
 }
@@ -178,10 +158,103 @@ pub(crate) fn live_bearer<'a>(
     }
 }
 
-fn header_value(diagnostic: &Diagnostic) -> axum::http::HeaderValue {
-    // A fixed three-enum JSON projection, bounded to under 160 bytes.
-    axum::http::HeaderValue::from_str(&serde_json::to_string(diagnostic).expect("enum projection"))
-        .expect("ASCII enums")
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedeemRequest {
+    handle: String,
+}
+
+#[derive(Serialize)]
+struct RedeemResponse {
+    observation: diagnostics::Observation,
+    assessment: diagnostics::Assessment,
+    outcome: diagnostics::Outcome,
+}
+
+impl From<&Diagnostic> for RedeemResponse {
+    fn from(diagnostic: &Diagnostic) -> Self {
+        Self {
+            observation: diagnostic.observation,
+            assessment: diagnostic.assessment,
+            outcome: diagnostic.outcome,
+        }
+    }
+}
+
+pub async fn redeem(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    telemetry: TelemetryContext,
+    headers: HeaderMap,
+    Json(request): Json<RedeemRequest>,
+) -> AppResult<Response> {
+    if auth.ensure_llm_proxy_access().is_err() {
+        return Err(crate::errors::AppError::NotFound(
+            "Invocation diagnostic not found".into(),
+        ));
+    }
+    let actor_id = auth.user_id.to_string();
+    let supplied = proxy_service::caller_bearer_token_for_downstream(&headers, false);
+    let caller_token = live_bearer(
+        &auth.auth_method,
+        auth.acting_client_id.as_deref(),
+        supplied.as_deref(),
+    );
+    match diagnostics::redeem(
+        &state.db,
+        &state.config,
+        &actor_id,
+        &auth.auth_method,
+        auth.api_key_id.as_deref(),
+        auth.acting_client_id
+            .as_deref()
+            .or(auth.oauth_client_id.as_deref()),
+        auth.allow_all_services,
+        &auth.allowed_service_ids,
+        &request.handle,
+        caller_token,
+    )
+    .await?
+    {
+        RedeemResult::Completed {
+            diagnostic,
+            exact_user_service_id,
+            fresh,
+        } => {
+            if fresh {
+                observe(
+                    &state,
+                    &AuditActor::from_auth_user(&auth),
+                    &exact_user_service_id,
+                    &diagnostic,
+                    &telemetry,
+                )
+                .await;
+            }
+            let mut response = Json(RedeemResponse::from(&diagnostic)).into_response();
+            response
+                .headers_mut()
+                .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            Ok(response)
+        }
+        RedeemResult::NotReady => {
+            let mut response = (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error":"diagnostic_not_ready",
+                    "message":"The failed invocation is still releasing capacity; retry this diagnostic once."
+                })),
+            )
+                .into_response();
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, HeaderValue::from_static("1"));
+            response
+                .headers_mut()
+                .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            Ok(response)
+        }
+    }
 }
 
 pub(crate) async fn observe(
@@ -262,27 +335,6 @@ mod tests {
                 Some("secret")
             )
             .is_none()
-        );
-    }
-
-    #[test]
-    fn retained_capacity_suppresses_only_failed_responses() {
-        let mut failed = Response::builder().status(503).body(Body::empty()).unwrap();
-        suppress_for_retained_capacity(&mut failed);
-        assert!(
-            failed
-                .extensions()
-                .get::<RetainedServiceCapacity>()
-                .is_some()
-        );
-
-        let mut succeeded = Response::new(Body::empty());
-        suppress_for_retained_capacity(&mut succeeded);
-        assert!(
-            succeeded
-                .extensions()
-                .get::<RetainedServiceCapacity>()
-                .is_none()
         );
     }
 }

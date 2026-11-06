@@ -2001,9 +2001,11 @@ fn private_cors(allowed_origins: std::collections::HashSet<axum::http::HeaderVal
             "DNT".parse().unwrap(),
             "X-NyxID-Account-Deletion-Policy".parse().unwrap(),
         ]))
-        .expose_headers([axum::http::HeaderName::from_static(
-            mw::assistant_trace::TRACE_HEADER,
-        )])
+        .expose_headers([
+            axum::http::HeaderName::from_static(mw::assistant_trace::TRACE_HEADER),
+            axum::http::HeaderName::from_static(handlers::invocation_diagnostics::HANDLE_HEADER),
+            axum::http::HeaderName::from_static(handlers::invocation_diagnostics::EXPIRES_HEADER),
+        ])
         .allow_credentials(true)
 }
 
@@ -2351,6 +2353,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn private_cors_exposes_invocation_diagnostic_headers() {
+        use tower::ServiceExt;
+
+        let origin = "https://app.example";
+        let app = axum::Router::new()
+            .route("/test", axum::routing::get(|| async { "ok" }))
+            .layer(private_cors(std::collections::HashSet::from([origin
+                .parse()
+                .unwrap()])));
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/test")
+                    .header("Origin", origin)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let exposed = response
+            .headers()
+            .get("access-control-expose-headers")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(exposed.contains(handlers::invocation_diagnostics::HANDLE_HEADER));
+        assert!(exposed.contains(handlers::invocation_diagnostics::EXPIRES_HEADER));
     }
 
     fn enc_hex(byte: u8) -> String {

@@ -3876,7 +3876,7 @@ fn execute_resolved_proxy<'a>(
                     None => execution.await?,
                 }
             };
-            let mut response = match assistant_decision {
+            let response = match assistant_decision {
                 Some(decision) => {
                     decision
                         .finish_http(
@@ -3891,10 +3891,7 @@ fn execute_resolved_proxy<'a>(
                 None => response,
             };
             match lease {
-                Some(lease) => {
-                    super::invocation_diagnostics::suppress_for_retained_capacity(&mut response);
-                    Ok(lease.hold_response(response))
-                }
+                Some(lease) => Ok(lease.hold_response(response)),
                 None => Ok(response),
             }
         }

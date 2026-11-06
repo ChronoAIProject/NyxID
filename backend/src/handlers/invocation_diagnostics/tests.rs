@@ -3,7 +3,7 @@ use crate::{
     errors::AppError,
     services::{
         billing::{BillingIngress, route_inventory::BillingRoutePolicy},
-        invocation_diagnostic_service::tests::{fixture, mount_healthy},
+        invocation_diagnostic_service::tests::fixture,
     },
     test_utils::{set_test_approval_preference, test_auth_user},
 };
@@ -38,7 +38,6 @@ fn request() -> Request<Body> {
 async fn invocation_diagnostic_preserves_raw_errors_and_authoritative_broker_errors() {
     for code in [401, 403, 404, 503, 504] {
         let (state, actor, id, server) = fixture().await;
-        mount_healthy(&server, &id).await;
         let mut request = request();
         let invocation = HttpInvocation::start(&state, &mut request);
         Target::record_request(&request, Some(&id));
@@ -46,6 +45,7 @@ async fn invocation_diagnostic_preserves_raw_errors_and_authoritative_broker_err
             .status(code)
             .header("content-type", "application/problem+json")
             .header("retry-after", "7")
+            .header(HANDLE_HEADER, "downstream-spoof")
             .body(Body::from("byte-identical original body"))
             .unwrap();
         let response = HttpInvocation::finish(invocation, &state, &auth(&actor), Ok(original))
@@ -57,20 +57,33 @@ async fn invocation_diagnostic_preserves_raw_errors_and_authoritative_broker_err
             response.headers()["content-type"],
             "application/problem+json"
         );
-        let evidence: Value = serde_json::from_str(
-            response.headers()["x-nyxid-service-diagnostic"]
-                .to_str()
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(evidence["assessment"], "operation_specific_likely");
+        let handle = response.headers()[HANDLE_HEADER]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(handle.starts_with("nyx_diag_"));
+        assert_ne!(handle, "downstream-spoof");
+        assert!(!handle.contains(&id));
+        assert_eq!(response.headers()[EXPIRES_HEADER], "60");
+        assert_eq!(response.headers()["cache-control"], "no-store");
         assert_eq!(
             to_bytes(response.into_body(), 4096).await.unwrap(),
             "byte-identical original body"
         );
+        let row = state
+            .db
+            .collection::<crate::models::invocation_diagnostic::InvocationDiagnostic>(
+                crate::models::invocation_diagnostic::COLLECTION_NAME,
+            )
+            .find_one(doc! {"handle_hash":crate::crypto::token::hash_token(&handle)})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.exact_user_service_id, id);
+        assert_eq!(row.actor_user_id, actor);
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
     let (state, actor, id, server) = fixture().await;
-    mount_healthy(&server, &id).await;
     let mut request = request();
     let invocation = HttpInvocation::start(&state, &mut request);
     Target::record_request(&request, Some(&id));
@@ -83,12 +96,14 @@ async fn invocation_diagnostic_preserves_raw_errors_and_authoritative_broker_err
     .await
     .unwrap();
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert!(response.headers().contains_key(HANDLE_HEADER));
     let body: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
     assert_eq!(
         body,
         serde_json::to_value(AppError::NodeProxyTimeout.response_body()).unwrap()
     );
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -104,12 +119,13 @@ async fn invocation_diagnostic_success_denial_cancel_and_probe_callbacks_do_not_
         Target::record_request(&request, Some(&id));
         let mut auth = auth(&actor);
         let original = match kind {
-            "success" => Ok(Response::new(Body::from("ok"))),
+            "success" => Ok(Response::builder()
+                .header(HANDLE_HEADER, "downstream-spoof")
+                .header(EXPIRES_HEADER, "999")
+                .body(Body::from("ok"))
+                .unwrap()),
             "denied" => Err(AppError::Forbidden("local denial".into())),
-            "cancelled" => {
-                invocation.context.cancellation.cancel();
-                Err(AppError::NodeProxyTimeout)
-            }
+            "cancelled" => Err(AppError::ClientDisconnected),
             _ => {
                 auth.acting_client_id = Some("chrono-probe".into());
                 Err(AppError::NodeProxyTimeout)
@@ -117,7 +133,9 @@ async fn invocation_diagnostic_success_denial_cancel_and_probe_callbacks_do_not_
         };
         let response = HttpInvocation::finish(Some(invocation), &state, &auth, original).await;
         if kind == "success" {
-            assert!(response.is_ok());
+            let response = response.unwrap();
+            assert!(!response.headers().contains_key(HANDLE_HEADER));
+            assert!(!response.headers().contains_key(EXPIRES_HEADER));
         } else {
             assert!(response.is_err());
         }
@@ -126,50 +144,62 @@ async fn invocation_diagnostic_success_denial_cancel_and_probe_callbacks_do_not_
 }
 
 #[tokio::test]
-async fn invocation_diagnostic_disconnect_aborts_in_flight_http_work() {
+async fn invocation_diagnostic_failure_returns_without_running_probe() {
     let (state, actor, id, server) = fixture().await;
-    Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(2)))
-        .expect(1)
-        .mount(&server)
-        .await;
     let mut request = request();
     let invocation = HttpInvocation::start(&state, &mut request).unwrap();
     Target::record_request(&request, Some(&id));
-    let cancellation = invocation.context.cancellation.clone();
     let original = Response::builder()
         .status(403)
         .body(Body::from("original operation error"))
         .unwrap();
     let auth = auth(&actor);
-    let finished = HttpInvocation::finish(Some(invocation), &state, &auth, Ok(original));
-    let disconnect = async {
-        tokio::time::timeout(std::time::Duration::from_millis(700), async {
-            loop {
-                if !server.received_requests().await.unwrap().is_empty() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("diagnostic HTTP request must start before disconnect");
-        cancellation.cancel();
-    };
     let started = std::time::Instant::now();
-    let (result, ()) = tokio::join!(finished, disconnect);
-    assert!(started.elapsed() < std::time::Duration::from_secs(3));
-    let response = result.unwrap();
+    let response = HttpInvocation::finish(Some(invocation), &state, &auth, Ok(original))
+        .await
+        .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert!(
-        !response
-            .headers()
-            .contains_key("x-nyxid-service-diagnostic")
-    );
+    assert!(response.headers().contains_key(HANDLE_HEADER));
     assert_eq!(
         to_bytes(response.into_body(), 4096).await.unwrap(),
         "original operation error"
     );
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn redemption_rechecks_current_execution_scope_before_handle_lookup() {
+    let (state, actor, id, server) = fixture().await;
+    let issued = crate::services::invocation_diagnostic_service::issue(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        &id,
+    )
+    .await
+    .unwrap();
+    let mut restricted = auth(&actor);
+    restricted.scope = "account:read".into();
+    let error = redeem(
+        State(state.clone()),
+        restricted,
+        TelemetryContext::default(),
+        HeaderMap::from_iter([(
+            axum::http::header::AUTHORIZATION,
+            "Bearer narrower-caller".parse().unwrap(),
+        )]),
+        Json(RedeemRequest {
+            handle: issued.handle,
+        }),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::NotFound(_)));
+    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -190,7 +220,6 @@ async fn invocation_diagnostic_rest_proxy_uses_the_actual_selected_instance() {
             .await
             .unwrap();
         set_test_approval_preference(&state.db, &actor, false).await;
-        mount_healthy(&server, &id).await;
         let mut request = request();
         *request.uri_mut() = format!("/api/v1/proxy/s/same-slug/invalid-operation?_nyxid_via={id}")
             .parse()
@@ -199,7 +228,7 @@ async fn invocation_diagnostic_rest_proxy_uses_the_actual_selected_instance() {
             .extensions_mut()
             .insert(BillingRoutePolicy::Metered(BillingIngress::Proxy));
         let response = Box::pin(super::super::proxy::proxy_request_by_slug(
-            State(state),
+            State(state.clone()),
             auth(&actor),
             TelemetryContext::default(),
             Path(("same-slug".into(), "invalid-operation".into())),
@@ -208,15 +237,25 @@ async fn invocation_diagnostic_rest_proxy_uses_the_actual_selected_instance() {
         .await
         .unwrap();
         assert_eq!(response.status().as_u16(), code);
-        assert!(
-            response
-                .headers()
-                .contains_key("x-nyxid-service-diagnostic")
-        );
+        assert!(response.headers().contains_key(HANDLE_HEADER));
         assert_eq!(
             to_bytes(response.into_body(), 4096).await.unwrap(),
             "original operation error"
         );
+        let rows = state
+            .db
+            .collection::<crate::models::invocation_diagnostic::InvocationDiagnostic>(
+                crate::models::invocation_diagnostic::COLLECTION_NAME,
+            );
+        assert_eq!(
+            rows.find_one(doc! {"exact_user_service_id":&id})
+                .await
+                .unwrap()
+                .unwrap()
+                .exact_user_service_id,
+            id
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }
 
@@ -281,7 +320,6 @@ async fn invocation_diagnostic_llm_entries_keep_downstream_errors() {
             .await
             .unwrap();
         set_test_approval_preference(&state.db, &actor, false).await;
-        mount_healthy(&server, &id).await;
         let body = json!({"model":"gpt-4.1"}).to_string();
         let mut request = Request::builder()
             .method("GET")
@@ -316,12 +354,9 @@ async fn invocation_diagnostic_llm_entries_keep_downstream_errors() {
         }
         .unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        assert!(
-            response
-                .headers()
-                .contains_key("x-nyxid-service-diagnostic")
-        );
+        assert!(response.headers().contains_key(HANDLE_HEADER));
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         assert!(String::from_utf8_lossy(&body).contains("original operation permission error"));
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }

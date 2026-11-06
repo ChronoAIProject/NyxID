@@ -5,14 +5,23 @@ use std::{
 };
 
 use chrono::Utc;
-use mongodb::{Database, bson::doc};
-use serde::Serialize;
+use mongodb::{
+    Database,
+    bson::{self, doc},
+    options::ReturnDocument,
+};
+use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::{
     config::AppConfig,
     errors::{AppError, AppResult},
-    models::{user_endpoint::UserEndpoint, user_service::UserService},
+    models::{
+        invocation_diagnostic::{COLLECTION_NAME, InvocationDiagnostic, InvocationDiagnosticState},
+        user_endpoint::UserEndpoint,
+        user_service::UserService,
+    },
+    mw::auth::AuthMethod,
     services::{
         coordination_service::TokenBucketStore,
         feature_flag_service,
@@ -26,16 +35,19 @@ use crate::{
 /// The probe path includes caller authorization and one live downstream check.
 /// Keep it bounded, but allow a normal remote provider round trip to finish.
 pub(crate) const BUDGET: Duration = Duration::from_secs(3);
+pub(crate) const HANDLE_TTL_SECS: i64 = 60;
+pub(crate) const ISSUE_BUDGET: Duration = Duration::from_millis(250);
+const HANDLE_PREFIX: &str = "nyx_diag_";
 static IN_FLIGHT: Semaphore = Semaphore::const_new(32);
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Observation {
     Caller,
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Assessment {
     OperationSpecificLikely,
@@ -47,7 +59,7 @@ pub enum Assessment {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     Completed,
@@ -58,13 +70,305 @@ pub enum Outcome {
     Unavailable,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Diagnostic {
-    #[serde(skip)]
+    #[serde(skip, default)]
     pub(crate) attempted: bool,
     pub observation: Observation,
     pub assessment: Assessment,
     pub outcome: Outcome,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct IssuedHandle {
+    pub handle: String,
+    pub expires_in: i64,
+}
+
+impl IssuedHandle {
+    pub(crate) fn content(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "text",
+            "text": serde_json::json!({
+                "nyxid_invocation_diagnostic": self,
+                "instruction": "Optional secondary evidence. Redeem this handle once with the current NyxID identity. Preserve the original error and do not retry the failed operation automatically."
+            }).to_string()
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum RedeemResult {
+    Completed {
+        diagnostic: Diagnostic,
+        exact_user_service_id: String,
+        fresh: bool,
+    },
+    NotReady,
+}
+
+fn auth_method_name(method: &AuthMethod) -> &'static str {
+    match method {
+        AuthMethod::Session => "session",
+        AuthMethod::AccessToken => "access_token",
+        AuthMethod::Relay => "relay",
+        AuthMethod::ApiKey => "api_key",
+        AuthMethod::ServiceAccount => "service_account",
+        AuthMethod::Delegated => "delegated",
+    }
+}
+
+pub(crate) async fn issue(
+    db: &Database,
+    config: &AppConfig,
+    actor_id: &str,
+    auth_method: &AuthMethod,
+    api_key_id: Option<&str>,
+    client_id: Option<&str>,
+    exact_user_service_id: &str,
+) -> AppResult<IssuedHandle> {
+    monitoring_service::configured_base_url(config)?;
+    let raw = format!(
+        "{HANDLE_PREFIX}{}",
+        crate::crypto::token::generate_random_token()
+    );
+    let now = Utc::now();
+    let row = InvocationDiagnostic {
+        id: uuid::Uuid::new_v4().to_string(),
+        handle_hash: crate::crypto::token::hash_token(&raw),
+        actor_user_id: actor_id.to_owned(),
+        original_auth_method: auth_method_name(auth_method).to_owned(),
+        original_api_key_id: api_key_id.map(str::to_owned),
+        original_client_id: client_id.map(str::to_owned),
+        exact_user_service_id: exact_user_service_id.to_owned(),
+        state: InvocationDiagnosticState::Pending,
+        diagnostic: None,
+        claim_id: None,
+        claimed_at: None,
+        completed_at: None,
+        created_at: now,
+        expires_at: now + chrono::Duration::seconds(HANDLE_TTL_SECS),
+    };
+    tokio::time::timeout(
+        ISSUE_BUDGET,
+        db.collection::<InvocationDiagnostic>(COLLECTION_NAME)
+            .insert_one(row),
+    )
+    .await
+    .map_err(|_| AppError::MonitoringUnavailable)??;
+    Ok(IssuedHandle {
+        handle: raw,
+        expires_in: HANDLE_TTL_SECS,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn redeem(
+    db: &Database,
+    config: &AppConfig,
+    actor_id: &str,
+    auth_method: &AuthMethod,
+    api_key_id: Option<&str>,
+    client_id: Option<&str>,
+    allow_all_services: bool,
+    allowed_service_ids: &[String],
+    handle: &str,
+    caller_token: Option<&str>,
+) -> AppResult<RedeemResult> {
+    if !valid_handle(handle) {
+        return Err(not_found());
+    }
+    let rows = db.collection::<InvocationDiagnostic>(COLLECTION_NAME);
+    let identity = identity_filter(actor_id, auth_method, api_key_id, client_id, handle);
+    let Some(row) = rows.find_one(identity.clone()).await? else {
+        return Err(not_found());
+    };
+    if row.expires_at <= Utc::now() {
+        return Err(not_found());
+    }
+    if !allow_all_services && !allowed_service_ids.contains(&row.exact_user_service_id) {
+        return Err(not_found());
+    }
+    let Some(service) = authorized_service(db, actor_id, &row.exact_user_service_id).await? else {
+        return Err(not_found());
+    };
+    if let Some(result) = completed(&row)? {
+        return Ok(RedeemResult::Completed {
+            diagnostic: result,
+            exact_user_service_id: row.exact_user_service_id,
+            fresh: false,
+        });
+    }
+
+    let delegable = matches!(auth_method, AuthMethod::AccessToken)
+        && client_id != Some("chrono-probe")
+        && caller_token.is_some();
+    if delegable && has_active_capacity(db, actor_id, &service).await? {
+        return Ok(RedeemResult::NotReady);
+    }
+
+    let claim_id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now();
+    let mut claim_filter = identity;
+    claim_filter.insert("state", "pending");
+    let claimed = rows
+        .find_one_and_update(
+            claim_filter,
+            doc! {"$set":{
+                "state":"running",
+                "claim_id":&claim_id,
+                "claimed_at":bson::DateTime::from_chrono(now),
+            }},
+        )
+        .return_document(ReturnDocument::After)
+        .await?;
+    let Some(claimed) = claimed else {
+        let Some(current) = rows
+            .find_one(identity_filter(
+                actor_id,
+                auth_method,
+                api_key_id,
+                client_id,
+                handle,
+            ))
+            .await?
+        else {
+            return Err(not_found());
+        };
+        if let Some(result) = completed(&current)? {
+            return Ok(RedeemResult::Completed {
+                diagnostic: result,
+                exact_user_service_id: current.exact_user_service_id,
+                fresh: false,
+            });
+        }
+        return Ok(RedeemResult::NotReady);
+    };
+
+    let diagnostic = if delegable {
+        diagnose(
+            db,
+            config,
+            actor_id,
+            &claimed.exact_user_service_id,
+            caller_token,
+        )
+        .await
+        .unwrap_or_else(|| Diagnostic::unknown(Outcome::Unavailable))
+    } else {
+        Diagnostic::unknown(Outcome::NonDelegable)
+    };
+    let encoded =
+        bson::to_document(&diagnostic).map_err(|error| AppError::Internal(error.to_string()))?;
+    let completed_at = Utc::now();
+    let update = rows
+        .update_one(
+            doc! {"_id":&claimed.id,"state":"running","claim_id":&claim_id},
+            doc! {"$set":{
+                "state":"completed",
+                "diagnostic":encoded,
+                "completed_at":bson::DateTime::from_chrono(completed_at),
+                "claim_id":bson::Bson::Null,
+            }},
+        )
+        .await?;
+    if update.matched_count == 0 {
+        return Ok(RedeemResult::NotReady);
+    }
+    Ok(RedeemResult::Completed {
+        diagnostic,
+        exact_user_service_id: claimed.exact_user_service_id,
+        fresh: true,
+    })
+}
+
+fn valid_handle(handle: &str) -> bool {
+    handle.len() == HANDLE_PREFIX.len() + 64
+        && handle.starts_with(HANDLE_PREFIX)
+        && handle[HANDLE_PREFIX.len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn identity_filter(
+    actor_id: &str,
+    auth_method: &AuthMethod,
+    api_key_id: Option<&str>,
+    client_id: Option<&str>,
+    handle: &str,
+) -> bson::Document {
+    doc! {
+        "handle_hash":crate::crypto::token::hash_token(handle),
+        "actor_user_id":actor_id,
+        "original_auth_method":auth_method_name(auth_method),
+        "original_api_key_id":api_key_id,
+        "original_client_id":client_id,
+        "expires_at":{"$gt":bson::DateTime::now()},
+    }
+}
+
+fn completed(row: &InvocationDiagnostic) -> AppResult<Option<Diagnostic>> {
+    if row.state != InvocationDiagnosticState::Completed {
+        return Ok(None);
+    }
+    let document = row
+        .diagnostic
+        .clone()
+        .ok_or_else(|| AppError::Internal("Completed diagnostic is missing its result".into()))?;
+    bson::from_document(document)
+        .map(Some)
+        .map_err(|error| AppError::Internal(error.to_string()))
+}
+
+fn not_found() -> AppError {
+    AppError::NotFound("Invocation diagnostic not found".into())
+}
+
+async fn authorized_service(
+    db: &Database,
+    actor_id: &str,
+    exact_id: &str,
+) -> AppResult<Option<UserService>> {
+    let Some(service) = super::service_history::collection::<UserService>(
+        db,
+        crate::models::user_service::COLLECTION_NAME,
+    )
+    .find_one(doc! {"_id":exact_id})
+    .await?
+    else {
+        return Ok(None);
+    };
+    if !service.is_active || service.deleted_at.is_some() || service.service_type != "http" {
+        return Ok(None);
+    }
+    let access = org_service::resolve_owner_access(db, actor_id, &service.user_id).await?;
+    let usable = match &access {
+        OwnerAccess::Direct | OwnerAccess::AsOrgAdmin { .. } => true,
+        OwnerAccess::AsOrgMember { role, .. } => {
+            user_service_service::role_can_proxy_service(*role, &service)
+        }
+        OwnerAccess::Forbidden => false,
+    };
+    Ok((usable && access.allows_resource(exact_id)).then_some(service))
+}
+
+async fn has_active_capacity(
+    db: &Database,
+    actor_id: &str,
+    service: &UserService,
+) -> AppResult<bool> {
+    let Some(catalog_service_id) = service.catalog_service_id.as_deref() else {
+        return Ok(false);
+    };
+    Ok(db
+        .collection::<bson::Document>(crate::models::service_concurrency::COLLECTION_NAME)
+        .find_one(doc! {
+            "service_id":catalog_service_id,
+            "person_id":actor_id,
+            "leases":{"$elemMatch":{"expires_at":{"$gt":bson::DateTime::now()}}},
+        })
+        .await?
+        .is_some())
 }
 
 impl Diagnostic {
@@ -75,16 +379,6 @@ impl Diagnostic {
             assessment: Assessment::Unknown,
             outcome,
         }
-    }
-
-    pub(crate) fn content(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "text",
-            "text": serde_json::json!({
-                "nyxid_service_diagnostic": self,
-                "interpretation": "Secondary health evidence only. The original invocation error remains authoritative. A healthy probe does not establish that the failed operation is valid or authorized; unknown provides no attribution."
-            }).to_string()
-        })
     }
 }
 
@@ -180,7 +474,7 @@ async fn diagnose_inner(
     else {
         return Ok(None);
     };
-    if !service.is_active || service.service_type != "http" {
+    if !service.is_active || service.deleted_at.is_some() || service.service_type != "http" {
         return Ok(None);
     }
     let access = org_service::resolve_owner_access(db, actor_id, &service.user_id).await?;
