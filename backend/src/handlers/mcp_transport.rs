@@ -6,7 +6,7 @@ pub(crate) mod async_operations;
 
 use axum::body::Body;
 use axum::extract::{Extension, State};
-use axum::http::{HeaderMap, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header::CACHE_CONTROL};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use mongodb::bson::doc;
@@ -277,6 +277,34 @@ fn content_result(
         id,
         serde_json::json!({ "content": content, "isError": is_error }),
     )
+}
+
+fn diagnosed_tool_result(
+    content: Vec<serde_json::Value>,
+    is_error: bool,
+    diagnostic: Option<&crate::services::invocation_diagnostic_service::IssuedHandle>,
+) -> serde_json::Value {
+    let mut result = serde_json::json!({"content":content,"isError":is_error});
+    if is_error && let Some(diagnostic) = diagnostic {
+        result["structuredContent"] = serde_json::json!({"nyxid_invocation_diagnostic":diagnostic});
+    }
+    result
+}
+
+fn content_result_with_diagnostic(
+    id: Option<serde_json::Value>,
+    content: Vec<serde_json::Value>,
+    is_error: bool,
+    diagnostic: Option<&crate::services::invocation_diagnostic_service::IssuedHandle>,
+) -> Response {
+    if !is_error || diagnostic.is_none() {
+        return content_result(id, content, is_error);
+    }
+    let mut response = rpc_success(id, diagnosed_tool_result(content, is_error, diagnostic));
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 fn classify_service_tool_response(
@@ -563,13 +591,20 @@ fn content_result_with_notifications(
     is_error: bool,
     notifications: Vec<serde_json::Value>,
 ) -> Response {
+    content_result_with_notifications_and_diagnostic(id, content, is_error, notifications, None)
+}
+
+fn content_result_with_notifications_and_diagnostic(
+    id: Option<serde_json::Value>,
+    content: Vec<serde_json::Value>,
+    is_error: bool,
+    notifications: Vec<serde_json::Value>,
+    diagnostic: Option<&crate::services::invocation_diagnostic_service::IssuedHandle>,
+) -> Response {
     let result = JsonRpcResponse {
         jsonrpc: JSONRPC_VERSION.into(),
         id,
-        result: Some(serde_json::json!({
-            "content": content,
-            "isError": is_error,
-        })),
+        result: Some(diagnosed_tool_result(content, is_error, diagnostic)),
         error: None,
     };
 
@@ -587,6 +622,11 @@ fn content_result_with_notifications(
 
     let digest = result_digest(result.result.as_ref().expect("tool result"));
     let mut response = Sse::new(tokio_stream::iter(events)).into_response();
+    if diagnostic.is_some() {
+        response
+            .headers_mut()
+            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     response.extensions_mut().insert(digest);
     response.extensions_mut().insert(if is_error {
         ToolOutcome::Error
@@ -1687,7 +1727,6 @@ pub async fn mcp_post(
         context.capture_idempotency(&headers);
         context.bind_cancellation(cancellation);
     }
-
     // Per-agent rate limit runs after auth, before any work. For OAuth/session
     // callers it is a no-op (no api_key_id / rps). This mirrors the REST proxy.
     if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
@@ -3549,6 +3588,7 @@ fn dispatch_service_tool<'a>(
         {
             tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
         }
+        let diagnostic = service_failure_handle(state, auth, service, &execution).await;
         let mut response = match execution {
             Ok(r) => r,
             Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
@@ -3562,10 +3602,10 @@ fn dispatch_service_tool<'a>(
             }
             Err(e) => {
                 tracing::warn!("Tool execution failed for {tool_name}: {e}");
-                return tool_result(
+                return tool_failure_with_diagnostic(
                     request.id.clone(),
                     &format!("Tool execution failed: {e}"),
-                    true,
+                    diagnostic.as_ref(),
                 );
             }
         };
@@ -3592,7 +3632,7 @@ fn dispatch_service_tool<'a>(
 
         let concurrency = response.concurrency.take();
         let is_policy_refusal = response.is_policy_refusal();
-        let (content, is_error, failure) = if is_policy_refusal {
+        let (mut content, is_error, failure) = if is_policy_refusal {
             if let (Some((row, output)), Some(chat)) = (&resource, auth.chat.as_ref())
                 && let Ok(refusal) = serde_json::from_str::<serde_json::Value>(&response.text)
                 && refusal["error"] == "acknowledgement_required"
@@ -3645,13 +3685,78 @@ fn dispatch_service_tool<'a>(
             )
             .await;
         }
-        let mut result = content_result(request.id.clone(), content, is_error);
+        if is_error && let Some(diagnostic) = &diagnostic {
+            content.push(diagnostic.content());
+        }
+        let mut result = content_result_with_diagnostic(
+            request.id.clone(),
+            content,
+            is_error,
+            diagnostic.as_ref(),
+        );
         classify_service_tool_response(&mut result, is_policy_refusal, failure);
         match concurrency {
             Some(lease) => lease.hold_response(result),
             None => result,
         }
     })
+}
+
+async fn service_failure_handle(
+    state: &AppState,
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    execution: &crate::errors::AppResult<mcp_service::ToolResponse>,
+) -> Option<crate::services::invocation_diagnostic_service::IssuedHandle> {
+    use crate::services::invocation_diagnostic_service as diagnostics;
+    let eligible = match execution {
+        Ok(response) => response.status >= 400 && !response.is_policy_refusal(),
+        Err(error) => diagnostics::eligible_error(error),
+    };
+    if !eligible || auth.acting_client_id.as_deref() == Some("chrono-probe") {
+        return None;
+    }
+    let mcp_service::McpToolSource::UserManaged {
+        user_service_id, ..
+    } = &service.source
+    else {
+        return None;
+    };
+    match diagnostics::issue(
+        &state.db,
+        &state.config,
+        &auth.user_id,
+        &auth.auth_method,
+        auth.api_key_id.as_deref(),
+        auth.acting_client_id
+            .as_deref()
+            .or(auth.oauth_client_id.as_deref()),
+        user_service_id,
+    )
+    .await
+    {
+        Ok(handle) => handle,
+        Err(crate::errors::AppError::MonitoringNotConfigured) => None,
+        Err(error) => {
+            tracing::warn!(
+                code = error.error_code(),
+                "Invocation diagnostic handle was not issued"
+            );
+            None
+        }
+    }
+}
+
+fn tool_failure_with_diagnostic(
+    id: Option<serde_json::Value>,
+    original_error: &str,
+    diagnostic: Option<&crate::services::invocation_diagnostic_service::IssuedHandle>,
+) -> Response {
+    let mut content = vec![serde_json::json!({"type":"text","text":original_error})];
+    if let Some(diagnostic) = diagnostic {
+        content.push(diagnostic.content());
+    }
+    content_result_with_diagnostic(id, content, true, diagnostic)
 }
 
 /// Build the execution context passed to `mcp_service::execute_tool` from
@@ -5180,6 +5285,7 @@ async fn handle_meta_call_tool(
     {
         tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
     }
+    let diagnostic = service_failure_handle(state, auth, service, &execution).await;
     let mut response = match execution {
         Ok(r) => r,
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
@@ -5193,7 +5299,11 @@ async fn handle_meta_call_tool(
         }
         Err(e) => {
             tracing::warn!("Tool execution failed for {tool_name}: {e}");
-            return tool_result(request_id, &format!("Tool execution failed: {e}"), true);
+            return tool_failure_with_diagnostic(
+                request_id,
+                &format!("Tool execution failed: {e}"),
+                diagnostic.as_ref(),
+            );
         }
     };
 
@@ -5220,7 +5330,7 @@ async fn handle_meta_call_tool(
 
     let concurrency = response.concurrency.take();
     let is_policy_refusal = response.is_policy_refusal();
-    let (content, is_error, failure) =
+    let (mut content, is_error, failure) =
         box_tool_future(|| service_tool_content(state, auth, tool_name, response, result_query))
             .await;
     if !is_error
@@ -5241,9 +5351,12 @@ async fn handle_meta_call_tool(
         .await;
     }
 
+    if is_error && let Some(diagnostic) = &diagnostic {
+        content.push(diagnostic.content());
+    }
     // Embed tools/list_changed inline for SSE-capable clients
     let mut result = if changed && client_accepts_sse {
-        content_result_with_notifications(
+        content_result_with_notifications_and_diagnostic(
             request_id,
             content,
             is_error,
@@ -5251,9 +5364,10 @@ async fn handle_meta_call_tool(
                 "jsonrpc": JSONRPC_VERSION,
                 "method": "notifications/tools/list_changed",
             })],
+            diagnostic.as_ref(),
         )
     } else {
-        content_result(request_id, content, is_error)
+        content_result_with_diagnostic(request_id, content, is_error, diagnostic.as_ref())
     };
     classify_service_tool_response(&mut result, is_policy_refusal, failure);
     match concurrency {
@@ -11989,3 +12103,7 @@ mod broad_enrollment_tests {
         state.db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_invocation_diagnostic_tests.rs"]
+mod invocation_diagnostic_tests;

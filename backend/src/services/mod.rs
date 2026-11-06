@@ -560,3 +560,4 @@ pub mod cma_session_origin;
 pub mod org_channel_service;
 
 pub mod generated_artifacts;
+pub(crate) mod invocation_diagnostic_service;

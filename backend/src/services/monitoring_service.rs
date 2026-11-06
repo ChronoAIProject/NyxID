@@ -95,6 +95,7 @@ pub enum Freshness {
 #[derive(Clone, Default, Deserialize, Serialize, ToSchema)]
 pub struct CheckResult {
     pub status: CheckStatus,
+    pub reachable: Option<bool>,
     pub configured: Option<bool>,
     #[serde(default)]
     pub source: Source,
@@ -229,6 +230,31 @@ pub struct Client {
 }
 
 impl Client {
+    /// Automatic diagnostics must use the original request credential. Never
+    /// mint a human/delegated replacement or use a monitoring system key here.
+    pub(crate) fn for_caller(
+        config: &AppConfig,
+        token: &str,
+        id: &str,
+        timeout: Duration,
+    ) -> AppResult<Self> {
+        let id = Uuid::parse_str(id)
+            .map_err(|_| AppError::MonitoringUnavailable)?
+            .to_string();
+        Ok(Self {
+            base: configured_base_url(config)?,
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .connect_timeout(timeout)
+                .timeout(timeout)
+                .build()
+                .map_err(|_| AppError::MonitoringUnavailable)?,
+            token: Zeroizing::new(token.to_owned()),
+            id,
+        })
+    }
+
     pub fn new(
         config: &AppConfig,
         keys: &JwtKeys,

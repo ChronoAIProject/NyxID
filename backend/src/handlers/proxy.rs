@@ -785,6 +785,7 @@ pub async fn proxy_request(
     // inner function threads `resolved_slug` through so we can attach a
     // real slug (never a UUID from the route path) even when the error
     // happens after service resolution. See docs/TELEMETRY.md §5.1.
+    let diagnostic = super::invocation_diagnostics::HttpInvocation::start(&state, &mut request);
     let started_at = std::time::Instant::now();
     let method = request.method().clone();
     request
@@ -835,7 +836,8 @@ pub async fn proxy_request(
         )
         .await;
     }
-    result
+    super::invocation_diagnostics::HttpInvocation::finish(diagnostic, &state, &auth_user, result)
+        .await
 }
 
 pub(crate) async fn proxy_request_inner(
@@ -1142,6 +1144,7 @@ pub async fn proxy_request_by_slug(
     // intentionally do NOT seed with the path-param slug: telemetry §5.1
     // requires a resolved slug or empty, and the path param is unvalidated
     // user input until resolution succeeds.
+    let diagnostic = super::invocation_diagnostics::HttpInvocation::start(&state, &mut request);
     let started_at = request
         .extensions()
         .get::<ProxyExchangeStartedAt>()
@@ -1193,7 +1196,8 @@ pub async fn proxy_request_by_slug(
         )
         .await;
     }
-    result
+    super::invocation_diagnostics::HttpInvocation::finish(diagnostic, &state, &auth_user, result)
+        .await
 }
 
 #[path = "service_pool_attempt.rs"]
@@ -1734,6 +1738,10 @@ async fn proxy_request_through_pool(
     let mut visited_tier = None;
     let mut tier_tick = 0;
     for index in 0..plan.max_attempts.min(plan.candidates.len()) {
+        // A pool retry may time out during resolution before the next member
+        // records its exact UserService. Do not let the previous member be
+        // diagnosed as the final failed selection.
+        super::invocation_diagnostics::Target::clear_extensions(&extensions);
         if pool_cancellation.is_cancelled() {
             return Err(AppError::ClientDisconnected);
         }
@@ -3231,6 +3239,12 @@ async fn execute_proxy_inner(
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
     crate::services::key_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
+    if let Some(pre) = &pre_resolved {
+        super::invocation_diagnostics::Target::record_request(
+            &request,
+            pre.user_service_id.as_deref(),
+        );
+    }
     // Poll resolution and forwarding sequentially so their debug frames never
     // stack, including when a machine request is nested in pool dispatch.
     let (resolved, extra_outbound_headers) = resolve_proxy_execution(
@@ -3244,6 +3258,10 @@ async fn execute_proxy_inner(
         extra_outbound_headers,
     )
     .await?;
+    super::invocation_diagnostics::Target::record_request(
+        &request,
+        resolved.resolved_user_service_id.as_deref(),
+    );
     execute_resolved_proxy(
         state,
         auth_user,
@@ -3951,6 +3969,10 @@ async fn execute_resolved_proxy_inner<'a>(
     >,
 ) -> AppResult<ProxyExecutionPhase<'a>> {
     let permission_ingress = request.extensions().get::<PermissionIngress>().cloned();
+    let invocation_diagnostic_target = request
+        .extensions()
+        .get::<super::invocation_diagnostics::Target>()
+        .cloned();
     let ornn_preflight = request
         .extensions()
         .get::<super::agent_skills::OrnnSkillPreflight>()
@@ -4758,6 +4780,9 @@ async fn execute_resolved_proxy_inner<'a>(
         .as_mut()
         .expect("service decision was just installed");
     if let Some(refusal) = assistant_decision.refusal.as_ref() {
+        if let Some(target) = &invocation_diagnostic_target {
+            target.record(None);
+        }
         request_audit.denied(axum::http::StatusCode::CONFLICT.as_u16());
         return Ok(ProxyExecutionPhase::Complete(
             (
@@ -5571,6 +5596,9 @@ async fn execute_resolved_proxy_inner<'a>(
                 let ws_upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
                     Ok(ws) => ws,
                     Err(rejection) => {
+                        if let Some(target) = &invocation_diagnostic_target {
+                            target.record(None);
+                        }
                         let response = rejection.into_response();
                         request_audit.denied(response.status().as_u16());
                         return observe_model_response(model_request, path, response).await;
