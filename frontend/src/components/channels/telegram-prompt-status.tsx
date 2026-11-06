@@ -2,12 +2,14 @@ import { ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { TelegramNewRequest } from "@/schemas/telegram-new";
 
-export function TelegramPromptStatus({ request, pending, recovering, onRecover, recoveryUrl, recoveryUnexpired }: {
+export function TelegramPromptStatus({ request, pending, recovering, onRecover, onRegenerate, regenerating, recoveryUrl, recoveryUnexpired }: {
   readonly request: TelegramNewRequest;
   readonly recoveryUnexpired: boolean;
   readonly pending: boolean;
   readonly recovering: boolean;
-  readonly onRecover: () => void;
+  readonly onRecover: (index?: number) => void;
+  readonly onRegenerate: () => void;
+  readonly regenerating: boolean;
   readonly recoveryUrl?: string;
 }) {
   const delivery = request.prompt_delivery;
@@ -36,10 +38,26 @@ export function TelegramPromptStatus({ request, pending, recovering, onRecover, 
       {request.can_open_creation_form && recoveryUnexpired && request.status === "waiting_bot" && (
         <>
           <p>Button missing? Open the same creation form for <strong className="break-words">{request.label}</strong>. Use the same Telegram account and check the NyxID destination shown in the setup chat.</p>
-          <Button type="button" variant="outline" disabled={pending} isLoading={recovering} onClick={onRecover}>
+          {request.username_suggestions && (
+            <div className="space-y-2 type-secondary" aria-label="Username suggestions">
+              <p>Suggested username: <code>{request.username_suggestions[0]}</code></p>
+              <p>Use 5–32 letters, digits or underscores, start with a letter, and end in bot. Usernames must be unique. Telegram checks availability when you create the bot; these suggestions have not been checked.</p>
+              <div className="flex flex-wrap gap-2">
+                {request.username_suggestions.slice(1).map((username, index) => (
+                  <Button key={username} type="button" variant="outline" disabled={pending} onClick={() => onRecover(index + 1)}>
+                    Use {username}
+                  </Button>
+                ))}
+                <Button type="button" variant="outline" disabled={pending} isLoading={regenerating} onClick={onRegenerate}>
+                  Regenerate username
+                </Button>
+              </div>
+            </div>
+          )}
+          <Button type="button" variant="outline" disabled={pending} isLoading={recovering} onClick={() => onRecover(0)}>
             Open creation form <ExternalLink className="size-3" aria-hidden="true" />
           </Button>
-          {recoveryUrl && <p>Form didn’t open? <a className="ph-no-capture underline" href={recoveryUrl} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">Open Telegram creation form</a></p>}
+          {recoveryUrl && <Button asChild variant="outline"><a className="ph-no-capture" href={recoveryUrl} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">Open Telegram creation form</a></Button>}
         </>
       )}
     </div>

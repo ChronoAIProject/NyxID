@@ -19,7 +19,7 @@ The manager sends ordinary setup instructions and the saved destination before a
 
 An instruction-send rejection remains retryable. After accepted instructions, keyboard failure or an uncertain response is acknowledged and recorded so Telegram does not repeatedly dispatch it. Duplicate webhook updates cannot replay a started keyboard; a new explicit `/start` can retry the same live request after the current attempt finishes or its current phase’s 45-second dispatch horizon passes. `attempted_at` records the current phase start: instructions and keyboard each renew it transactionally only while the exact claim is still live. Before sending, NyxID requires the full 20-second provider-call budget to fit inside that phase’s horizon; a slow write or commit cannot dispatch on an aged claim. This preserves the original sender, creation boundary, destination, revision and expiry. Database-only admission, phase and outcome transactions retry definite transient conflicts without replaying Telegram sends. A lost outcome write leaves delivery unconfirmed; no automatic send worker replays it. An explicit start for an expired setup receives an expiry reply. If the live setup context has closed, the reply directs the user to review the setup without authorizing a new destination.
 
-**Open creation form** opens Telegram's documented native `https://t.me/newbot/{manager}/{suggested_username}?name=...` form for the saved request after its private sender handoff. Use the same Telegram account and check the saved NyxID destination. The instruction message offers the same form link when eligible. This action creates no NyxID bot, assistant, request or route. It cannot authorize an expired, cancelled, terminal, unbound, legacy consent, Telegram-first claim, or platform-installation setup request. New website requests explicitly record standalone origin or the exact hosted link/watch provenance. Legacy rows without that origin keep their existing handoff but cannot use the new recovery. Hosted recovery refuses a deleted, replaced, expired or retargeted link, watch, specialist or source; it never chooses a replacement. Hidden group-member sources retain their original visible group return path.
+**Open creation form** opens Telegram's documented native `https://t.me/newbot/{manager}/{suggested_username}?name=...` form for the saved request after its private sender handoff. Use the same Telegram account and check the saved NyxID destination. The instruction message offers an explicit **Open creation form** button and two alternative usernames when eligible. This action creates no NyxID bot, assistant, request or route. It cannot authorize an expired, cancelled, terminal, unbound, legacy consent, Telegram-first claim, or platform-installation setup request. New website requests explicitly record standalone origin or the exact hosted link/watch provenance. Legacy rows without that origin keep their existing handoff but cannot use the new recovery. Hosted recovery refuses a deleted, replaced, expired or retargeted link, watch, specialist or source; it never chooses a replacement. Hidden group-member sources retain their original visible group return path.
 
 The provider form URL is not a revocable NyxID capability and carries neither the setup challenge nor a request ID. A copied URL may still open Telegram after NyxID expiry. The UI removes known-expired recovery actions and cached links, and server admission still requires fresh original private `managed_bot_created` proof, the already-bound sender, update/time/manager observation and live authority. `managed_bot`, username lookup, `/recover`, API acceptance and browser navigation do not substitute for creation proof. A person submitting multiple provider forms can create remote extra bots; NyxID consumes at most one bot per request. Direct-link event semantics and actual replies require the live verification gates below.
 
@@ -112,6 +112,8 @@ All request routes require a person session or ordinary person access token; API
 | POST | `/channel-bots/telegram-new` | Save `{label, target_org_id?, auto_connect?}` and return a Telegram launch URL; the website sends `auto_connect: true` |
 | GET | `/channel-bots/telegram-new/requests/{id}` | Read an actor-owned request with destination access |
 | POST | `/channel-bots/telegram-new/requests/{id}/launch` | Replace the start challenge and return a fresh link |
+| POST | `/channel-bots/telegram-new/requests/{id}/creation-link` | Issue the eligible saved request's primary creation URL and two username alternatives; empty body |
+| POST | `/channel-bots/telegram-new/requests/{id}/regenerate-username` | Refresh the saved request's cosmetic username suggestions without changing its creation context; empty body |
 | DELETE | `/channel-bots/telegram-new/requests/{id}` | Cancel before provisioning |
 | POST | `/channel-bots/telegram-new/claims/preview` | Preview `{code}` without mutation or Telegram API calls; return `{bot_username, expires_at}` |
 | POST | `/channel-bots/telegram-new/claims/redeem` | Redeem `{code, label, target_org_id?}`; return HTTP 202 with the saved safe request response |
@@ -539,3 +541,58 @@ Server diagnostics log one fixed reason code, request UUID, saved status and
 sender-match boolean per recovery reply; no challenges, tokens, content, labels
 or URLs are logged. Existing `config.same_base_url` callback checks continue to
 accept configured API aliases and reject unrelated hosts.
+
+
+## Username suggestions (#2239)
+
+Saved setups offer three usernames derived from the saved bot label using ASCII
+letters and digits, with separators normalized to underscores. Names without an
+ASCII stem use `nyx`; numeric stems get a `nyx_` prefix. Each suggestion appends a
+six-hex suffix and `_bot`, keeping the entire name within 5–32 characters and
+starting with a letter. The original Unicode bot name remains unchanged in the
+Telegram `name` parameter and native creation keyboard. No transliteration
+package is added.
+
+The initial suggestions are deterministic per request. **Regenerate username**
+changes only an optional cosmetic `username_seed`; it does not renew expiry,
+change the sender/start boundary, increment the authority revision, or replace
+the account, bot name, captured link/watch, or target agent. Both the manager
+message and eligible web setup offer two alternative usernames. Every native
+creation keyboard and generated form URL uses the same suggestion function.
+Telegram-first creation without a saved request gets a fresh neutral suggestion
+batch; its regeneration button cannot bypass a subsequently bound request or an
+opted-in platform-manager route.
+
+The manager's instruction message now has **Open creation form**, two **Use
+@username** URL buttons, and **Regenerate username**, alongside the existing
+separate native **Create bot** keyboard. Legacy/platform-bound flows retain their
+existing form-access restrictions; they can refresh suggestions without gaining
+a direct form recovery URL. Callback regeneration verifies the manager's original
+private message, matching sender/request, current cosmetic seed, live setup
+fences, and a five-per-minute sender/manager limit. Stale buttons only acknowledge;
+forwarded, quoted and mismatched controls cannot change or disclose a setup.
+
+`POST /api/v1/channel-bots/telegram-new/requests/{id}/regenerate-username` is a
+human-only, empty-body action using the existing shared five-per-minute mutation
+limit and private response headers. Its response is the existing request DTO
+with additive `username_suggestions` (three strings). The creation-link response
+adds three `{username, creation_url}` alternatives while retaining `creation_url`
+as the primary. Opening an alternative still uses the existing live issuance
+fences. The browser discards stale results after account/context/expiry or
+suggestion changes and clears cached form links on regeneration.
+
+The official Telegram Bot API documents `suggested_username` for
+`KeyboardButtonRequestManagedBot` but exposes no managed-bot username availability
+precheck. Suggestions are **not verified available**: Telegram checks uniqueness
+in its creation form. The UI states the format, uniqueness requirement and lack
+of a check. A short suffix reduces collisions but does not guarantee availability;
+users can select an alternative, regenerate, or edit the name in Telegram.
+
+Compatibility is additive: absent seeds derive initial suggestions from the
+request ID; older replicas ignore the cosmetic seed, and older clients ignore the
+new response fields. New clients accept responses without suggestions and keep
+the existing creation control. An old backend may still suggest its old name or
+not support regeneration; no authorization/identity format changes or writer
+drain are required for this cosmetic enhancement. Existing creation-authority
+rollout requirements above still apply. No setup secrets, usernames, labels or
+seed values are added to logs or audit.

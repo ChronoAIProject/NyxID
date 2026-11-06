@@ -31,6 +31,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 pub(crate) use prompt::PROMPT_HORIZON_SECS;
 pub use setup_status::SetupNotice;
 use setup_status::SetupReason;
+pub use usernames::{creation_suggestions, username_suggestions};
 
 pub struct TelegramNewService<'a> {
     pub manager_id: Option<i64>,
@@ -240,25 +241,6 @@ fn consent_message(request: &TelegramBotRequest) -> String {
         destination_html(request),
         account_details_html(request)
     )
-}
-
-fn suggested_bot_username(label: &str) -> String {
-    let mut stem = label
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("_")
-        .to_ascii_lowercase();
-    if stem.is_empty() {
-        stem.push_str("nyx");
-    } else if !stem.starts_with(|ch: char| ch.is_ascii_alphabetic()) {
-        stem.insert_str(0, "nyx_");
-    }
-    if stem.ends_with("bot") && (5..=32).contains(&stem.len()) {
-        return stem;
-    }
-    stem.truncate(28);
-    format!("{}_bot", stem.trim_end_matches('_'))
 }
 
 fn nonce() -> Zeroizing<String> {
@@ -624,6 +606,7 @@ impl TelegramNewService<'_> {
             active: true,
             revision: 0,
             previous_challenge_hashes: Vec::new(),
+            username_seed: None,
             challenge_hash: hash(&challenge),
             telegram_user_id: None,
             telegram_bot_id: None,
@@ -965,6 +948,16 @@ impl TelegramNewService<'_> {
             return Ok(None);
         }
         if let Some(callback) = update.get("callback_query") {
+            if callback["data"]
+                .as_str()
+                .is_some_and(|data| data.starts_with("tgname:"))
+            {
+                if let Some(update_id) = update["update_id"].as_i64().filter(|id| *id >= 0) {
+                    self.username_callback(manager_id, token, update_id, callback)
+                        .await?;
+                }
+                return Ok(None);
+            }
             return self
                 .consent_callback(manager_id, token, callback)
                 .await
@@ -1353,17 +1346,35 @@ impl TelegramNewService<'_> {
             None if self.manager_channel(manager_id).await?.is_some() => public_welcome().into(),
             None => "<b>Create your Telegram bot</b>\n\nTap <b>Create bot</b> and finish Telegram's name and username form. Then use the private claim code to choose an account in NyxID and connect your bot.\n\nAlready created a bot? Send /recover @YourBotUsername for a new claim code.".into(),
         };
+        let suggestions = request
+            .map(username_suggestions)
+            .unwrap_or_else(usernames::unbound_suggestions);
+        let mut choices = Vec::new();
+        if request.is_none() {
+            let (_, manager, _) = self.manager().await?;
+            for username in &suggestions {
+                choices.push((
+                    username.clone(),
+                    recovery::native_creation_url(&manager, "Nyx", username)?,
+                ));
+            }
+        }
+        let markup = request
+            .map(|r| usernames::username_keyboard(r, &choices))
+            .unwrap_or_else(|| usernames::choices_keyboard(&choices, "tgname:unbound"));
+        let text = format!("{text}{}", usernames::suggestions_message(&suggestions));
         self.api.call(token, "sendMessage", json!({
             "chat_id": user,
+            "reply_markup": markup,
             "text": format!("{text}\n\nIf no Create bot button appears, update Telegram to the latest version, then send /start to try again."),
             "parse_mode": "HTML",
             "link_preview_options": {"is_disabled": true},
         })).await?;
 
-        let mut creation = json!({"request_id": 1});
+        let mut creation = json!({"request_id": 1, "suggested_username": suggestions[0]});
         if let Some(request) = request {
             creation["suggested_name"] = json!(request.label.chars().take(64).collect::<String>());
-            creation["suggested_username"] = json!(suggested_bot_username(&request.label));
+            creation["suggested_username"] = json!(username_suggestions(request)[0]);
         }
         if let Err(error) = self.api.call(token, "sendMessage", json!({
             "chat_id": user,
@@ -1674,7 +1685,7 @@ pub fn bot_identity(value: &Value) -> Option<(i64, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{html_escape, setup_destination, suggested_bot_username};
+    use super::{html_escape, setup_destination};
 
     #[test]
     fn telegram_new_org_summary_identifies_the_initiator_and_escapes_display_names() {
@@ -1689,39 +1700,6 @@ mod tests {
         assert!(!summary.contains(&org.email));
         assert!(html_escape(&summary).contains("Support &lt;Team&gt; &amp; Partners"));
     }
-
-    #[test]
-    fn telegram_new_username_suggestions_follow_telegram_constraints() {
-        for (label, expected) in [
-            ("nyx_test_123456", "nyx_test_123456_bot"),
-            ("Support Team!", "support_team_bot"),
-            ("CustomerBot", "customerbot"),
-            ("Customer_bot", "customer_bot"),
-            ("123 Support", "nyx_123_support_bot"),
-            ("x", "x_bot"),
-            ("客服 🤖", "nyx_bot"),
-            ("---", "nyx_bot"),
-        ] {
-            assert_eq!(suggested_bot_username(label), expected);
-        }
-        for label in [
-            "a".repeat(128),
-            format!("{}bot", "a".repeat(32)),
-            format!("{} extra", "a".repeat(27)),
-            "🤖".repeat(32),
-            "9".repeat(128),
-        ] {
-            let username = suggested_bot_username(&label);
-            assert!((5..=32).contains(&username.len()));
-            assert!(username.starts_with(|ch: char| ch.is_ascii_alphabetic()));
-            assert!(username.ends_with("bot"));
-            assert!(
-                username
-                    .bytes()
-                    .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
-            );
-        }
-    }
 }
 
 #[path = "telegram_new_prompt.rs"]
@@ -1732,3 +1710,6 @@ mod recovery;
 
 #[path = "telegram_new_status.rs"]
 mod setup_status;
+
+#[path = "telegram_new_usernames.rs"]
+mod usernames;
