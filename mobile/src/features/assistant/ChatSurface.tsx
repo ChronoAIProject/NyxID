@@ -57,7 +57,7 @@ export function ChatMessageTurn({
   user?: boolean;
   notes?: ReactNode;
   author?: ReactNode;
-  footer: ReactNode;
+  footer?: ReactNode;
   children: ReactNode;
 }) {
   const { mode, bubblePalette } = useTheme();

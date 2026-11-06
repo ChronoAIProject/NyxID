@@ -1,7 +1,7 @@
+import { OnboardingReplay } from "./OnboardingReplay";
 import { useEffect, useRef, useState } from "react";
 import { Feather } from "@expo/vector-icons";
 import {
-  Image,
   Keyboard,
   LayoutAnimation,
   Modal,
@@ -229,6 +229,7 @@ export function FirstRunIntro({
         : [...current, id],
     );
 
+  if (!visible) return null;
   return (
     <Modal
       visible={visible}
@@ -260,7 +261,7 @@ export function FirstRunIntro({
                   disabled: save.isPending,
                 }}
                 disabled={save.isPending}
-                hitSlop={{ top: 12, bottom: 12, left: 2, right: 2 }}
+                hitSlop={{ top: 20, bottom: 20, left: 1, right: 1 }}
                 onPress={() => goTo(flow.indexOf(item))}
                 style={styles.dotTarget}
               >
@@ -268,9 +269,8 @@ export function FirstRunIntro({
                   style={[
                     styles.dot,
                     {
-                      width: position === progress ? 24 : 12,
                       backgroundColor:
-                        position <= progress
+                        position === progress
                           ? colors.textPrimary
                           : colors.border,
                     },
@@ -326,9 +326,10 @@ export function FirstRunIntro({
                 title="Meet NyxBot, your chief of staff"
                 body="Ask in plain words. NyxBot works across the apps you connect, keeps track of what matters and remembers how you like things done."
               />
-              <Replay
-                source={require("../../../assets/onboarding/chief-of-staff.gif")}
-                label="Replay: the owner asks NyxBot to set up a Telegram bot; NyxBot links the setup page and keeps watching until the bot exists."
+              <OnboardingReplay
+                kind="chief-of-staff"
+                topics={topics}
+                label="Replay: the owner asks NyxBot for a daily summary, and NyxBot replies with the next steps."
               />
               <Point text="Chat here, on the web, or in Telegram, Slack and other chat apps." />
               <Point text="It uses only the services you connect, through NyxID." />
@@ -339,8 +340,9 @@ export function FirstRunIntro({
                 title="Specialists: experts with one job"
                 body="Think of specialists as people who are great at one thing. Give each a fixed role and scope, so it does that job better than anyone. Work with them directly, or let NyxBot hand them the work."
               />
-              <Replay
-                source={require("../../../assets/onboarding/specialists.gif")}
+              <OnboardingReplay
+                kind="specialists"
+                topics={topics}
                 label="Replay: the owner asks NyxBot for urgent issues; NyxBot hands the job to the researcher specialist, which reports back, and NyxBot answers."
               />
               <Point text="A role and scope you set: only the services and access you grant." />
@@ -352,8 +354,9 @@ export function FirstRunIntro({
                 title="You stay in control"
                 body="NyxBot asks before it does anything sensitive. You choose how often it asks in NyxBot settings: Auto, Ask every time or Full access."
               />
-              <Replay
-                source={require("../../../assets/onboarding/control.gif")}
+              <OnboardingReplay
+                kind="control"
+                topics={topics}
                 label="Replay: the owner asks NyxBot to delete an agent key; NyxBot shows a confirmation card, the owner allows it, and NyxBot finishes the deletion."
               />
               <Point text="Auto (the default) asks before sensitive or destructive actions." />
@@ -501,19 +504,6 @@ function Heading({ title, body }: { title: string; body: string }) {
   );
 }
 
-/** A recorded replay of the real assistant (fixture data); loops like a GIF. */
-function Replay({ source, label }: { source: number; label: string }) {
-  const { colors } = useTheme();
-  return (
-    <Image
-      source={source}
-      accessibilityLabel={label}
-      resizeMode="contain"
-      style={[styles.replay, { borderColor: colors.border, borderWidth: 1 }]}
-    />
-  );
-}
-
 function Point({ text }: { text: string }) {
   const { colors } = useTheme();
   return (
@@ -590,27 +580,34 @@ function Chips({
 }
 
 const styles = StyleSheet.create({
-  fill: { flex: 1 },
-  dismissRow: { alignItems: "flex-end", paddingHorizontal: 12 },
+  fill: { flex: 1, minWidth: 0, maxWidth: "100%" },
+  dismissRow: {
+    flexDirection: "row",
+    justifyContent: "flex-end",
+    paddingHorizontal: 20,
+    width: "100%",
+    maxWidth: 680,
+    alignSelf: "center",
+    paddingTop: 8,
+  },
   progress: {
     flexDirection: "row",
     gap: 6,
     paddingHorizontal: 20,
-    paddingTop: 16,
+    marginVertical: 20,
+    width: "100%",
+    maxWidth: 680,
+    alignSelf: "center",
   },
-  dot: { height: 4, borderRadius: 2 },
-  dotTarget: {
-    minWidth: 44,
-    minHeight: 44,
-    justifyContent: "center",
-    alignItems: "center",
-  },
+  dot: { height: 4, width: "100%", borderRadius: 2 },
+  dotTarget: { flex: 1, minWidth: 0, height: 4 },
   body: {
     padding: 20,
     gap: 16,
     flexGrow: 1,
     width: "100%",
     maxWidth: 680,
+    minWidth: 0,
     alignSelf: "center",
   },
   heading: { gap: 6 },
@@ -638,7 +635,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  replay: { width: "100%", aspectRatio: 1280 / 864, borderRadius: 12 },
   row: { flexDirection: "row", gap: 8, alignItems: "center" },
   small: { fontSize: 13, lineHeight: 19 },
   footer: {

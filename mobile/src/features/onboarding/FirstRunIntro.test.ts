@@ -103,9 +103,7 @@ function setup(entryPoint: "first_run" | "home" = "first_run") {
       Label: "Label",
     },
     "./onboardingContracts": contracts,
-    "../../../assets/onboarding/chief-of-staff.gif": 1,
-    "../../../assets/onboarding/specialists.gif": 2,
-    "../../../assets/onboarding/control.gif": 3,
+    "./OnboardingReplay": { OnboardingReplay: "Replay" },
   });
   h.mock(
     "./NextStepList",
@@ -259,7 +257,14 @@ test("onboarding actions scroll with long copy, pills wrap, safe areas include b
   const pill = f.all().find((n) => n.props.accessibilityRole === "checkbox")!;
   assert.equal(pill.props.style({ pressed: false })[0].maxWidth, "100%");
   assert.equal(pill.props.style({ pressed: false })[0].minHeight, 44);
-  assert.equal(f.tab(1).props.style.minHeight, 44);
+  assert.equal(f.tab(1).props.style.height, 4);
+  assert.equal(f.tab(1).props.style.flex, 1);
+  assert.equal(
+    f.tab(1).props.style.height +
+      f.tab(1).props.hitSlop.top +
+      f.tab(1).props.hitSlop.bottom,
+    44,
+  );
   assert.equal(f.h.value().props.animationType, "none");
   f.h.unmount();
 });
@@ -317,5 +322,38 @@ test("local close immediately fences in-flight saves from navigation and cache p
       .map((e) => e[0]),
     ["save", "close"],
   );
+  f.h.unmount();
+});
+
+test("onboarding constrains horizontal content, deliberately right-aligns dismiss, and uses compact equal progress segments", () => {
+  const f = setup("home");
+  const safe = f.all().find((n) => n.type === "SafeAreaView")!;
+  assert.equal(safe.props.style[0].minWidth, 0);
+  assert.equal(safe.props.style[0].maxWidth, "100%");
+  const dismiss = f
+    .all()
+    .find(
+      (n) => n.type === "View" && n.props.style?.justifyContent === "flex-end",
+    )!;
+  assert.equal(dismiss.props.style.flexDirection, "row");
+  assert.equal(dismiss.props.style.width, "100%");
+  const progress = f
+    .all()
+    .find((n) => n.props.accessibilityRole === "tablist")!;
+  assert.equal(progress.props.style.gap, 6);
+  assert.equal(progress.props.style.width, "100%");
+  const tabs = f.all().filter((n) => n.props.accessibilityRole === "tab");
+  assert.equal(tabs.length, 5);
+  for (const tab of tabs) {
+    assert.equal(tab.props.style.flex, 1);
+    assert.equal(tab.props.style.height, 4);
+    assert.equal(
+      tab.props.style.height + tab.props.hitSlop.top + tab.props.hitSlop.bottom,
+      44,
+    );
+  }
+  f.props.visible = false;
+  f.h.render();
+  assert.equal(f.h.value(), null);
   f.h.unmount();
 });
