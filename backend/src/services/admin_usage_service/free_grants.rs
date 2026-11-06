@@ -120,8 +120,7 @@ pub async fn report(db: &Database, q: Query, now: DateTime<Utc>) -> AppResult<Re
         ]};
         let account_group = doc! {"$group": {"_id": "$owner_id", "issued": {"$sum": "$issued"}, "used": {"$sum": "$used"}, "grants": {"$sum": "$grants"}}};
         let service_group = doc! {"$group": {"_id": "$service_slug", "used": {"$sum": "$used"}}};
-        let rows: Vec<Document> = db.collection::<Document>(crate::models::billing_ledger::COLLECTION_NAME)
-            .aggregate(vec![
+        let pipeline = vec![
                 doc! {"$match": filter},
                 doc! {"$project": {
                     "owner_id": 1, "service_slug": {"$ifNull": ["$service_slug", Bson::Null]},
@@ -142,9 +141,13 @@ pub async fn report(db: &Database, q: Query, now: DateTime<Utc>) -> AppResult<Re
                     "service_count": [{"$match": {"is_issuance": false}}, service_group, {"$count": "count"}],
                     "trend": [{"$group": {"_id": "$day", "issued": {"$sum": "$issued"}, "used": {"$sum": "$used"}}}, {"$sort": {"_id": 1}}],
                 }},
-            ]).max_time(QUERY_TIMEOUT).allow_disk_use(true)
-            .read_concern(mongodb::options::ReadConcern::snapshot())
-            .await.map_err(query_error)?.try_collect().await.map_err(query_error)?;
+        ];
+        let rows = retry_snapshot_read(|| async {
+            db.collection::<Document>(crate::models::billing_ledger::COLLECTION_NAME)
+                .aggregate(pipeline.clone()).max_time(QUERY_TIMEOUT).allow_disk_use(true)
+                .read_concern(mongodb::options::ReadConcern::snapshot())
+                .await?.try_collect().await
+        }).await?;
         let root = rows.first().ok_or_else(|| AppError::Internal("Missing grant report".into()))?;
         let totals = documents(root, "totals")?.next();
         let accounts: Vec<&Document> = documents(root, "accounts")?.collect();
@@ -191,6 +194,28 @@ pub async fn report(db: &Database, q: Query, now: DateTime<Utc>) -> AppResult<Re
         })
     }).await.map_err(|_| AppError::AdminUsageQueryTimeout)?
 }
+// A snapshot can expire even between aggregate admission and its first read.
+// Restart the entire facet/cursor so every amount and page shares one snapshot.
+async fn retry_snapshot_read<F, Fut>(mut read: F) -> AppResult<Vec<Document>>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = mongodb::error::Result<Vec<Document>>>,
+{
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match read().await {
+            Err(error)
+                if attempt < super::MAX_READ_ATTEMPTS
+                    && matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if matches!(command.code, 239 | 246)) =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            result => return result.map_err(query_error),
+        }
+    }
+}
+
 fn documents<'a>(row: &'a Document, key: &str) -> AppResult<impl Iterator<Item = &'a Document>> {
     Ok(row
         .get_array(key)
@@ -214,6 +239,58 @@ fn money(row: &Document, key: &str) -> AppResult<Credits> {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    fn command_error(code: i32) -> mongodb::error::Error {
+        mongodb::error::ErrorKind::Command(bson::from_document(doc! {"code": code}).unwrap()).into()
+    }
+
+    #[tokio::test]
+    async fn free_grants_snapshot_read_recovers_from_expired_and_unavailable_snapshots() {
+        let expected = vec![doc! {"totals": [{"issued": "1.000000000001"}]}];
+        let mut results = std::collections::VecDeque::from([
+            Err(command_error(239)),
+            Err(command_error(246)),
+            Ok(expected.clone()),
+        ]);
+        let rows = retry_snapshot_read(|| std::future::ready(results.pop_front().unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(rows, expected);
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn free_grants_snapshot_read_stops_at_the_retry_budget() {
+        let mut attempts = 0;
+        let error = retry_snapshot_read(|| {
+            attempts += 1;
+            std::future::ready(Err(command_error(239)))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(attempts, super::super::MAX_READ_ATTEMPTS);
+        assert!(matches!(error, AppError::DatabaseError(error)
+            if matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if command.code == 239)));
+    }
+
+    #[tokio::test]
+    async fn free_grants_snapshot_read_preserves_nonretryable_errors_and_timeouts() {
+        for code in [2, 50] {
+            let mut attempts = 0;
+            let error = retry_snapshot_read(|| {
+                attempts += 1;
+                std::future::ready(Err(command_error(code)))
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(attempts, 1);
+            match code {
+                50 => assert!(matches!(error, AppError::AdminUsageQueryTimeout)),
+                _ => assert!(matches!(error, AppError::DatabaseError(error)
+                    if matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if command.code == code))),
+            }
+        }
+    }
 
     #[test]
     fn free_grants_amount_reads_decimal128_and_whole_credit_integers() {
