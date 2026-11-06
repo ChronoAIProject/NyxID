@@ -22,6 +22,7 @@ use crate::{
 
 mod authority;
 pub(crate) mod descendants;
+pub(crate) mod machine;
 mod native;
 pub(crate) mod proposals;
 pub(crate) mod tasks;
@@ -36,6 +37,7 @@ pub(crate) struct RequestContext {
     pub(crate) principal: Principal,
     pub(crate) operation_id: String,
     voice_task: bool,
+    machine: OnceLock<Arc<machine::Admission>>,
     ingress: OnceLock<crate::models::execution_proposal::PreparedAdapter>,
     idempotency: OnceLock<String>,
     async_requested: std::sync::atomic::AtomicBool,
@@ -84,7 +86,8 @@ impl RequestContext {
         if matches!(
             self.descendant.as_deref(),
             Some(descendants::Descendant::Job(_))
-        ) {
+        ) && self.machine.get().is_none()
+        {
             return;
         }
         self.authoring
@@ -284,6 +287,7 @@ impl RequestContext {
             connected_resume: OnceLock::new(),
             connected_snapshot: OnceCell::new(),
             wait_guard: OnceLock::new(),
+            machine: OnceLock::new(),
             voice_task: chat.is_some_and(|c| c.execution_voice_task),
             native: None,
             descendant: None,
@@ -508,6 +512,7 @@ pub(crate) struct Permit {
     generated_correlation: Option<String>,
     native: Option<Arc<native::Native>>,
     descendant: Option<Arc<descendants::Descendant>>,
+    machine: Option<Arc<machine::Admission>>,
 }
 
 impl Permit {
@@ -905,6 +910,7 @@ pub(crate) fn prepare<'a>(
                         generated_correlation: context.generated_correlation.get().cloned(),
                         native: context.native.clone(),
                         descendant: context.descendant.clone(),
+                        machine: context.machine.get().cloned(),
                     });
                     context
                         .decision
@@ -1041,6 +1047,7 @@ impl Permit {
                 connected_resume: OnceLock::new(),
                 connected_snapshot: OnceCell::new(),
                 wait_guard: OnceLock::new(),
+                machine: OnceLock::new(),
                 voice_task: self.chat.as_ref().is_some_and(|c| c.execution_voice_task),
                 native: None,
                 descendant: None,
@@ -1235,13 +1242,40 @@ impl Permit {
             self.source_credential.as_deref(),
         )
         .await;
-        match live {
-            Ok(current) if self.authority.same(&current) => Ok(()),
-            result => {
-                self.finish(ExecutionUseState::NotSent).await?;
-                Err(result.err().unwrap_or_else(refused))
+        let result = match live {
+            Ok(current) if self.authority.same(&current) => {
+                // Only negotiated B2 occurrences add this source check. A job
+                // cancellation or owner takeover committed during the barrier
+                // must still stop the unsent HTTP effect.
+                if let Some(machine) = self.machine.as_ref().filter(|_| self.resume.is_some()) {
+                    if machine.cancellation.is_cancelled() {
+                        Err(AppError::ClientDisconnected)
+                    } else if let Some(task) =
+                        self.chat.as_ref().and_then(|c| c.execution_task.as_ref())
+                    {
+                        tokio::select! {
+                            biased;
+                            _ = machine.cancellation.cancelled() => Err(AppError::ClientDisconnected),
+                            result = machine.binding.live(&self.db, task) => result,
+                        }
+                    } else {
+                        Err(refused())
+                    }
+                } else {
+                    Ok(())
+                }
+            }
+            result => Err(result.err().unwrap_or_else(refused)),
+        };
+        if result.is_err() {
+            self.finish(ExecutionUseState::NotSent).await?;
+            if self.machine.is_some()
+                && let Some(resume) = &self.resume
+            {
+                proposals::v2::not_sent_before_handoff(&self.db, resume).await?;
             }
         }
+        result
     }
 
     fn reserve<'a>(&'a self) -> futures::future::BoxFuture<'a, AppResult<()>> {

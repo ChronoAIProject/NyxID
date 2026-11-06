@@ -292,7 +292,7 @@ async fn voice_task(
     Ok(task)
 }
 
-fn live_filter(task: &TaskAdmission) -> AppResult<Document> {
+pub(super) fn live_filter(task: &TaskAdmission) -> AppResult<Document> {
     if task.version != VERSION
         || task.cancelled
         || task.epoch < 1

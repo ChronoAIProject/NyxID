@@ -28,6 +28,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 pub struct Gateway {
+    execution_approval: AtomicBool,
     url: String,
     jobs: Weak<Jobs>,
     node_id: String,
@@ -62,6 +63,7 @@ impl Gateway {
     ) -> Result<Arc<Self>> {
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
         let gateway = Arc::new(Self {
+            execution_approval: AtomicBool::new(false),
             url: format!("http://127.0.0.1:{}", listener.local_addr()?.port()),
             jobs,
             node_id,
@@ -217,7 +219,11 @@ impl Gateway {
     pub async fn connect(&self, sender: mpsc::Sender<NodeWsMessage>) {
         *self.sender.write().await = Some(sender);
     }
+    pub fn negotiate_execution_approval(&self, enabled: bool) {
+        self.execution_approval.store(enabled, Ordering::Release);
+    }
     pub async fn disconnect(&self) {
+        self.negotiate_execution_approval(false);
         *self.sender.write().await = None;
         self.pending.lock().await.clear();
         for binding in self.tokens.lock().await.values_mut() {
@@ -435,6 +441,7 @@ async fn forward_inner(
     gateway: Arc<Gateway>,
     request: Request<Body>,
 ) -> Result<axum::response::Response> {
+    let admitted_at = chrono::Utc::now();
     let token = request
         .headers()
         .get("authorization")
@@ -474,7 +481,12 @@ async fn forward_inner(
         .path_and_query()
         .map(|p| p.as_str())
         .unwrap_or("/");
-    if !path.starts_with("/s/") && !path.starts_with("/git/") {
+    let negotiated =
+        gateway.execution_approval.load(Ordering::Acquire) && external_services.is_none();
+    let readback = path.starts_with("/_nyxid/approvals/")
+        && path.ends_with("/status")
+        && request.method() == axum::http::Method::GET;
+    if !path.starts_with("/s/") && !path.starts_with("/git/") && !(negotiated && readback) {
         return Ok(StatusCode::NOT_FOUND.into_response());
     }
     if let Some(services) = &external_services {
@@ -509,6 +521,7 @@ async fn forward_inner(
                     | "proxy-authorization"
                     | "upgrade"
                     | "x-nyxid-user-token"
+                    | "x-nyxid-approval-mode"
             )
         })
         .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().into(), v.into())))
@@ -534,6 +547,30 @@ async fn forward_inner(
         nonce: Uuid::new_v4().to_string(),
         signature: String::new(),
     };
+    if negotiated && !path.starts_with("/git/") {
+        let mode = if request
+            .headers()
+            .get_all("x-nyxid-approval-mode")
+            .iter()
+            .count()
+            == 1
+            && request
+                .headers()
+                .get("x-nyxid-approval-mode")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.trim().eq_ignore_ascii_case("async"))
+        {
+            nyxid_machine::gateway::ApprovalMode::Async
+        } else {
+            nyxid_machine::gateway::ApprovalMode::Connected
+        };
+        signed.parameters["execution_approval"] =
+            serde_json::to_value(nyxid_machine::gateway::ExecutionApproval {
+                version: 1,
+                mode,
+                waiter_until_ms: (admitted_at + chrono::Duration::seconds(120)).timestamp_millis(),
+            })?;
+    }
     if let Some(conversation) = conversation_id {
         signed.parameters["conversation_id"] = json!(conversation);
     }
@@ -787,6 +824,90 @@ mod tests {
         .await
         .unwrap();
         (temp, jobs, gateway, env, id)
+    }
+
+    #[tokio::test]
+    async fn machine_approval_negotiation_controls_readback_and_downstream_headers() {
+        let (_temp, jobs, gateway, env, id) = live_job().await;
+        let client = reqwest::Client::new();
+        let path = format!("{}/_nyxid/approvals/{}/status", gateway.url, Uuid::new_v4());
+        assert_eq!(
+            client
+                .get(&path)
+                .bearer_auth(&env["NYXID_GATEWAY_TOKEN"])
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
+        for (negotiated, async_opt_in) in [(false, false), (true, false), (true, true)] {
+            let (tx, mut rx) = mpsc::channel(16);
+            gateway.connect(tx).await;
+            gateway.negotiate_execution_approval(negotiated);
+            let mut request = client
+                .post(format!("{}/s/service/test", gateway.url))
+                .bearer_auth(&env["NYXID_GATEWAY_TOKEN"])
+                .header("Idempotency-Key", "downstream")
+                .header("Prefer", "respond-async");
+            if async_opt_in {
+                request = request.header("X-NyxID-Approval-Mode", "async");
+            }
+            let call = tokio::spawn(async move { request.send().await });
+            let Some(NodeWsMessage::Text(text)) = rx.recv().await else {
+                panic!("signed request")
+            };
+            let signed: nyxid_machine::Request = serde_json::from_str(&text).unwrap();
+            nyxid_machine::signing::ReplayGuard::default()
+                .verify(
+                    &signed,
+                    &gateway.node_id,
+                    &gateway.signing,
+                    chrono::Utc::now().timestamp(),
+                )
+                .unwrap();
+            let p = &signed.parameters;
+            assert_eq!(p.get("execution_approval").is_some(), negotiated);
+            if negotiated {
+                assert_eq!(
+                    p["execution_approval"]["mode"],
+                    if async_opt_in { "async" } else { "connected" }
+                );
+            }
+            let headers = p["headers"].as_array().unwrap();
+            assert!(
+                headers
+                    .iter()
+                    .any(|h| h[0] == "idempotency-key" && h[1] == "downstream")
+            );
+            assert!(
+                headers
+                    .iter()
+                    .any(|h| h[0] == "prefer" && h[1] == "respond-async")
+            );
+            assert!(!headers.iter().any(|h| h[0] == "x-nyxid-approval-mode"));
+            call.abort();
+            gateway.disconnect().await;
+            assert!(!gateway.execution_approval.load(Ordering::Acquire));
+        }
+        let (tx, mut rx) = mpsc::channel(16);
+        gateway.connect(tx).await;
+        gateway.negotiate_execution_approval(true);
+        let request = client.get(path).bearer_auth(&env["NYXID_GATEWAY_TOKEN"]);
+        let call = tokio::spawn(async move { request.send().await });
+        let Some(NodeWsMessage::Text(text)) = rx.recv().await else {
+            panic!("readback")
+        };
+        let signed: nyxid_machine::Request = serde_json::from_str(&text).unwrap();
+        assert!(
+            signed.parameters["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("/_nyxid/approvals/")
+        );
+        assert_eq!(signed.parameters["job_id"], id);
+        call.abort();
+        jobs.cancel(&id).await.unwrap();
     }
 
     #[tokio::test]

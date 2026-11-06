@@ -178,6 +178,7 @@ pub async fn claim(
         credential_ack_correlation: false,
         credential_target_update_v1: false,
         remote_credential_crypto_v1: false,
+        machine_execution_approval_v1: false,
         proxy_max_body_size: None,
         capabilities_resolved: false,
     };
@@ -273,6 +274,7 @@ pub async fn record_capabilities(
                     "connection_owner.credential_ack_correlation": capabilities.credential_ack_correlation,
                     "connection_owner.credential_target_update_v1": capabilities.credential_target_update_v1,
                     "connection_owner.remote_credential_crypto_v1": capabilities.remote_credential_crypto_v1,
+                    "connection_owner.machine_execution_approval_v1": capabilities.machine_execution_approval_v1,
                     "connection_owner.proxy_max_body_size": capabilities.proxy_max_body_size.map(|value| value as i64),
                     "connection_owner.capabilities_resolved": resolved,
                     "updated_at": now,
@@ -457,6 +459,45 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
+
+        let negotiated = NodeCapabilitiesFlags {
+            machine_execution_approval_v1: true,
+            ..Default::default()
+        };
+        assert!(
+            !record_capabilities(
+                &db,
+                &NodeOwnerFence::from_owner(&node_id, &first),
+                negotiated,
+                true,
+                None
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            record_capabilities(
+                &db,
+                &NodeOwnerFence::from_owner(&node_id, &second),
+                negotiated,
+                true,
+                None
+            )
+            .await
+            .unwrap()
+        );
+        let current = db
+            .collection::<Node>(NODES)
+            .find_one(doc! {"_id": &node_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            current
+                .connection_owner
+                .unwrap()
+                .machine_execution_approval_v1
+        );
 
         assert!(
             !renew(

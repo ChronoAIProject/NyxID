@@ -170,10 +170,13 @@ pub struct ProposalV2 {
     pub failure_code: Option<String>,
 }
 
-/// Closed B1 sources. A Machine job deliberately has no proposal source.
+/// Closed sources, with Machine authoring behind its own reader readiness.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProposalSource {
+    Machine {
+        binding: Box<MachineSource>,
+    },
     External {
         #[serde(default)]
         pool: Option<ProposalPool>,
@@ -203,6 +206,11 @@ pub struct ProposalPool {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PreparedAdapter {
+    Machine {
+        binding: Box<MachineSource>,
+        call_id: String,
+        verified_digest: String,
+    },
     Unsupported,
     Http,
     Pool {
@@ -240,4 +248,26 @@ pub struct ExecutionResult {
     pub headers: Vec<(String, String)>,
     pub body: String,
     pub partial: bool,
+}
+
+/// Immutable, server-verified job identity. No commands, output or credentials.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineSource {
+    pub node_owner_id: String,
+    pub agent_owner_id: String,
+    pub job_id: String,
+    pub node_id: String,
+    pub runtime_id: String,
+    pub runtime_generation: Option<u64>,
+    pub actor_id: String,
+    pub key_id: String,
+    pub agent_id: String,
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub context_id: String,
+    pub generation: u64,
+    pub revision: i64,
+    pub lease_id: String,
+    pub declared_id: String,
 }
