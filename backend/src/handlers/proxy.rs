@@ -3969,6 +3969,10 @@ async fn execute_resolved_proxy_inner<'a>(
     >,
 ) -> AppResult<ProxyExecutionPhase<'a>> {
     let permission_ingress = request.extensions().get::<PermissionIngress>().cloned();
+    let invocation_diagnostic_target = request
+        .extensions()
+        .get::<super::invocation_diagnostics::Target>()
+        .cloned();
     let ornn_preflight = request
         .extensions()
         .get::<super::agent_skills::OrnnSkillPreflight>()
@@ -4776,6 +4780,9 @@ async fn execute_resolved_proxy_inner<'a>(
         .as_mut()
         .expect("service decision was just installed");
     if let Some(refusal) = assistant_decision.refusal.as_ref() {
+        if let Some(target) = &invocation_diagnostic_target {
+            target.record(None);
+        }
         request_audit.denied(axum::http::StatusCode::CONFLICT.as_u16());
         return Ok(ProxyExecutionPhase::Complete(
             (
@@ -5589,6 +5596,9 @@ async fn execute_resolved_proxy_inner<'a>(
                 let ws_upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
                     Ok(ws) => ws,
                     Err(rejection) => {
+                        if let Some(target) = &invocation_diagnostic_target {
+                            target.record(None);
+                        }
                         let response = rejection.into_response();
                         request_audit.denied(response.status().as_u16());
                         return observe_model_response(model_request, path, response).await;

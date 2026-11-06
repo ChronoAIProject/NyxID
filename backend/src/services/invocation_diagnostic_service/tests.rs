@@ -48,7 +48,27 @@ fn readiness_is_independent_and_stale_evidence_cannot_attribute() {
         project(&response).assessment,
         Assessment::DependencyUnavailable
     );
-    response.readiness.as_mut().unwrap().checked_at = None;
+    response.readiness = Some(CheckResult {
+        configured: Some(false),
+        ..Default::default()
+    });
+    assert_eq!(
+        project(&response).assessment,
+        Assessment::OperationSpecificLikely
+    );
+    response.readiness = Some(CheckResult {
+        status: CheckStatus::NotConfigured,
+        ..Default::default()
+    });
+    assert_eq!(
+        project(&response).assessment,
+        Assessment::OperationSpecificLikely
+    );
+    response.readiness = Some(CheckResult {
+        status: CheckStatus::NotReady,
+        reachable: Some(true),
+        ..Default::default()
+    });
     assert_eq!(project(&response).assessment, Assessment::Unknown);
     response.health.checked_at = Some(Utc::now() - chrono::Duration::seconds(61));
     assert_eq!(project(&response).observation, Observation::Unknown);

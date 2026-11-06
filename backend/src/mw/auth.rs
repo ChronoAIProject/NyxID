@@ -655,6 +655,10 @@ fn is_delegated_native_path(path: &str) -> bool {
 
     matches!(segments.as_slice(), ["approvals", "requests", _, "status"])
         || segments.starts_with(&["approvals", "exact-service"])
+        || matches!(
+            segments.as_slice(),
+            ["monitoring", "invocation-diagnostics"]
+        )
 }
 
 /// Return true for management GET classes that delegated account reads must
@@ -2756,6 +2760,7 @@ mod tests {
             "/api/v1/channel-relay/reply",
             "/api/v1/channel-events/conversation-id",
             "/api/v1/approvals/requests/request-id/status",
+            "/api/v1/monitoring/invocation-diagnostics",
         ];
 
         for path in native_paths {

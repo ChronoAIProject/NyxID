@@ -295,6 +295,58 @@ async fn invocation_diagnostic_rest_proxy_uses_the_actual_selected_instance() {
 }
 
 #[tokio::test]
+async fn invocation_diagnostic_ignores_local_websocket_handshake_rejections() {
+    let (state, actor, id, server) = fixture().await;
+    let downstream = MockServer::start().await;
+    state
+        .db
+        .collection::<mongodb::bson::Document>("user_endpoints")
+        .update_many(doc! {}, doc! {"$set":{"url":downstream.uri()}})
+        .await
+        .unwrap();
+    set_test_approval_preference(&state.db, &actor, false).await;
+    let mut request = request();
+    *request.uri_mut() = format!("/api/v1/proxy/s/same-slug/socket?_nyxid_via={id}")
+        .parse()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("connection", "upgrade".parse().unwrap());
+    request
+        .headers_mut()
+        .insert("upgrade", "websocket".parse().unwrap());
+    request
+        .extensions_mut()
+        .insert(BillingRoutePolicy::Metered(BillingIngress::Proxy));
+
+    let response = Box::pin(super::super::proxy::proxy_request_by_slug(
+        State(state.clone()),
+        auth(&actor),
+        TelemetryContext::default(),
+        Path(("same-slug".into(), "socket".into())),
+        request,
+    ))
+    .await
+    .unwrap();
+
+    assert!(response.status().is_client_error());
+    assert!(!response.headers().contains_key(HANDLE_HEADER));
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::invocation_diagnostic::COLLECTION_NAME,
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(downstream.received_requests().await.unwrap().is_empty());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn invocation_diagnostic_llm_entries_keep_downstream_errors() {
     use crate::models::{downstream_service::DownstreamService, provider_config::ProviderConfig};
     for gateway in [false, true] {

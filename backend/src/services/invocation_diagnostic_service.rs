@@ -654,6 +654,12 @@ fn project(result: &ProbeResult) -> Diagnostic {
             CheckStatus::Healthy if health.reachable == Some(true) => {
                 match result.readiness.as_ref() {
                     Some(check)
+                        if check.configured == Some(false)
+                            || matches!(check.status, CheckStatus::NotConfigured) =>
+                    {
+                        Assessment::OperationSpecificLikely
+                    }
+                    Some(check)
                         if recent(check)
                             && matches!(check.status, CheckStatus::NotReady)
                             && check.reachable == Some(true) =>
