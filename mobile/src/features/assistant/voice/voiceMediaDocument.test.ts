@@ -23,6 +23,7 @@ async function settle() {
 }
 
 type Media = VoiceMediaAdapter & {
+  readonly usesNativeMedia: boolean;
   receive(raw: string): void;
   unavailable(message?: string): void;
   connect(send: (message: Record<string, unknown>) => void): () => void;
@@ -33,16 +34,107 @@ type Media = VoiceMediaAdapter & {
   }[];
 };
 
-function nativeMedia(): Media {
+function nativeMediaClass(defaultFactory?: () => VoiceMediaAdapter) {
   const harness = hookHarness<unknown>({
     "react-native": { StyleSheet: { create: (value: unknown) => value } },
     "react-native-webview": { WebView: "WebView" },
     "./voiceMediaDocument": documentModule,
+    "./createNativeOpenAIMedia": {
+      createNativeOpenAIMedia: defaultFactory,
+    },
   });
   const module = harness.load(
     fileURLToPath(new URL("./VoiceMediaBridge.tsx", import.meta.url)),
-  ) as { NativeVoiceMedia: new () => Media };
-  return new module.NativeVoiceMedia();
+  ) as {
+    NativeVoiceMedia: new (
+      createOpenAI?: (() => VoiceMediaAdapter) | null,
+    ) => Media;
+  };
+  return module.NativeVoiceMedia;
+}
+
+function nativeMedia(
+  createOpenAI: (() => VoiceMediaAdapter) | null = null,
+): Media {
+  const NativeVoiceMedia = nativeMediaClass();
+  return new NativeVoiceMedia(createOpenAI);
+}
+
+function nativeDelegate(offer = Promise.resolve("v=0\r\nnative-offer")) {
+  const prepared: { protocol: string; signal: AbortSignal }[] = [];
+  const answers: string[] = [];
+  const inputs: boolean[] = [];
+  const holds: boolean[] = [];
+  const speakers: boolean[] = [];
+  const frames: { bytes: ArrayBuffer; endMs: number }[] = [];
+  const listeners = new Set<(event: VoiceMediaEvent) => void>();
+  const retained: ((event: VoiceMediaEvent) => void)[] = [];
+  const diagnostics = [
+    { stage: "microphone", name: "ready", counts: { audio_tracks: 1 } },
+  ];
+  const counts = { closed: 0, unsubscribed: 0, resumed: 0, flushed: 0 };
+  const adapter: VoiceMediaAdapter & {
+    getDiagnostics(): typeof diagnostics;
+  } = {
+    prepare(protocol, signal) {
+      prepared.push({ protocol, signal });
+      return offer;
+    },
+    async answer(sdp) {
+      answers.push(sdp);
+    },
+    setInput(enabled) {
+      inputs.push(enabled);
+    },
+    hold(pressed) {
+      holds.push(pressed);
+    },
+    muteSpeaker(muted) {
+      speakers.push(muted);
+    },
+    async resume() {
+      counts.resumed++;
+    },
+    enqueue(bytes, endMs) {
+      frames.push({ bytes, endMs });
+    },
+    flush() {
+      counts.flushed++;
+    },
+    playback() {
+      return { playback_ms: 240, playback_audible: true };
+    },
+    getDiagnostics() {
+      return diagnostics;
+    },
+    close() {
+      counts.closed++;
+    },
+    subscribe(listener) {
+      retained.push(listener);
+      listeners.add(listener);
+      return () => {
+        counts.unsubscribed++;
+        listeners.delete(listener);
+      };
+    },
+  };
+  return {
+    adapter,
+    prepared,
+    answers,
+    inputs,
+    holds,
+    speakers,
+    frames,
+    diagnostics,
+    counts,
+    listeners,
+    retained,
+    emit(event: VoiceMediaEvent) {
+      for (const listener of listeners) listener(event);
+    },
+  };
 }
 
 function engine(
@@ -338,6 +430,286 @@ function engine(
     },
   };
 }
+
+test("OpenAI delegates native media without a mounted or ready WebView", async () => {
+  const native = nativeDelegate();
+  const media = nativeMedia(() => native.adapter);
+  const events: VoiceMediaEvent[] = [];
+  media.subscribe((event) => events.push(event));
+  const abort = new AbortController();
+
+  try {
+    assert.equal(
+      await media.prepare("openai_live", abort.signal),
+      "v=0\r\nnative-offer",
+    );
+    assert.equal(media.usesNativeMedia, true);
+    assert.deepEqual(native.prepared, [
+      { protocol: "openai_live", signal: abort.signal },
+    ]);
+    await media.answer("v=0\r\nprovider-answer");
+    media.setInput(true);
+    media.setInput(false);
+    media.hold(true);
+    media.hold(false);
+    media.muteSpeaker(true);
+    media.muteSpeaker(false);
+    await media.resume();
+    const bytes = new ArrayBuffer(960);
+    media.enqueue(bytes, 240);
+    media.flush();
+
+    assert.deepEqual(native.answers, ["v=0\r\nprovider-answer"]);
+    assert.deepEqual(native.inputs, [true, false]);
+    assert.deepEqual(native.holds, [true, false]);
+    assert.deepEqual(native.speakers, [true, false]);
+    assert.equal(native.counts.resumed, 1);
+    assert.equal(native.counts.flushed, 1);
+    assert.equal(native.frames[0]?.bytes, bytes);
+    assert.equal(native.frames[0]?.endMs, 240);
+    assert.deepEqual(media.playback(), {
+      playback_ms: 240,
+      playback_audible: true,
+    });
+    const diagnostic = media.getDiagnostics()[0]!;
+    diagnostic.counts!.audio_tracks = 99;
+    assert.equal(native.diagnostics[0]!.counts.audio_tracks, 1);
+
+    native.emit({ type: "provider-ready" });
+    native.emit({ type: "level", input: 0.3, output: 0.6 });
+    native.emit({ type: "playback-blocked" });
+    assert.deepEqual(events, [
+      { type: "provider-ready" },
+      { type: "level", input: 0.3, output: 0.6 },
+      { type: "playback-blocked" },
+    ]);
+    // An unused WebView may still send messages or terminate independently.
+    media.receive("not JSON");
+    media.receive('{"type":"error","generation":1,"message":"unused WebView"}');
+    assert.equal(native.counts.closed, 0);
+    assert.equal(events.length, 3);
+  } finally {
+    media.close();
+  }
+
+  media.close();
+  assert.equal(native.counts.closed, 1);
+  assert.equal(native.counts.unsubscribed, 1);
+  assert.equal(native.listeners.size, 0);
+  assert.equal(media.usesNativeMedia, false);
+  assert.equal(media.playback().playback_ms, 0);
+  assert.equal(media.playback().playback_audible, false);
+  native.retained[0]!({ type: "provider-ready" });
+  native.retained[0]!({ type: "error", message: "late native event" });
+  assert.equal(events.length, 3);
+});
+
+test("the facade uses its default native factory for OpenAI and disconnect closes only native media", async () => {
+  const native = nativeDelegate();
+  let created = 0;
+  const NativeVoiceMedia = nativeMediaClass(() => {
+    created++;
+    return native.adapter;
+  });
+  const media = new NativeVoiceMedia();
+  const commands: unknown[] = [];
+  const disconnect = media.connect((command) => commands.push(command));
+  // A ready WebView must not receive OpenAI preparation or close commands.
+  media.receive('{"type":"ready"}');
+  try {
+    await media.prepare("openai_live", new AbortController().signal);
+    assert.equal(created, 1);
+    assert.equal(native.prepared.length, 1);
+    assert.deepEqual(commands, []);
+  } finally {
+    disconnect();
+  }
+  assert.equal(native.counts.closed, 1);
+  assert.equal(native.counts.unsubscribed, 1);
+  assert.deepEqual(commands, []);
+});
+
+test("aborting pending native preparation releases the shared microphone and fences its late offer", async () => {
+  const pending = deferred<string>();
+  const old = nativeDelegate(pending.promise);
+  const next = nativeDelegate();
+  const NativeVoiceMedia = nativeMediaClass();
+  const first = new NativeVoiceMedia(() => old.adapter);
+  const second = new NativeVoiceMedia(() => next.adapter);
+  const events: VoiceMediaEvent[] = [];
+  first.subscribe((event) => events.push(event));
+  const abort = new AbortController();
+  const preparing = first.prepare("openai_live", abort.signal);
+  const rejected = assert.rejects(preparing, /closed/);
+
+  try {
+    abort.abort();
+    assert.equal(old.counts.closed, 1);
+    assert.equal(old.counts.unsubscribed, 1);
+    await second.prepare("openai_live", new AbortController().signal);
+    old.retained[0]!({ type: "provider-ready" });
+    old.retained[0]!({ type: "error", message: "obsolete capture" });
+    pending.resolve("v=0\r\nlate-native-offer");
+    await rejected;
+    assert.deepEqual(events, []);
+    assert.equal(next.counts.closed, 0);
+    assert.equal(second.usesNativeMedia, true);
+  } finally {
+    pending.resolve("v=0\r\nlate-native-offer");
+    first.close();
+    second.close();
+    await rejected;
+  }
+});
+
+test("a superseded native generation cannot emit or close its replacement", async () => {
+  const pending = deferred<string>();
+  const old = nativeDelegate(pending.promise);
+  const next = nativeDelegate();
+  let created = 0;
+  const media = nativeMedia(() =>
+    created++ === 0 ? old.adapter : next.adapter,
+  );
+  const events: VoiceMediaEvent[] = [];
+  media.subscribe((event) => events.push(event));
+  const abort = new AbortController();
+  const rejected = assert.rejects(
+    media.prepare("openai_live", abort.signal),
+    /closed/,
+  );
+
+  try {
+    await media.prepare("openai_live", new AbortController().signal);
+    assert.equal(old.counts.closed, 1);
+    abort.abort();
+    old.retained[0]!({ type: "error", message: "obsolete native error" });
+    old.retained[0]!({ type: "provider-ready" });
+    pending.resolve("v=0\r\nold-offer");
+    await rejected;
+    next.emit({ type: "provider-ready" });
+    assert.deepEqual(events, [{ type: "provider-ready" }]);
+    assert.equal(next.counts.closed, 0);
+    assert.equal(media.usesNativeMedia, true);
+  } finally {
+    pending.resolve("v=0\r\nold-offer");
+    media.close();
+    await rejected;
+  }
+});
+
+test("an already aborted native attempt never opens capture or reserves the microphone", async () => {
+  const native = nativeDelegate();
+  let created = 0;
+  const NativeVoiceMedia = nativeMediaClass(() => {
+    created++;
+    return native.adapter;
+  });
+  const first = new NativeVoiceMedia();
+  const second = new NativeVoiceMedia();
+  const abort = new AbortController();
+  abort.abort();
+  await assert.rejects(first.prepare("openai_live", abort.signal), /closed/);
+  assert.equal(created, 0);
+  try {
+    await second.prepare("openai_live", new AbortController().signal);
+    assert.equal(created, 1);
+  } finally {
+    first.close();
+    second.close();
+  }
+});
+
+test("native failure unsubscribes once and releases ownership despite a failing UI listener", async () => {
+  const native = nativeDelegate();
+  const replacement = nativeDelegate();
+  const NativeVoiceMedia = nativeMediaClass();
+  const first = new NativeVoiceMedia(() => native.adapter);
+  const second = new NativeVoiceMedia(() => replacement.adapter);
+  const events: VoiceMediaEvent[] = [];
+  first.subscribe(() => {
+    throw new Error("UI listener failed");
+  });
+  first.subscribe((event) => events.push(event));
+  try {
+    await first.prepare("openai_live", new AbortController().signal);
+    native.emit({ type: "error", message: "Microphone access ended." });
+    native.retained[0]!({ type: "error", message: "late duplicate error" });
+    assert.deepEqual(events, [
+      { type: "error", message: "Microphone access ended." },
+    ]);
+    assert.equal(native.counts.closed, 1);
+    assert.equal(native.counts.unsubscribed, 1);
+    assert.equal(native.listeners.size, 0);
+    await second.prepare("openai_live", new AbortController().signal);
+    assert.equal(replacement.prepared.length, 1);
+  } finally {
+    first.close();
+    second.close();
+  }
+});
+
+test("native preparation rejection tears down its delegate and permits another capture", async () => {
+  const pending = deferred<string>();
+  const native = nativeDelegate(pending.promise);
+  const replacement = nativeDelegate();
+  const NativeVoiceMedia = nativeMediaClass();
+  const first = new NativeVoiceMedia(() => native.adapter);
+  const second = new NativeVoiceMedia(() => replacement.adapter);
+  const preparing = first.prepare("openai_live", new AbortController().signal);
+  const rejected = assert.rejects(preparing, /capture unavailable/);
+  pending.reject(new Error("capture unavailable"));
+  await rejected;
+  try {
+    assert.equal(native.counts.closed, 1);
+    assert.equal(native.listeners.size, 0);
+    await second.prepare("openai_live", new AbortController().signal);
+  } finally {
+    first.close();
+    second.close();
+  }
+});
+
+test("native OpenAI and WebView xAI share microphone ownership without invoking xAI's native factory", async () => {
+  const native = nativeDelegate();
+  const NativeVoiceMedia = nativeMediaClass();
+  const first = new NativeVoiceMedia(() => native.adapter);
+  let unwantedNativeCalls = 0;
+  const second = new NativeVoiceMedia(() => {
+    unwantedNativeCalls++;
+    throw new Error("xAI must use its WebView transport");
+  });
+  const e = engine({ receive: (raw) => second.receive(raw) });
+  second.connect(e.command);
+  try {
+    await first.prepare("openai_live", new AbortController().signal);
+    await assert.rejects(
+      second.prepare("xai_realtime", new AbortController().signal),
+      /already in use/,
+    );
+    assert.equal(unwantedNativeCalls, 0);
+    assert.equal(e.micRequests(), 0);
+    assert.equal(native.counts.closed, 0);
+    first.close();
+    assert.equal(
+      await second.prepare("xai_realtime", new AbortController().signal),
+      "",
+    );
+    assert.equal(unwantedNativeCalls, 0);
+    assert.equal(second.usesNativeMedia, false);
+    assert.equal(e.micRequests(), 1);
+    assert.equal(e.peers.length, 2);
+    second.setInput(true);
+    assert.equal(e.tracks[0]!.enabled, true);
+  } finally {
+    first.close();
+    second.close();
+  }
+  assert.equal(e.tracks[0]!.stopped, true);
+  assert.equal(
+    e.peers.every((peer) => peer.closed),
+    true,
+  );
+});
 
 test("the media document contains only bundled code and no credentials or network client", () => {
   const html = createVoiceMediaDocument();
@@ -1438,12 +1810,16 @@ test("OpenAI stats never overlap and pending stats or play callbacks cannot ente
   e.command({ type: "close", generation: 2 });
 });
 
-test("the WebView is inaccessible, blocks later navigation, and closes on unmount", () => {
+test("WebView failures cannot end native OpenAI media, but unmount still releases capture", async () => {
   type Element = { props: Record<string, any> };
+  const native = nativeDelegate();
   const harness = hookHarness<Element>({
     "react-native": { StyleSheet: { create: (value: unknown) => value } },
     "react-native-webview": { WebView: "WebView" },
     "./voiceMediaDocument": documentModule,
+    "./createNativeOpenAIMedia": {
+      createNativeOpenAIMedia: () => native.adapter,
+    },
   });
   const module = harness.load(
     fileURLToPath(new URL("./VoiceMediaBridge.tsx", import.meta.url)),
@@ -1452,6 +1828,44 @@ test("the WebView is inaccessible, blocks later navigation, and closes on unmoun
     VoiceMediaBridge(props: { media: Media; origin: string }): Element;
   };
   const media = new module.NativeVoiceMedia();
+  const events: VoiceMediaEvent[] = [];
+  media.subscribe((event) => events.push(event));
+  const bridge = harness.mount(() =>
+    module.VoiceMediaBridge({ media, origin: "https://app.example.test" }),
+  );
+  try {
+    await media.prepare("openai_live", new AbortController().signal);
+    bridge.props.onError();
+    bridge.props.onContentProcessDidTerminate();
+    bridge.props.onRenderProcessGone();
+    assert.equal(native.counts.closed, 0);
+    assert.equal(media.usesNativeMedia, true);
+    assert.deepEqual(events, []);
+    native.emit({ type: "provider-ready" });
+    assert.deepEqual(events, [{ type: "provider-ready" }]);
+  } finally {
+    harness.unmount();
+  }
+  assert.equal(native.counts.closed, 1);
+  assert.equal(native.listeners.size, 0);
+  assert.equal(media.usesNativeMedia, false);
+});
+
+test("the WebView is inaccessible, blocks later navigation, and closes on unmount", () => {
+  type Element = { props: Record<string, any> };
+  const harness = hookHarness<Element>({
+    "react-native": { StyleSheet: { create: (value: unknown) => value } },
+    "react-native-webview": { WebView: "WebView" },
+    "./voiceMediaDocument": documentModule,
+    "./createNativeOpenAIMedia": { createNativeOpenAIMedia: () => undefined },
+  });
+  const module = harness.load(
+    fileURLToPath(new URL("./VoiceMediaBridge.tsx", import.meta.url)),
+  ) as {
+    NativeVoiceMedia: new (createOpenAI?: null) => Media;
+    VoiceMediaBridge(props: { media: Media; origin: string }): Element;
+  };
+  const media = new module.NativeVoiceMedia(null);
   const bridge = harness.mount(() =>
     module.VoiceMediaBridge({ media, origin: "https://app.example.test" }),
   );
