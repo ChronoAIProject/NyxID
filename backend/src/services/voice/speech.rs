@@ -1,6 +1,10 @@
 //! Bounded, self-contained speech presentation of settled results.
 use crate::{AppState, models::assistant_message::AssistantMessage};
 
+// Factual model context has a separate budget from a single spoken append.
+// Match the existing Grok presentation queue's bound.
+pub(super) const CONTEXT_MAX_BYTES: usize = 8_000;
+
 /// Prefer sentences, then clauses; never split a Unicode scalar or invent an
 /// ending for an overlong clause. An indivisible clause stays whole for callers
 /// to omit rather than reading a cut-off prefix.
@@ -144,7 +148,7 @@ fn presentation(
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
     });
-    if safe(text) {
+    if !text.trim().is_empty() {
         let facts = serde_json::json!({
             "type":"task_result",
             "state":task_state(status, error_code),
@@ -152,7 +156,7 @@ fn presentation(
             "answer":text,
             "error_code":code,
         });
-        if facts.to_string().len() <= super::runtime::COMMENTARY_MAX_BYTES {
+        if facts.to_string().len() <= CONTEXT_MAX_BYTES {
             return Presentation::Context(facts);
         }
     }
@@ -164,7 +168,8 @@ fn presentation(
     }))
 }
 
-/// Presentation-only leak guard. It never classifies user intent or permissions.
+/// Direct-narration guard, not a filter on the facts available to the model.
+/// It never classifies user intent or permissions.
 fn safe(text: &str) -> bool {
     !text.trim().is_empty()
         && !text.contains(['_', '`'])
@@ -189,7 +194,7 @@ mod tests {
         let Presentation::Context(facts) = value else {
             panic!("Fallback must be model context rather than a fixed spoken line")
         };
-        assert!(facts.to_string().len() <= super::super::runtime::COMMENTARY_MAX_BYTES);
+        assert!(facts.to_string().len() <= CONTEXT_MAX_BYTES);
         facts
     }
 
@@ -334,12 +339,58 @@ mod tests {
             presentation(Some(&over), "結果", "completed", None),
             Presentation::Text("結果".into())
         );
-        for text in [&over, "", "   ", "POST /admin/reset"] {
+        for text in [&over, "POST /admin/reset"] {
+            let facts = context(presentation(None, text, "completed", None));
+            assert_eq!(facts["presentation"], "original");
+            assert_eq!(facts["answer"], text);
+        }
+        for text in ["", "   ", &"x".repeat(CONTEXT_MAX_BYTES)] {
             let facts = context(presentation(None, text, "completed", None));
             assert_eq!(facts["type"], "task_result");
             assert_eq!(facts["state"], "completed");
             assert_eq!(facts["presentation"], "unavailable");
             assert!(facts["error_code"].is_null());
+            assert!(facts.get("answer").is_none());
+        }
+    }
+
+    #[test]
+    fn summary_failure_preserves_complete_technical_multilingual_findings() {
+        let text = "板子在线：`net.connected=true`，音量 95。\n\
+            Firmware 0.6.16; nyx.state=up; microphone_muted=false.\n\
+            العربية 日本語 မြန်မာ 👩🏽‍💻\n\
+            GET https://device.example/status\n\
+            f47ac10b-58cc-4372-a567-0e02b2c3d479\n"
+            .repeat(8);
+        assert!(text.len() > super::super::runtime::COMMENTARY_MAX_BYTES);
+        for summary in [None, Some("`net.connected=true`"), Some("")] {
+            let facts = context(presentation(summary, &text, "completed", None));
+            assert_eq!(facts["state"], "completed");
+            assert_eq!(facts["presentation"], "original");
+            assert_eq!(facts["answer"], text);
+        }
+    }
+
+    #[test]
+    fn context_budget_includes_metadata_and_json_escaping_without_partial_results() {
+        let overhead = context(presentation(None, "", "failed", Some("timeout")))
+            .to_string()
+            .len();
+        // Compute the original-result envelope rather than the unavailable one.
+        let envelope = context(presentation(None, "x", "failed", Some("timeout")))
+            .to_string()
+            .len()
+            - 1;
+        assert!(envelope > overhead);
+        let text = "x".repeat(CONTEXT_MAX_BYTES - envelope);
+        let facts = context(presentation(None, &text, "failed", Some("timeout")));
+        assert_eq!(facts.to_string().len(), CONTEXT_MAX_BYTES);
+        assert_eq!(facts["answer"], text);
+        for oversized in [format!("{text}x"), "\u{0}".repeat(CONTEXT_MAX_BYTES / 2)] {
+            let facts = context(presentation(None, &oversized, "failed", Some("timeout")));
+            assert_eq!(facts["state"], "failed");
+            assert_eq!(facts["presentation"], "unavailable");
+            assert_eq!(facts["error_code"], "timeout");
             assert!(facts.get("answer").is_none());
         }
     }
