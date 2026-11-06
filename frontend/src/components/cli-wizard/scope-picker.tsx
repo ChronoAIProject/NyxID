@@ -73,7 +73,7 @@ export function ScopePicker({
       </div>
       <p
         className={
-          isEmpty ? "text-xs text-destructive" : "text-xs text-muted-foreground"
+          isEmpty ? "text-13 text-destructive" : "text-13 text-muted-foreground"
         }
       >
         {isEmpty ? "At least one scope is required." : hint}
@@ -92,9 +92,9 @@ function ScopeChip({
   readonly onToggle: () => void
 }) {
   return (
-    <label
+    <Label
       className={
-        "inline-flex cursor-pointer select-none items-center gap-1.5 rounded-full border px-3 py-1.5 text-12 transition-colors duration-300 " +
+        "inline-flex cursor-pointer select-none items-center gap-1.5 rounded-full border px-3 py-1.5 transition-colors duration-300 " +
         (checked
           ? "border-primary bg-primary/15 text-foreground"
           : "border-border bg-transparent text-muted-foreground hover:border-border hover:bg-muted/40")
@@ -107,7 +107,7 @@ function ScopeChip({
         onChange={onToggle}
         value={scope}
       />
-      <span className="text-xs">{scope}</span>
-    </label>
+      <span>{scope}</span>
+    </Label>
   )
 }

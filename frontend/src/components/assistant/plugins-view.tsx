@@ -1,14 +1,40 @@
-import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, RefreshCw, Search } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { ArrowRight, Plus, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
+import { Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  GroupedList,
+  GroupedRow,
+  GroupedInput,
+  GroupedSelectTrigger,
+} from "@/components/ui/grouped-list";
+import {
+  SegmentedControl,
+  SegmentedControlList,
+  SegmentedControlTrigger,
+  SegmentedControlContent,
+} from "@/components/ui/segmented-control";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectValue,
+} from "@/components/ui/select";
 import { AssistantLinkModal } from "./assistant-link-modals";
-import { useCreateAssistantConnectLink } from "@/hooks/use-connect-links";
-import { Link } from "@tanstack/react-router";
-import { ManageConnectionModal } from "@/components/assistant/manage-connection-modal";
+import { WorkspacePageHeader } from "./workspace-page-header";
+import { ManageConnectionModal } from "./manage-connection-modal";
 import { ServiceIcon } from "@/components/service-icon";
+import { ServiceCardSummary } from "@/components/shared/service-card-summary";
+import { useCreateAssistantConnectLink } from "@/hooks/use-connect-links";
 import { useCatalog, useKeys } from "@/hooks/use-keys";
 import {
   useAgentSkills,
@@ -17,20 +43,12 @@ import {
   useSkillSearch,
 } from "@/hooks/use-agent-skills";
 import { useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { agentTitle } from "@/lib/assistant/nyxbot-labels";
 import type { AssistantAgent } from "@/schemas/assistant-nyxagent";
 import {
   deriveConnectorItems,
   matchesPluginQuery,
   type ConnectorCardItem,
-  type PluginKind,
 } from "@/lib/assistant/plugins";
 
 interface PluginCardShape {
@@ -39,334 +57,325 @@ interface PluginCardShape {
   readonly initial: string;
   readonly iconSlug?: string | null;
   readonly iconUrl?: string | null;
-  readonly category: string;
   readonly description: string;
   readonly meta: string;
   readonly added: boolean;
-  /** Added connectors only: every connection behind the card is disabled. */
   readonly disabled?: boolean;
 }
 
-/**
- * Every card in the grid renders at this exact box, whatever its description
- * length: header (34px tile) + a 3-line description + the action row, inside
- * `p-4`. The description is the only elastic block (`flex-1` + `line-clamp-3`),
- * so short and empty descriptions reserve the same space instead of collapsing
- * the card. `LoadingGrid` skeletons use the same height.
- */
-const CARD_HEIGHT = "h-[168px]";
-
-function PluginTile({
-  children,
-}: {
-  readonly children: React.ReactNode;
-}) {
-  return (
-    <div className="flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-md bg-muted text-13 font-semibold text-muted-foreground">
-      {children}
-    </div>
-  );
-}
-
-/**
- * A catalog card with exactly one call to action: the card itself. Clicking
- * anywhere runs the primary action — Connect for an unconnected service,
- * Manage for a connected one — rather than staging a detail view in front of
- * it. `actionLabel` is the card's own affordance; it is deliberately a label,
- * not a nested button, so the whole surface stays a single hit target.
- *
- * A card with no `onActivate` (an installed skill, whose management isn't
- * built yet) renders inert: not focusable, no pointer affordance.
- */
+/** The primary native control covers the card. Secondary controls are siblings
+ * above it, so they never nest interactive elements or trigger the primary. */
 function PluginCard({
   item,
-  addedBadge,
-  addedMeta,
+  status,
   actionLabel,
   onActivate,
+  href,
+  skillAgentId,
+  secondary,
+  add = false,
+  disabled = false,
 }: {
   readonly item: PluginCardShape;
-  readonly addedBadge: "Connected" | "Installed" | "Attached";
-  /** Extra mono note next to the added badge (e.g. "2 connections"). */
-  readonly addedMeta?: string;
+  readonly status: string;
   readonly actionLabel: string;
   readonly onActivate?: () => void;
+  readonly href?: { slug?: string };
+  readonly skillAgentId?: string;
+  readonly secondary?: ReactNode;
+  readonly add?: boolean;
+  readonly disabled?: boolean;
 }) {
-  const interactive = Boolean(onActivate);
-
+  const controlClass =
+    "absolute inset-0 rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed";
   return (
-    <div
-      {...(interactive
-        ? {
-            role: "button",
-            tabIndex: 0,
-            "aria-label": `${actionLabel} ${item.name}`,
-            onClick: onActivate,
-            onKeyDown: (event: React.KeyboardEvent) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                onActivate?.();
-              }
-            },
-          }
-        : {})}
-      // The clamped description is the only truncated text on the card, and
-      // the card no longer expands — the native tooltip keeps the full copy
-      // reachable without a second surface.
-      title={item.description}
-      className={`group flex ${CARD_HEIGHT} flex-col gap-2.5 rounded-xl border border-border bg-card p-4 text-left transition-colors ${
-        interactive ? "cursor-pointer hover:border-hairline-strong" : ""
-      }`}
+    <article
+      data-plugin-card=""
+      className="assistant-plugin-card relative flex flex-col gap-3 rounded-xl border border-border/50 bg-card p-4 text-left transition-colors has-[button:not(:disabled):hover]:bg-overlay has-[a:hover]:bg-overlay"
     >
-      <div className="flex items-start gap-2.5">
-        <PluginTile>
-          {item.iconSlug || item.iconUrl ? (
-            <ServiceIcon slug={item.iconSlug} iconUrl={item.iconUrl} size="md" />
+      {skillAgentId ? (
+        <Link
+          to="/assistant"
+          search={{ agent: skillAgentId, details: "skills" }}
+          className={controlClass}
+          aria-label={`${actionLabel} ${item.name}`}
+        />
+      ) : href ? (
+        <Link
+          to="/keys"
+          search={{ tab: "services", action: "add-service", ...href }}
+          className={controlClass}
+          aria-label={`${actionLabel} ${item.name}`}
+        />
+      ) : onActivate ? (
+        <button
+          type="button"
+          className={controlClass}
+          aria-label={add ? item.name : `${actionLabel} ${item.name}`}
+          disabled={disabled}
+          onClick={onActivate}
+        />
+      ) : null}
+      <ServiceCardSummary
+        description={item.description}
+        name={item.name}
+        subtitleTitle={status}
+        className="pointer-events-none"
+        icon={
+          add ? <Plus aria-hidden className="size-[1.5em]" /> : item.iconSlug || item.iconUrl ? (
+            <ServiceIcon
+              slug={item.iconSlug}
+              iconUrl={item.iconUrl}
+              size="md"
+            />
           ) : (
             item.initial
-          )}
-        </PluginTile>
-        <div className="min-w-0">
-          <p className="truncate text-13 font-medium text-foreground">
-            {item.name}
-          </p>
-          <p className="text-10 uppercase tracking-[0.5px] text-text-tertiary">
-            {item.category}
-          </p>
+          )
+        }
+        subtitle={
+          <>
+            {item.added && !item.disabled ? (
+              <span
+                aria-hidden
+                className="mr-1.5 inline-block size-[0.5em] rounded-full bg-success align-middle"
+              />
+            ) : null}
+            {status}
+          </>
+        }
+      />
+      <div className="pointer-events-none mt-auto flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-1 text-13">
+        <div className="pointer-events-auto relative flex min-w-0 items-center gap-2">
+          {secondary}
         </div>
-      </div>
-      {/* The spacer absorbs the card's slack so the action row stays pinned to
-          the bottom; the clamp lives on the text itself, or `flex-1` would
-          stretch the box past three lines and clip a fourth mid-glyph. */}
-      <div className="min-h-0 flex-1">
-        <p className="break-words text-12 leading-[17px] text-muted-foreground line-clamp-3">
-          {item.description}
-        </p>
-      </div>
-      <div className="flex shrink-0 items-center justify-between gap-2">
-        {item.added ? (
-          <span className="flex min-w-0 items-center gap-2">
-            {/* A disabled connection is still added — it just can't be used.
-                Showing the green Connected badge would claim the assistant has
-                a working way in, so the neutral Disabled badge replaces it
-                rather than sitting beside it. */}
-            {item.disabled ? (
-              <Badge variant="secondary">Disabled</Badge>
-            ) : (
-              <Badge variant="success">{addedBadge}</Badge>
-            )}
-            {addedMeta && (
-              <span className="truncate font-mono text-10 text-text-tertiary">
-                {addedMeta}
-              </span>
-            )}
-          </span>
-        ) : (
-          <span className="font-mono text-10 text-text-tertiary">
-            {item.meta}
-          </span>
-        )}
         <span
           aria-hidden
-          className={`flex shrink-0 items-center gap-1 text-12 transition-colors ${
-            interactive
-              ? "text-muted-foreground group-hover:text-foreground"
-              : "text-text-tertiary"
-          }`}
+          className="flex items-center gap-1 type-row-title"
         >
           {actionLabel}
-          {interactive && <ArrowRight className="h-3 w-3" />}
+          {onActivate || href ? <ArrowRight className="size-[1em]" /> : null}
         </span>
       </div>
+    </article>
+  );
+}
+
+function SectionHeading({
+  children,
+  actions,
+}: {
+  readonly children: ReactNode;
+  readonly actions?: ReactNode;
+}) {
+  return (
+    <div className="mb-3 flex flex-wrap items-center justify-between gap-2 px-1">
+      <h2 className="type-card-title">{children}</h2>
+      {actions}
     </div>
   );
 }
-
-function SectionHeading({ children }: { readonly children: React.ReactNode }) {
-  return (
-    <p className="mb-2.5 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-      {children}
-    </p>
-  );
+function CardGrid({ children }: { readonly children: ReactNode }) {
+  return <div className="assistant-plugin-grid shell-card-grid grid">{children}</div>;
 }
-
-function CardGrid({ children }: { readonly children: React.ReactNode }) {
-  return (
-    <div className="grid grid-cols-[repeat(auto-fill,minmax(248px,1fr))] gap-3">
-      {children}
-    </div>
-  );
-}
-
 function LoadingGrid() {
   return (
     <div role="status" aria-label="Loading the plugin catalog">
       <CardGrid>
         {Array.from({ length: 6 }, (_, i) => (
-          <Skeleton key={i} className={`${CARD_HEIGHT} rounded-xl`} />
+          <Skeleton key={i} className="assistant-plugin-card rounded-xl" />
         ))}
       </CardGrid>
     </div>
   );
 }
-
 function ConnectorCard({
   item,
   onManage,
   onConnect,
+  busy,
 }: {
   readonly item: ConnectorCardItem;
-  readonly onManage: (cardId: string) => void;
+  readonly onManage: (id: string) => void;
   readonly onConnect: (slug: string, personal: boolean) => void;
+  readonly busy: boolean;
 }) {
-  const connectSlug = item.connectSlug;
+  const count = item.manageKeyIds?.length ?? 0;
   return (
-    <div className="space-y-2">
-      <PluginCard
+    <PluginCard
       item={item}
-      addedBadge="Connected"
-      addedMeta={(item.manageKeyIds?.length ?? 0) > 1 ? item.meta : undefined}
-      actionLabel={item.added ? "Manage" : "Connect"}
+      status={
+        item.added
+          ? `${item.disabled ? "Disabled" : "Connected"} · ${count} ${count === 1 ? "connection" : "connections"}`
+          : item.meta
+      }
+      actionLabel={
+        item.added
+          ? "Manage"
+          : item.advancedSetupSlug
+            ? "Advanced setup"
+            : "Connect"
+      }
+      href={
+        item.advancedSetupSlug ? { slug: item.advancedSetupSlug } : undefined
+      }
+      disabled={!item.added && busy}
       onActivate={
         item.added
           ? () => onManage(item.id)
-          : connectSlug
-            ? () => onConnect(connectSlug, false)
+          : item.connectSlug
+            ? () => onConnect(item.connectSlug!, false)
             : undefined
       }
+      secondary={
+        item.connectOwnSlug ? (
+          <button
+            type="button"
+            disabled={busy}
+            className="min-h-8 type-row-title text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={() => onConnect(item.connectOwnSlug!, true)}
+          >
+            Connect your own
+          </button>
+        ) : undefined
+      }
     />
-      {item.advancedSetupSlug ? (
-        <Link
-          to="/keys"
-          search={{ tab: "services", action: "add-service", slug: item.advancedSetupSlug }}
-          className="inline-block text-12 underline underline-offset-4"
-        >
-          Advanced setup for {item.name}
-        </Link>
-      ) : null}
-      {item.connectOwnSlug ? (
-        <Button variant="outline" onClick={() => onConnect(item.connectOwnSlug!, true)}>
-          Connect your own
-        </Button>
-      ) : null}
-    </div>
   );
 }
-
 function ConnectorsTab({ query }: { readonly query: string }) {
   const keysQuery = useKeys();
   const catalogQuery = useCatalog();
   const [manageCardId, setManageCardId] = useState<string | null>(null);
   const [connectHref, setConnectHref] = useState<string | null>(null);
+  const [modelPicker, setModelPicker] = useState(false);
   const createConnect = useCreateAssistantConnectLink();
   function openConnect(slug: string, personal: boolean) {
     if (createConnect.isPending) return;
-    void createConnect.mutateAsync({ serviceSlug: slug, personal }).then(setConnectHref).catch((cause: unknown) => {
-      toast.error(cause instanceof Error ? cause.message : "Could not create connection link");
-    });
+    void createConnect
+      .mutateAsync({ serviceSlug: slug, personal })
+      .then((href) => {
+        setModelPicker(false);
+        setConnectHref(href);
+      })
+      .catch((cause: unknown) => {
+        toast.error(
+          cause instanceof Error
+            ? cause.message
+            : "Could not create connection link",
+        );
+      });
   }
-
   const items = useMemo(
     () => deriveConnectorItems(keysQuery.data ?? [], catalogQuery.data ?? []),
     [keysQuery.data, catalogQuery.data],
   );
-  // Resolved from the live list rather than snapshotted at open time, so
-  // revoking one of several connections updates the modal in place, and
-  // revoking the last one unmounts it.
   const manageItem = items.added.find((item) => item.id === manageCardId);
-
-  // A dead backend must not take the view away: report the failure as a
-  // toast, render whatever data exists (or the normal empty states), and keep
-  // the retry affordance inside the working view.
   const loadFailed = Boolean(keysQuery.error ?? catalogQuery.error);
   useEffect(() => {
-    if (!loadFailed) return;
-    toast.error("Could not load plugins", {
-      id: "assistant-plugins-load-failed",
-      description:
-        "The assistant backend did not respond. Showing what has already loaded — retry below.",
-    });
+    if (loadFailed)
+      toast.error("Could not load plugins", {
+        id: "assistant-plugins-load-failed",
+        description:
+          "The assistant backend did not respond. Showing what has already loaded — retry below.",
+      });
   }, [loadFailed]);
-
   if (keysQuery.isLoading || catalogQuery.isLoading) return <LoadingGrid />;
-
   const searching = Boolean(query.trim());
   const added = items.added.filter((item) => matchesPluginQuery(item, query));
   const available = items.available.filter((item) =>
     matchesPluginQuery(item, query),
   );
-
-  if (searching && added.length === 0 && available.length === 0) {
-    return (
-      <p className="py-14 text-center text-11 text-text-tertiary">
-        No plugins match this search.
-      </p>
-    );
+  const addModel: PluginCardShape = {
+    id: "add-model",
+    name: "Add a model connection",
+    initial: "+",
+    description:
+      "Use your own provider account or a custom OpenAI-compatible endpoint.",
+    meta: "Model providers",
+    added: false,
+  };
+  const showModels = !searching || matchesPluginQuery({ ...addModel, category: "Models" }, query) || items.models.some((item) => matchesPluginQuery(item, query));
+  function cards(rows: readonly ConnectorCardItem[]) {
+    return rows.map((item) => (
+      <ConnectorCard
+        key={item.id}
+        item={item}
+        onManage={setManageCardId}
+        onConnect={openConnect}
+        busy={createConnect.isPending}
+      />
+    ));
   }
-
   return (
-    <>
+    <div className="space-y-7">
       {loadFailed ? (
-        <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-4 py-2.5">
-          <p className="text-12 text-muted-foreground">
-            Some plugins may be missing until the catalog loads.
-          </p>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              void keysQuery.refetch();
-              void catalogQuery.refetch();
-            }}
-          >
-            <RefreshCw />
-            Retry
-          </Button>
-        </div>
+        <GroupedList footer="Some plugins may be missing until the catalog loads.">
+          <GroupedRow asChild interactive>
+            <button
+              type="button"
+              onClick={() => {
+                void keysQuery.refetch();
+                void catalogQuery.refetch();
+              }}
+            >
+              <RefreshCw aria-hidden className="size-[1.125em]" />
+              Retry
+            </button>
+          </GroupedRow>
+        </GroupedList>
       ) : null}
       {(added.length > 0 || !searching) && (
-        <>
-          <SectionHeading>Added</SectionHeading>
-          {added.length > 0 ? (
-            <div className="mb-7">
-              <CardGrid>
-                {added.map((item) => (
-                  <ConnectorCard
-                    key={item.id}
-                    item={item}
-                    onManage={setManageCardId}
-                    onConnect={openConnect}
-                  />
-                ))}
-              </CardGrid>
-            </div>
+        <section aria-label="Connected">
+          <SectionHeading>Connected</SectionHeading>
+          {added.length ? (
+            <CardGrid>{cards(added)}</CardGrid>
           ) : (
-            <p className="mb-7 rounded-xl border border-dashed border-border px-4 py-6 text-center text-12 text-muted-foreground">
+            <p className="px-4 py-6 text-14 text-text-tertiary">
               {loadFailed
                 ? "Connected services could not be loaded right now."
                 : "No connected services yet. Connect one below and your assistant can call it through the NyxID proxy."}
             </p>
           )}
-        </>
+        </section>
       )}
-
-      {available.length > 0 && (
-        <>
-          <SectionHeading>Available to add</SectionHeading>
+      {showModels && (
+        <section aria-label="Models">
+          <SectionHeading>Models</SectionHeading>
           <CardGrid>
-            {available.map((item) => (
-              <ConnectorCard
-                key={item.id}
-                item={item}
-                onManage={setManageCardId}
-                onConnect={openConnect}
-              />
-            ))}
+            <PluginCard
+              item={addModel}
+              status="Model providers"
+              actionLabel="Choose provider"
+              add
+              onActivate={() => setModelPicker(true)}
+            />
           </CardGrid>
-        </>
+        </section>
       )}
-
+      {available.length > 0 && (
+        <section aria-label="Browse">
+          <SectionHeading>Browse</SectionHeading>
+          <CardGrid>{cards(available)}</CardGrid>
+        </section>
+      )}
+      {searching &&
+      !added.length &&
+      !available.length &&
+      !showModels ? (
+        <p className="py-12 text-center text-14 text-text-tertiary">
+          No plugins match this search.
+        </p>
+      ) : null}
+      <GroupedList>
+        <GroupedRow asChild interactive>
+          <Link to="/keys" search={{ tab: "services", action: "add-service" }}>
+            <span className="flex-1">Advanced setup</span>
+            <ArrowRight
+              aria-hidden
+              className="size-[1.125em] text-text-tertiary"
+            />
+          </Link>
+        </GroupedRow>
+      </GroupedList>
       {manageItem && (
         <ManageConnectionModal
           keyIds={manageItem.manageKeyIds ?? []}
@@ -376,17 +385,52 @@ function ConnectorsTab({ query }: { readonly query: string }) {
           onClose={() => setManageCardId(null)}
         />
       )}
-
-      <Link
-        to="/keys"
-        search={{ tab: "services", action: "add-service" }}
-        className="inline-block text-12 underline underline-offset-4"
-      >
-        Advanced setup
-      </Link>
-      <AssistantLinkModal href={connectHref} onClose={() => setConnectHref(null)} />
-
-    </>
+      <Dialog open={modelPicker} onOpenChange={setModelPicker}>
+        <DialogContent className="bg-background sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Add a model connection</DialogTitle>
+            <DialogDescription>
+              Use your own provider account or model endpoint.
+            </DialogDescription>
+          </DialogHeader>
+          <GroupedList>
+            {items.models.map((item) => (
+              <GroupedRow asChild interactive key={item.id}>
+                <button
+                  type="button"
+                  disabled={createConnect.isPending}
+                  onClick={() => openConnect(item.connectSlug!, true)}
+                >
+                  <ServiceIcon slug={item.iconSlug} size="sm" />
+                  <span className="flex-1">{item.name}</span>
+                  <ArrowRight
+                    aria-hidden
+                    className="size-[1.125em] text-text-tertiary"
+                  />
+                </button>
+              </GroupedRow>
+            ))}
+            <GroupedRow asChild interactive>
+              <Link
+                to="/keys"
+                search={{ tab: "services", action: "add-service" }}
+              >
+                <ServiceIcon slug="custom" size="sm" />
+                Custom OpenAI-compatible endpoint
+                <ArrowRight
+                  aria-hidden
+                  className="ml-auto size-[1.125em] text-text-tertiary"
+                />
+              </Link>
+            </GroupedRow>
+          </GroupedList>
+        </DialogContent>
+      </Dialog>
+      <AssistantLinkModal
+        href={connectHref}
+        onClose={() => setConnectHref(null)}
+      />
+    </div>
   );
 }
 
@@ -401,21 +445,25 @@ function SkillAgentPicker({
   readonly onChange: (id: string) => void;
 }) {
   return (
-    <label className="flex max-w-[300px] flex-col gap-1 text-11 text-text-tertiary">
-      Agent
-      <Select value={value} onValueChange={onChange}>
-        <SelectTrigger aria-label="Agent for skills">
-          <SelectValue placeholder="Choose an agent" />
-        </SelectTrigger>
-        <SelectContent>
-          {agents.map((agent) => (
-            <SelectItem key={agent.id} value={agent.id}>
-              {agentTitle(agent)}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-    </label>
+    <GroupedList>
+      <GroupedRow
+        title="Agent"
+        accessory={
+          <Select value={value} onValueChange={onChange}>
+            <GroupedSelectTrigger aria-label="Agent for skills">
+              <SelectValue placeholder="Choose an agent" />
+            </GroupedSelectTrigger>
+            <SelectContent>
+              {agents.map((agent) => (
+                <SelectItem key={agent.id} value={agent.id}>
+                  {agentTitle(agent)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        }
+      />
+    </GroupedList>
   );
 }
 
@@ -437,7 +485,7 @@ function SkillsTab({
     manageable.find((item) => item.kind === "nyxbot") ??
     manageable[0];
   const agentId = agent?.id ?? "";
-  const search = useSkillSearch(query.trim() || null, 1);
+  const search = useSkillSearch(query.trim(), 1);
   const attached = useAgentSkills(agentId);
   const detach = useSetAgentSkills(agentId);
   const attach = useAttachLatestSkill(agentId);
@@ -448,7 +496,6 @@ function SkillsTab({
     id: skill.id,
     name: skill.name,
     initial: skill.name.slice(0, 2).toUpperCase(),
-    category: "Skill",
     description: skill.description,
     meta: "Ornn catalog",
     added: pins.some((pin) => pin.skill_id === skill.id),
@@ -466,8 +513,10 @@ function SkillsTab({
       <PluginCard
         key={item.id}
         item={item}
-        addedBadge="Attached"
-        actionLabel={item.added ? "Attached" : "Attach"}
+        status={item.added ? "Attached" : "Ornn catalog"}
+        disabled={busy || full}
+        actionLabel={item.added ? "View" : "Attach"}
+        skillAgentId={item.added ? agentId : undefined}
         onActivate={
           item.added
             ? undefined
@@ -491,7 +540,7 @@ function SkillsTab({
       {agents.isPending ? (
         <Skeleton className="h-8 w-[300px]" />
       ) : manageable.length === 0 && !agents.error ? (
-        <p className="text-12 text-muted-foreground">
+        <p className="text-14 text-muted-foreground">
           No agent you can maintain is available.
         </p>
       ) : agent ? (
@@ -502,61 +551,68 @@ function SkillsTab({
         />
       ) : null}
       {errors.map((error, index) => (
-        <p key={index} role="alert" className="text-12 text-destructive">
+        <p key={index} role="alert" className="text-14 text-destructive">
           {error.message}
         </p>
       ))}
       {agent && attached.data ? (
-        <section aria-label="Attached skills" className="space-y-2">
-          <SectionHeading>
-            {`Attached to ${agentTitle(agent)} · ${pins.length}/16`}
-          </SectionHeading>
-          {pins.length === 0 ? (
-            <p className="text-12 text-muted-foreground">
-              No skills attached. Search the catalog to attach one.
-            </p>
+        <GroupedList
+          title={`Attached to ${agentTitle(agent)} · ${pins.length}/16`}
+          footer={
+            <>
+              <p>
+                Versions, tests and edits live in the agent&apos;s settings.
+              </p>
+              {full ? (
+                <p>This agent already has 16 skills. Detach one first.</p>
+              ) : null}
+            </>
+          }
+        >
+          {pins.length ? (
+            pins.map((pin) => (
+              <GroupedRow
+                key={pin.skill_id}
+                title={pin.name}
+                description={pin.disabled ? "Disabled" : undefined}
+                accessory={
+                  <>
+                    <span>{pin.version}</span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() =>
+                        detach.mutate({
+                          expected_revision: attached.data.revision,
+                          skills: pins.filter(
+                            (item) => item.skill_id !== pin.skill_id,
+                          ),
+                        })
+                      }
+                    >{`Detach ${pin.name}`}</Button>
+                  </>
+                }
+              />
+            ))
           ) : (
-            <ul className="space-y-2">
-              {pins.map((pin) => (
-                <li
-                  key={pin.skill_id}
-                  className="flex items-center justify-between gap-3 rounded-lg border border-border/50 px-3 py-2"
-                >
-                  <span className="min-w-0 text-12">
-                    <span className="font-medium">{pin.name}</span>{" "}
-                    <span className="font-mono text-text-tertiary">
-                      {pin.version}
-                    </span>
-                    {pin.disabled ? (
-                      <span className="text-text-tertiary"> · Disabled</span>
-                    ) : null}
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() =>
-                      detach.mutate({
-                        expected_revision: attached.data.revision,
-                        skills: pins.filter(
-                          (item) => item.skill_id !== pin.skill_id,
-                        ),
-                      })
-                    }
-                  >
-                    {`Detach ${pin.name}`}
-                  </Button>
-                </li>
-              ))}
-            </ul>
+            <GroupedRow
+              title="No skills attached"
+              description="Search the catalog to attach one."
+            />
           )}
-          <p className="text-11 text-text-tertiary">
-            Versions, tests and edits live in the agent&apos;s settings.
-          </p>
-        </section>
+        </GroupedList>
+      ) : null}
+      {!query.trim() && !items.length ? (
+        <GroupedList>
+          <GroupedRow
+            title="Find a skill"
+            description="Search by name or workflow to explore the Ornn catalog."
+          />
+        </GroupedList>
       ) : null}
       {query.trim() && items.length === 0 && search.data ? (
-        <p className="py-14 text-center text-11 text-text-tertiary">
+        <p className="py-14 text-center text-13 text-text-tertiary">
           No plugins match this search.
         </p>
       ) : null}
@@ -571,63 +627,49 @@ function SkillsTab({
 }
 
 export function PluginsView({ agentId }: { readonly agentId?: string } = {}) {
-  const [tab, setTab] = useState<PluginKind>("connector");
+  const [tab, setTab] = useState("connector");
   const [query, setQuery] = useState("");
-
   return (
-    <div className="h-full min-h-0 overflow-y-auto overscroll-contain">
-      <div className="px-5 pt-6 sm:px-8">
-        <h1 className="text-22 font-bold tracking-[-0.03em] sm:text-28">
-          Plugins
-        </h1>
-        <p className="mt-1 max-w-2xl text-12 text-muted-foreground">
-          Plugins are connectors to services, MCP servers, and data sources;
-          skills teach your assistant new workflows. Installing provisions the
-          endpoint, credential, and proxy route in one step.
-        </p>
-        <div className="mt-4 flex flex-wrap items-center gap-4">
-          <label className="flex h-8 w-full max-w-[300px] items-center gap-2 rounded-lg border border-hairline px-3 transition-colors focus-within:border-hairline-strong">
-            <Search className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
-            <input
+    <div className="shell-page-stack pb-4">
+      <WorkspacePageHeader
+        title="Plugins"
+        description="Connect your services and model accounts. Add skills to teach your assistant new workflows."
+      />
+      <SegmentedControl
+        value={tab}
+        onValueChange={setTab}
+        className="space-y-6"
+      >
+        <SegmentedControlList aria-label="Plugin type" className="max-w-80">
+          <SegmentedControlTrigger value="connector">
+            Connectors
+          </SegmentedControlTrigger>
+          <SegmentedControlTrigger value="skill">
+            Skills
+          </SegmentedControlTrigger>
+        </SegmentedControlList>
+        <GroupedList className="max-w-2xl">
+          <GroupedRow leading={<Search aria-hidden />}>
+            <Search
+              aria-hidden
+              className="size-[1.125em] shrink-0 text-text-tertiary"
+            />
+            <GroupedInput
+              className="min-w-0 flex-1"
+              aria-label="Search plugins"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search the catalog..."
-              className="min-w-0 flex-1 bg-transparent text-12 text-foreground outline-none placeholder:text-text-tertiary"
             />
-          </label>
-          <div className="flex h-8" role="tablist" aria-label="Plugin type">
-            {(
-              [
-                ["connector", "Connectors"],
-                ["skill", "Skills"],
-              ] as const
-            ).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                role="tab"
-                aria-selected={tab === value}
-                onClick={() => setTab(value)}
-                className={`border-b-2 px-3 text-12 transition-colors ${
-                  tab === value
-                    ? "border-primary font-medium text-foreground"
-                    : "border-transparent text-text-tertiary hover:text-foreground"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div className="px-5 pb-10 pt-5 sm:px-8">
-        {tab === "connector" ? (
+          </GroupedRow>
+        </GroupedList>
+        <SegmentedControlContent value="connector">
           <ConnectorsTab query={query} />
-        ) : (
+        </SegmentedControlContent>
+        <SegmentedControlContent value="skill">
           <SkillsTab query={query} agentId={agentId} />
-        )}
-      </div>
+        </SegmentedControlContent>
+      </SegmentedControl>
     </div>
   );
 }

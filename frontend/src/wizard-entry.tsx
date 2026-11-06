@@ -671,7 +671,7 @@ function SecretDispatcher({
   }
   // ai-key uses `acking` phase instead of `secret`, so this is
   // unreachable — keep it exhaustive.
-  return <p className="text-sm text-destructive">Unknown result kind.</p>
+  return <p className="text-14 text-destructive">Unknown result kind.</p>
 }
 
 function AckingPanel({
@@ -686,12 +686,12 @@ function AckingPanel({
   return (
     <div className="flex flex-col gap-4">
       <WizardHeading title="Service added">
-        <code className="font-mono text-xs">{result.slug}</code> is now connected. Check
+        <code className="font-mono text-14">{result.slug}</code> is now connected. Check
         your terminal for the final summary.
       </WizardHeading>
       {completeError ? (
         <div className="flex flex-col gap-2">
-          <p className="text-sm text-destructive">
+          <p className="text-14 text-destructive">
             Couldn't notify CLI: {completeError}
           </p>
           <Button variant="outline" onClick={onRetry}>
@@ -766,7 +766,7 @@ function CancelLink({
     <button
       type="button"
       onClick={onCancel}
-      className={`${centered ? "self-center" : "self-start"} text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground`}
+      className={`${centered ? "self-center" : "self-start"} text-13 text-muted-foreground underline underline-offset-2 hover:text-foreground`}
     >
       Cancel and return to terminal
     </button>

@@ -28,8 +28,8 @@ export function ThreadTitle({
         className={cn(
           "group flex min-w-0 max-w-full items-center gap-2 text-left",
           heading
-            ? "text-15 font-semibold text-foreground"
-            : "text-12 text-muted-foreground hover:text-foreground",
+            ? "type-card-title text-foreground"
+            : "text-14 text-muted-foreground hover:text-foreground",
         )}
         onClick={() => {
           form.reset({ title });
@@ -71,7 +71,7 @@ export function ThreadTitle({
         <Input
           autoFocus
           aria-label="Chat title"
-          className={heading ? "h-8 min-w-0 flex-1 text-15 font-semibold" : undefined}
+          className={heading ? "h-8 min-w-0 flex-1 type-body " : undefined}
           maxLength={200}
           {...form.register("title")}
         />
@@ -99,7 +99,7 @@ export function ThreadTitle({
         </Button>
       </div>
       {error && (
-        <p role="alert" className="text-11 text-destructive">
+        <p role="alert" className="text-13 text-destructive">
           {error}
         </p>
       )}

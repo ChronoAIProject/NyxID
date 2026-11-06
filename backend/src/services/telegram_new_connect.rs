@@ -201,9 +201,11 @@ impl TelegramNewService<'_> {
         );
         super::platform_provisioning_service::admit_request(self.db, &request, true).await?;
         let webhook = self.api.call(&token, "getWebhookInfo", json!({})).await?;
+        // Our own callback registered under a configured API alias (before a
+        // domain move) is not another application's webhook.
         if webhook["url"]
             .as_str()
-            .is_some_and(|url| !url.is_empty() && url != callback)
+            .is_some_and(|url| !url.is_empty() && !self.config.same_base_url(url, &callback))
         {
             return Err(AppError::Conflict("This bot has a webhook for another application. Clear that webhook before retrying.".into()));
         }
@@ -211,7 +213,10 @@ impl TelegramNewService<'_> {
         self.api.call(&token, "setWebhook", json!({"url": callback, "secret_token": secret, "allowed_updates": ["message", "edited_message", "channel_post"]})).await?;
         super::platform_provisioning_service::admit_request(self.db, &request, true).await?;
         let webhook = self.api.call(&token, "getWebhookInfo", json!({})).await?;
-        if webhook["url"] != callback {
+        if !webhook["url"]
+            .as_str()
+            .is_some_and(|url| self.config.same_base_url(url, &callback))
+        {
             return Err(AppError::ChannelPlatformError(
                 "Telegram webhook was not confirmed. Retry connecting the saved bot.".into(),
             ));

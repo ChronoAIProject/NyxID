@@ -47,7 +47,7 @@ export function CmaTime({
     <time
       dateTime={value}
       title={new Date(value).toLocaleString()}
-      className="shrink-0 text-11 text-text-tertiary"
+      className="shrink-0 type-meta text-text-tertiary"
     >
       {new Date(value).toLocaleString(undefined, {
         ...(!timeOnly && ({ month: "short", day: "numeric" } as const)),
@@ -76,7 +76,7 @@ export function CmaDisclosure({
         aria-expanded={open}
         aria-controls={id}
         onClick={() => setOpen(!open)}
-        className="flex w-full items-center gap-2 rounded-xl p-4 text-left text-12 font-medium hover:bg-overlay focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
+        className="flex w-full items-center gap-2 rounded-xl p-4 text-left type-button hover:bg-overlay focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
       >
         <ChevronDown
           aria-hidden
@@ -87,7 +87,7 @@ export function CmaDisclosure({
         />
         {title}
         {count !== undefined && (
-          <span className="ml-auto text-11 font-normal text-text-tertiary">
+          <span className="ml-auto type-secondary text-text-tertiary">
             {count} records
           </span>
         )}
@@ -147,7 +147,7 @@ export function CmaMessage({
       >
         <div
           className={cn(
-            "mb-2 flex flex-wrap items-center gap-2 text-11 text-text-tertiary",
+            "mb-2 flex flex-wrap items-center gap-2 type-meta text-text-tertiary",
             request && "justify-end",
           )}
         >
@@ -157,7 +157,7 @@ export function CmaMessage({
               From your chat
             </span>
           )}
-          <h3 className="font-medium text-muted-foreground">
+          <h3 className="type-group-label text-muted-foreground">
             {request ? "Work request" : assistantName}
           </h3>
           <CmaTime value={time} timeOnly />
@@ -165,7 +165,7 @@ export function CmaMessage({
         {request ? (
           <UserMessageBubble
             className={cn(
-              "rounded-2xl rounded-tr-sm rounded-br-2xl px-4 py-3 text-16 leading-relaxed",
+              "rounded-2xl rounded-tr-sm rounded-br-2xl px-4 py-3 type-chat-message",
               linked && "ring-1 ring-ring",
             )}
           >
@@ -184,7 +184,7 @@ export function CmaMessage({
                 aria-controls={id}
                 aria-expanded={expanded}
                 onClick={() => setExpanded(!expanded)}
-                className="mt-2 inline-flex items-center gap-1 rounded text-11 text-text-tertiary hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
+                className="mt-2 inline-flex items-center gap-1 rounded type-button text-text-tertiary hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
               >
                 {expanded ? "Show less" : "Show full message"}
                 <ChevronDown
@@ -236,8 +236,8 @@ export function CmaEmptyState({
         aria-hidden
         className="mx-auto mb-3 size-6 text-text-tertiary"
       />
-      <p className="text-13 font-medium">{title}</p>
-      <p className="mx-auto mt-2 max-w-md text-12 leading-relaxed text-text-tertiary">
+      <p className="type-secondary-emphasis">{title}</p>
+      <p className="mx-auto mt-2 max-w-md type-secondary text-text-tertiary">
         {text}
       </p>
     </div>

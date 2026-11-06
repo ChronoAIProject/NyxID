@@ -7,7 +7,7 @@ use crate::models::{
 use crate::services::channel_platform::PlatformAdapter;
 use serde_json::json;
 
-fn bot() -> ChannelBot {
+pub(super) fn bot() -> ChannelBot {
     bson::from_document(doc! {
         "_id":uuid::Uuid::new_v4().to_string(),"user_id":uuid::Uuid::new_v4().to_string(),
         "platform":"discord","label":"fixture","platform_bot_id":"100","platform_bot_username":"helper",
@@ -334,7 +334,15 @@ async fn shared_pipeline_sends_one_signed_callback_with_versioned_facts_and_no_p
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
-    let (state, fence) = fixture("discord_gateway_pipeline").await;
+    let (state, mut fence) = fixture("discord_gateway_pipeline").await;
+    fence.bot.status = "pending_webhook".into();
+    fence.bot.webhook_registered = false;
+    state
+        .db
+        .collection::<ChannelBot>(COLLECTION_NAME)
+        .replace_one(doc! {"_id": &fence.bot.id}, &fence.bot)
+        .await
+        .unwrap();
     let server = MockServer::start().await;
     let agent = uuid::Uuid::new_v4().to_string();
     state.db.collection::<Document>(crate::models::api_key::COLLECTION_NAME).insert_one(doc! {
@@ -354,6 +362,31 @@ async fn shared_pipeline_sends_one_signed_callback_with_versioned_facts_and_no_p
         .await;
     let adapter = super::super::channel_adapters::discord::DiscordAdapter::default();
     let (inbound, facts) = normalize(&fence.bot, "500");
+    let mut wrong = fence.bot.clone();
+    wrong.platform_bot_id = "999".into();
+    assert!(
+        super::super::channel_inbound_service::process_discord_gateway_message(
+            &state, &wrong, &adapter, &inbound, &fence, &facts,
+        )
+        .await
+        .is_err()
+    );
+    let mut expired = fence.clone();
+    expired.lease.lease_id = uuid::Uuid::new_v4().to_string();
+    assert!(
+        super::super::channel_inbound_service::process_discord_gateway_message(
+            &state, &fence.bot, &adapter, &inbound, &expired, &facts,
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        super::super::channel_bot_service::get_bot(&state.db, &fence.bot.id)
+            .await
+            .unwrap()
+            .status,
+        "pending_webhook"
+    );
     let dispatch = || {
         super::super::channel_inbound_service::process_discord_gateway_message(
             &state, &fence.bot, &adapter, &inbound, &fence, &facts,
@@ -362,7 +395,20 @@ async fn shared_pipeline_sends_one_signed_callback_with_versioned_facts_and_no_p
     let (a, b) = tokio::join!(dispatch(), dispatch());
     let (a, b) = (a.unwrap(), b.unwrap());
     assert!(a || b);
+    let activated = super::super::channel_bot_service::get_bot(&state.db, &fence.bot.id)
+        .await
+        .unwrap();
+    assert_eq!(activated.status, "active");
+    assert!(
+        !activated.webhook_registered,
+        "Gateway traffic does not prove webhook registration"
+    );
     assert!(dispatch().await.unwrap());
+    let unchanged = super::super::channel_bot_service::get_bot(&state.db, &fence.bot.id)
+        .await
+        .unwrap();
+    assert_eq!(unchanged.status, "active");
+    assert_eq!(unchanged.updated_at, activated.updated_at);
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests.len(), 1);
     assert!(requests[0].headers.contains_key("x-nyxid-callback-token"));

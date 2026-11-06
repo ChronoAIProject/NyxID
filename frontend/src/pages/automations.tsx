@@ -1,3 +1,6 @@
+import { Label } from "@/components/ui/label";
+import { describeChanges, labelValue } from "@/lib/grouped-form-changes";
+import { TEXT_STYLES } from "@/lib/typography";
 import { formatCapacityWait } from "@/lib/assistant/capacity-wait";
 import { storedError } from "@/lib/assistant/nyxagent-transport";
 import { Link, useSearch } from "@tanstack/react-router";
@@ -7,13 +10,11 @@ import { TimezoneSelect } from "@/components/shared/timezone-select";
 import { AutomationDateTime } from "@/components/shared/automation-date-time";
 import {
   Select,
-  SelectTrigger,
   SelectValue,
   SelectContent,
   SelectItem,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Textarea } from "@/components/ui/textarea";
 import {
   useAutomationSetup,
   type AutomationSetup,
@@ -32,6 +33,7 @@ import {
 import {
   useAutomationChats,
   useAutomationRuns,
+  useCancelAutomationRun,
   useRunAutomation,
   useSchedulePreview,
 } from "@/hooks/use-automations";
@@ -49,7 +51,7 @@ import {
   type ScheduleSpec,
 } from "@/schemas/automations";
 import type { TriggerResponse } from "@/schemas/triggers";
-import { PageHeader } from "@/components/shared/page-header";
+import { WorkspacePageHeader } from "@/components/assistant/workspace-page-header";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import {
@@ -57,12 +59,11 @@ import {
   type OneTimeSecretValue,
 } from "@/components/shared/one-time-secret-dialog";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Form, useAppForm } from "@/components/ui/form";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogHeader,
   DialogTitle,
@@ -75,18 +76,38 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+  GroupedList,
+  GroupedRow,
+  GroupedInput,
+  GroupedTextarea,
+  GroupedSelectTrigger,
+  GroupedDisclosure,
+  GroupedFooter,
+} from "@/components/ui/grouped-list";
+import { GroupedDialogActions } from "@/components/ui/grouped-form";
+import {
+  GroupedPage,
+  GroupedDialog,
+  GroupedDialogContent,
+} from "@/components/ui/grouped-dialog";
+import {
+  SegmentedControl,
+  SegmentedControlList,
+  SegmentedControlTrigger,
+} from "@/components/ui/segmented-control";
 
 const message = (e: unknown) =>
   e instanceof Error ? e.message : "Could not save automation";
 
 export function AutomationsPage() {
+  return (
+    <GroupedPage>
+      <AutomationsContent />
+    </GroupedPage>
+  );
+}
+
+function AutomationsContent() {
   const search = parseAutomationSearch(useSearch({ strict: false }));
   const setup = useAutomationSetup(search.setup);
   const settings = useNyxBotSettings();
@@ -175,8 +196,9 @@ export function AutomationsPage() {
     );
   }
   return (
-    <div className="space-y-6">
-      <PageHeader
+    <div className="shell-page-stack">
+      <WorkspacePageHeader
+        column
         title="Automations"
         description="Scheduled work, reminders and webhook events for your agents."
         actions={
@@ -186,7 +208,7 @@ export function AutomationsPage() {
           />
         }
       />
-      <AutomationPreferences />
+      <AutomationPreferences title="Settings" />
       {triggers.error && (
         <ErrorBanner
           message={triggers.error.message}
@@ -196,99 +218,73 @@ export function AutomationsPage() {
       {triggers.isPending ? (
         <Skeleton className="h-36 w-full" aria-label="Loading automations" />
       ) : rows.length === 0 ? (
-        <p className="text-13 text-muted-foreground">
-          No automations yet. Ask NyxBot to schedule a task or create one here.
-        </p>
+        <GroupedList
+          className="max-w-2xl"
+          footer={
+            <Link className="underline" to="/triggers">
+              Webhook secrets and delivery replay
+            </Link>
+          }
+        >
+          <GroupedRow
+            title="No automations yet"
+            description="Ask NyxBot to schedule a task or create one here."
+          />
+        </GroupedList>
       ) : (
-        <>
-          <div className="hidden overflow-hidden rounded-xl border border-border/50 bg-card md:block">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Automation</TableHead>
-                  <TableHead>Target</TableHead>
-                  <TableHead>Next run</TableHead>
-                  <TableHead>Last run</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {rows.map((row) => (
-                  <TableRow key={row.id}>
-                    <TableCell>
-                      <button
-                        className="text-left"
-                        onClick={() => setHistory(row)}
-                      >
-                        {row.label}
-                        <span className="block text-11 text-muted-foreground">
-                          {row.source ?? "webhook"}
-                        </span>
-                      </button>
-                    </TableCell>
-                    <TableCell>{target(row)}</TableCell>
-                    <TableCell>
-                      {formatAutomationTime(row.next_run_at, zone)}
-                    </TableCell>
-                    <TableCell className="capitalize">
-                      {row.last_run?.outcome ?? "—"}
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={
-                          row.status === "active" ? "success" : "secondary"
-                        }
-                      >
-                        {row.status === "active" ? "Active" : "Paused"}
-                      </Badge>
-                      {row.pause_reason && (
-                        <span className="block text-11">
-                          {automationPauseReason(row.pause_reason)}
-                        </span>
-                      )}
-                    </TableCell>
-                    <TableCell>{actions(row)}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-          <div className="space-y-3 md:hidden">
-            {rows.map((row) => (
-              <div
-                key={row.id}
-                className="rounded-xl border border-border/50 bg-card p-4"
+        <GroupedList
+          title="Your automations"
+          className="max-w-2xl"
+          footer={
+            <Link className="underline" to="/triggers">
+              Webhook secrets and delivery replay
+            </Link>
+          }
+        >
+          {rows.map((row) => (
+            <GroupedRow key={row.id}>
+              <button
+                type="button"
+                aria-label={row.label}
+                className="min-w-0 flex-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => setHistory(row)}
               >
-                <div className="flex items-center justify-between">
-                  <button onClick={() => setHistory(row)}>{row.label}</button>
-                  {actions(row)}
-                </div>
-                <p className="text-12 text-muted-foreground">
+                <span data-trigger-title="" className={`block break-words ${TEXT_STYLES.rowTitle}`}>
+                  {row.label}
+                </span>
+                <span className="mt-0.5 block type-secondary text-text-tertiary">
                   {target(row)} ·{" "}
-                  {row.status === "active" ? "Active" : "Paused"}
-                </p>
-                <p className="text-12">
-                  Next: {formatAutomationTime(row.next_run_at, zone)}
-                </p>
-                <p className="text-12 capitalize">
-                  Last run: {row.last_run?.outcome ?? "—"}
-                </p>
+                  {row.source === "schedule" ? "Schedule" : "Webhook"} ·{" "}
+                  <span
+                    className={
+                      row.status === "active" ? "text-success" : undefined
+                    }
+                  >
+                    {row.status === "active" ? "Active" : "Paused"}
+                  </span>
+                </span>
+                <span className="mt-1 block type-secondary text-text-tertiary">
+                  {row.source === "webhook"
+                    ? "Runs on webhook events"
+                    : row.status !== "active"
+                      ? "Schedule paused"
+                      : row.next_run_at
+                        ? `Next: ${formatAutomationTime(row.next_run_at, zone)}`
+                        : "No run scheduled"} · {row.last_run?.outcome
+                    ? `Last run: ${row.last_run.outcome.replaceAll("_", " ")}`
+                    : "Not run yet"}
+                </span>
                 {row.pause_reason && (
-                  <p className="text-12">
+                  <span className="mt-1 block type-secondary text-warning">
                     {automationPauseReason(row.pause_reason)}
-                  </p>
+                  </span>
                 )}
-              </div>
-            ))}
-          </div>
-        </>
+              </button>
+              {actions(row)}
+            </GroupedRow>
+          ))}
+        </GroupedList>
       )}
-      <p className="text-12 text-muted-foreground">
-        <Link className="underline" to="/triggers">
-          Webhook secrets and delivery replay
-        </Link>
-      </p>
       {setup.error && <ErrorBanner message={setup.error.message} />}
       {search.setup && setup.isPending && (
         <Skeleton className="h-24 w-full" aria-label="Loading setup" />
@@ -373,6 +369,8 @@ export function AutomationEditor({
   const create = useCreateTrigger();
   const update = useUpdateTrigger();
   const [error, setError] = useState<string>();
+  const [advanced, setAdvanced] = useState(false);
+  const [prefillDirty, setPrefillDirty] = useState(Boolean(!row && prefill));
   const [defaults] = useState(() => {
     const value = automationDefaults(
       settings.data?.timezone ?? browserTimezone(),
@@ -392,6 +390,7 @@ export function AutomationEditor({
     return value;
   });
   const form = useAppForm<AutomationForm>({
+    mode: "onChange",
     resolver: zodResolver(automationFormSchema),
     defaultValues: defaults,
   });
@@ -426,21 +425,37 @@ export function AutomationEditor({
     return () => clearTimeout(timer);
   }, [serialized]);
   const preview = useSchedulePreview(spec);
+  function fieldError(name: keyof AutomationForm) {
+    const error = form.formState.errors[name];
+    return error ? (
+      <GroupedFooter>
+        <p
+          id={`automation-${name}-error`}
+          role="alert"
+          className="text-destructive"
+        >
+          {error.message}
+        </p>
+      </GroupedFooter>
+    ) : null;
+  }
   function input(name: keyof AutomationForm, label: string, type = "text") {
     return (
-      <label className="block space-y-1 text-12" key={name}>
-        {label}
-        <Input
-          type={type}
-          disabled={Boolean(row) && name === "signature_header"}
-          {...form.register(name, { valueAsNumber: name === "amount" })}
-        />
-        {form.formState.errors[name] && (
-          <span role="alert" className="text-destructive">
-            {form.formState.errors[name]?.message}
+      <GroupedRow key={name} asChild className="block space-y-0.5">
+        <Label>
+          <span className="text-text-tertiary">
+            {label}
           </span>
-        )}
-      </label>
+          <GroupedInput
+            type={type}
+            aria-invalid={Boolean(form.formState.errors[name])}
+            aria-describedby={`automation-${name}-error`}
+            disabled={Boolean(row) && name === "signature_header"}
+            {...form.register(name, { valueAsNumber: name === "amount" })}
+          />
+          {fieldError(name)}
+        </Label>
+      </GroupedRow>
     );
   }
   function select(
@@ -450,35 +465,69 @@ export function AutomationEditor({
     disabled = false,
   ) {
     return (
-      <div className="block space-y-1 text-12">
-        {label}
-        <Select
-          value={String(form.watch(name)) || "__empty"}
-          onValueChange={(value) =>
-            form.setValue(
-              name,
-              value === "__empty" ? "" : (value as AutomationForm[typeof name]),
-            )
+      <>
+        <GroupedRow
+          title={label}
+          accessory={
+            <Select
+              value={String(form.watch(name)) || "__empty"}
+              onValueChange={(value) =>
+                form.setValue(
+                  name,
+                  value === "__empty" ? "" : (value as AutomationForm[typeof name]),
+                )
+              }
+              disabled={disabled}
+            >
+              <GroupedSelectTrigger
+                aria-label={label}
+                aria-describedby={`automation-${name}-error`}
+                aria-invalid={Boolean(form.formState.errors[name])}
+              >
+                <SelectValue />
+              </GroupedSelectTrigger>
+              <SelectContent>
+                {options.map(([value, text]) => (
+                  <SelectItem key={value || "__empty"} value={value || "__empty"}>
+                    {text}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           }
-          disabled={disabled}
+        />
+        {fieldError(name)}
+      </>
+    );
+  }
+  function segmented(
+    name: "source" | "kind",
+    label: string,
+    options: readonly (readonly [string, string])[],
+    disabled = false,
+  ) {
+    return (
+      <GroupedRow className="block space-y-2">
+        <Label asChild><p>{label}</p></Label>
+        <SegmentedControl
+          value={values[name]}
+          onValueChange={(value) =>
+            form.setValue(name, value as AutomationForm[typeof name])
+          }
         >
-          <SelectTrigger aria-label={label}>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
+          <SegmentedControlList aria-label={label}>
             {options.map(([value, text]) => (
-              <SelectItem key={value || "__empty"} value={value || "__empty"}>
+              <SegmentedControlTrigger
+                key={value}
+                value={value}
+                disabled={disabled}
+              >
                 {text}
-              </SelectItem>
+              </SegmentedControlTrigger>
             ))}
-          </SelectContent>
-        </Select>
-        {form.formState.errors[name] && (
-          <span role="alert" className="text-destructive">
-            {form.formState.errors[name]?.message}
-          </span>
-        )}
-      </div>
+          </SegmentedControlList>
+        </SegmentedControl>
+      </GroupedRow>
     );
   }
   function dateTime(
@@ -487,13 +536,19 @@ export function AutomationEditor({
     optional: boolean,
   ) {
     return (
-      <AutomationDateTime
-        timezone={values.timezone}
-        label={label}
-        optional={optional}
-        value={values[name]}
-        onChange={(value) => form.setValue(name, value)}
-      />
+      <>
+        <AutomationDateTime
+          grouped
+          errorId={`automation-${name}-error`}
+          invalid={Boolean(form.formState.errors[name])}
+          timezone={values.timezone}
+          label={label}
+          optional={optional}
+          value={values[name]}
+          onChange={(value) => form.setValue(name, value)}
+        />
+        {fieldError(name)}
+      </>
     );
   }
   async function save(v: AutomationForm) {
@@ -547,15 +602,16 @@ export function AutomationEditor({
       setError(message(e));
     }
   }
+  const busy = create.isPending || update.isPending || saveSettings.isPending;
   return (
-    <Dialog
+    <GroupedDialog
       open
       onOpenChange={(open) => {
-        if (!open) onClose();
+        if (!open && !busy) onClose();
       }}
     >
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
-        <DialogHeader>
+      <GroupedDialogContent scrollMode="body" className="md:max-w-xl">
+        <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>
             {row ? "Edit automation" : "Create automation"}
           </DialogTitle>
@@ -564,244 +620,337 @@ export function AutomationEditor({
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
-          <form className="space-y-4" onSubmit={form.handleSubmit(save)}>
-            {input("label", "Label")}
-            {select(
-              "source",
-              "Source",
-              [
-                ["schedule", "Schedule"],
-                ["webhook", "Webhook"],
-              ],
-              Boolean(row),
-            )}
-            {values.source === "schedule" ? (
-              <div className="space-y-3 rounded-lg border border-border p-3">
-                <TimezoneSelect
-                  label="IANA timezone"
-                  value={values.timezone}
-                  onChange={(zone) => form.setValue("timezone", zone)}
-                />
-                {select("kind", "Schedule type", [
-                  ["cron", "Calendar / cron"],
-                  ["every", "Every interval"],
-                  ["at", "Once"],
-                ])}
-                {values.kind === "cron" ? (
-                  <>
-                    <div className="space-y-1 text-12">
-                      <span>Preset</span>
-                      <Select
-                        onValueChange={(value) =>
-                          form.setValue("expression", value)
-                        }
-                      >
-                        <SelectTrigger aria-label="Preset">
-                          <SelectValue placeholder="Choose a preset…" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="0 8 * * 1-5">
-                            Weekdays at 8:00
-                          </SelectItem>
-                          <SelectItem value="0 9 * * *">
-                            Daily at 9:00
-                          </SelectItem>
-                          <SelectItem value="0 17 * * 5">
-                            Friday at 17:00
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    {input("expression", "Cron expression")}
-                    <p className="text-11 text-muted-foreground">
-                      Minute · hour · day · month · weekday. Missing DST times
-                      run once at the first valid time after the gap; repeated
-                      times use the earlier instant.
-                    </p>
-                  </>
-                ) : values.kind === "every" ? (
-                  <>
-                    {input("amount", "Interval amount", "number")}
-                    {select("unit", "Interval unit", [
-                      ["minutes", "Minutes"],
-                      ["hours", "Hours"],
-                      ["days", "Days"],
-                    ])}
-                    {dateTime("anchor", "Anchor", false)}
-                  </>
-                ) : (
-                  dateTime("at", "Run at", false)
+          <form className="min-h-0" onSubmit={form.handleSubmit(save)}>
+            <DialogBody className="space-y-6 pb-4">
+              <GroupedList title="What">
+                {input("label", "Label")}
+                {values.delivery_type === "assistant" && (
+                  <GroupedRow asChild className="block space-y-0.5">
+                    <Label>
+                      <span className="text-text-tertiary">
+                        Instruction
+                      </span>
+                      <GroupedTextarea
+                        {...form.register("instruction")}
+                        aria-invalid={Boolean(
+                          form.formState.errors.instruction,
+                        )}
+                        aria-describedby="automation-instruction-error"
+                      />
+                      {fieldError("instruction")}
+                    </Label>
+                  </GroupedRow>
                 )}
-                <div aria-live="polite" className="text-12">
-                  <strong>Next runs</strong>
-                  {preview.isFetching ? (
-                    <Skeleton
-                      className="h-12 w-full"
-                      aria-label="Calculating next runs"
-                    />
-                  ) : preview.error ? (
-                    <p role="alert" className="text-destructive">
-                      {preview.error.message}
-                    </p>
-                  ) : (
-                    <>
-                      <p>{preview.data?.description}</p>
-                      <ul>
-                        {preview.data?.next_runs.map((time) => (
-                          <li key={time}>
-                            {formatAutomationTime(
-                              time,
-                              settings.data?.timezone ?? values.timezone,
-                            )}
-                          </li>
-                        ))}
-                      </ul>
-                    </>
-                  )}
-                </div>
-                <details>
-                  <summary className="cursor-pointer text-12">
-                    Start, end and run limits
-                  </summary>
-                  <div className="mt-3 space-y-3">
-                    {dateTime("start", "Start", true)}
-                    {dateTime("end", "End", true)}
-                    {input("max_runs", "Maximum occurrences", "number")}
-                    {input(
-                      "grace_seconds",
-                      "Grace window in seconds (optional)",
-                      "number",
-                    )}
-                  </div>
-                </details>
-              </div>
-            ) : (
-              <>
-                {select(
-                  "verification_mode",
-                  "Inbound verification",
+              </GroupedList>
+              <GroupedList
+                title="When"
+                footer={
+                  values.source === "schedule" && values.kind === "cron"
+                    ? "Minute · hour · day · month · weekday. Missing DST times run once at the first valid time after the gap; repeated times use the earlier instant."
+                    : undefined
+                }
+              >
+                {segmented(
+                  "source",
+                  "Source",
                   [
-                    ["bearer", "Bearer token"],
-                    ["query", "Query token"],
-                    ["hmac", "HMAC-SHA256"],
+                    ["schedule", "Schedule"],
+                    ["webhook", "Webhook"],
                   ],
                   Boolean(row),
                 )}
-                {values.verification_mode === "hmac" &&
-                  input("signature_header", "Signature header")}
-              </>
-            )}
-            {select("delivery_type", "Delivery", [
-              ["assistant", "NyxBot / specialist"],
-              ["notification", "Notification reminder"],
-              ["webhook", "Webhook"],
-              ["agent", "Device agent"],
-            ])}
-            {values.delivery_type === "assistant" ? (
-              <>
-                {select("agent_id", "Target agent", [
-                  ["", "Choose an agent…"],
-                  ...(agents.data?.agents
-                    .filter((a) => a.status !== "destroyed")
-                    .map((a) => [a.id, a.display_name ?? a.name] as const) ??
-                    []),
-                ])}
-                {values.source === "webhook" && (
+                {values.source === "schedule" ? (
                   <>
-                    {select("confirmation_policy", "Confirm webhook actions", [
+                    {segmented("kind", "Schedule type", [
+                      ["cron", "Calendar"],
+                      ["every", "Every"],
+                      ["at", "Once"],
+                    ])}
+                    {values.kind === "cron" ? (
+                      <>
+                        <GroupedRow
+                          title="Preset"
+                          accessory={
+                            <Select
+                              onValueChange={(value) =>
+                                form.setValue("expression", value)
+                              }
+                            >
+                              <GroupedSelectTrigger aria-label="Preset">
+                                <SelectValue placeholder="Choose a preset…" />
+                              </GroupedSelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="0 8 * * 1-5">
+                                  Weekdays at 8:00
+                                </SelectItem>
+                                <SelectItem value="0 9 * * *">
+                                  Daily at 9:00
+                                </SelectItem>
+                                <SelectItem value="0 17 * * 5">
+                                  Friday at 17:00
+                                </SelectItem>
+                              </SelectContent>
+                            </Select>
+                          }
+                        />
+                        {input("expression", "Cron expression")}
+                      </>
+                    ) : values.kind === "every" ? (
+                      <>
+                        <GroupedRow
+                          title="Interval"
+                          accessory={
+                            <div className="flex max-w-full flex-wrap items-center gap-2">
+                              <GroupedInput
+                                type="number"
+                                className="w-16"
+                                aria-label="Interval amount"
+                                aria-invalid={Boolean(
+                                  form.formState.errors.amount,
+                                )}
+                                aria-describedby="automation-amount-error"
+                                {...form.register("amount", {
+                                  valueAsNumber: true,
+                                })}
+                              />
+                              <Select
+                                value={values.unit}
+                                onValueChange={(value) =>
+                                  form.setValue(
+                                    "unit",
+                                    value as AutomationForm["unit"],
+                                  )
+                                }
+                              >
+                                <GroupedSelectTrigger
+                                  aria-label="Interval unit"
+                                  aria-invalid={Boolean(
+                                    form.formState.errors.unit,
+                                  )}
+                                  aria-describedby="automation-unit-error"
+                                >
+                                  <SelectValue />
+                                </GroupedSelectTrigger>
+                                <SelectContent>
+                                  {["minutes", "hours", "days"].map((unit) => (
+                                    <SelectItem key={unit} value={unit}>
+                                      {unit.charAt(0).toUpperCase() +
+                                        unit.slice(1)}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          }
+                        />
+                        {fieldError("amount")}
+                        {fieldError("unit")}
+                        {dateTime("anchor", "Anchor", false)}
+                      </>
+                    ) : (
+                      dateTime("at", "Run at", false)
+                    )}
+                    <TimezoneSelect
+                      grouped
+                      label="IANA timezone"
+                      describedBy="automation-timezone-error"
+                      invalid={Boolean(form.formState.errors.timezone)}
+                      value={values.timezone}
+                      onChange={(zone) => form.setValue("timezone", zone)}
+                    />
+                    {fieldError("timezone")}
+                    <GroupedDisclosure
+                      aria-expanded={advanced}
+                      onClick={() => setAdvanced(!advanced)}
+                    >
+                      Start, end and run limits
+                    </GroupedDisclosure>
+                  </>
+                ) : (
+                  <>
+                    {select(
+                      "verification_mode",
+                      "Inbound verification",
+                      [
+                        ["bearer", "Bearer token"],
+                        ["query", "Query token"],
+                        ["hmac", "HMAC-SHA256"],
+                      ],
+                      Boolean(row),
+                    )}
+                    {values.verification_mode === "hmac" &&
+                      input("signature_header", "Signature header")}
+                  </>
+                )}
+              </GroupedList>
+              {values.source === "schedule" && advanced && (
+                <GroupedList title="Start, end and run limits">
+                  {dateTime("start", "Start", true)}
+                  {dateTime("end", "End", true)}
+                  {input("max_runs", "Maximum occurrences", "number")}
+                  {input(
+                    "grace_seconds",
+                    "Grace window in seconds (optional)",
+                    "number",
+                  )}
+                </GroupedList>
+              )}
+              {values.source === "schedule" && (
+                <GroupedList
+                  title="Next runs"
+                  aria-live="polite"
+                  footer={
+                    preview.error ? (
+                      <p role="alert" className="text-destructive">
+                        {preview.error.message}
+                      </p>
+                    ) : (
+                      preview.data?.description
+                    )
+                  }
+                >
+                  {preview.isFetching ? (
+                    <GroupedRow>
+                      <Skeleton
+                        className="h-8 w-full"
+                        aria-label="Calculating next runs"
+                      />
+                    </GroupedRow>
+                  ) : preview.data?.next_runs.length ? (
+                    preview.data.next_runs.map((time) => (
+                      <GroupedRow
+                        key={time}
+                        title={formatAutomationTime(
+                          time,
+                          settings.data?.timezone ?? values.timezone,
+                        )}
+                      />
+                    ))
+                  ) : (
+                    <GroupedRow title="Choose a valid schedule to preview its next runs" />
+                  )}
+                </GroupedList>
+              )}
+              {values.delivery_type === "assistant" && (
+                <GroupedList
+                  title="Who"
+                  footer={
+                    <>
+                      {values.source === "webhook" &&
+                        values.confirmation_policy === "destructive" && (
+                          <p role="alert" className="text-warning">
+                            Untrusted webhook content can cause changes using
+                            your account without confirmation. Choose this only
+                            for event sources you trust.
+                          </p>
+                        )}
+                      {values.source === "webhook" &&
+                        values.thread_policy === "home" && (
+                          <p role="alert" className="text-warning">
+                            Untrusted webhook content will remain in your home
+                            thread and can influence later owner turns,
+                            including private channel chats, with full account
+                            authority. Webhook confirmations do not protect
+                            those later turns. Choose this only if you accept
+                            that risk.
+                          </p>
+                        )}
+                    </>
+                  }
+                >
+                  {select("agent_id", "Target agent", [
+                    ["", "Choose an agent…"],
+                    ...(agents.data?.agents
+                      .filter((a) => a.status !== "destroyed")
+                      .map((a) => [a.id, a.display_name ?? a.name] as const) ??
+                      []),
+                  ])}
+                  {select("thread_policy", "Thread", [
+                    [
+                      "default",
+                      values.source === "webhook"
+                        ? "Default (dedicated thread)"
+                        : "Default (NyxBot home, specialist dedicated)",
+                    ],
+                    ["home", "Home thread"],
+                    ["dedicated", "One thread for this automation"],
+                    ["new", "New thread each run"],
+                  ])}
+                  {values.source === "webhook" &&
+                    select("confirmation_policy", "Confirm webhook actions", [
                       ["changes", "Every changing action (recommended)"],
                       ["destructive", "Only destructive actions"],
                     ])}
-                    {values.confirmation_policy === "destructive" && (
-                      <p role="alert" className="text-12 text-warning">
-                        Untrusted webhook content can cause changes using your
-                        account without confirmation. Choose this only for event
-                        sources you trust.
-                      </p>
-                    )}
+                </GroupedList>
+              )}
+              <GroupedList title="Deliver to">
+                {select("delivery_type", "Delivery", [
+                  ["assistant", "NyxBot / specialist"],
+                  ["notification", "Notification reminder"],
+                  ["webhook", "Webhook"],
+                  ["agent", "Device agent"],
+                ])}
+                {values.delivery_type === "assistant" ? (
+                  <>
+                    {select("deliver_type", "Send result to", [
+                      ["thread", "Web thread"],
+                      ["chat", "Channel chat"],
+                      ["notification", "Notification"],
+                    ])}
+                    {values.deliver_type === "chat" &&
+                      select("chat_id", "Chat (posting must be allowed)", [
+                        ["", "Choose a chat…"],
+                        ...(chats.data?.map(
+                          (chat) =>
+                            [
+                              chat.id,
+                              `${chat.bot_label}: ${chat.title ?? chat.kind ?? "Chat"}`,
+                            ] as const,
+                        ) ?? []),
+                      ])}
                   </>
-                )}
-                {select("thread_policy", "Thread", [
-                  [
-                    "default",
-                    values.source === "webhook"
-                      ? "Default (dedicated thread)"
-                      : "Default (NyxBot home, specialist dedicated)",
-                  ],
-                  ["home", "Home thread"],
-                  ["dedicated", "One thread for this automation"],
-                  ["new", "New thread each run"],
-                ])}
-                {values.source === "webhook" &&
-                  values.thread_policy === "home" && (
-                    <p role="alert" className="text-12 text-warning">
-                      Untrusted webhook content will remain in your home thread
-                      and can influence later owner turns, including private
-                      channel chats, with full account authority. Webhook
-                      confirmations do not protect those later turns. Choose
-                      this only if you accept that risk.
+                ) : values.delivery_type === "webhook" ? (
+                  input("webhook_url", "Delivery HTTPS URL")
+                ) : values.delivery_type === "agent" ? (
+                  input("conversation_id", "Device conversation ID")
+                ) : null}
+              </GroupedList>
+              <GroupedList
+                title="If still running"
+                footer={
+                  error && (
+                    <p role="alert" className="text-destructive">
+                      {error}
                     </p>
-                  )}
-                <label className="block space-y-1 text-12">
-                  Instruction
-                  <Textarea {...form.register("instruction")} />
-                  {form.formState.errors.instruction && (
-                    <span role="alert" className="text-destructive">
-                      {form.formState.errors.instruction.message}
-                    </span>
-                  )}
-                </label>
-                {select("deliver_type", "Send result to", [
-                  ["thread", "Web thread"],
-                  ["chat", "Channel chat"],
-                  ["notification", "Notification"],
-                ])}
-                {values.deliver_type === "chat" &&
-                  select("chat_id", "Chat (posting must be allowed)", [
-                    ["", "Choose a chat…"],
-                    ...(chats.data?.map(
-                      (chat) =>
-                        [
-                          chat.id,
-                          `${chat.bot_label}: ${chat.title ?? chat.kind ?? "Chat"}`,
-                        ] as const,
-                    ) ?? []),
-                  ])}
-              </>
-            ) : values.delivery_type === "webhook" ? (
-              input("webhook_url", "Delivery HTTPS URL")
-            ) : values.delivery_type === "agent" ? (
-              input("conversation_id", "Device conversation ID")
-            ) : null}
-            {select("overlap", "If the previous run is still active", [
-              ["skip", "Skip"],
-              ["queue", "Queue one"],
-            ])}
-            {error && (
-              <p role="alert" className="text-12 text-destructive">
-                {error}
-              </p>
-            )}
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={onClose}>
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                variant="primary"
-                disabled={
-                  create.isPending ||
-                  update.isPending ||
-                  (Boolean(row) && !form.formState.isDirty)
+                  )
                 }
               >
-                Save automation
-              </Button>
-            </DialogFooter>
+                {select("overlap", "If the previous run is still active", [
+                  ["skip", "Skip"],
+                  ["queue", "Queue one"],
+                ])}
+              </GroupedList>
+            </DialogBody>
+            <GroupedDialogActions
+              changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "label", label: "Label" }, { key: "instruction", label: "Instruction" }, { key: "source", label: "Source", format: labelValue({ schedule: "Schedule", webhook: "Webhook" }) }, { key: "kind", label: "Schedule type", format: labelValue({ cron: "Calendar", every: "Every", at: "Once" }) }, { key: "expression", label: "Cron expression" }, { key: "timezone", label: "Timezone" }, { key: "amount", label: "Interval" }, { key: "unit", label: "Interval unit", format: labelValue({ minutes: "Minutes", hours: "Hours", days: "Days" }) }, { key: "anchor", label: "Anchor" }, { key: "at", label: "Run at" }, { key: "start", label: "Start" }, { key: "end", label: "End" }, { key: "max_runs", label: "Maximum runs" }, { key: "grace_seconds", label: "Grace period (seconds)" }, { key: "delivery_type", label: "Delivery type", format: labelValue({ assistant: "Assistant", notification: "Notification", webhook: "Webhook", agent: "Device agent" }) }, { key: "agent_id", label: "Target agent", format: (value) => { const agent = agents.data?.agents.find((agent) => agent.id === value); return agent?.display_name || agent?.name || String(value || "None"); } }, { key: "thread_policy", label: "Thread", format: labelValue({ default: values.source === "webhook" ? "Default (dedicated thread)" : "Default (NyxBot home, specialist dedicated)", home: "Home thread", dedicated: "One thread for this automation", new: "New thread each run" }) }, { key: "confirmation_policy", label: "Confirmation policy", format: labelValue({ changes: "Every changing action (recommended)", destructive: "Only destructive actions" }) }, { key: "deliver_type", label: "Send result to", format: labelValue({ thread: "Web thread", chat: "Channel chat", notification: "Notification" }) }, { key: "chat_id", label: "Chat", format: (value) => { const chat = chats.data?.find((chat) => chat.id === value); return chat ? `${chat.bot_label}: ${chat.title ?? chat.kind ?? "Chat"}` : value ? "Saved chat" : "None"; } }, { key: "overlap", label: "If still running", format: labelValue({ skip: "Skip", queue: "Queue one" }) }, { key: "webhook_url", label: "Webhook URL", format: (value) => value === form.formState.defaultValues?.webhook_url ? "Saved destination (hidden)" : "New destination (hidden)" }, { key: "conversation_id", label: "Device conversation" }, { key: "verification_mode", label: "Verification method", format: labelValue({ bearer: "Bearer token", query: "Query token", hmac: "HMAC signature" }) }, { key: "signature_header", label: "Signature header" }])}
+              intent={row ? "edit" : "create"}
+              disabled={!form.formState.isValid}
+              label="automation"
+              dirty={form.formState.isDirty || prefillDirty}
+              pending={busy}
+              save={form.handleSubmit(save)}
+              discard={() => {
+                form.reset();
+                setPrefillDirty(false);
+                setError(undefined);
+                if (prefillDirty) onClose();
+              }}
+              saveLabel="Save automation"
+            />
           </form>
         </Form>
-      </DialogContent>
-    </Dialog>
+      </GroupedDialogContent>
+    </GroupedDialog>
   );
 }
 
@@ -815,6 +964,8 @@ function AutomationHistory({
   const settings = useNyxBotSettings();
   const zone = settings.data?.timezone ?? browserTimezone();
   const history = useAutomationRuns(row.id);
+  const cancelRun = useCancelAutomationRun();
+  const [cancelling, setCancelling] = useState<string | null>(null);
   const runs = history.data?.pages.flatMap((page) => page.runs) ?? [];
   return (
     <Dialog
@@ -823,72 +974,131 @@ function AutomationHistory({
         if (!open) onClose();
       }}
     >
-      <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
+      <DialogContent className="bg-background sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{row.label}: run history</DialogTitle>
           <DialogDescription>
             Up to 1,000 recent runs are retained for 90 days.
           </DialogDescription>
         </DialogHeader>
+        <Dialog open={cancelling !== null} onOpenChange={(open) => { if (!open) setCancelling(null); }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Cancel this automation run?</DialogTitle>
+              <DialogDescription>Stop this run and its delegated work. Completed actions remain completed.</DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setCancelling(null)}>Keep run</Button>
+              <Button variant="destructive" disabled={cancelRun.isPending} onClick={() => {
+                if (cancelling) cancelRun.mutate({ triggerId: row.id, runId: cancelling });
+                setCancelling(null);
+              }}>Confirm cancellation</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+        {cancelRun.error && <ErrorBanner message={cancelRun.error.message} />}
         {history.error ? (
           <ErrorBanner message={history.error.message} />
         ) : history.isPending ? (
           <Skeleton className="h-24 w-full" aria-label="Loading runs" />
         ) : !runs.length ? (
-          <p>No runs yet.</p>
+          <GroupedList>
+            <GroupedRow title="No runs yet." />
+          </GroupedList>
         ) : (
-          <ul className="space-y-3">
+          <div className="space-y-6">
             {runs.map((run) => (
-              <li
+              <GroupedList
                 key={run.id}
-                className="rounded-lg border border-border p-3 text-12"
+                title={run.outcome.replaceAll("_", " ")}
+                footer={
+                  <>
+                    {run.started_at && (
+                      <p>
+                        Started{" "}
+                        {formatAutomationTime(run.started_at, zone, true)}
+                      </p>
+                    )}
+                    {run.capacity_wait_ms != null &&
+                      run.capacity_wait_ms > 0 && (
+                        <p>waited {formatCapacityWait(run.capacity_wait_ms)} for capacity</p>
+                      )}
+                    {run.missed ? (
+                      <p>
+                        Missed {run.missed.count} occurrences between{" "}
+                        {formatAutomationTime(run.missed.from, zone)} and{" "}
+                        {formatAutomationTime(run.missed.through, zone)}.
+                      </p>
+                    ) : run.failure_reason ? (
+                      <p>
+                        {run.failure_reason.stage === "model_proxy"
+                          ? "Model request failed"
+                          : "Assistant request failed"}
+                        {": "}
+                        {run.failure_reason.code}
+                        {run.failure_reason.http_status != null &&
+                          ` (HTTP ${run.failure_reason.http_status})`}
+                      </p>
+                    ) : (
+                      run.reason && <p>{run.reason === "coordinator_timeout"
+                        ? "Coordinator deadline expired (coordinator_timeout)."
+                        : run.outcome === "waiting" && run.wait_kind === "coordinator"
+                          ? "Waiting for delegated work to finish"
+                          : run.reason.replaceAll("_", " ")}</p>
+                    )}
+                    {run.duration_ms !== null && (
+                      <p>{(run.duration_ms / 1000).toFixed(1)} seconds</p>
+                    )}
+                  </>
+                }
               >
-                <strong className="capitalize">{run.outcome}</strong> ·{" "}
-                Scheduled {formatAutomationTime(run.scheduled_at, zone, true)}
-                {run.started_at && <p>Started {formatAutomationTime(run.started_at, zone, true)}</p>}
-                {run.capacity_wait_ms != null && run.capacity_wait_ms > 0 && <p>waited {formatCapacityWait(run.capacity_wait_ms)} for capacity</p>}
-                {run.missed ? (
-                  <p>
-                    Missed {run.missed.count} occurrences between{" "}
-                    {formatAutomationTime(run.missed.from, zone)} and{" "}
-                    {formatAutomationTime(run.missed.through, zone)}.
-                  </p>
-                ) : run.failure_reason ? (
-                  <p>
-                    {run.failure_reason.stage === "model_proxy"
-                      ? "Model request failed"
-                      : "Assistant request failed"}
-                    {": "}
-                    {run.failure_reason.code}
-                    {run.failure_reason.http_status != null &&
-                      ` (HTTP ${run.failure_reason.http_status})`}
-                  </p>
-                ) : (
-                  run.reason && <p>{run.reason.replaceAll("_", " ")}</p>
+                <GroupedRow
+                  title={run.scheduled_at ? "Scheduled" : "On demand"}
+                  accessory={run.scheduled_at ? formatAutomationTime(run.scheduled_at, zone, true) : "Started by an event or request"}
+                />
+                {run.outcome === "waiting" && run.coordinator_deadline && (
+                  <GroupedRow
+                    title="Completion deadline"
+                    accessory={formatAutomationTime(run.coordinator_deadline, zone, true)}
+                  />
                 )}
-                {run.duration_ms !== null && (
-                  <p>{(run.duration_ms / 1000).toFixed(1)} seconds</p>
+                {run.can_cancel && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={cancelRun.isPending}
+                    onClick={() => setCancelling(run.id)}
+                  >
+                    Cancel run
+                  </Button>
                 )}
                 {run.thread_id && (
-                  <Link
-                    className="text-primary-text underline"
-                    to="/assistant"
-                    search={{ c: run.thread_id }}
-                  >
-                    Open thread
-                  </Link>
+                  <GroupedRow asChild interactive>
+                    <Link
+                      className="text-primary-text underline"
+                      to="/assistant"
+                      search={{ c: run.thread_id }}
+                    >
+                      Open thread
+                    </Link>
+                  </GroupedRow>
                 )}
-              </li>
+              </GroupedList>
             ))}
-          </ul>
+          </div>
         )}
         {history.hasNextPage && (
-          <Button
-            disabled={history.isFetchingNextPage}
-            onClick={() => void history.fetchNextPage()}
-          >
-            Load older runs
-          </Button>
+          <GroupedList>
+            <GroupedRow asChild interactive>
+              <button
+                type="button"
+                disabled={history.isFetchingNextPage}
+                onClick={() => void history.fetchNextPage()}
+              >
+                Load older runs
+              </button>
+            </GroupedRow>
+          </GroupedList>
         )}
       </DialogContent>
     </Dialog>

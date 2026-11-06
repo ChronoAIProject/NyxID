@@ -48,7 +48,11 @@ pub(crate) async fn gateway_base(state: &AppState) -> AppResult<String> {
                     .into(),
                 )
             })?;
-    let base = row.base_url.trim_end_matches('/').to_owned();
+    validated_base(&row.base_url)
+}
+
+pub(crate) fn validated_base(value: &str) -> AppResult<String> {
+    let base = value.trim_end_matches('/').to_owned();
     let parsed = url::Url::parse(&base)
         .map_err(|_| AppError::ValidationError("gateway_configuration_required".into()))?;
     let local = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
@@ -508,7 +512,9 @@ mod tests {
             agent_api_key_id: None,
             completed: false,
             claim_id: None,
-            retry_at: chrono::Utc::now(),
+            // This fixture is immediately claimable against MongoDB's $$NOW,
+            // independently of small host/database clock differences.
+            retry_at: chrono::DateTime::UNIX_EPOCH,
             created_at: chrono::Utc::now(),
         };
         f.state

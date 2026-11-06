@@ -145,6 +145,38 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
+/// Preserve conversation-wide Stop cleanup except for another live run.
+pub async fn cancel_unrelated(
+    db: &Database,
+    owner: &str,
+    thread: &str,
+    target: Option<&str>,
+) -> AppResult<()> {
+    let ctx = (
+        db.clone(),
+        owner.to_owned(),
+        thread.to_owned(),
+        target.map(str::to_owned),
+    );
+    super::transaction_service::run_db_only(db, &ctx, |session, (db, owner, thread, target)| Box::pin(async move {
+        db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id": thread, "user_id": owner}, doc! {"$inc": {"automation_handoff_version": 1_i64}}).session(&mut *session).await?;
+        let protected = super::trigger_schedule::continuation::stop_protected_runs_in_session(db, owner, target.as_deref(), session).await?;
+        db.collection::<bson::Document>(WATCHES).update_many(doc! {
+            "user_id": owner, "conversation_id": thread, "state": {"$in": ["submitting", "waiting", "ready", "queued"]},
+            "delivery.automation_work.run_id": {"$nin": &protected},
+        }, doc! {"$unset": {"secret_context_versions.result_encrypted": ""}, "$set": {
+            "state": "cancelling", "result_encrypted": null, "lease_id": null, "lease_until": null, "poll_at": bson::DateTime::now()
+        }}).session(&mut *session).await?;
+        // Generated files are admitted only for ordinary Web turns. Preserve
+        // their conversation-wide Stop cleanup beside waiting automations.
+        super::generated_artifacts::discard_in_session(db, doc! {"user_id": owner, "conversation_id": thread, "state": "pending"}, session).await?;
+        db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id": thread, "user_id": owner},
+            doc! {"$pull": {"pending_events": {"kind": {"$in": [EVENT_KIND, super::cma_operation::APPROVAL_EVENT_KIND]}, "automation_work.run_id": {"$nin": &protected}}}}
+        ).session(session).await?;
+        Ok(())
+    })).await
+}
+
 /// Reserve before submission, under an owner-wide write fence, so parallel
 /// submissions cannot exceed bounds or leave an unwatchable upstream job.
 #[cfg(test)]
@@ -157,12 +189,23 @@ pub async fn reserve(
     reserve_with_arguments(db, chat, service, endpoint, &Value::Null).await
 }
 
+#[cfg(test)]
 pub async fn reserve_with_arguments(
     db: &Database,
     chat: &super::assistant_acknowledgement_service::ChatAuthority,
     service: &super::mcp_service::McpToolService,
     endpoint: &super::mcp_service::McpToolEndpoint,
     args: &Value,
+) -> AppResult<AsyncServiceOperation> {
+    reserve_with_artifacts(db, chat, service, endpoint, args, false).await
+}
+pub async fn reserve_with_artifacts(
+    db: &Database,
+    chat: &super::assistant_acknowledgement_service::ChatAuthority,
+    service: &super::mcp_service::McpToolService,
+    endpoint: &super::mcp_service::McpToolEndpoint,
+    args: &Value,
+    artifacts_enabled: bool,
 ) -> AppResult<AsyncServiceOperation> {
     if chat.guest {
         return Err(AppError::Forbidden(
@@ -178,6 +221,15 @@ pub async fn reserve_with_arguments(
     }
     let contract = endpoint.async_operation.clone().ok_or_else(invalid)?;
     validate_endpoints(&contract, service, endpoint)?;
+    let artifact_catalog = if artifacts_enabled
+        && super::generated_artifacts::eligible(chat)
+        && super::generated_artifacts::sandbox_contract(service, endpoint)
+    {
+        super::security_readiness_service::require(db, "assistant:generated-artifacts").await?;
+        super::generated_artifacts::trusted_sandbox_catalog(db, service, endpoint).await?
+    } else {
+        None
+    };
     let cma = super::cma_operation::metadata(&contract, args);
     let db_ref_for_audit = db;
     let db = db.clone();
@@ -205,10 +257,12 @@ pub async fn reserve_with_arguments(
                 return Err(AppError::Conflict("Async operation watch limit reached".into()));
             }
             let turn=row.active_turn.as_ref().ok_or(AppError::AssistantTurnRequired)?;
+            if let Some(task)=&chat.execution_task { super::execution_permission_dispatch::tasks::fence(&db, session, task).await?; }
             let mut delivery = if let Some(filter) = delivery_watch_filter(&row, false)? {
                 watches.find_one(filter).session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?.delivery
             } else {
-                DeliveryBinding{invocation_id:turn.invocation_id.clone(),platform_reply:Some(platform_reply_routing(turn)),platform_origin:turn.platform_origin.clone(),origin:turn.origin,channel:turn.asked_from.clone().filter(|_|row.channel.is_some()).or_else(||row.channel.clone()),reply_channel:turn.asked_from.clone().filter(|_|row.channel.is_none()).or_else(||row.reply_channel.clone()),group_id:row.group_id.clone(),group_request_id:row.group_request_id.clone(),voice_request_id:turn.voice_request_id.clone(),trigger_run_id:turn.trigger_run_id.clone(),report_to:None,report_provenance:0}
+                DeliveryBinding{
+            automation_work: turn.automation_work.clone(),invocation_id:turn.invocation_id.clone(),platform_reply:Some(platform_reply_routing(turn)),platform_origin:turn.platform_origin.clone(),origin:turn.origin,channel:turn.asked_from.clone().filter(|_|row.channel.is_some()).or_else(||row.channel.clone()),reply_channel:turn.asked_from.clone().filter(|_|row.channel.is_none()).or_else(||row.reply_channel.clone()),group_id:row.group_id.clone(),group_request_id:row.group_request_id.clone(),voice_request_id:turn.voice_request_id.clone(),trigger_run_id:turn.trigger_run_id.clone(),report_to:None,report_provenance:0}
             };
             // Never a parent operation's stored field wholesale.
             match super::assistant_nyxagent::live_turn(&row, Utc::now()).filter(|live| !live.stop_requested) {
@@ -226,7 +280,12 @@ pub async fn reserve_with_arguments(
                     .update_one(doc!{"_id":request,"user_id":&chat.user_id,"state":{"$ne":"cancelled"}},doc!{"$set":{"async_operation_pending":true}}).session(&mut *session).await?;
             }
             let now=Utc::now();
-            let watch=AsyncServiceOperation { instruction_receipt_version: 0, shared_execution: None,cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
+            let watch=AsyncServiceOperation {
+            execution_task: super::execution_permission_dispatch::tasks::child(&chat),
+            artifact_catalog_service_id: artifact_catalog.clone().filter(|_|super::generated_artifacts::web_delivery(&delivery) && turn.origin == TurnOrigin::User && turn.asked_from.is_none() && turn.also_deliver.is_empty() && turn.report_to.is_none()),
+            artifact_mode: artifact_catalog.as_ref().filter(|_|super::generated_artifacts::web_delivery(&delivery) && turn.origin == TurnOrigin::User && turn.asked_from.is_none() && turn.also_deliver.is_empty() && turn.report_to.is_none()).map(|_|super::generated_artifacts::sandbox::MODE.to_owned()),
+            artifact_result: None,
+            artifact_event_turn_id: None, instruction_receipt_version: 0, shared_execution: None,cma:cma.clone(),secret_context_versions: Default::default(),id:Uuid::new_v4().to_string(),user_id:chat.user_id.clone(),conversation_id:row.id.clone(),agent_id:chat.agent_id.clone(),turn_id:turn.turn_id.clone(),api_key_id:chat.api_key_id.clone(),service_id:service_id.clone(),submit_endpoint_id:endpoint_id.clone(),contract:contract.clone(),
                 delivery,
                 operation_id:None,execution_binding:None,authority_version:1,contract_binding:None,state:"submitting".into(),reason:None,attempts:0,lease_id:None,lease_until:None,created_at:now,deadline:now+Duration::hours(2),poll_at:now+Duration::seconds(60),expires_at:now+if cma.is_some(){Duration::days(30)}else{Duration::hours(4)},result_encrypted:None};
             watches.insert_one(&watch).session(&mut *session).await?;
@@ -311,17 +370,48 @@ pub async fn submitted(
     let operation_id = (!agent_input).then_some(&id);
     // Replayed idempotent submissions reuse the existing watch, never queue a
     // second completion. Do not change another thread's existing destination.
-    let result=db.collection::<bson::Document>(WATCHES).update_one(doc!{"_id":&watch.id,"state":{"$in":["submitting","cancelling"]}},vec![doc!{"$set":{
-        "operation_id":{"$literal":operation_id},"cma":{"$literal":bson::to_bson(&cma).map_err(|_|invalid())?},"state":{"$cond":[{"$eq":["$state","cancelling"]},"cancelling","waiting"]},"poll_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(5))}}]).await;
+    let cma_value = if cma.is_some() {
+        bson::Bson::Document(doc! {"$mergeObjects":[
+            {"$literal":bson::to_bson(&cma).map_err(|_|invalid())?},
+            {"observer_binding":"$cma.observer_binding"},
+        ]})
+    } else {
+        bson::Bson::Null
+    };
+    let result = db
+        .collection::<bson::Document>(WATCHES)
+        .update_one(
+            doc! {"_id":&watch.id,"state":{"$in":["submitting","cancelling"]}},
+            vec![doc! {"$set":{
+                "operation_id":{"$literal":operation_id},"cma":cma_value,
+                "state":{"$cond":[{"$eq":["$state","cancelling"]},"cancelling","waiting"]},
+                "poll_at":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(5)),
+            }}],
+        )
+        .await;
     match result {
         Ok(updated) => {
-            if updated.matched_count == 1
-                && let (Some(cma), Some(value)) = (cma.as_ref(), parsed.as_ref())
-                && let Err(error) =
-                    super::cma_operation::register_observed_reference(state, watch, cma, value)
+            if updated.matched_count == 1 && cma.is_some() {
+                // This read is optional and happens after provider success. Missing
+                // watches (deletion) and projection failures cannot trigger retry.
+                let observation = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    db.collection::<AsyncServiceOperation>(WATCHES)
+                        .find_one(doc! {"_id":&watch.id,"user_id":&watch.user_id})
                         .await
-            {
-                tracing::debug!(watch_id=%watch.id,code=error.error_code(),"CMA receipt registration deferred");
+                })
+                .await;
+                match observation {
+                    Ok(Ok(Some(admitted))) => {
+                        if let Some(cma) = &admitted.cma {
+                            super::cma_session_origin::record_best_effort(db, &admitted, cma).await;
+                            // Reference/approval enrichment needs the exact live
+                            // polling lease. The admitted receipt stays durable
+                            // here; normal leased observation performs extra reads.
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    _ => super::cma_session_origin::metadata_unavailable(),
+                }
             }
             Ok(())
         }
@@ -585,16 +675,21 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
                 db.collection::<bson::Document>(WATCHES).delete_one(lease_filter(&w)).session(&mut *session).await?;return Ok(false);
             };
             if !super::assistant_invocation_service::fence_in_session(&db,session,&w.user_id,w.delivery.invocation_id.as_deref()).await? {return Ok(false);}
+            if let Some(work) = w.delivery.automation_work.as_ref() {super::trigger_schedule::continuation::fence_work(&db, &w.user_id, &w.conversation_id, work, session).await?;}
             let approval_key = cma_approval_watch_key(&w.id);
             if row.pending_events.iter().filter(|event| {
                 event.kind != super::cma_operation::APPROVAL_EVENT_KIND
                     || event.question_key.as_deref() != Some(approval_key.as_str())
             }).count()>=super::assistant_nyxagent::MAX_PENDING_EVENTS {return Ok(false);}
             if db.collection::<bson::Document>(WATCHES).update_one(lease_filter(&w),doc!{"$set":{"state":"queued","lease_id":null,"lease_until":null}}).session(&mut *session).await?.modified_count==0{return Ok(false);}
+            if let Some(task) = &w.execution_task { super::execution_permission_dispatch::tasks::fence(&db, session, task).await?; }
             conversations.update_one(doc!{"_id":&row.id,"user_id":&w.user_id},
                 doc!{"$pull":{"pending_events":{"kind":super::cma_operation::APPROVAL_EVENT_KIND,"question_key":approval_key}}})
                 .session(&mut *session).await?;
             let event = AgentEvent {
+                automation_work: w.delivery.automation_work.clone(),
+                execution_task: w.execution_task.clone(),
+                channel_contexts: Vec::new(),
                 delegated_result: None,
                 media_event_ids: Vec::new(),
                 media_declared: None,
@@ -629,6 +724,7 @@ pub async fn cancel(db: &Database, user: &str, id: &str) -> AppResult<()> {
         // scheduler -> assistant tool -> Stop path.
         let result:AppResult<()>=Box::pin(async {
             db.collection::<bson::Document>(WATCHES).update_many(doc!{"user_id":&user,"conversation_id":&id,"state":{"$in":["submitting","waiting","ready","queued"]}},doc!{"$unset":{"secret_context_versions.result_encrypted":""},"$set":{"state":"cancelling","result_encrypted":null,"lease_id":null,"lease_until":null,"poll_at":bson::DateTime::now()}}).session(&mut *session).await?;
+            super::generated_artifacts::discard_in_session(&db,doc!{"user_id":&user,"conversation_id":&id,"state":"pending"},session).await?;
             db.collection::<bson::Document>(CONVERSATIONS).update_one(doc!{"_id":&id,"user_id":&user},doc!{"$pull":{"pending_events":{"kind":{"$in":[EVENT_KIND,super::cma_operation::APPROVAL_EVENT_KIND]}}}}).session(&mut *session).await?;
             Ok(())
         }).await;transactions::transaction_result(result)
@@ -835,6 +931,62 @@ pub fn select_events(row: &mut AssistantConversation, origin: TurnOrigin) -> Vec
     {
         return vec![row.pending_events.remove(index)];
     }
+    if row
+        .pending_events
+        .iter()
+        .any(|e| e.automation_work.is_some())
+    {
+        // Root results are exclusively consumed with the scheduler's run claim.
+        let selected_work = (origin == TurnOrigin::Event)
+            .then(|| {
+                row.pending_events
+                    .iter()
+                    .filter(|e| {
+                        e.kind == EVENT_KIND
+                            || e.automation_work
+                                .as_ref()
+                                .is_some_and(|w| w.role != "coordinator")
+                    })
+                    .find_map(|e| e.automation_work.as_ref())
+                    .cloned()
+            })
+            .flatten();
+        let mut ordinary = Vec::new();
+        let mut selected = Vec::new();
+        let mut deferred = Vec::new();
+        for event in std::mem::take(&mut row.pending_events) {
+            if event.automation_work.is_none() {
+                ordinary.push(event);
+            } else if selected_work.is_some() && event.automation_work == selected_work {
+                selected.push(event);
+            } else {
+                deferred.push(event);
+            }
+        }
+        row.pending_events = if selected_work.is_some() {
+            selected
+        } else {
+            ordinary.clone()
+        };
+        // Reuse the legacy invocation/async partition inside this exact work.
+        // Remove only the binding during selection; restore it on every event.
+        if let Some(work) = selected_work.as_ref() {
+            for event in &mut row.pending_events {
+                event.automation_work = None;
+            }
+            let mut result = select_events(row, origin);
+            for event in result.iter_mut().chain(row.pending_events.iter_mut()) {
+                event.automation_work = Some(work.clone());
+            }
+            row.pending_events.extend(ordinary);
+            row.pending_events.extend(deferred);
+            return result;
+        }
+        let result = select_events(row, origin);
+        row.pending_events.extend(deferred);
+        return result;
+    }
+
     if origin == TurnOrigin::Event
         && let Some(index) = row
             .pending_events
@@ -911,6 +1063,7 @@ pub fn apply_delivery(row: &mut AssistantConversation, w: &AsyncServiceOperation
         );
         turn.voice_request_id = w.delivery.voice_request_id.clone();
         turn.trigger_run_id = w.delivery.trigger_run_id.clone();
+        turn.automation_work = w.delivery.automation_work.clone();
         turn.also_deliver.clear();
     }
 }
@@ -947,6 +1100,10 @@ pub async fn input_context(
         operation_id: Option<&'a str>,
         originating_turn_id: &'a str,
         reason: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifact_delivery: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        verified_file_count: Option<usize>,
         data: &'a str,
     }
     let quoted = crate::crypto::secret_json::to_secret_string(&QuotedResult {
@@ -959,6 +1116,11 @@ pub async fn input_context(
         } else {
             w.reason.as_deref()
         },
+        artifact_delivery: w
+            .artifact_result
+            .as_ref()
+            .map(|m| m.delivery_reason.as_str()),
+        verified_file_count: w.artifact_result.as_ref().map(|m| m.count),
         data: &data,
     })
     .map_err(|_| invalid())?;
@@ -1004,8 +1166,10 @@ pub async fn claim_cancel(
 /// Attach the saved task identity to its event turn inside admission's transaction.
 pub async fn bind_in_session(
     db: &Database,
+    keys: &EncryptionKeys,
     row: &mut AssistantConversation,
     session: &mut ClientSession,
+    reservation: Option<&super::assistant_upload_service::byte_budget::ByteReservation>,
 ) -> AppResult<()> {
     let Some(filter) = delivery_watch_filter(row, true)? else {
         return Ok(());
@@ -1041,6 +1205,7 @@ pub async fn bind_in_session(
     );
     turn.voice_request_id = w.delivery.voice_request_id.clone();
     turn.trigger_run_id = w.delivery.trigger_run_id.clone();
+    turn.automation_work = w.delivery.automation_work.clone();
     // A bound event that disagrees with its carrier resolves to None.
     if turn.report_to.is_some()
         && turn.report_to
@@ -1051,7 +1216,14 @@ pub async fn bind_in_session(
     {
         turn.report_to = None;
     }
-    if let Some(id) = &turn.trigger_run_id {
+    if let Some(work) = turn
+        .automation_work
+        .as_ref()
+        .filter(|w| w.role == "coordinator")
+    {
+        let limit = super::trigger_schedule::continuation::CONTINUATION_LIMIT;
+        if db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME).update_one(doc! {"_id": &work.run_id, "user_id": &row.user_id, "outcome": "started", "coordinator.protocol": 2, "coordinator.deadline": {"$gt": bson::DateTime::now()}, "coordinator.continuations": {"$lt": i64::from(limit)}}, doc! {"$set": {"turn_id": &turn.turn_id, "coordinator.closed": false}, "$inc": {"coordinator.continuations": 1_i64, "coordinator.version": 1_i64}}).session(&mut *session).await?.matched_count != 1 { return Err(AppError::AssistantTurnRequired); }
+    } else if let Some(id) = &turn.trigger_run_id {
         db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
             .update_one(
                 doc! {"_id":id,"user_id":&row.user_id,"outcome":"started"},
@@ -1069,6 +1241,7 @@ pub async fn bind_in_session(
             .session(&mut *session)
             .await?;
     }
+    super::generated_artifacts::bind_in_session(db, keys, row, &w, session, reservation).await?;
     Ok(())
 }
 
@@ -1201,6 +1374,72 @@ pub fn validate_endpoints(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod event_selection_tests {
+    use super::*;
+    use crate::models::trigger_run::AutomationWork;
+
+    fn row() -> AssistantConversation {
+        let now = bson::DateTime::now();
+        bson::from_document(doc! {
+            "_id":"selection-thread","user_id":"selection-owner","title":"Selection",
+            "model":"test","credential_api_key_id":"selection-key","message_count":0_i64,
+            "created_at":now,"updated_at":now
+        })
+        .unwrap()
+    }
+
+    fn work(run: &str, role: &str) -> AutomationWork {
+        AutomationWork {
+            run_id: run.into(),
+            work_id: format!("work-{run}"),
+            coordinator_thread_id: "coordinator-thread".into(),
+            role: role.into(),
+            confirmation_policy: None,
+        }
+    }
+
+    #[test]
+    fn cma_owner_wake_precedes_automation_without_coalescing_other_work() {
+        let event = |kind| super::super::assistant_team_service::event(kind, "notice".into(), None);
+        let mut coordinator = event("subagent_settled");
+        coordinator.automation_work = Some(work("coordinator-run", "coordinator"));
+        let notice = event("ordinary_notice");
+        let mut approval = event(super::super::cma_operation::APPROVAL_EVENT_KIND);
+        approval.automation_work = Some(work("approval-run", "direct"));
+        let mut result = event(EVENT_KIND);
+        result.automation_work = Some(work("result-run", "direct"));
+        let mut owner =
+            event(super::super::assistant_acknowledgement_service::CMA_OWNER_EVENT_KIND);
+        owner.bound = true;
+        let mut row = row();
+        row.pending_events = vec![
+            coordinator.clone(),
+            notice.clone(),
+            approval.clone(),
+            result.clone(),
+            owner.clone(),
+        ];
+
+        let selected = select_events(&mut row, TurnOrigin::User);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].id, notice.id);
+        for expected in [&owner, &approval, &result] {
+            let selected = select_events(&mut row, TurnOrigin::Event);
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].id, expected.id);
+            assert_eq!(selected[0].automation_work, expected.automation_work);
+        }
+        assert!(select_events(&mut row, TurnOrigin::Event).is_empty());
+        assert_eq!(row.pending_events.len(), 1);
+        assert_eq!(row.pending_events[0].id, coordinator.id);
+        assert_eq!(
+            row.pending_events[0].automation_work,
+            coordinator.automation_work
+        );
+    }
 }
 
 #[cfg(test)]

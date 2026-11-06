@@ -226,6 +226,9 @@ pub struct OnboardingState {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
+    /// Server-only personal/org rollout hint. Never consent; global candidacy is a process snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_permission_enrollment: Option<u32>,
     #[serde(rename = "_id")]
     pub id: String,
     pub email: String,
@@ -293,6 +296,7 @@ mod tests {
 
     fn make_user() -> User {
         User {
+            execution_permission_enrollment: None,
             id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             email: "test@example.com".to_string(),
             password_hash: Some("$argon2id$hash".to_string()),

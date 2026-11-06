@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { safeCmaUrl } from "@/lib/assistant/cma-url";
 import { Check, CircleAlert, Clock3, ExternalLink, Radio, Workflow } from "lucide-react";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { CmaGlyph } from "@/components/service-icons/cma";
@@ -49,7 +50,6 @@ function presentation(operation: CmaOperation) {
   if (["working", "running", "in_progress"].includes(status)) return { label: kind === "cma_provisioning" ? "Starting" : "Working", tone: "active" };
   return { label: "Status unavailable", tone: "warning" };
 }
-
 const tones: Record<string, string> = {
   active: "border-[#c6ef68]/25 bg-[#c6ef68]/10 text-[#d4f58b]",
   success: "border-emerald-300/20 bg-emerald-300/10 text-emerald-200",
@@ -59,21 +59,6 @@ const tones: Record<string, string> = {
   neutral: "border-border bg-muted text-muted-foreground",
 };
 
-function safeCmaUrl(value: string | null | undefined): string | undefined {
-  if (!value || new TextEncoder().encode(value).length > 2048
-    || !/^https?:\/\//.test(value) || /[\s\\]/u.test(value)
-    || [...value].some((char) => char.charCodeAt(0) < 32 || (char.charCodeAt(0) >= 127 && char.charCodeAt(0) <= 159))) return undefined;
-  try {
-    const url = new URL(value);
-    const host = url.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
-    return ["https:", "http:"].includes(url.protocol) && Boolean(host) && !url.username && !url.password
-      && !value.includes("?") && !value.includes("#")
-      && !["metadata.google.internal", "169.254.169.254", "fd00:ec2::254", "100.100.100.200", "168.63.129.16"].includes(host)
-      ? value : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 const phases: Record<string, string> = {
   sandbox_creation: "Creating sandbox",
@@ -129,19 +114,19 @@ export function CmaOperationCard({ operation }: { readonly operation: CmaOperati
           <span className="flex size-10 shrink-0 items-center justify-center rounded-full border border-white/5 bg-white/5 text-[#c6ef68]">
             <CmaGlyph className="size-6" />
           </span>
-          <h3 className="min-w-0 flex-1 text-sm font-semibold tracking-tight">Delegated to CMA</h3>
-          <span role="status" aria-live="polite" className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-11 font-medium", tones[tone])}>
+          <h3 className="min-w-0 flex-1 type-body-strong tracking-tight">Delegated to CMA</h3>
+          <span role="status" aria-live="polite" className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 type-secondary-emphasis ", tones[tone])}>
             <span aria-hidden className={cn("size-1.5 rounded-full bg-current", pending && tone === "active" && "motion-safe:animate-pulse")} />
             {label}
           </span>
         </div>
-        <p className="mt-3 text-11 text-zinc-400">ChronoAI Managed Agent</p>
-        <dl className="mt-1.5 space-y-1 break-all font-mono text-10 leading-relaxed text-zinc-400">
+        <p className="mt-3 text-13 text-zinc-400">ChronoAI Managed Agent</p>
+        <dl className="mt-1.5 space-y-1 break-all font-mono text-12 text-zinc-400">
           {operation.agent_id && <div><dt className="inline text-zinc-500">Agent </dt><dd className="inline select-all">{operation.agent_id}</dd></div>}
           {operation.operation_id && operation.operation_id !== operation.agent_id && <div><dt className="inline text-zinc-500">Operation </dt><dd className="inline select-all">{operation.operation_id}</dd></div>}
           {operation.idempotency_key && <div><dt className="inline text-zinc-500">Idempotency-Key </dt><dd className="inline select-all">{operation.idempotency_key}</dd></div>}
         </dl>
-        <ol aria-label="CMA progress" className="mt-4 flex flex-wrap items-center gap-2 text-10">
+        <ol aria-label="CMA progress" className="mt-4 flex flex-wrap items-center gap-2 text-12">
           {stages.map((stage, index) => <li key={stage.label} className="flex items-center gap-2">
             {index > 0 && <span aria-hidden className="text-zinc-600">→</span>}
             <span className={cn("inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5", stage.done ? "border-white/10 bg-white/[0.06] text-zinc-200" : "border-white/5 text-zinc-500")}>
@@ -150,12 +135,12 @@ export function CmaOperationCard({ operation }: { readonly operation: CmaOperati
             </span>
           </li>)}
         </ol>
-        {operation.phase && phases[operation.phase] && pending && <p className="mt-3 flex items-center gap-1.5 text-11 text-zinc-400"><Workflow aria-hidden className="size-3" />{phases[operation.phase]}</p>}
-        {takingLonger && <p className="mt-3 flex items-start gap-1.5 text-11 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />This request has been open for at least 10 minutes. CMA still reports it as running. View its progress, or ask NyxBot to cancel this task.</p>}
-        {operation.reason === "timeout" && <p className="mt-3 flex items-start gap-1.5 text-11 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />Automatic tracking reached its time limit. CMA may still be running. Check its status before submitting it again.</p>}
-        {tone === "warning" && !pending && operation.reason !== "timeout" && <p className="mt-3 flex items-start gap-1.5 text-11 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />CMA’s final outcome could not be confirmed. Check the operation before submitting it again.</p>}
-        {tone === "success" && operation.reason?.startsWith("result_") && <p className="mt-3 text-11 text-zinc-400">CMA finished, but its final result is unavailable here.</p>}
-        {operation.state === "cancelled" && <p className="mt-3 text-11 text-zinc-400">Tracking ended. CMA may still be running.</p>}
+        {operation.phase && phases[operation.phase] && pending && <p className="mt-3 flex items-center gap-1.5 text-13 text-zinc-400"><Workflow aria-hidden className="size-3" />{phases[operation.phase]}</p>}
+        {takingLonger && <p className="mt-3 flex items-start gap-1.5 text-13 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />This request has been open for at least 10 minutes. CMA still reports it as running. View its progress, or ask NyxBot to cancel this task.</p>}
+        {operation.reason === "timeout" && <p className="mt-3 flex items-start gap-1.5 text-13 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />Automatic tracking reached its time limit. CMA may still be running. Check its status before submitting it again.</p>}
+        {tone === "warning" && !pending && operation.reason !== "timeout" && <p className="mt-3 flex items-start gap-1.5 text-13 text-amber-200/80"><CircleAlert aria-hidden className="mt-0.5 size-3 shrink-0" />CMA’s final outcome could not be confirmed. Check the operation before submitting it again.</p>}
+        {tone === "success" && operation.reason?.startsWith("result_") && <p className="mt-3 text-13 text-zinc-400">CMA finished, but its final result is unavailable here.</p>}
+        {operation.state === "cancelled" && <p className="mt-3 text-13 text-zinc-400">Tracking ended. CMA may still be running.</p>}
         {executionAgentId && <CmaAgentPanel
           key={`${executionAgentId}:${operation.response_id ?? ""}`}
           agentId={executionAgentId}
@@ -166,7 +151,7 @@ export function CmaOperationCard({ operation }: { readonly operation: CmaOperati
             View in CMA <ExternalLink aria-hidden className="size-3" />
           </a>
         </Button>}
-        <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-white/[0.08] pt-3 text-10 text-zinc-400">
+        <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-white/[0.08] pt-3 text-12 text-zinc-400">
           <span className="inline-flex min-w-0 flex-1 items-center gap-2">
             <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-violet-400/15 text-violet-300"><Radio aria-hidden className="size-3" /></span>
             <span className="break-words"><span className="font-medium text-zinc-200">{operation.monitor_name}</span> · {pending ? "Tracking progress" : "Status recorded"}</span>

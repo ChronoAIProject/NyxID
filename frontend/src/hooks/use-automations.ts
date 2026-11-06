@@ -91,3 +91,24 @@ export function useAutomationSetup(id: string | undefined) {
       ),
   });
 }
+
+export function useCancelAutomationRun() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      triggerId,
+      runId,
+    }: {
+      triggerId: string;
+      runId: string;
+    }) =>
+      runSchema.parse(
+        await api.post(
+          `/triggers/${encodeURIComponent(triggerId)}/runs/${encodeURIComponent(runId)}/cancel`,
+        ),
+      ),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["triggers"] });
+    },
+  });
+}

@@ -59,7 +59,7 @@ type ServiceScopeProps = {
 export function ServiceScopeCard(props: ServiceScopeProps) {
   const { data: allKeys, isLoading } = useKeys({ includeTools: true });
   if (isLoading && props.initialCatalogServiceId)
-    return <p className="text-12">Loading tool grants…</p>;
+    return <p className="text-14">Loading tool grants…</p>;
   return (
     <ServiceScopeEditor
       key={`${props.keyId}:${props.initialCatalogServiceId ?? ""}`}
@@ -183,14 +183,14 @@ function ServiceScopeEditor({
                 checked={allowAll}
                 onCheckedChange={(checked) => setAllowAll(checked === true)}
               />
-              <Label htmlFor="allow-all-services" className="text-12">
+              <Label htmlFor="allow-all-services">
                 Allow all services
               </Label>
             </div>
 
             {!allowAll && (
               <div className="space-y-2 rounded-lg border border-border p-3">
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Select allowed services:
                 </p>
                 {personalKeys.length > 0 ? (
@@ -204,7 +204,7 @@ function ServiceScopeEditor({
                           onCheckedChange={() => toggleService(k.id)}
                         />
                         <ServiceIcon slug={k.catalog_service_slug} iconUrl={connectionIconUrl(k)} size="2xs" />
-                        <Label htmlFor={`svc-${k.id}`} className="text-xs">
+                        <Label htmlFor={`svc-${k.id}`}>
                           {k.label}
                           <span className="text-muted-foreground">
                             {" "}
@@ -214,7 +214,7 @@ function ServiceScopeEditor({
                       </div>
                     ))
                 ) : (
-                  <p className="text-xs text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     No external services configured yet.
                   </p>
                 )}
@@ -270,7 +270,7 @@ function ServiceScopeEditor({
               ) : allowedServices.length > 0 ? (
                 <div className="flex flex-wrap gap-1">
                   {allowedServices.map((s) => (
-                    <Badge key={s.id} variant="secondary" className="text-xs">
+                    <Badge key={s.id} variant="secondary" className="text-12">
                       {s.label} ({s.slug}) {s.auto_connected && "· Platform"}
                     </Badge>
                   ))}

@@ -1,8 +1,9 @@
+import { Label } from "@/components/ui/label";
 import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { OwnedOnboardingBindings } from "@/pages/platform-onboarding";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { PageHeader } from "@/components/shared/page-header";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
@@ -12,7 +13,10 @@ import { api, apiClient, ApiError } from "@/lib/api-client";
 import { ACCOUNT_DELETION_POLICY_VERSION } from "@/lib/account-deletion-policy";
 import { AccountDeletionDisclosure } from "@/components/shared/account-deletion-disclosure";
 import { disableTelemetry } from "@/lib/telemetry";
-import { readAnalyticsConsent, saveAnalyticsConsent } from "@/lib/analytics-consent";
+import {
+  readAnalyticsConsent,
+  saveAnalyticsConsent,
+} from "@/lib/analytics-consent";
 import type { User, Session } from "@/types/api";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -24,61 +28,64 @@ import {
   Form,
   FormControl,
   FormField,
-  FormItem,
   FormLabel,
-  FormMessage,
 } from "@/components/ui/form";
 import { copyToClipboard, formatDate } from "@/lib/utils";
 import { openExternal } from "@/lib/navigation";
-import {
-  SETTINGS_TABS,
-  SETTINGS_TAB_DEFAULT,
-  parseTab,
-} from "@/lib/url-tabs";
+import { SETTINGS_TABS, SETTINGS_TAB_DEFAULT, parseTab } from "@/lib/url-tabs";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { MfaSetupDialog } from "@/components/auth/mfa-setup-dialog";
 import { ApprovedSignInPolicy } from "@/components/settings/approved-sign-in-policy";
 import { DisplaySettings } from "@/components/settings/display-settings";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+  SegmentedControl,
+  SegmentedControlContent,
+  SegmentedControlList,
+  SegmentedControlTrigger,
+} from "@/components/ui/segmented-control";
 import {
-  Dialog,
-  DialogContent,
+  GroupedList,
+  GroupedRow,
+  GroupedInput as Input,
+} from "@/components/ui/grouped-list";
+import {
+  GroupedField as FormItem,
+  GroupedMessage as FormMessage,
+} from "@/components/ui/grouped-fields";
+import {
+  GroupedFormActions,
+  GroupedFormBar,
+  GroupedFormScope,
+} from "@/components/ui/grouped-form";
+import {
+  GroupedPage,
+  GroupedDialog as Dialog,
+  GroupedDialogContent as DialogContent,
+  GroupedDialogCancel,
+  GroupedDecisionDraft,
+} from "@/components/ui/grouped-dialog";
+import { FormViewport } from "@/components/ui/form-viewport";
+import { CompactChrome, CompactScroll } from "@/components/ui/compact-title";
+import { describeChanges } from "@/lib/grouped-form-changes";
+import {
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Button, ButtonIcon } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import {
   Eye,
   EyeOff,
+  Pencil,
   Trash2,
   ExternalLink,
   Copy,
   Check,
 } from "lucide-react";
-import { PowerButtonIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import {
   getDeviceIcon,
@@ -100,158 +107,257 @@ interface DeleteAccountResponse {
 
 export function SettingsPage({
   presentation = "page",
+}: { readonly presentation?: "page" | "panel" } = {}) {
+  const content = <SettingsContent presentation={presentation} />;
+  return presentation === "page" ? (
+    <GroupedPage>{content}</GroupedPage>
+  ) : (
+    content
+  );
+}
+
+function SettingsContent({
+  presentation,
 }: {
-  readonly presentation?: "page" | "panel";
-} = {}) {
-  const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
+  readonly presentation: "page" | "panel";
+}) {
+  const searchParams = useRouterState({
+    select: (s) => s.location.search as Record<string, unknown>,
+  });
   const navigate = useNavigate();
   const account = useAccountPanel();
-  const currentTab = parseTab(presentation === "panel" ? account.current.panelTab : searchParams.tab, SETTINGS_TABS, SETTINGS_TAB_DEFAULT);
+  const currentTab = parseTab(
+    presentation === "panel" ? account.current.panelTab : searchParams.tab,
+    SETTINGS_TABS,
+    SETTINGS_TAB_DEFAULT,
+  );
+  const [visited, setVisited] = useState(() => new Set([currentTab]));
+  if (!visited.has(currentTab)) setVisited(new Set([...visited, currentTab]));
+  const panels = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (presentation !== "panel") return;
+    const frame = requestAnimationFrame(() =>
+      panels.current
+        ?.querySelector<HTMLElement>(`[data-settings-tab="${currentTab}"] h2`)
+        ?.focus({ preventScroll: true }),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [currentTab, presentation]);
 
   function handleTabChange(value: string) {
     if (presentation === "panel") void account.update({ panelTab: value });
-    else void navigate({ to: "/settings", search: { tab: value }, replace: true });
+    else
+      void navigate({ to: "/settings", search: { tab: value }, replace: true });
   }
 
   return (
-    <div className="space-y-8">
-      {presentation === "page" && <PageHeader
-        title="Account Settings"
-        description="Manage your account settings and preferences."
-      />}
-
-      <Tabs value={currentTab} onValueChange={handleTabChange} className="space-y-6">
-        <TabsList className="max-w-full" aria-label="Account settings">
-          <TabsTrigger value="profile">Profile</TabsTrigger>
-          <TabsTrigger value="security">Security</TabsTrigger>
-          <TabsTrigger value="sessions">Sessions</TabsTrigger>
-          <TabsTrigger value="mcp">MCP</TabsTrigger>
-          <TabsTrigger value="display">Display</TabsTrigger>
-          <TabsTrigger value="privacy">Privacy</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="profile">
-          <ProfileTab />
-        </TabsContent>
-        <TabsContent value="security">
-          <SecurityTab />
-        <OwnedOnboardingBindings />
-          </TabsContent>
-        <TabsContent value="sessions">
-          <SessionsTab />
-        </TabsContent>
-        <TabsContent value="mcp">
-          <McpTab />
-        </TabsContent>
-        <TabsContent value="display">
-          <DisplaySettings />
-        </TabsContent>
-        <TabsContent value="privacy">
-          <PrivacyTab />
-        </TabsContent>
-      </Tabs>
-    </div>
+    <GroupedFormScope viewport={presentation === "panel"}>
+      <section
+        aria-label="Account settings"
+        className={
+          presentation === "panel"
+            ? "flex min-h-0 flex-1 flex-col"
+            : "space-y-8"
+        }
+      >
+        {presentation === "page" && (
+          <PageHeader
+            title="Account Settings"
+            description="Manage your account settings and preferences."
+          />
+        )}
+        <SegmentedControl
+          value={currentTab}
+          onValueChange={handleTabChange}
+          className="flex min-h-0 flex-1 flex-col gap-6"
+        >
+          <CompactChrome>
+            <SegmentedControlList aria-label="Account settings">
+              {SETTINGS_TABS.map((tab) => (
+                <SegmentedControlTrigger key={tab} value={tab}>
+                  {tab === "mcp"
+                    ? "MCP"
+                    : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                </SegmentedControlTrigger>
+              ))}
+            </SegmentedControlList>
+          </CompactChrome>
+          <div
+            ref={panels}
+            className={
+              presentation === "panel"
+                ? "flex min-h-0 flex-1 flex-col"
+                : undefined
+            }
+          >
+            {SETTINGS_TABS.filter((tab) => visited.has(tab)).map((tab) => (
+              <SegmentedControlContent
+                key={tab}
+                value={tab}
+                forceMount
+                hidden={currentTab !== tab}
+                data-settings-tab={tab}
+                className="min-h-0 flex-1 flex-col space-y-0 data-[state=active]:flex data-[state=inactive]:hidden"
+              >
+                <h2 tabIndex={-1} className="sr-only outline-none">
+                  {tab === "mcp"
+                    ? "MCP"
+                    : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                </h2>
+                <FormViewport className="flex min-h-0 flex-1 flex-col">
+                  <CompactScroll
+                    active={currentTab === tab}
+                    className="assistant-scrollbar flex-1 space-y-6 pb-6"
+                  >
+                    {tab === "profile" ? (
+                      <ProfileTab />
+                    ) : tab === "security" ? (
+                      <>
+                        <SecurityTab />
+                        <OwnedOnboardingBindings />
+                      </>
+                    ) : tab === "sessions" ? (
+                      <SessionsTab />
+                    ) : tab === "mcp" ? (
+                      <McpTab />
+                    ) : tab === "display" ? (
+                      <DisplaySettings />
+                    ) : (
+                      <PrivacyTab />
+                    )}
+                  </CompactScroll>
+                </FormViewport>
+              </SegmentedControlContent>
+            ))}
+          </div>
+        </SegmentedControl>
+        <GroupedFormBar viewport={presentation === "panel"} />
+      </section>
+    </GroupedFormScope>
   );
 }
 
 function ProfileTab() {
   const { data: user, isLoading } = useUser();
-  const [name, setName] = useState("");
-  const [saving, setSaving] = useState(false);
+  if (isLoading || !user) return <Skeleton className="h-32 w-full" />;
+  return <ProfileForm key={user.id} user={user} />;
+}
+
+function ProfileForm({ user }: { readonly user: User }) {
+  const form = useAppForm({
+    defaultValues: { display_name: user.display_name ?? "" },
+  });
   const setUser = useAuthStore((s) => s.setUser);
-
-  if (isLoading) {
-    return <Skeleton className="h-64 w-full" />;
-  }
-
-  const displayName = name || user?.display_name || "";
-
-  async function handleSave() {
-    setSaving(true);
+  const queryClient = useQueryClient();
+  async function save(values: { display_name: string }) {
+    form.clearErrors("root");
     try {
-      const updated = await api.put<User>("/users/me", {
-        display_name: displayName,
-      });
+      const updated = await api.put<User>("/users/me", values);
       setUser(updated);
+      queryClient.setQueryData(["user", "me"], updated);
+      const draft = form.getValues("display_name");
+      form.reset({ display_name: updated.display_name ?? "" });
+      if (draft !== values.display_name) form.setValue("display_name", draft);
       toast.success("Profile updated successfully");
     } catch (error) {
-      if (error instanceof ApiError) {
-        toast.error(error.message);
-      } else {
-        toast.error("Failed to update profile");
-      }
-    } finally {
-      setSaving(false);
+      form.setError("root", {
+        message:
+          error instanceof ApiError
+            ? error.message
+            : "Failed to update profile",
+      });
     }
   }
-
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Profile</CardTitle>
-        <CardDescription>Update your personal information.</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="space-y-2">
-          <label className="text-12 font-medium" htmlFor="profile-name">
-            Name
-          </label>
-          <Input
-            id="profile-name"
-            value={displayName}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Your name"
-          />
-        </div>
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <label className="text-12 font-medium" htmlFor="profile-email">
-              Email
-            </label>
-            {user?.email_verified ? (
-              <Badge variant="success" className="text-xs">
-                Verified
-              </Badge>
-            ) : (
-              <Badge variant="warning" className="text-xs">
-                Not verified
-              </Badge>
+    <Form {...form}>
+      <form
+        aria-label="Profile"
+        onSubmit={form.handleSubmit(save)}
+        className="space-y-6"
+      >
+        <GroupedList
+          title="Profile"
+          footer={
+            <>
+              <p>Update your personal information.</p>
+              {form.formState.errors.root && (
+                <p role="alert" className="text-destructive">
+                  {form.formState.errors.root.message}
+                </p>
+              )}
+            </>
+          }
+        >
+          <FormField
+            control={form.control}
+            name="display_name"
+            rules={{ required: "Name is required" }}
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>Name</FormLabel>
+                <div className="relative">
+                  <FormControl>
+                    <Input
+                      {...field}
+                      className="pr-8"
+                      placeholder="Your name"
+                    />
+                  </FormControl>
+                  <Pencil
+                    aria-hidden="true"
+                    className="pointer-events-none absolute right-0 top-1/2 size-4 -translate-y-1/2 text-text-tertiary"
+                  />
+                </div>
+                <FormMessage />
+              </FormItem>
             )}
-          </div>
-          <Input
-            id="profile-email"
-            value={user?.email ?? ""}
-            disabled
-            className="opacity-50"
-            aria-readonly="true"
           />
-          {!user?.email_verified && (
-            <Button
-              type="button"
-              variant="link"
-              size="sm"
-              className="h-auto p-0 text-12"
-              onClick={() => {
-                // TODO: backend endpoint POST /api/v1/auth/verify-email/resend is not yet
-                // implemented. Do NOT invent the URL — once it lands, wire it here as:
-                //   await api.post<void>("/auth/verify-email/resend");
-                //   toast.success("Verification email sent");
-                toast.info(
-                  "Email resend is not yet available on this server.",
-                );
-              }}
-            >
-              Resend verification email
-            </Button>
+          <GroupedRow className="block space-y-0.5">
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="profile-email">Email</Label>
+              <Badge variant={user.email_verified ? "success" : "warning"}>
+                {user.email_verified ? "Verified" : "Not verified"}
+              </Badge>
+            </div>
+            <Input
+              id="profile-email"
+              value={user.email}
+              disabled
+              aria-readonly="true"
+              title={user.email}
+              className="truncate text-text-tertiary disabled:opacity-100"
+            />
+          </GroupedRow>
+          {!user.email_verified && (
+            <GroupedRow asChild interactive>
+              <button
+                type="button"
+                onClick={() =>
+                  toast.info(
+                    "Email resend is not yet available on this server.",
+                  )
+                }
+              >
+                Resend verification email
+              </button>
+            </GroupedRow>
           )}
-        </div>
-      </CardContent>
-      <CardFooter>
-        <Button variant="primary" onClick={() => void handleSave()} isLoading={saving} disabled={!name || name === (user?.display_name ?? "")}>
-          Save Changes
-        </Button>
-      </CardFooter>
-    </Card>
+        </GroupedList>
+        <GroupedFormActions
+          label="Profile"
+          dirty={form.formState.isDirty}
+          pending={form.formState.isSubmitting}
+          disabled={!form.watch("display_name")}
+          save={form.handleSubmit(save)}
+          discard={() => form.reset()}
+          changes={() =>
+            describeChanges(form.formState.defaultValues, form.getValues(), [
+              { key: "display_name", label: "Name" },
+            ])
+          }
+        />
+      </form>
+    </Form>
   );
 }
 
@@ -324,6 +430,7 @@ function SecurityTab() {
       setDisableMfaError("Password is required for this account");
       return;
     }
+    setDisableMfaError(null);
     try {
       await disableMfa.mutateAsync({
         code: disableMfaCode.trim(),
@@ -358,11 +465,19 @@ function SecurityTab() {
     }
     setIsDeletingAccount(true);
     try {
-      const result = await withErasurePreparation(() => apiClient<DeleteAccountResponse>("/users/me", {
-        method: "DELETE",
-        headers: { "X-NyxID-Account-Deletion-Policy": ACCOUNT_DELETION_POLICY_VERSION },
-      }));
-      toast.success(result.status === "complete" ? "Account erasure complete" : "Account deletion accepted. Cleanup continues until verified.");
+      const result = await withErasurePreparation(() =>
+        apiClient<DeleteAccountResponse>("/users/me", {
+          method: "DELETE",
+          headers: {
+            "X-NyxID-Account-Deletion-Policy": ACCOUNT_DELETION_POLICY_VERSION,
+          },
+        }),
+      );
+      toast.success(
+        result.status === "complete"
+          ? "Account erasure complete"
+          : "Account deletion accepted. Cleanup continues until verified.",
+      );
       try {
         await logout();
       } catch {
@@ -390,43 +505,45 @@ function SecurityTab() {
 
   return (
     <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle>Two-Factor Authentication</CardTitle>
-          <CardDescription>
-            {user?.mfa_enabled
-              ? "Your account is protected with two-factor authentication."
-              : "Add an extra layer of security to your account."}
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <Switch
-                checked={user?.mfa_enabled ?? false}
-                onCheckedChange={(checked) => {
-                  if (checked) {
-                    setMfaDialogOpen(true);
-                  } else {
-                    setDisableMfaDialogOpen(true);
-                  }
-                }}
-                aria-label="Toggle two-factor authentication"
-              />
-              <span className="text-12">
-                {user?.mfa_enabled ? "Enabled" : "Disabled"}
-              </span>
-            </div>
-          </div>
-          <Separator />
-          <ApprovedSignInPolicy key={user?.id} />
-        </CardContent>
-      </Card>
+      <GroupedList
+        title="Two-factor authentication"
+        footer={
+          user?.mfa_enabled
+            ? "Your account is protected with two-factor authentication."
+            : "Add an extra layer of security to your account."
+        }
+      >
+        <GroupedRow
+          title="Two-factor authentication"
+          accessory={
+            <Switch
+              checked={user?.mfa_enabled ?? false}
+              disabled={disableMfa.isPending}
+              onCheckedChange={(checked) => {
+                if (checked) setMfaDialogOpen(true);
+                else setDisableMfaDialogOpen(true);
+              }}
+              aria-label="Toggle two-factor authentication"
+            />
+          }
+          description={user?.mfa_enabled ? "Enabled" : "Disabled"}
+        />
+      </GroupedList>
+      <ApprovedSignInPolicy key={user?.id} />
 
       <MfaSetupDialog open={mfaDialogOpen} onOpenChange={setMfaDialogOpen} />
 
       <Dialog open={disableMfaDialogOpen} onOpenChange={handleDisableMfaClose}>
         <DialogContent>
+          <GroupedDecisionDraft
+            dirty={Boolean(disableMfaCode || disableMfaPassword)}
+            pending={disableMfa.isPending}
+            discard={() => {
+              setDisableMfaCode("");
+              setDisableMfaPassword("");
+              setDisableMfaError(null);
+            }}
+          />
           <DialogHeader>
             <DialogTitle>Disable Two-Factor Authentication</DialogTitle>
             <DialogDescription>
@@ -435,24 +552,23 @@ function SecurityTab() {
               This will make your account less secure.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
-            {disableMfaError && (
-              <div
-                role="alert"
-                className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
-              >
-                {disableMfaError}
-              </div>
-            )}
-            <div className="space-y-2">
-              <label
-                className="text-12 font-medium"
-                htmlFor="disable-mfa-code"
-              >
+          <GroupedList
+            aria-busy={disableMfa.isPending}
+            footer={
+              disableMfaError && (
+                <p role="alert" className="text-destructive">
+                  {disableMfaError}
+                </p>
+              )
+            }
+          >
+            <GroupedRow className="block space-y-1">
+              <Label htmlFor="disable-mfa-code">
                 Authenticator or recovery code
-              </label>
+              </Label>
               <Input
                 id="disable-mfa-code"
+                disabled={disableMfa.isPending}
                 value={disableMfaCode}
                 onChange={(e) => setDisableMfaCode(e.target.value)}
                 placeholder="000000 or recovery code"
@@ -460,28 +576,34 @@ function SecurityTab() {
                 inputMode="text"
                 autoFocus
               />
-            </div>
-            {isPasswordUser && <div className="space-y-2">
-              <label
-                className="text-12 font-medium"
-                htmlFor="disable-mfa-password"
-              >
-                Password
-              </label>
-              <Input
-                id="disable-mfa-password"
-                type="password"
-                autoComplete="current-password"
-                value={disableMfaPassword}
-                onChange={(e) => setDisableMfaPassword(e.target.value)}
-                placeholder="Enter your password"
-              />
-            </div>}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={handleDisableMfaClose}>
+            </GroupedRow>
+            {isPasswordUser && (
+              <GroupedRow className="block space-y-1">
+                <Label htmlFor="disable-mfa-password">Password</Label>
+                <Input
+                  id="disable-mfa-password"
+                  disabled={disableMfa.isPending}
+                  type="password"
+                  autoComplete="current-password"
+                  value={disableMfaPassword}
+                  onChange={(e) => setDisableMfaPassword(e.target.value)}
+                  placeholder="Enter your password"
+                />
+              </GroupedRow>
+            )}
+          </GroupedList>
+          {disableMfa.isPending && (
+            <p role="status" className="px-4 text-13 text-text-tertiary">
+              Disabling two-factor authentication…
+            </p>
+          )}
+          <DialogFooter className="bg-background">
+            <GroupedDialogCancel
+              variant="outline"
+              disabled={disableMfa.isPending}
+            >
               Cancel
-            </Button>
+            </GroupedDialogCancel>
             <Button
               variant="destructive"
               onClick={() => void handleDisableMfa()}
@@ -494,176 +616,139 @@ function SecurityTab() {
       </Dialog>
 
       {user?.has_password === true && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Change Password</CardTitle>
-            <CardDescription>
-              Use 8–128 UTF-8 bytes. Existing sessions remain signed in.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Form {...passwordForm}>
-              <form onSubmit={passwordForm.handleSubmit(handleChangePassword)}>
-                <fieldset className="space-y-4">
+        <Form {...passwordForm}>
+          <form
+            aria-label="Change password"
+            onSubmit={passwordForm.handleSubmit(handleChangePassword)}
+            className="space-y-6"
+          >
+            <GroupedList
+              title="Change password"
+              footer={
+                <>
+                  <p>
+                    Use 8–128 UTF-8 bytes. Existing sessions remain signed in.
+                  </p>
                   {passwordForm.formState.errors.root && (
-                    <div
-                      role="alert"
-                      className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
-                    >
+                    <p role="alert" className="text-destructive">
                       {passwordForm.formState.errors.root.message}
-                    </div>
+                    </p>
                   )}
-
-                  <FormField
-                    control={passwordForm.control}
-                    name="currentPassword"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Current Password</FormLabel>
-                        <div className="relative">
-                          <FormControl>
-                            <Input
-                              type={showCurrentPw ? "text" : "password"}
-                              autoComplete="current-password"
-                              className="pr-10"
-                              {...field}
-                            />
-                          </FormControl>
-                          <button
-                            type="button"
-                            tabIndex={-1}
-                            onClick={() => setShowCurrentPw((v) => !v)}
-                            className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
-                            aria-label={
-                              showCurrentPw ? "Hide password" : "Show password"
+                </>
+              }
+            >
+              {(
+                [
+                  [
+                    "currentPassword",
+                    "Current Password",
+                    showCurrentPw,
+                    setShowCurrentPw,
+                    "current-password",
+                  ],
+                  [
+                    "newPassword",
+                    "New Password",
+                    showNewPw,
+                    setShowNewPw,
+                    "new-password",
+                  ],
+                  [
+                    "confirmNewPassword",
+                    "Confirm New Password",
+                    showConfirmPw,
+                    setShowConfirmPw,
+                    "new-password",
+                  ],
+                ] as const
+              ).map(([name, label, shown, setShown, autoComplete]) => (
+                <FormField
+                  key={name}
+                  control={passwordForm.control}
+                  name={name}
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{label}</FormLabel>
+                      <div className="relative">
+                        <FormControl>
+                          <Input
+                            {...field}
+                            type={shown ? "text" : "password"}
+                            autoComplete={autoComplete}
+                            placeholder={
+                              name === "currentPassword"
+                                ? "Enter current password"
+                                : name === "newPassword"
+                                  ? "Enter new password"
+                                  : "Re-enter new password"
                             }
-                          >
-                            {showCurrentPw ? (
-                              <Eye className="h-4 w-4" />
-                            ) : (
-                              <EyeOff className="h-4 w-4" />
-                            )}
-                          </button>
-                        </div>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-
-                  <Separator />
-
-                  <FormField
-                    control={passwordForm.control}
-                    name="newPassword"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>New Password</FormLabel>
-                        <div className="relative">
-                          <FormControl>
-                            <Input
-                              type={showNewPw ? "text" : "password"}
-                              autoComplete="new-password"
-                              className="pr-10"
-                              {...field}
-                            />
-                          </FormControl>
-                          <button
-                            type="button"
-                            tabIndex={-1}
-                            onClick={() => setShowNewPw((v) => !v)}
-                            className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
-                            aria-label={
-                              showNewPw ? "Hide password" : "Show password"
-                            }
-                          >
-                            {showNewPw ? (
-                              <Eye className="h-4 w-4" />
-                            ) : (
-                              <EyeOff className="h-4 w-4" />
-                            )}
-                          </button>
-                        </div>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-
-                  <FormField
-                    control={passwordForm.control}
-                    name="confirmNewPassword"
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>Confirm New Password</FormLabel>
-                        <div className="relative">
-                          <FormControl>
-                            <Input
-                              type={showConfirmPw ? "text" : "password"}
-                              autoComplete="new-password"
-                              className="pr-10"
-                              {...field}
-                            />
-                          </FormControl>
-                          <button
-                            type="button"
-                            tabIndex={-1}
-                            onClick={() => setShowConfirmPw((v) => !v)}
-                            className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
-                            aria-label={
-                              showConfirmPw ? "Hide password" : "Show password"
-                            }
-                          >
-                            {showConfirmPw ? (
-                              <Eye className="h-4 w-4" />
-                            ) : (
-                              <EyeOff className="h-4 w-4" />
-                            )}
-                          </button>
-                        </div>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-
-                  <div className="flex justify-end">
-                    <Button
-                      variant="primary"
-                      type="submit"
-                      isLoading={passwordForm.formState.isSubmitting}
-                      disabled={!passwordForm.formState.isDirty}
-                    >
-                      Change Password
-                    </Button>
-                  </div>
-                </fieldset>
-              </form>
-            </Form>
-          </CardContent>
-        </Card>
+                            className="pr-10"
+                          />
+                        </FormControl>
+                        <button
+                          type="button"
+                          onClick={() => setShown((v) => !v)}
+                          className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
+                          aria-label={`${shown ? "Hide" : "Show"} ${label.toLowerCase()}`}
+                        >
+                          {shown ? (
+                            <Eye className="h-4 w-4" />
+                          ) : (
+                            <EyeOff className="h-4 w-4" />
+                          )}
+                        </button>
+                      </div>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              ))}
+            </GroupedList>
+            <GroupedFormActions
+              label="Password"
+              dirty={passwordForm.formState.isDirty}
+              pending={passwordForm.formState.isSubmitting}
+              save={passwordForm.handleSubmit(handleChangePassword)}
+              discard={() => passwordForm.reset()}
+              changes={() =>
+                passwordForm.formState.isDirty
+                  ? [
+                      {
+                        label: "Password",
+                        before: "Current password",
+                        after: "Changed",
+                      },
+                    ]
+                  : []
+              }
+            />
+          </form>
+        </Form>
       )}
 
-      <Card className="border-destructive/40">
-        <CardHeader className="flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div className="space-y-1.5">
-            <CardTitle className="text-destructive">Delete Account</CardTitle>
-            <CardDescription className="text-destructive/70">
-              Permanently delete your account and queue managed Machine workspace
-              cleanup.
-              Necessary security and financial records are retained.
-            </CardDescription>
-          </div>
-          <Button
-            variant="destructive"
-            className="shrink-0"
+      <GroupedList
+        title="Delete account"
+        footer="Permanently delete your account and queue managed Machine workspace cleanup. Necessary security and financial records are retained."
+      >
+        <GroupedRow asChild interactive>
+          <button
+            type="button"
+            className="text-destructive"
             onClick={() => setDeleteAccountOpen(true)}
           >
-            <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
+            <Trash2 aria-hidden className="size-[1.125em]" />
             Delete My Account
-          </Button>
-        </CardHeader>
-      </Card>
+          </button>
+        </GroupedRow>
+      </GroupedList>
 
       <Dialog open={deleteAccountOpen} onOpenChange={handleDeleteAccountDialog}>
         <DialogContent>
+          <GroupedDecisionDraft
+            dirty={Boolean(deleteConfirmEmail)}
+            pending={isDeletingAccount}
+            discard={() => setDeleteConfirmEmail("")}
+          />
           <DialogHeader>
             <DialogTitle>Delete Account</DialogTitle>
             <DialogDescription>
@@ -674,34 +759,30 @@ function SecurityTab() {
 
           <AccountDeletionDisclosure />
 
-          <div className="space-y-2">
-            <label
-              className="text-12 font-medium"
-              htmlFor="delete-account-email"
-            >
-              Email
-            </label>
-            <Input
-              id="delete-account-email"
-              value={deleteConfirmEmail}
-              onChange={(e) => setDeleteConfirmEmail(e.target.value)}
-              placeholder={user?.email ?? "your@email.com"}
-              aria-invalid={deleteEmailError ? true : undefined}
-              autoFocus
-            />
-            {deleteEmailError && (
-              <p className="text-xs text-destructive">{deleteEmailError}</p>
-            )}
-          </div>
+          <GroupedList
+            footer={
+              deleteEmailError && (
+                <p className="text-destructive">{deleteEmailError}</p>
+              )
+            }
+          >
+            <GroupedRow className="block space-y-1">
+              <Label htmlFor="delete-account-email">Email</Label>
+              <Input
+                id="delete-account-email"
+                value={deleteConfirmEmail}
+                onChange={(e) => setDeleteConfirmEmail(e.target.value)}
+                placeholder={user?.email ?? "your@email.com"}
+                aria-invalid={deleteEmailError ? true : undefined}
+                autoFocus
+              />
+            </GroupedRow>
+          </GroupedList>
 
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => handleDeleteAccountDialog(false)}
-              disabled={isDeletingAccount}
-            >
+          <DialogFooter className="bg-background">
+            <GroupedDialogCancel variant="outline" disabled={isDeletingAccount}>
               Cancel
-            </Button>
+            </GroupedDialogCancel>
             <Button
               variant="destructive"
               isLoading={isDeletingAccount}
@@ -775,133 +856,84 @@ function McpTab() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h3 className="text-lg font-medium">MCP (Model Context Protocol)</h3>
-        <p className="text-12 text-muted-foreground">
-          Install NyxID as an MCP server in your client of choice.
-        </p>
-      </div>
-      <Card>
-        <CardHeader>
-          <CardTitle>Install to Cursor</CardTitle>
-          <CardDescription>
-            One-click install via Cursor's deeplink protocol. Cursor will open
-            and prompt you to confirm the MCP server installation.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <Button
-            variant="primary"
+      <p className="px-4 text-13 text-text-tertiary">
+        Install NyxID as an MCP (Model Context Protocol) server in your client
+        of choice.
+      </p>
+      <GroupedList
+        title="Install to Cursor"
+        footer="One-click install via Cursor's deeplink protocol. Cursor will open and prompt you to confirm the MCP server installation."
+      >
+        <GroupedRow asChild interactive>
+          <button
+            type="button"
             onClick={() => void openExternal(cursorDeeplink)}
-            className="w-full"
           >
-            <ButtonIcon><ExternalLink className="h-4 w-4" /></ButtonIcon>
+            <ExternalLink aria-hidden className="size-[1.125em]" />
             Install to Cursor
-          </Button>
-          <Separator />
-          <div>
-            <div className="mb-1 flex items-center gap-2">
-              <p className="text-xs font-medium text-muted-foreground">
-                Or copy manually
-              </p>
-              <Badge variant="secondary" className="text-10">
-                .cursor/mcp.json
-              </Badge>
-            </div>
-            <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
-                {cursorConfig}
-              </pre>
-              <CopyInlineButton text={cursorConfig} label="Cursor config" />
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Install to Claude Code</CardTitle>
-          <CardDescription>
-            Run this command in your terminal to add NyxID as an MCP server in
-            Claude Code.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="relative">
-            <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-xs break-all font-mono">
-              {claudeCommand}
-            </code>
-            <CopyInlineButton text={claudeCommand} label="CLI command" />
-          </div>
-          <Separator />
-          <div>
-            <div className="mb-1 flex items-center gap-2">
-              <p className="text-xs font-medium text-muted-foreground">
-                Or add manually
-              </p>
-              <Badge variant="secondary" className="text-10">
-                .claude/settings.json or .mcp.json
-              </Badge>
-            </div>
-            <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
-                {claudeConfig}
-              </pre>
-              <CopyInlineButton
-                text={claudeConfig}
-                label="Claude Code config"
-              />
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Install to Codex</CardTitle>
-          <CardDescription>
-            Run this command in your terminal to add NyxID as an MCP server in
-            Codex CLI.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="relative">
-            <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-xs break-all font-mono">
-              {codexCommand}
-            </code>
-            <CopyInlineButton text={codexCommand} label="CLI command" />
-          </div>
-          <Separator />
-          <div>
-            <div className="mb-1 flex items-center gap-2">
-              <p className="text-xs font-medium text-muted-foreground">
-                Or add manually
-              </p>
-              <Badge variant="secondary" className="text-10">
-                ~/.codex/config.toml
-              </Badge>
-            </div>
-            <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
-                {codexConfig}
-              </pre>
-              <CopyInlineButton text={codexConfig} label="Codex config" />
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div className="rounded-xl border border-border/50 bg-muted/30 p-4">
-        <p className="mb-1 text-13 font-medium">How it works</p>
-        <p className="text-xs text-muted-foreground">
-          When your MCP client connects for the first time, NyxID will open an
-          OAuth flow in your browser to authenticate. Once authenticated, the
-          proxy exposes tools from all your connected services. Tool calls are
-          forwarded to each service's API with your credentials injected
-          automatically.
-        </p>
-      </div>
+          </button>
+        </GroupedRow>
+        <McpCode
+          title="Or copy manually · .cursor/mcp.json"
+          text={cursorConfig}
+          label="Cursor config"
+        />
+      </GroupedList>
+      <GroupedList
+        title="Install to Claude Code"
+        footer="Run this command in your terminal to add NyxID as an MCP server in Claude Code."
+      >
+        <McpCode
+          title="Terminal command"
+          text={claudeCommand}
+          label="CLI command"
+        />
+        <McpCode
+          title="Or add manually · .claude/settings.json or .mcp.json"
+          text={claudeConfig}
+          label="Claude Code config"
+        />
+      </GroupedList>
+      <GroupedList
+        title="Install to Codex"
+        footer="Run this command in your terminal to add NyxID as an MCP server in Codex CLI."
+      >
+        <McpCode
+          title="Terminal command"
+          text={codexCommand}
+          label="CLI command"
+        />
+        <McpCode
+          title="Or add manually · ~/.codex/config.toml"
+          text={codexConfig}
+          label="Codex config"
+        />
+      </GroupedList>
+      <GroupedList
+        title="How it works"
+        footer="When your MCP client connects for the first time, NyxID will open an OAuth flow in your browser to authenticate. Once authenticated, the proxy exposes tools from all your connected services. Tool calls are forwarded to each service's API with your credentials injected automatically."
+      />
     </div>
+  );
+}
+
+function McpCode({
+  title,
+  text,
+  label,
+}: {
+  readonly title: string;
+  readonly text: string;
+  readonly label: string;
+}) {
+  return (
+    <GroupedRow className="relative block space-y-1 pr-12">
+      <p className="text-13 text-text-tertiary">{title}</p>
+      <pre className="font-mono type-code whitespace-pre-wrap break-all">
+        {text}
+      </pre>
+      <CopyInlineButton text={text} label={label} />
+    </GroupedRow>
   );
 }
 
@@ -930,7 +962,9 @@ function SessionsTab() {
     try {
       await revokeMutation.mutateAsync(revokeTarget.id);
       toast.success(
-        revokeTarget.is_current ? "Session revoked. Signing you out…" : "Session revoked",
+        revokeTarget.is_current
+          ? "Session revoked. Signing you out…"
+          : "Session revoked",
       );
     } catch (err) {
       toast.error(
@@ -946,130 +980,61 @@ function SessionsTab() {
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Active Sessions</CardTitle>
-        <Button asChild variant="outline"><Link to="/login/code">Generate terminal login code</Link></Button>
-        <CardDescription>
-          Manage your active sessions across devices.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        {!sessions || sessions.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
-            <PowerButtonIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-12 font-medium text-foreground">No Active Sessions</p>
-            <p className="text-12 text-muted-foreground">
-              Your active sessions across devices will appear here.
-            </p>
-          </div>
+    <div className="space-y-6">
+      <GroupedList
+        title="Active sessions"
+        footer="Manage your active sessions across devices."
+      >
+        <GroupedRow asChild interactive>
+          <Link to="/login/code">Generate terminal login code</Link>
+        </GroupedRow>
+        {!sessions?.length ? (
+          <GroupedRow
+            title="No Active Sessions"
+            description="Your active sessions across devices will appear here."
+          />
         ) : (
-          <>
-          {/* Mobile card view */}
-          <div className="flex flex-col gap-3 md:hidden">
-            {sessions.map((session) => {
-              const deviceLabel = humanizeUserAgent(session.user_agent);
-              const ipLabel = humanizeIpAddress(session.ip_address);
-              return (
-                <div
-                  key={session.id}
-                  className={`relative rounded-xl border ${session.is_current ? "border-success/50 bg-success/[0.04]" : "border-border/50 bg-card"} p-4`}
-                >
-                  <div className="absolute right-3 top-3">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                      onClick={() => setRevokeTarget(session)}
-                      aria-label={session.is_current ? "Revoke current session and sign out" : `Revoke session on ${deviceLabel}`}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                  <div className="flex items-center gap-2 pr-10">
-                    {getDeviceIcon(session.user_agent)}
-                    <p className="min-w-0 flex-1 truncate text-13 font-bold">
-                      {deviceLabel}
-                    </p>
+          sessions.map((session) => {
+            const deviceLabel = humanizeUserAgent(session.user_agent);
+            return (
+              <GroupedRow
+                key={session.id}
+                leading={getDeviceIcon(session.user_agent)}
+                title={
+                  <span className="flex flex-wrap items-center gap-2">
+                    {deviceLabel}
                     {session.is_current && (
-                      <Badge variant="success" className="shrink-0">Current</Badge>
+                      <Badge variant="success">Current</Badge>
                     )}
+                  </span>
+                }
+                description={
+                  <div className="space-y-1">
+                    <p>IP Address: {humanizeIpAddress(session.ip_address)}</p>
+                    <p>Signed in: {formatDate(session.created_at)}</p>
+                    <p>Expires: {formatDate(session.expires_at)}</p>
                   </div>
-                  <div className="mt-3 space-y-1">
-                    <p className="text-11 text-muted-foreground">
-                      <span className="font-medium">IP Address:</span> {ipLabel}
-                    </p>
-                    <p className="text-11 text-muted-foreground">
-                      <span className="font-medium">Signed in:</span>{" "}
-                      {formatDate(session.created_at)}
-                    </p>
-                    <p className="text-11 text-muted-foreground">
-                      <span className="font-medium">Expires:</span>{" "}
-                      {formatDate(session.expires_at)}
-                    </p>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Desktop table view */}
-          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Device</TableHead>
-                  <TableHead>IP Address</TableHead>
-                  <TableHead>Signed in</TableHead>
-                  <TableHead>Expires</TableHead>
-                  <TableHead className="w-[80px] text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sessions.map((session) => {
-                  const deviceLabel = humanizeUserAgent(session.user_agent);
-                  const ipLabel = humanizeIpAddress(session.ip_address);
-                  return (
-                    <TableRow
-                      key={session.id}
-                      className={session.is_current ? "bg-success/[0.04]" : undefined}
-                    >
-                      <TableCell>
-                        <div className="flex items-center gap-2">
-                          {getDeviceIcon(session.user_agent)}
-                          <span className="max-w-[260px] truncate">{deviceLabel}</span>
-                          {session.is_current && (
-                            <Badge variant="success" className="shrink-0">Current</Badge>
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell>{ipLabel}</TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {formatDate(session.created_at)}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">
-                        {formatDate(session.expires_at)}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                          onClick={() => setRevokeTarget(session)}
-                          aria-label={session.is_current ? "Revoke current session and sign out" : `Revoke session on ${deviceLabel}`}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </div>
-          </>
+                }
+                accessory={
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="text-destructive"
+                    onClick={() => setRevokeTarget(session)}
+                    aria-label={
+                      session.is_current
+                        ? "Revoke current session and sign out"
+                        : `Revoke session on ${deviceLabel}`
+                    }
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                }
+              />
+            );
+          })
         )}
-      </CardContent>
+      </GroupedList>
 
       <Dialog
         open={revokeTarget !== null}
@@ -1080,7 +1045,9 @@ function SessionsTab() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {revokeTarget?.is_current ? "Sign out of this session?" : "Revoke session?"}
+              {revokeTarget?.is_current
+                ? "Sign out of this session?"
+                : "Revoke session?"}
             </DialogTitle>
             <DialogDescription>
               {revokeTarget?.is_current ? (
@@ -1098,13 +1065,13 @@ function SessionsTab() {
                   <span className="font-medium">
                     {humanizeUserAgent(revokeTarget?.user_agent)}
                   </span>
-                  . The person using it will be signed out next time they
-                  load a page.
+                  . The person using it will be signed out next time they load a
+                  page.
                 </>
               )}
             </DialogDescription>
           </DialogHeader>
-          <DialogFooter>
+          <DialogFooter className="bg-background">
             <Button variant="outline" onClick={() => setRevokeTarget(null)}>
               Cancel
             </Button>
@@ -1118,7 +1085,7 @@ function SessionsTab() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </Card>
+    </div>
   );
 }
 
@@ -1141,47 +1108,40 @@ function PrivacyTab() {
       await saveAnalyticsConsent(accountId, next);
       await permission.refetch();
     } catch {
-      toast.error("Could not save account analytics permission. This browser remains off; retry to withdraw across devices.");
-    } finally { setSaving(false); }
+      toast.error(
+        "Could not save account analytics permission. This browser remains off; retry to withdraw across devices.",
+      );
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Usage Analytics</CardTitle>
-        <CardDescription>
-          Optional usage events are linked to your account. Account permission
-          applies across devices. Each device must also opt in locally; Do Not
-          Track always disables collection. Security audit and billing records
-          have separate retention rules.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="flex items-center gap-3">
-          <Switch
-            checked={permission.data?.enabled === true}
-            disabled={saving || !accountId || !permission.data || permission.isError || permission.isFetching}
-            onCheckedChange={(next) => void handleToggle(next)}
-            aria-label="Allow account usage analytics"
-          />
-          <span className="text-12" role="status">{permission.isFetching ? "Loading account permission…" : permission.isError ? "Account permission unavailable" : permission.data?.enabled ? "Account permission enabled" : "Account permission disabled"}</span>
-          {permission.isError && (
-            <Button variant="outline" size="sm" isLoading={permission.isFetching}
-              onClick={() => void permission.refetch()}>Retry</Button>
+    <GroupedList
+      title="Usage analytics"
+      footer={
+        <>
+          <p>
+            Optional usage events are linked to your account. Account permission
+            applies across devices. Each device must also opt in locally; Do Not
+            Track always disables collection. Security audit and billing records
+            have separate retention rules.
+          </p>
+          {persistenceError && (
+            <div role="alert" className="space-y-2">
+              <p>
+                This browser's choice could not be saved. Analytics is off in
+                this session; retry before closing this page.
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setConsent(false)}
+              >
+                Retry saving browser choice
+              </Button>
+            </div>
           )}
-        </div>
-        <div className="flex items-center gap-3">
-          <Switch checked={consentEnabled} disabled={!consentEnabled && (permission.data?.enabled !== true || permission.isError || permission.isFetching)}
-            onCheckedChange={(next) => { setConsent(next); if (!next) disableTelemetry(); }}
-            aria-label="Allow usage analytics on this browser" />
-          <span className="text-12">Allow on this browser</span>
-        </div>
-        {persistenceError && <div role="alert" className="space-y-2 text-12 text-muted-foreground">
-          <p>This browser's choice could not be saved. Analytics is off in this session; retry before closing this page.</p>
-          <Button variant="outline" size="sm" onClick={() => setConsent(false)}>Retry saving browser choice</Button>
-        </div>}
-        <Separator />
-        <div className="space-y-2 text-12 text-muted-foreground">
           <p>
             For the full disclosure of what we collect, how it's stored, and
             retention windows, see the{" "}
@@ -1193,8 +1153,68 @@ function PrivacyTab() {
             </a>
             .
           </p>
-        </div>
-      </CardContent>
-    </Card>
+        </>
+      }
+    >
+      <GroupedRow
+        title="Allow account usage analytics"
+        description={
+          <span role="status">
+            {permission.isFetching
+              ? "Loading account permission…"
+              : permission.isError
+                ? "Account permission unavailable"
+                : permission.data?.enabled
+                  ? "Account permission enabled"
+                  : "Account permission disabled"}
+          </span>
+        }
+        accessory={
+          <>
+            {permission.isError && (
+              <Button
+                variant="ghost"
+                size="sm"
+                isLoading={permission.isFetching}
+                onClick={() => void permission.refetch()}
+              >
+                Retry
+              </Button>
+            )}
+            <Switch
+              checked={permission.data?.enabled === true}
+              disabled={
+                saving ||
+                !accountId ||
+                !permission.data ||
+                permission.isError ||
+                permission.isFetching
+              }
+              onCheckedChange={(next) => void handleToggle(next)}
+              aria-label="Allow account usage analytics"
+            />
+          </>
+        }
+      />
+      <GroupedRow
+        title="Allow on this browser"
+        accessory={
+          <Switch
+            checked={consentEnabled}
+            disabled={
+              !consentEnabled &&
+              (permission.data?.enabled !== true ||
+                permission.isError ||
+                permission.isFetching)
+            }
+            onCheckedChange={(next) => {
+              setConsent(next);
+              if (!next) disableTelemetry();
+            }}
+            aria-label="Allow usage analytics on this browser"
+          />
+        }
+      />
+    </GroupedList>
   );
 }

@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct Admission {
+    pub(super) execution_enrolled: bool,
     slot: model::ExecutionSlot,
     actor: String,
     request_id: String,
@@ -68,6 +69,7 @@ async fn append(
         agent_name: None,
         text: text.into(),
         recipient_agent_ids: recipients.to_vec(),
+        mentioned_participant_ids: vec![],
         created_at: now,
     };
     db.collection::<GroupMessage>(MESSAGES)
@@ -132,6 +134,8 @@ pub(super) async fn enqueue_with_uploads_ready(
                     return Err(AppError::Conflict("Your group queue is full; wait or stop a pending request".into()));
                 }
                 let roster: Vec<_> = access.agents.values().map(|a| a.agent.clone()).collect();
+                let people=people::resolve(text, &access.participants, &roster, true)?;
+                let text_for_agents=people.agent_text.as_str();
                 let selected = if let Some(ids) = recipients {
                     // Stored IDs are accepted even when their current ACL is unavailable:
                     // the addressed member receives a fixed notice, never a redirect.
@@ -146,14 +150,18 @@ pub(super) async fn enqueue_with_uploads_ready(
                     }
                     ids.to_vec()
                 } else {
-                    if svc::assistant_group_service::ambiguous_mention(text, &roster) {
+                    if svc::assistant_group_service::ambiguous_mention(text_for_agents, &roster) {
                         return Err(invalid(
                             "More than one agent has that name; choose an exact recipient",
                         ));
                     }
-                    let mentions = svc::assistant_group_service::mentions(text, &roster);
+                    let mentions = svc::assistant_group_service::mentions(text_for_agents, &roster);
                     if !mentions.is_empty() {
                         mentions
+                    } else if people.has_people {
+                        // A membership/name change between preview and enqueue must
+                        // never turn a people-only post into a fallback agent turn.
+                        return Err(stale());
                     } else {
                         svc::assistant_group_service::default_recipients(
                             access
@@ -179,13 +187,16 @@ pub(super) async fn enqueue_with_uploads_ready(
                     session,
                 )
                 .await?;
+                message.mentioned_participant_ids=people.ids;
+                message.author_display_name=access.participants.iter().find(|p|p.id==actor).map(|p|p.display_name.clone());
                 message.attachments=svc::assistant_upload_service::bind(db,actor,group_id,&message.id,uploads,session).await?;
-                db.collection::<GroupMessage>(MESSAGES).update_one(doc! {"_id":&message.id},doc! {"$set":{"attachments":bson::to_bson(&message.attachments).map_err(|e|AppError::Internal(e.to_string()))?}}).session(&mut *session).await?;
+                db.collection::<GroupMessage>(MESSAGES).update_one(doc! {"_id":&message.id},doc! {"$set":{"attachments":bson::to_bson(&message.attachments).map_err(|e|AppError::Internal(e.to_string()))?,"mentioned_participant_ids":&message.mentioned_participant_ids,"author_display_name":&message.author_display_name}}).session(&mut *session).await?;
+                notifications::enqueue(db, &access.group, &message, session).await?;
                 let mut authorities = BTreeMap::new();
                 // A recipient-picker edit does not make an unavailable mention
                 // disappear. Record its refusal without adding a recipient or
                 // changing the request's execution/attachment semantics.
-                for mentioned in svc::assistant_group_service::mentions(text, &roster) {
+                for mentioned in svc::assistant_group_service::mentions(text_for_agents, &roster) {
                     if !selected.contains(&mentioned)
                         && access.agent(&mentioned).and_then(AgentIdentity::authority).is_none()
                     {
@@ -211,7 +222,13 @@ pub(super) async fn enqueue_with_uploads_ready(
                         .await?;
                     }
                 }
+                let participating = access.execution_enrolled && svc::execution_permission_enrollment::live_enabled(db, actor, Some(session)).await?;
                 let request = GroupRequest {
+                    execution_task: participating.then(|| crate::models::execution_permission::TaskAdmission {
+                        version:1, task:crate::models::execution_permission::TaskRef {root_kind:crate::models::execution_permission::TaskRootKind::GroupRequest,root_id:id.clone()},
+                        actor_user_id:actor.into(),audience:crate::models::execution_permission::Audience::Group {group_id:group_id.into(),revision:access.membership_revision()},epoch:1,
+                        hard_deadline:Utc::now()+chrono::Duration::hours(24),cancelled:false,parent_turn_id:None,
+                    }),
                     collaboration: Some(model::RequestBinding {
                         version: model::VERSION,
                         membership_revision: access.membership_revision(),
@@ -342,6 +359,7 @@ pub(super) async fn admit_in_session(
     if db.collection::<GroupRequest>(REQUESTS).update_one(doc! {"_id":request_id,"pending_agent_ids":agent_id},
         doc! {"$pull":{"pending_agent_ids":agent_id},"$addToSet":{"collaboration.admitted_agent_ids":agent_id}}).session(session).await?.matched_count != 1 {return Err(stale());}
     Ok(Admission {
+        execution_enrolled: request.execution_task.is_some(),
         slot,
         actor: actor.into(),
         request_id: request_id.into(),
@@ -446,6 +464,7 @@ pub(crate) async fn settled_admission(
         return Err(stale());
     }
     Ok(Admission {
+        execution_enrolled: false,
         slot,
         actor: b.original_requester_id.clone(),
         request_id: b.request_id.clone(),

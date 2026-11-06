@@ -10,8 +10,12 @@ export const SERVICE_BILLING_METRICS = [
   "cache_write_tokens",
   "images",
   "voice_seconds",
+  "sandbox_cpu_millis_seconds",
+  "sandbox_memory_mib_seconds",
+  "sandbox_disk_gib_seconds",
 ] as const;
-// Runtime billing has its own logical SKU; ordinary service lanes cannot price it.
+// Machine fixed-profile billing has its own logical SKU. Sandbox allocation
+// units use versioned CMA rate cards; only retained lifecycle evidence meters them.
 export const BILLING_METRICS = [
   ...SERVICE_BILLING_METRICS,
   "machine_running_seconds",
@@ -51,6 +55,21 @@ export const BILLING_UNITS: Record<
   machine_running_seconds: {
     label: "machine running seconds",
     singular: "machine running second",
+    tokenFamily: false,
+  },
+  sandbox_cpu_millis_seconds: {
+    label: "Sandbox CPU millicore-seconds",
+    singular: "Sandbox CPU millicore-second",
+    tokenFamily: false,
+  },
+  sandbox_memory_mib_seconds: {
+    label: "Sandbox RAM MiB-seconds",
+    singular: "Sandbox RAM MiB-second",
+    tokenFamily: false,
+  },
+  sandbox_disk_gib_seconds: {
+    label: "Sandbox disk GiB-seconds",
+    singular: "Sandbox disk GiB-second",
     tokenFamily: false,
   },
   images: { label: "images", singular: "image", tokenFamily: false },

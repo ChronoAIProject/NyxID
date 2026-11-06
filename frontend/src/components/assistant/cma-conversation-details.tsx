@@ -36,12 +36,12 @@ export function CmaConversationDetails({
         <Button
           variant="ghost"
           size="sm"
-          className="text-11 text-text-tertiary"
+          className="type-button text-text-tertiary"
         >
           <ChevronRight aria-hidden />
           Execution details
           {count > 0 && (
-            <span className="rounded bg-overlay px-1.5 text-10">{count}</span>
+            <span className="rounded bg-overlay px-1.5 type-badge">{count}</span>
           )}
         </Button>
       </DialogTrigger>
@@ -62,7 +62,7 @@ export function CmaConversationDetails({
               key={message.sequence ?? message.id ?? index}
               className="space-y-2 py-3 first:pt-0"
             >
-              <h3 className="text-12 font-medium">
+              <h3 className="type-group-label">
                 {cmaReadableLabel(message.role)} message
               </h3>
               <p className="whitespace-pre-wrap break-words text-12 text-text-tertiary [overflow-wrap:anywhere]">
@@ -73,7 +73,7 @@ export function CmaConversationDetails({
           {activity.map((event) => (
             <article key={event.key} className="space-y-2 py-3 first:pt-0">
               <div className="flex flex-wrap items-center gap-2">
-                <h3 className="text-12 font-medium">
+                <h3 className="type-group-label">
                   {cmaReadableLabel(event.type)}
                 </h3>
                 {event.status && <CmaStatus status={event.status} />}
@@ -94,7 +94,7 @@ export function CmaConversationDetails({
             No execution details in the loaded activity.
           </p>
         )}
-        <details className="border-t border-hairline pt-3 text-11 text-text-tertiary">
+        <details className="border-t border-hairline pt-3 type-secondary text-text-tertiary">
           <summary className="cursor-pointer">Technical reference</summary>
           <p className="mt-3">Work reference: {turn.turn_sequence}</p>
         </details>

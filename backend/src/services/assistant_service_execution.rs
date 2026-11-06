@@ -397,7 +397,12 @@ async fn check_inner(
         let approval =
             approval_binding(db, chat, connection_id, &binding, instruction_covered).await?;
         let needs_connection_consent = service.user_id == chat.user_id
-            && !shared_platform_model(chat, &service, operation, target);
+            && !shared_platform_model(chat, &service, operation, target)
+            && !super::execution_permission_dispatch::covers(
+                chat,
+                crate::models::execution_permission::ExecutionFloor::SharedConnectionConsent,
+                connection_id,
+            );
         if pool {
             super::shared_agent_transport::require_ready(db).await?;
             pools::pin_shared_pool(db, chat, connection_id, &binding, operation).await?;
@@ -427,6 +432,7 @@ async fn check_inner(
             },
         )
         .await?;
+        let gate = super::execution_permission_dispatch::risk_gate(chat, connection_id, gate);
         if let Some(need) = gate.ask() {
             let args = json!({"connection_id": connection_id, "execution_binding": approval,
                 "operation": operation, "acknowledgement_id": acknowledgement});
@@ -838,6 +844,16 @@ async fn check_inner(
             automatic: None,
         });
     }
+    // Enabling this binding explicitly delegates model-only guest use. Its
+    // hidden setup is a fenced, tool-free model call paid from that same budget,
+    // not a member selecting an org connection or a guest asking for a card.
+    let org_guest_setup = operation["kind"] == "raw_inference"
+        && chat
+            .org_agent_access
+            .as_ref()
+            .and_then(|a| a.channel())
+            .is_some_and(|a| a.execution().guest)
+        && super::assistant_guest_model_setup::is_setup(db, &chat.conversation_id).await?;
     box_confirmation(move || async move {
         let summary = if org {
             let owner = db
@@ -863,8 +879,9 @@ async fn check_inner(
         let gate = if resource_replay && acknowledgement.is_some() {
             acks::Gate::Ask(acks::ConfirmationNeed { org_instruction: if instruction_required { acks::OrgInstructionRequirement::Required } else { acks::OrgInstructionRequirement::None }, class: facts.class, mode: None, webhook: false, policy: true, delegation: false })
         } else { acks::confirmation_needed_with_org(db, chat, facts,
-            org && !model_consent && !instruction_covered,
+            org && !model_consent && !instruction_covered && !org_guest_setup,
             if instruction_required { acks::OrgInstructionRequirement::Required } else { acks::OrgInstructionRequirement::None }).await? };
+        let gate = super::execution_permission_dispatch::risk_gate(chat, connection_id, gate);
         if gate.ask().is_some() {
             // Legacy idle calls can retain their existing automatic behavior, but
             // cannot mint or redeem turn-bound consent without an admitted turn.

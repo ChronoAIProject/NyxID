@@ -1,3 +1,4 @@
+import { Label, FieldHelp } from "@/components/ui/label";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -90,9 +91,9 @@ function StatCard({
     <Card>
       <CardContent className="flex items-start justify-between p-4">
         <div className="space-y-1">
-          <p className="text-12 text-muted-foreground">{title}</p>
-          <p className="text-2xl font-semibold text-foreground">{value}</p>
-          <p className="text-xs text-text-tertiary">{description}</p>
+          <p className="text-14 text-muted-foreground">{title}</p>
+          <p className="type-metric text-foreground">{value}</p>
+          <p className="text-13 text-text-tertiary">{description}</p>
         </div>
         <Icon className="h-5 w-5 text-primary-text" />
       </CardContent>
@@ -200,9 +201,9 @@ export function OrgDeveloperAppsTab({
             <div className="space-y-4">
               <OrgReadOnlyRow orgName={orgName} />
               <div className="space-y-2">
-                <label className="text-12 font-medium" htmlFor="org-app-name">
+                <Label htmlFor="org-app-name">
                   Application Name
-                </label>
+                </Label>
                 <Input
                   id="org-app-name"
                   value={name}
@@ -211,12 +212,12 @@ export function OrgDeveloperAppsTab({
                 />
               </div>
               <div className="space-y-2">
-                <label
-                  className="text-12 font-medium"
+                <Label
+
                   htmlFor="org-redirect-uris"
                 >
                   Redirect URIs (one per line)
-                </label>
+                </Label>
                 <textarea
                   id="org-redirect-uris"
                   value={redirectUrisText}
@@ -224,11 +225,11 @@ export function OrgDeveloperAppsTab({
                   placeholder={
                     "https://app.example.com/oauth/callback\nmyapp://oauth/callback"
                   }
-                  className="flex min-h-[120px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus"
+                  className="flex min-h-[120px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus"
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-12 font-medium">Client Type</label>
+                <Label>Client Type</Label>
                 <Select
                   value={clientType}
                   onValueChange={(value: "public" | "confidential") =>
@@ -245,8 +246,8 @@ export function OrgDeveloperAppsTab({
                 </Select>
               </div>
               <div className="space-y-3">
-                <label className="text-12 font-medium">Allowed Scopes</label>
-                <p className="text-xs text-muted-foreground">
+                <Label>Allowed Scopes</Label>
+                <p className="text-13 text-muted-foreground">
                   OIDC scopes this app can request. Determines what user data
                   and NyxID capabilities are included in tokens.
                 </p>
@@ -265,20 +266,20 @@ export function OrgDeveloperAppsTab({
                           );
                         }}
                       />
-                      <div className="grid gap-0.5 leading-none">
-                        <label
+                      <div className="grid gap-0.5">
+                        <Label
                           htmlFor={`scope-org-create-${scope.id}`}
-                          className="text-12 font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                          className="peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
                         >
                           {scope.label}
                           {scope.required && (
-                            <span className="ml-1 text-xs text-muted-foreground">
+                            <FieldHelp className="ml-1 text-muted-foreground">
                               (required)
-                            </span>
+                            </FieldHelp>
                           )}
-                        </label>
+                        </Label>
                         {"hint" in scope && scope.hint && (
-                          <p className="text-xs text-muted-foreground">
+                          <p className="text-13 text-muted-foreground">
                             {scope.hint}
                           </p>
                         )}
@@ -385,14 +386,14 @@ export function OrgDeveloperAppsTab({
             >
               <CardHeader className="space-y-2">
                 <div className="flex items-center justify-between gap-3">
-                  <CardTitle className="text-base">{app.client_name}</CardTitle>
+                  <CardTitle className="text-15">{app.client_name}</CardTitle>
                   <Badge variant={app.is_active ? "success" : "secondary"}>
                     {app.is_active ? "Active" : "Inactive"}
                   </Badge>
                 </div>
                 <CardDescription className="break-all">
                   Client ID:{" "}
-                  <span className="text-xs text-foreground">
+                  <span className="text-13 text-foreground">
                     {app.id}
                   </span>
                 </CardDescription>
@@ -412,7 +413,7 @@ export function OrgDeveloperAppsTab({
                       <Badge
                         key={scope}
                         variant="secondary"
-                        className="text-xs"
+                        className="text-12"
                       >
                         {scope}
                       </Badge>
@@ -425,7 +426,7 @@ export function OrgDeveloperAppsTab({
         {!isLoading && visibleApps.length === 0 && (
           <Card className="xl:col-span-2">
             <CardContent className="p-4 text-center">
-              <p className="text-12 text-muted-foreground">
+              <p className="text-14 text-muted-foreground">
                 {apps.length === 0
                   ? `No developer apps owned by ${orgName}.`
                   : `No active developer apps owned by ${orgName}. Enable "Show inactive" to view deactivated apps.`}

@@ -64,7 +64,7 @@ export function RemoteMachineBilling({
     [404, 405, 501].includes(query.error.status);
   return (
     <div className="space-y-6">
-      <div className="space-y-2 text-12 text-muted-foreground">
+      <div className="space-y-2 text-14 text-muted-foreground">
         <p>
           Runtime billing uses the accepted continuous-run rate and cumulative
           whole seconds. There is no per-instance cap. Paused storage is free.
@@ -76,7 +76,7 @@ export function RemoteMachineBilling({
         </p>
       </div>
       {billingState === "free" && (
-        <p className="rounded-lg border border-border/50 p-4 text-12 text-muted-foreground">
+        <p className="rounded-lg border border-border/50 p-4 text-14 text-muted-foreground">
           This resource currently reports free runtime billing. Paid historical
           contracts, if any, are shown only when the server provides them.
         </p>
@@ -90,24 +90,24 @@ export function RemoteMachineBilling({
             View current contract
           </Button>
           {selectedRunId && (
-            <p className="break-all text-12 text-muted-foreground">
+            <p className="break-all text-14 text-muted-foreground">
               Viewing historical run {selectedRunId}. Each run retains its
               accepted rate version.
             </p>
           )}
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             Historical summaries contain accepted rates and state. Open a
             contract to read its settled and reserved amounts separately.
           </p>
           {runs.isPending && (
-            <p role="status" className="text-12">
+            <p role="status" className="text-14">
               Loading historical contracts…
             </p>
           )}
           {runs.error &&
             (runs.error instanceof ApiError &&
             [404, 405, 501].includes(runs.error.status) ? (
-              <p className="text-12 text-muted-foreground">
+              <p className="text-14 text-muted-foreground">
                 Historical contract lookup is unavailable on this server.
                 Current billing remains independently available when its
                 endpoint is enabled.
@@ -123,7 +123,7 @@ export function RemoteMachineBilling({
               key={run.run_id}
               className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/50 p-3"
             >
-              <div className="min-w-0 space-y-1 text-12">
+              <div className="min-w-0 space-y-1 text-14">
                 <p className="break-all font-mono">{run.run_id}</p>
                 <p>
                   {run.accepted_credits_per_second} Credits / second ·{" "}
@@ -144,7 +144,7 @@ export function RemoteMachineBilling({
             </article>
           ))}
           {runs.data && !runs.data.runs.length && (
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               No runtime contracts in this page.
             </p>
           )}
@@ -168,14 +168,14 @@ export function RemoteMachineBilling({
         </div>
       </DetailSection>
       {query.isPending && (
-        <p role="status" className="text-12">
+        <p role="status" className="text-14">
           Loading runtime billing…
         </p>
       )}
       {query.error && (
         <div role="status" className="space-y-3">
           {noContract ? (
-            <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
+            <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">
               {selectedRunId
                 ? "Selected historical contract was not found. Refresh the contract list or view the current contract; its amounts remain unknown."
                 : billingState === "free"
@@ -183,7 +183,7 @@ export function RemoteMachineBilling({
                   : "No current runtime contract was found. Current billing amounts remain unknown; this does not establish zero cost or completed settlement."}
             </p>
           ) : missing ? (
-            <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
+            <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">
               Runtime billing details are unavailable on this server. Accepted
               rates, exact settled/reserved amounts, pending liability, and
               account-duration estimates cannot be shown yet.
@@ -244,7 +244,7 @@ export function RemoteMachineBilling({
               label="Pending within reserved"
               value={`${data.pending_credits} Credits`}
             />
-            <p className="px-4 py-3 text-12 text-muted-foreground">
+            <p className="px-4 py-3 text-14 text-muted-foreground">
               Pending liability is included in reserved Credits. It is not an
               additional amount to sum. Unknown stop evidence can retain
               responsibility until verified settlement; later funds do not
@@ -280,7 +280,7 @@ export function RemoteMachineBilling({
               label="Current estimate"
               value={`${data.funds.estimated_seconds} seconds`}
             />
-            <p className="px-4 py-3 text-12 text-muted-foreground">
+            <p className="px-4 py-3 text-14 text-muted-foreground">
               This is an account-wide estimate, not a reserved duration or
               spending limit. Other Machines and services share these funds;
               allowances and grants can expire. A finite reservation, live
@@ -289,30 +289,30 @@ export function RemoteMachineBilling({
             </p>
           </DetailSection>
           <div className="space-y-3">
-            <h3 className="text-13 font-semibold">Runtime intervals</h3>
+            <h3 className="type-card-title">Runtime intervals</h3>
             <div className="flex flex-col gap-3 md:hidden">
               {data.intervals.map((row) => (
                 <article
                   key={row.interval_id}
                   className="space-y-2 rounded-xl border border-border/50 bg-card p-4"
                 >
-                  <p className="break-all text-13 font-semibold">
+                  <p className="break-all type-card-title">
                     {row.interval_id}
                   </p>
                   <Badge variant={row.settled ? "success" : "warning"}>
                     {row.settled ? "Settled" : "Reserved"}
                   </Badge>
-                  <p className="text-11 text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     Generation {row.runtime_generation} ·{" "}
                     {row.quantity === null
                       ? "Awaiting evidence"
                       : `${row.quantity} seconds`}
                   </p>
-                  <p className="text-11 text-muted-foreground">
+                  <p className="text-13 text-muted-foreground">
                     {row.settled ? row.settled_credits : row.reserved_credits}{" "}
                     Credits
                   </p>
-                  <p className="break-all text-11 text-text-tertiary">
+                  <p className="break-all text-13 text-text-tertiary">
                     Rate {row.rate_version}
                   </p>
                 </article>
@@ -332,14 +332,14 @@ export function RemoteMachineBilling({
                   {data.intervals.map((row) => (
                     <TableRow key={row.interval_id}>
                       <TableCell>
-                        <span className="block break-all font-mono text-11">
+                        <span className="block break-all font-mono text-13">
                           {row.interval_id}
                         </span>
-                        <span className="text-11 text-text-tertiary">
+                        <span className="text-13 text-text-tertiary">
                           {new Date(row.covered_from).toLocaleString()} –{" "}
                           {new Date(row.covered_until).toLocaleString()}
                         </span>
-                        <span className="block break-all text-11 text-text-tertiary">
+                        <span className="block break-all text-13 text-text-tertiary">
                           Rate {row.rate_version}
                         </span>
                       </TableCell>
@@ -352,7 +352,7 @@ export function RemoteMachineBilling({
                           : row.reserved_credits}{" "}
                         Credits
                         <br />
-                        <span className="text-11 text-text-tertiary">
+                        <span className="text-13 text-text-tertiary">
                           Allowance {row.allowance_funded} · Grant{" "}
                           {row.grant_funded} · Wallet {row.wallet_funded}
                         </span>
@@ -368,7 +368,7 @@ export function RemoteMachineBilling({
               </Table>
             </div>
             {!data.intervals.length && (
-              <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
+              <p className="rounded-lg border border-dashed border-border p-4 text-14 text-muted-foreground">
                 No runtime intervals in this page.
               </p>
             )}
@@ -398,7 +398,7 @@ export function RemoteMachineBilling({
         </>
       )}
       <DetailSection title="Recovery and separate service usage">
-        <div className="space-y-3 px-4 py-3 text-12 text-muted-foreground">
+        <div className="space-y-3 px-4 py-3 text-14 text-muted-foreground">
           <p>
             Insufficient funds never triggers automatic top-up or resume. First
             resolve any old pending responsibility, then manually review a new

@@ -8,7 +8,7 @@ type Element = { type: unknown; props: Record<string, any> };
 const nodes = (n: any): Element[] =>
   n?.props ? [n, ...[n.props.children].flat(Infinity).flatMap(nodes)] : [];
 const plain = (v: any) => JSON.parse(JSON.stringify(v));
-function setup() {
+function setup(theme = "light") {
   let epoch = 1;
   let available = true;
   const calls: unknown[][] = [];
@@ -41,6 +41,8 @@ function setup() {
       Pressable: "Pressable",
       ScrollView: "ScrollView",
       View: "View",
+      ActivityIndicator: "Spinner",
+      StyleSheet: { absoluteFill: { position: "absolute" } },
     },
     "lucide-react-native": {
       Check: "Check",
@@ -48,7 +50,13 @@ function setup() {
       X: "X",
     },
     "../../components/workspace/WorkspaceUI": { Label: "Label" },
-    "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+    "../../theme/ThemeContext": {
+      useTheme: () => ({
+        preference: theme,
+        mode: theme === "system" ? "dark" : theme,
+        colors: { card: "surface", sheetScrim: "scrim" },
+      }),
+    },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
     "../groups/useGroupRuntime": {
       useGroupAvailability: () => ({
@@ -98,6 +106,11 @@ function setup() {
     settings,
     queries,
     find,
+    open: () => {
+      find("Permissions: Auto").props.onPress();
+      h.render();
+      assert.equal(props.visible, true);
+    },
     writeMode: (write: typeof modeWrite) => {
       modeWrite = write;
     },
@@ -223,12 +236,14 @@ test("late permission responses cannot update another scope, account or unmounte
 
 test("settings write failures retain authoritative mode and expose the error", async () => {
   const x = setup();
+  x.open();
   x.writeMode(async () => {
     throw new Error("Permission policy changed.");
   });
   x.find("Full access").props.onPress();
   await x.h.settle();
   assert.equal(x.find("Auto").props.accessibilityState.checked, true);
+  assert.equal(x.props.visible, true);
   assert.ok(
     nodes(x.h.value()).some(
       (n) =>
@@ -237,6 +252,140 @@ test("settings write failures retain authoritative mode and expose the error", a
     ),
   );
   x.h.unmount();
+});
+
+test("permissions automatically close after a confirmed write in every appearance", async () => {
+  for (const theme of ["light", "dark", "system"]) {
+    const x = setup(theme);
+    x.open();
+    const wait = deferred<any>();
+    x.writeMode(() => wait.promise);
+    const change = x.find("Full access").props.onPress;
+    change();
+    change();
+    x.h.flush();
+    assert.equal(x.props.visible, true);
+    assert.equal(x.find("Full access").props.disabled, true);
+    assert.ok(
+      nodes(x.h.value()).some(
+        (n) => n.props.children === "Saving permissions…",
+      ),
+    );
+    wait.resolve({ access_mode: "autopilot" });
+    await x.h.settle();
+    assert.equal(x.props.visible, false);
+    assert.ok(x.find("Permissions: Full access"));
+    assert.deepEqual(
+      x.calls.filter((c) => c[0] === "PUT"),
+      [["PUT", "autopilot"]],
+    );
+    assert.ok(
+      x.calls.findIndex((c) => c[0] === "cache") <
+        x.calls.findLastIndex((c) => c[0] === "open"),
+    );
+    x.h.unmount();
+  }
+});
+
+test("a stalled permissions save stays dismissible and reopening preserves its write lock until settlement", async () => {
+  for (const action of ["backdrop", "close", "back", "escape"]) {
+    const x = setup();
+    x.open();
+    const wait = deferred<any>();
+    x.writeMode(() => wait.promise);
+    const change = x.find("Full access").props.onPress;
+    change();
+    x.h.flush();
+    // No response or timeout has settled this request when the user leaves.
+    if (action === "backdrop") x.find("Dismiss permissions").props.onPress();
+    if (action === "close") x.find("Close permissions").props.onPress();
+    if (action === "back")
+      nodes(x.h.value())
+        .find((n) => n.type === "Modal")!
+        .props.onRequestClose();
+    if (action === "escape")
+      nodes(x.h.value())
+        .find((n) => n.props.accessibilityViewIsModal)!
+        .props.onAccessibilityEscape();
+    assert.equal(x.props.visible, false, action);
+    x.open();
+    assert.equal(x.find("Full access").props.disabled, true);
+    assert.equal(x.find("Dismiss permissions").props.disabled, undefined);
+    assert.equal(x.find("Close permissions").props.disabled, undefined);
+    assert.ok(
+      nodes(x.h.value()).some(
+        (n) => n.props.children === "Saving permissions…",
+      ),
+    );
+    change();
+    assert.deepEqual(
+      x.calls.filter((c) => c[0] === "PUT"),
+      [["PUT", "autopilot"]],
+    );
+    wait.resolve({ access_mode: "autopilot" });
+    await x.h.settle();
+    assert.equal(x.props.visible, false);
+    assert.ok(x.find("Permissions: Full access"));
+    x.h.unmount();
+  }
+});
+
+test("a permissions save settling after dismissal does not close another shared sheet", async () => {
+  const x = setup();
+  let sheet: "permissions" | "agents" | undefined;
+  x.props.onOpenChange = (open: boolean) => {
+    sheet = open ? "permissions" : undefined;
+    x.props.visible = sheet === "permissions";
+  };
+  x.h.render();
+  x.open();
+  assert.equal(sheet, "permissions");
+  const wait = deferred<any>();
+  x.writeMode(() => wait.promise);
+  x.find("Full access").props.onPress();
+  x.h.flush();
+  x.find("Dismiss permissions").props.onPress();
+  x.h.render();
+  assert.equal(sheet, undefined);
+  sheet = "agents";
+  x.props.visible = false;
+  x.h.render();
+
+  wait.resolve({ access_mode: "autopilot" });
+  await x.h.settle();
+  assert.equal(x.settings.data.access_mode, "autopilot");
+  assert.equal(x.calls.filter((call) => call[0] === "cache").length, 1);
+  assert.equal(sheet, "agents");
+  x.h.unmount();
+});
+
+test("backdrop, close, system Back and accessibility Escape dismiss without a setting write", () => {
+  for (const action of ["backdrop", "close", "back", "escape"]) {
+    const x = setup();
+    x.open();
+    if (action === "backdrop") x.find("Dismiss permissions").props.onPress();
+    if (action === "close") x.find("Close permissions").props.onPress();
+    if (action === "back")
+      nodes(x.h.value())
+        .find((n) => n.type === "Modal")!
+        .props.onRequestClose();
+    if (action === "escape")
+      nodes(x.h.value())
+        .find((n) => n.props.accessibilityViewIsModal)!
+        .props.onAccessibilityEscape();
+    assert.equal(x.props.visible, false, action);
+    assert.equal(
+      x.calls.some((c) => c[0] === "PUT"),
+      false,
+    );
+    // Backdrop is a sibling of the card, so content touches cannot bubble into it.
+    const backdrop = x.find("Dismiss permissions");
+    assert.equal(
+      nodes(backdrop).some((n) => n.props.accessibilityLabel === "Full access"),
+      false,
+    );
+    x.h.unmount();
+  }
 });
 
 test("access-mode API posts only validated owner access_mode to the existing settings endpoint", async () => {

@@ -48,7 +48,7 @@ export function CmaDesktopPanel({ agentId }: { readonly agentId: string }) {
   return (
     <section aria-label="Shared Sandbox desktop" className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-13 font-medium">Shared Sandbox desktop</h2>
+        <h2 className="type-secondary-emphasis">Shared Sandbox desktop</h2>
         <Button
           variant="outline"
           isLoading={descriptor.isFetching}
@@ -62,7 +62,7 @@ export function CmaDesktopPanel({ agentId }: { readonly agentId: string }) {
           Reconnect
         </Button>
       </div>
-      <p className="text-12 leading-relaxed text-text-tertiary">
+      <p className="type-secondary text-text-tertiary">
         This desktop belongs to the parent Sandbox and may be shared by several
         Agents and chats. Only one viewer can connect at a time. Manual input
         does not pause the Agent.
@@ -221,7 +221,7 @@ function RfbViewer({ path }: { readonly path: string }) {
         ref={screen}
         className="aspect-video min-h-64 w-full overflow-hidden rounded-lg bg-muted"
       />
-      <p className="mt-3 text-11 text-text-tertiary">
+      <p className="mt-3 type-secondary text-text-tertiary">
         Connections expire after 30 minutes. Reconnect verifies current access
         and starts in view-only mode.
       </p>

@@ -57,20 +57,32 @@ async fn manager_file_failures_and_disabled_media_preserve_the_owner_text_turn()
                 .contains("Keep this forwarded question even if its file fails"),
             "{case}"
         );
-        let expected_note = match case {
-            "disabled" => "attachments are not shared",
-            "oversize" => "too large: 1",
-            _ => "unavailable: 1",
+        let expected_notes: &[&str] = match case {
+            "disabled" => &[
+                "1 attachment is not shared",
+                "not enabled for this owner",
+                "Ask a NyxID platform administrator to review the assistant:channel-media rollout for this owner.",
+            ],
+            "oversize" => &["too large: 1"],
+            _ => &["unavailable: 1"],
         };
-        assert!(
-            message.text.contains(expected_note),
-            "{case}: {}",
-            message.text
-        );
+        for &expected_note in expected_notes {
+            assert!(
+                message.text.contains(expected_note),
+                "{case}: {}",
+                message.text
+            );
+        }
         assert_eq!(message.attachments.len(), usize::from(case == "partial"));
         assert_eq!(j.egress.0.load(Ordering::SeqCst), 1);
         let input = j.egress.1.lock().await;
-        assert!(input[0].to_string().contains(expected_note));
+        let captured_input = input[0].to_string();
+        for &expected_note in expected_notes {
+            assert!(
+                captured_input.contains(expected_note),
+                "{case}: {captured_input}"
+            );
+        }
         drop(input);
         if case != "partial" {
             assert!(

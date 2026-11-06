@@ -401,6 +401,7 @@ pub(crate) async fn claim_personal_turn_in_session(
         return Err(AppError::AssistantTurnRequired);
     }
     let ids = engine::OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: thread.conversation_id.clone(),
         turn_id: candidate_ids.turn_id.clone(),
         message_id: candidate_ids.message_id.clone(),
@@ -604,6 +605,7 @@ impl contract::PersonalTurnProducer for PersonalTurns {
         start.model = Some(agent.model.clone());
         start.channel_uploads = input.channel_uploads;
         let ids = engine::OwnerTurnIds {
+            artifact_budget: Default::default(),
             conversation_id: format!("nyxa-{}", uuid::Uuid::new_v4().simple()),
             turn_id: uuid::Uuid::new_v4().to_string(),
             message_id: uuid::Uuid::new_v4().to_string(),

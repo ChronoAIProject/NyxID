@@ -6,6 +6,7 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  Outlet,
   RouterProvider,
 } from "@tanstack/react-router";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -13,6 +14,7 @@ import { WebDeviceLogin } from "./web-device-login";
 import { LoginPage } from "@/pages/login";
 import { useConsentStore } from "@/stores/consent-store";
 import { useAuthStore } from "@/stores/auth-store";
+import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
 
 vi.mock("qrcode", () => ({
   default: { toDataURL: vi.fn().mockResolvedValue("data:image/png;base64,qr") },
@@ -89,7 +91,9 @@ it("clears a pending password MFA challenge only after QR profile verification a
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  const root = createRootRoute();
+  const root = createRootRoute({
+    component: () => <CmaSessionProvider><Outlet /></CmaSessionProvider>,
+  });
   const qr = createRoute({
     path: "/qr",
     getParentRoute: () => root,
@@ -175,7 +179,9 @@ async function renderLoginChallenge(cookieChallenge: boolean, returnTo?: string)
   if (!cookieChallenge) {
     await useAuthStore.getState().login("qr@example.com", "password");
   }
-  const root = createRootRoute();
+  const root = createRootRoute({
+    component: () => <CmaSessionProvider><Outlet /></CmaSessionProvider>,
+  });
   const login = createRoute({
     path: "/login",
     getParentRoute: () => root,
@@ -264,7 +270,9 @@ it("preserves the trusted return URL when switching from social MFA to QR", asyn
 });
 
 async function renderQr() {
-  const root = createRootRoute();
+  const root = createRootRoute({
+    component: () => <CmaSessionProvider><Outlet /></CmaSessionProvider>,
+  });
   const qr = createRoute({
     path: "/qr",
     getParentRoute: () => root,

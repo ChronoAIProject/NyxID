@@ -12,6 +12,39 @@ import {
   billingExpandedRows,
 } from "../src/test/billing-fixture";
 
+function benefitPreview(
+  allowances = [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "images",
+  ].map((metric) =>
+    billingAllowance(metric as Parameters<typeof billingAllowance>[0]),
+  ),
+  page = 1,
+) {
+  return {
+    summary: {
+      remaining: "2",
+      unreserved: "1.5",
+      held: "0.5",
+      pending_activation: "0",
+      pending_reclaim: "0",
+      expired_awaiting_cleanup: "0",
+      restricted: "0",
+      generated_at: "2026-10-01T00:00:00Z",
+    },
+    grants: [
+      { ...billingGrant({ expires_at: null }), available: "1.5", held: "0.5" },
+    ],
+    allowances,
+    total_grants: 1,
+    page,
+    per_page: 50,
+  };
+}
+
 async function billingApi(page: Page) {
   await mockDashboard(page);
   await page.route("**/api/v1/users/me", (route) =>
@@ -43,6 +76,9 @@ async function billingApi(page: Page) {
   );
   await page.route("**/api/v1/billing/wallet", (route) =>
     route.fulfill({ json: billingWallet() }),
+  );
+  await page.route("**/api/v1/billing/benefits?**", (route) =>
+    route.fulfill({ json: benefitPreview() }),
   );
   await page.route("**/api/v1/billing/grants", (route) =>
     route.fulfill({
@@ -138,6 +174,9 @@ for (const width of [1440, 768, 390, 320]) {
     await page.route("**/api/v1/billing/usage?**", (route) =>
       route.fulfill({ json: billingUsage(billingExpandedRows()) }),
     );
+    await page.route("**/api/v1/billing/benefits?**", (route) =>
+      route.fulfill({ json: benefitPreview(billingExpandedAllowances()) }),
+    );
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto("/billing");
@@ -147,6 +186,9 @@ for (const width of [1440, 768, 390, 320]) {
     await expect(
       page.getByRole("tab", { name: "Billing", exact: true }),
     ).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    await page
+      .getByRole("button", { name: "View breakdown", exact: true })
+      .click();
     const allowance = page.locator(".benefit-disclosure").filter({
       has: page.locator(".compact-benefit-label > strong", {
         hasText: "Example LLM",
@@ -467,16 +509,33 @@ for (const width of [1440, 768, 390, 320]) {
     await expect(
       page.getByRole("heading", { name: "Billing & Usage", exact: true }),
     ).toBeVisible();
-    await expect(page.getByText("95 credits", { exact: true })).toBeVisible();
+    await expect(
+      page
+        .getByLabel("Current available benefits", { exact: true })
+        .locator('p[title="96.5"]'),
+    ).toBeVisible();
     await expect(
       page.getByRole("tab", { name: "Billing", exact: true }),
     ).toHaveAttribute("data-state", "active");
+    const benefits = page.getByLabel("Current available benefits", {
+      exact: true,
+    });
+    await expect(benefits.locator('p[title="96.5"]')).toBeVisible();
+    expect((await benefits.boundingBox())!.height).toBeLessThan(170);
+    await expect(benefits.getByText("Individual grants")).not.toBeVisible();
     await expect(
-      page
-        .locator(".compact-benefit-label > strong")
-        .filter({ hasText: "Example LLM" }),
-    ).toHaveCount(1);
-    await expect(page.locator(".benefit-expanded").first()).not.toBeVisible();
+      benefits.getByText("Free allowances", { exact: true }),
+    ).not.toBeVisible();
+    await expect(
+      benefits.getByRole("button", { name: "Add credits", exact: true }),
+    ).toBeVisible();
+    await benefits
+      .getByRole("button", { name: "View breakdown", exact: true })
+      .click();
+    await expect(benefits.getByText("Individual grants")).toBeVisible();
+    await expect(
+      benefits.getByText(/Available: 1.5 credits · Held:/),
+    ).toBeVisible();
     // #1673 replaced the image with a focusable stacked meter. Keyboard
     // focus exposes the full allowance breakdown for every viewport.
     await page
@@ -508,6 +567,8 @@ for (const width of [1440, 768, 390, 320]) {
     await page.keyboard.press("Escape");
     await expect(page.getByRole("tooltip")).toHaveCount(0);
     await page.getByRole("tab", { name: "Usage", exact: true }).click();
+    await expect(benefits).toContainText("96.5 credits");
+    await expect(benefits.getByText("Individual grants")).toBeVisible();
     await expect(
       page.locator(".billing-activity .recharts-line-curve"),
     ).toHaveCount(2);
@@ -604,12 +665,10 @@ for (const width of [1440, 768, 390, 320]) {
       }),
     ).toBeVisible();
     if (width === 1440) {
-      await page
-        .getByRole("dialog")
-        .screenshot({
-          path: "test-results/billing-services-picker-light.png",
-          animations: "disabled",
-        });
+      await page.getByRole("dialog").screenshot({
+        path: "test-results/billing-services-picker-light.png",
+        animations: "disabled",
+      });
     }
 
     await page
@@ -745,3 +804,165 @@ test("top-up history pages on the server and resumes a pending payment", async (
   await page.getByRole("button", { name: "Resume payment" }).click();
   await expect(page).toHaveURL("https://billing.example.test/resume");
 });
+
+for (const width of [1440, 390]) {
+  test(`available benefits retain long grant details across pages and tabs at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await billingApi(page);
+    await page.route("**/api/v1/billing/benefits?**", (route) => {
+      const pageNumber = Number(
+        new URL(route.request().url()).searchParams.get("page"),
+      );
+      const data = benefitPreview();
+      data.total_grants = 51;
+      data.page = pageNumber;
+      data.grants[0]!.id = `grant-${pageNumber}`;
+      data.grants[0]!.reason = `Grant ${pageNumber} ` + "longlabel".repeat(28);
+      return route.fulfill({ json: data });
+    });
+    await page.goto("/billing");
+    const benefits = page.getByLabel("Current available benefits", {
+      exact: true,
+    });
+    await expect(benefits).toContainText("96.5 credits");
+    await benefits
+      .getByRole("button", { name: "View breakdown", exact: true })
+      .click();
+    await benefits.getByRole("button", { name: "Next grants" }).click();
+    await expect(benefits).toContainText("51 grants · page 2");
+    await expect(benefits.getByText("Individual grants")).toBeVisible();
+    await page.getByRole("tab", { name: "Usage", exact: true }).click();
+    await expect(benefits).toContainText("96.5 credits");
+    await expect(benefits.getByText("Individual grants")).toBeVisible();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await benefits.screenshot({
+      path: `test-results/available-benefits-${width}.png`,
+      animations: "disabled",
+    });
+  });
+}
+test("singular benefit amounts and grant history read correctly on mobile", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 1000 });
+  await billingApi(page);
+  await page.route("**/api/v1/billing/wallet", (route) =>
+    route.fulfill({ json: { ...billingWallet(), available: "0" } }),
+  );
+  const data = benefitPreview();
+  data.summary.unreserved = "1";
+  data.grants[0]!.available = "1";
+  data.grants[0]!.amount = "1";
+  await page.route("**/api/v1/billing/benefits?**", (route) =>
+    route.fulfill({ json: data }),
+  );
+  await page.goto("/billing");
+  const benefits = page.getByLabel("Current available benefits", {
+    exact: true,
+  });
+  await expect(benefits.locator('p[title="1"]')).toHaveText("1 credit");
+  await benefits
+    .getByRole("button", { name: "View breakdown", exact: true })
+    .click();
+  await expect(benefits).toContainText("1 grant · page 1.");
+  await expect(benefits).toContainText("Granted 1 credit ·");
+  await page.getByRole("tab", { name: "Usage", exact: true }).click();
+  await expect(benefits.locator('p[title="1"]')).toHaveText("1 credit");
+});
+
+test("suspended grants remain visible but cannot appear spendable on either tab", async ({
+  page,
+}) => {
+  await billingApi(page);
+  await page.route("**/api/v1/billing/wallet", (route) =>
+    route.fulfill({ json: { ...billingWallet(), suspended: true } }),
+  );
+  await page.goto("/billing");
+  const benefits = page.getByLabel("Current available benefits", {
+    exact: true,
+  });
+  await expect(benefits.getByRole("alert")).toContainText("Usage is suspended");
+  await expect(benefits.locator('p[title="0"]')).toHaveText("0 credits");
+  await page.getByRole("tab", { name: "Usage", exact: true }).click();
+  await expect(benefits.locator('p[title="0"]')).toHaveText("0 credits");
+});
+
+for (const theme of ["light", "dark"] as const) {
+  test(`available breakdown preserves large balances and allowance layout at 320px enlarged ${theme}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 320, height: 1000 });
+    await billingApi(page);
+    await page.addInitScript(
+      (mode) =>
+        localStorage.setItem(
+          "nyxid.theme",
+          JSON.stringify({
+            state: { mode, textScale: 2, density: 1, motion: "reduce" },
+            version: 2,
+          }),
+        ),
+      theme,
+    );
+    await page.route("**/api/v1/billing/wallet", (route) =>
+      route.fulfill({
+        json: { ...billingWallet(), available: "123456789.123456789123" },
+      }),
+    );
+    await page.route("**/api/v1/billing/benefits?**", (route) =>
+      route.fulfill({ json: benefitPreview(billingExpandedAllowances()) }),
+    );
+    await page.goto("/billing");
+    const benefits = page.getByLabel("Current available benefits", {
+      exact: true,
+    });
+    await expect(
+      benefits.locator('p[title="123456790.623456789123"]'),
+    ).toBeVisible();
+    const disclosure = benefits.getByRole("button", {
+      name: "View breakdown",
+      exact: true,
+    });
+    await disclosure.focus();
+    await page.keyboard.press("Enter");
+    await expect(
+      benefits.getByRole("button", { name: "Hide breakdown", exact: true }),
+    ).toHaveAttribute("aria-expanded", "true");
+    await expect(
+      benefits.getByText("123,456,789.123457 credits", { exact: true }),
+    ).toBeVisible();
+    const allowance = benefits
+      .locator(".benefit-disclosure")
+      .filter({
+        has: page.locator(".compact-benefit-label > strong", {
+          hasText: "Example LLM",
+        }),
+      });
+    await allowance.locator("summary").first().click();
+    await expect(
+      benefits.getByRole("region", { name: "Selected allowance balances" }),
+    ).toBeVisible();
+    for (const target of await benefits
+      .locator(
+        '.allowance-balance > header, .allowance-balance > dl, [aria-label="Wallet breakdown"]',
+      )
+      .all()) {
+      expect(
+        await target.evaluate(
+          (node) => node.scrollWidth <= node.clientWidth + 1,
+        ),
+      ).toBe(true);
+    }
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  });
+}

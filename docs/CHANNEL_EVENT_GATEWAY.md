@@ -460,6 +460,56 @@ The initial broken deploy of this feature created a `unique` variant of the `(co
 The [Aurinko email adapter](./AURINKO_INTEGRATION.md) uses the channel callback and reply protocol while owning its bounded inline ingress. Aurinko supplies redelivery; NyxID persists only subscription bindings, batch digest/cursor, stable message receipts, and irreversible send barriers. No message bodies, queue, or periodic worker are added. Active claims produce retryable failures, completed items stay deduplicated across partial batches and log expiration, and callback retries retain their UUID-v4 so runtimes can suppress duplicate work after a lost acknowledgement. Device and legacy chat adapters keep their existing protocols.
 
 
+## Moving the gateway host
+
+Update the administrator-managed `cmaeg` catalog row to the new gateway API
+base (for example `https://cma.nyxid.ai/event-gateway/v1`) and the `cma` row to
+the corresponding application base. **Never rely on redirects for signed
+callbacks:** a 301 can turn the relay's POST into a body-less GET.
+Preserve CMA's channel records and token keys so the existing channel IDs
+remain valid on the new host.
+
+NyxID reconciles stored gateway destinations in the background immediately
+after startup and on the existing 30-second release sweep. A completed pass is
+remembered per process; another full pass runs when the catalog base changes or
+after one hour. Reads use batches of 64, paginated on the built-in `_id` index.
+No gateway HTTP request is needed for this repair. The catalog is the only source
+of the new destination; the stored HTTPS URL contributes only its validated
+`/callbacks/<channel-id>` suffix. Userinfo, queries, fragments, dot segments,
+encoded path spellings and non-CMA callbacks are refused.
+The channel suffix follows CMA's actual `cmaeg-core/src/seal.rs` format:
+`cmaeg1.ch.<canonical u8 key ID>.<unpadded base64url>`, at most 4,096 characters.
+Existing sealed IDs exceed 200 characters. Validation checks the envelope's
+syntax and minimum nonce/tag size; the reference remains opaque to NyxID.
+
+Only keys referenced by non-deleted NyxBot gateway links or active/prepared
+platform-entry gateways are eligible. Personal and org-owned route keys retain
+their owners. NyxBot updates compare the exact old callback and live route
+reference; platform-entry row and key changes commit together under their
+existing identity, revision and key fences. Every change also fences the exact
+catalog base. Mixed replicas can use the new callback without understanding the
+reconciler. Audit records contain local row kind/ID and old/new hosts only;
+logs contain aggregate counts, never opaque gateway IDs or full URLs.
+
+Pending releases move only when their captured catalog service ID is unchanged
+and their creator issuer is still accepted. Remote identity/version and active
+lease fences remain enforced. A review caused solely by
+`gateway_destination_changed` becomes due again; other review reasons remain
+in place. There is no persisted callback URL on release records to rewrite.
+
+Native WhatsApp webhooks registered at Meta need separate attention. The pass
+reports an aggregate `whatsapp_manual` count for retained native callbacks that
+differ from the new base; it does not rewrite Meta or claim verification. The
+activation helper requires relay state and can roll back on failure, so it
+cannot safely repair a live native channel. For affected dedicated BYO bots,
+turn off `nyxbot:gateway-whatsapp` for the linking person, wait for **verified
+relay restoration**, then enable it again after the catalog move. This uses
+the supported rollback/enrollment flow to register and verify the new CMA
+endpoint at Meta. If doing a manual Meta subscription repair instead, retain
+the exact channel ID and native Verify Token and verify the phone's effective
+webhook precedence (phone override, WABA override, then application); do not
+merely edit local verification metadata or leave an old override in place.
+
 ## NyxBot gateway creator authorization and recovery
 
 Gateway management uses a **creator credential** distinct from the channel's
@@ -741,7 +791,41 @@ as replacement original messages. Incoming media receives explicit unavailable
 feedback; tool images cannot use old relay anchors and report unavailable.
 
 Status exposes `gateway_native_phase`, `gateway_native_activation` and
-`gateway_native_delivery`. Intake refusals/unavailability and response failures
+`gateway_native_delivery`. A rejected native setup also exposes the optional
+`gateway_native_activation_detail`: CMA's problem `code`, restricted to
+`[a-z0-9_.-]{1,64}`, beside the existing NyxID activation code. It is retained
+through relay fallback and included in connect/transport audit metadata and an
+info log with the channel agent ID. Upstream prose, URLs and credentials are
+never retained; a new preparation or successful activation clears the detail.
+
+Native Discord fallback visibility (#2183): `nyxbot_channel_connected` records
+the persisted transport after setup/fallback, plus `gateway_native_activation`
+and the bounded detail when present. A successful relay message is not native
+acceptance. The channel-agent API and bot settings retain these fields and add
+`gateway_next_retry_at` (last attempt plus 23 hours; a legacy fallback without
+an attempt timestamp is already eligible from its fallback time)
+and `gateway_retry_available_at` (last attempt plus ten minutes), plus a plain
+`gateway_fallback_reason`. The automatic
+time is an eligibility time, not a guarantee: the flag must remain enabled,
+the owner must be verified, the bot must be idle, and the bounded sweep rotates
+among eligible channels.
+
+An owner can use **Retry native gateway now** in the channel bot list or agent
+details, or ask NyxBot to call `nyxid__retry_channel_gateway`. The first-party
+human REST action is `POST /api/v1/assistant/nyxagent/channels/{id}/retry-native-gateway`.
+The tool is NyxBot-only (no guests/specialists) and follows the existing
+channel-management access-mode confirmation. Both paths require the linking
+owner's live org-admin authority, the existing gateway flag, an active verified
+Discord channel on direct transport, and no answer in progress. A timestamp CAS
+coordinates with the sweep and enforces ten minutes between attempts, including
+connect-time attempts; a pending preparation cannot be replaced. Retry reuses
+source verification, preparation, release/drain and build-beside-then-swap. A
+rejection keeps the relay and persists code/detail, with metadata-only
+`nyxbot_channel_native_gateway_retried` audit. Selecting native transport does
+not prove a Discord send: inspect native activation and delivery separately.
+Re-linking to another agent still does not trigger transport migration.
+
+Intake refusals/unavailability and response failures
 use stable codes. Activation reflects CMA's bounded activation codes;
 `response_ready` means the provider answer is available, **not** a confirmed
 Discord send. The CMA owner owns native connection/runtime and final delivery
@@ -1257,3 +1341,16 @@ channel/key, use `delivery_id` for idempotency, and report closed outcomes
 `confirmed`, `rejected`, or `unknown` (no message text, tool data, tokens or opaque
 event/reply refs). `unknown` must remain terminal for sending. This is a proposed
 cross-service extension, not an endpoint implemented by this change.
+
+### Org-specialist execution behind the provider
+
+Default-off `nyxbot:org-specialist-channels` adds a same-org specialist binding.
+Provider/creator keys stay on the linking admin and route keys stay org-owned;
+CMA source contracts are unchanged. NyxID resolves each verified sender to a
+live org member or an explicitly delegated, budgeted org-paid guest. Optional
+versioned origins carry that actor through replay/queues/async replies. Native
+and relay events use the same authority checks and dedup namespace. There is no
+CMA-provided membership/payer and no fallback to a personal agent. See
+[org-specialist channel rules](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots)
+for verification, public transcript isolation, payer rules and mandatory rollout
+readiness.

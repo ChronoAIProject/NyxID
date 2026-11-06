@@ -34,6 +34,7 @@ const agentBase = `${base}/cma-agents/${agentId}`;
 const exactOutput =
   "Exact task result: the requested release checks are complete.";
 const sharedOutput = "Earlier shared Agent history from another NyxBot chat.";
+const responseOnlyOutput = "Response-only output must not replace the verified conversation.";
 
 interface FixtureOptions {
   empty?: boolean;
@@ -223,7 +224,7 @@ async function cmaApi(page: Page, options: FixtureOptions = {}) {
               id: "output_exact",
               type: "message",
               role: "assistant",
-              content: exactOutput,
+              content: responseOnlyOutput,
             },
           ],
         },
@@ -383,7 +384,7 @@ for (const width of [1440, 390]) {
     await expect(environment.getByText("4 GiB", { exact: true })).toBeVisible();
     await expect(
       page.getByText(/Price and accrued charges are unknown here/),
-    ).toBeVisible();
+    ).toHaveCount(0);
     await expect(
       page.getByRole("tab", { name: "Desktop", exact: true }),
     ).toHaveCount(0);
@@ -479,16 +480,20 @@ for (const width of [1440, 390]) {
     const api = await cmaApi(page);
     await page.goto(`/assistant/cma-agents/${agentId}?response=${responseId}`);
     await expect(
-      page.getByRole("heading", { name: "Release research Agent" }),
+      page.getByRole("heading", { name: "Release research Agent", level: 1 }),
     ).toBeVisible();
     await expect(
       page.getByRole("tab", { name: "Conversation", exact: true }),
     ).toBeVisible();
     await expect(
-      page.getByText(/You are viewing an earlier request/),
+      page.getByText(/Opened at the request from your chat/),
     ).toBeVisible();
     await expect(page.getByText(exactOutput, { exact: true })).toBeVisible();
-    await expect(page.getByText(sharedOutput, { exact: true })).toHaveCount(0);
+    await expect(page.getByText(sharedOutput, { exact: true })).toBeVisible();
+    await expect(page.getByText(responseOnlyOutput, { exact: true })).toHaveCount(0);
+    await expect(
+      page.getByRole("region", { name: "Linked request", exact: true }),
+    ).toContainText(exactOutput);
     await expect
       .poll(() =>
         api.reads.includes(
@@ -501,15 +506,15 @@ for (const width of [1440, 390]) {
       `${agentBase}/responses/${responseId}/events`,
     );
     await capture(page, testInfo, "assistant-linked-request");
-    await page.getByRole("link", { name: "View latest", exact: true }).click();
+    await page.getByRole("button", { name: "Jump to latest", exact: true }).click();
     await expect(page).toHaveURL(
-      new RegExp(`/assistant/cma-agents/${agentId}$`),
+      new RegExp(`/assistant/cma-agents/${agentId}\\?response=${responseId}$`),
     );
     await expect(page.getByText(sharedOutput, { exact: true })).toBeVisible();
     await expect(
       page.getByText(/all NyxBot chats that use this assistant/),
     ).toBeVisible();
-    await expect(page.getByText(exactOutput, { exact: true })).toHaveCount(0);
+    await expect(page.getByText(exactOutput, { exact: true })).toBeVisible();
     await capture(page, testInfo, "assistant-latest-conversation");
     await page.getByRole("tab", { name: "Desktop", exact: true }).click();
     const desktop = page.getByRole("region", {
@@ -576,7 +581,8 @@ test("a direct assistant entry opens recent conversation without inventing a res
     page.getByRole("region", { name: "Latest request" }),
   ).toBeVisible();
   await expect(page.getByText(sharedOutput, { exact: true })).toBeVisible();
-  await expect(page.getByText(exactOutput, { exact: true })).toHaveCount(0);
+  await expect(page.getByText(exactOutput, { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Linked request", exact: true })).toHaveCount(0);
   expect(api.reads.some((path) => path.includes("/responses/"))).toBe(false);
   await capture(page, testInfo, "assistant-direct-entry");
   expect(api.writes).toEqual([]);
@@ -584,7 +590,7 @@ test("a direct assistant entry opens recent conversation without inventing a res
 });
 
 for (const binding of ["wrong-agent", "wrong-response"] as const) {
-  test(`an assistant rejects a ${binding} link without opening another request`, async ({
+  test(`an assistant rejects a ${binding} link while keeping its own conversation`, async ({
     page,
   }, testInfo) => {
     const api = await cmaApi(page, { responseBinding: binding });
@@ -592,8 +598,9 @@ for (const binding of ["wrong-agent", "wrong-response"] as const) {
     await expect(page.getByRole("alert")).toHaveText(
       "The linked request is unavailable or does not belong to this assistant.",
     );
-    await expect(page.getByText(exactOutput, { exact: true })).toHaveCount(0);
-    await expect(page.getByText(sharedOutput, { exact: true })).toHaveCount(0);
+    await expect(page.getByText(responseOnlyOutput, { exact: true })).toHaveCount(0);
+    await expect(page.getByText(exactOutput, { exact: true })).toBeVisible();
+    await expect(page.getByText(sharedOutput, { exact: true })).toBeVisible();
     await expect(
       page.getByRole("region", { name: "Linked request" }),
     ).toHaveCount(0);

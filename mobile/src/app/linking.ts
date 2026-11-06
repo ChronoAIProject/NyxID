@@ -11,9 +11,9 @@ import { capture } from "../lib/telemetry";
 import type { LinkType } from "../lib/telemetry-schema";
 import {
   IS_DEV_BUILD,
-  NYXID_API_BASE_URL,
   NYXID_APP_SCHEME,
-  NYXID_FRONTEND_URL,
+  NYXID_TRUSTED_API_BASE_URLS,
+  NYXID_TRUSTED_FRONTEND_URLS,
   NYXID_UNIVERSAL_LINK_HOST,
 } from "../lib/env";
 import { buildLinkingPrefixes } from "../lib/linkingPrefixes";
@@ -208,8 +208,9 @@ function rewriteChallengeUrl(url: string): string {
 export const appLinking: LinkingOptions<RootStackParamList> = {
   prefixes: buildLinkingPrefixes({
     appScheme: NYXID_APP_SCHEME,
-    apiBaseUrl: NYXID_API_BASE_URL,
-    frontendUrl: NYXID_FRONTEND_URL,
+    // Both embedded sets: native links can arrive on either API host.
+    apiBaseUrls: NYXID_TRUSTED_API_BASE_URLS,
+    frontendUrls: NYXID_TRUSTED_FRONTEND_URLS,
     universalLinkHost: NYXID_UNIVERSAL_LINK_HOST,
     allowHttp: IS_DEV_BUILD,
   }),

@@ -57,6 +57,45 @@ pub async fn load(db: &Database) -> AppResult<Settings> {
         .await?
         .unwrap_or_default())
 }
+pub async fn load_in_session(db: &Database, session: &mut ClientSession) -> AppResult<Settings> {
+    Ok(db
+        .collection::<Settings>(SETTINGS)
+        .find_one(doc! {"_id":SETTINGS_ID})
+        .session(session)
+        .await?
+        .unwrap_or_default())
+}
+/// Generated files keep an immutable cap; current policy can only shorten it.
+pub fn generated_expiry(row: &Document, policy: Policy) -> Option<DateTime<Utc>> {
+    let days = if row
+        .get_str("content_type")
+        .unwrap_or_default()
+        .starts_with("image/")
+    {
+        policy.image_days
+    } else {
+        policy.document_days
+    };
+    Some(date(row, "expires_at")?.min(date(row, "created_at")? + Duration::days(i64::from(days))))
+}
+pub async fn generated_available_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    filter: Document,
+    policy: Policy,
+) -> AppResult<()> {
+    let row = db
+        .collection::<Document>(ATTACHMENTS)
+        .find_one(filter)
+        .projection(projection())
+        .session(session)
+        .await?
+        .ok_or(AppError::AssistantAttachmentExpired)?;
+    if generated_expiry(&row, policy).is_none_or(|expiry| expiry <= Utc::now()) {
+        return Err(AppError::AssistantAttachmentExpired);
+    }
+    Ok(())
+}
 pub async fn refresh(db: &Database, cache: &Cache) -> AppResult<()> {
     let settings = load(db).await?;
     let mut snapshot = cache.write().unwrap_or_else(|e| e.into_inner());
@@ -146,6 +185,9 @@ fn bound_at(row: &Document) -> Option<DateTime<Utc>> {
 }
 
 fn age_expired(row: &Document, policy: Policy, now: DateTime<Utc>) -> bool {
+    if row.get_str("origin").ok() == Some("generated_artifact") {
+        return generated_expiry(row, policy).is_none_or(|expiry| expiry <= now);
+    }
     let (start, duration) = if row.get_str("origin").ok() == Some("machine_preview") {
         (
             date(row, "created_at"),
@@ -202,11 +244,23 @@ async fn turn_settled(db: &Database, row: &Document, now: DateTime<Utc>) -> AppR
         conversation = first.get_str("conversation_id").unwrap_or_default().into();
         turn = first.get_str("turn_id").unwrap_or_default().into();
     }
+    let mut thread_filter = doc! {"_id":&conversation,"user_id":owner};
+    if user_upload(row)
+        && let Ok(group) = row.get_str("group_id")
+    {
+        // A collaboration guest executes on the agent owner's key, while the
+        // public upload and its retention lifetime belong to the requester.
+        thread_filter.remove("user_id");
+        thread_filter.insert("$or", bson::bson!([
+            {"user_id":owner},
+            {"collaboration.version":1,"collaboration.group_id":group,"collaboration.original_requester_id":owner},
+        ]));
+    }
     let thread = db
         .collection::<crate::models::assistant_conversation::AssistantConversation>(
             crate::models::assistant_conversation::COLLECTION_NAME,
         )
-        .find_one(doc! {"_id":&conversation,"user_id":owner})
+        .find_one(thread_filter)
         .await?;
     Ok(thread
         .as_ref()
@@ -237,6 +291,9 @@ async fn expired(
 
 /// Scope must already be authorized. Live Mongo policy, never the replica cache.
 pub async fn require_available(db: &Database, filter: Document) -> AppResult<()> {
+    available_row(db, filter).await.map(|_| ())
+}
+pub async fn available_row(db: &Database, filter: Document) -> AppResult<Document> {
     let row = db
         .collection::<Document>(ATTACHMENTS)
         .find_one(filter.clone())
@@ -253,7 +310,7 @@ pub async fn require_available(db: &Database, filter: Document) -> AppResult<()>
         {
             return Err(AppError::AssistantAttachmentExpired);
         }
-        return Ok(());
+        return Ok(row);
     }
     if db
         .collection::<Document>(TOMBSTONES)

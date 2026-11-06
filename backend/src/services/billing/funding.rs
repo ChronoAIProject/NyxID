@@ -40,7 +40,9 @@ const WALLET_ADMISSION_BUSY: &str = "Purchased credit settlement is completing; 
 
 mod machine;
 pub use machine::{
-    MachineFundingCandidates, prepare_machine_window_funding, reserve_machine_window_in_session,
+    MachineFundingCandidates, RuntimeFundingCandidates, prepare_machine_window_funding,
+    prepare_sandbox_window_funding, reserve_machine_window_in_session,
+    reserve_runtime_window_in_session,
 };
 
 /// Pool admission has a cancellation deadline. Commit every funding hold and
@@ -364,6 +366,9 @@ fn reserve_and_open_durable_once<'a>(
                     return Err(AppError::Conflict("Managed funding authority changed".into()));
                 }
             }
+            if let Some(guest) = &ctx.org_channel_guest {
+                crate::services::org_channel_service::budget::reserve(&db, session, guest, &rows, &reservation.layers).await?;
+            }
             if !rows.is_empty() {
                 if let Some(admission)=&ctx.managed_admission {
                     let mut documents = Vec::with_capacity(rows.len());
@@ -415,10 +420,13 @@ pub async fn release_usage_reservations(
     db: &mongodb::Database,
     row: &UsageMeterRow,
 ) -> AppResult<()> {
-    if machine::is_machine_runtime(row) {
+    if machine::is_runtime_allocation(row) {
         return Err(AppError::BillingProviderUnavailable(
             "Machine liability requires evidence-backed settlement, including zero usage".into(),
         ));
+    }
+    if row.org_channel_guest.is_some() {
+        crate::services::org_channel_service::budget::settle(db, &row.id, Credits::ZERO).await?;
     }
     let Some(funding) = row.funding.as_ref() else {
         return Ok(());
@@ -639,7 +647,7 @@ pub fn settle_usage_funding<'a>(
     row: &'a UsageMeterRow,
 ) -> futures::future::BoxFuture<'a, AppResult<FundingSettlement>> {
     Box::pin(async move {
-        machine::validate_machine_settlement(row)?;
+        machine::validate_runtime_settlement(row)?;
         if let Some(funding) = row.funding.as_ref()
             && funding.settled
         {
@@ -727,8 +735,8 @@ pub fn settle_usage_funding<'a>(
 
         finish_usage_resource_locks(db, &claimed.id).await?;
         refresh_claimed_funding(db, &mut claimed, &claim_id).await?;
-        machine::validate_machine_settlement(&claimed)?;
-        let reserved_only = machine::is_machine_runtime(&claimed);
+        machine::validate_runtime_settlement(&claimed)?;
+        let reserved_only = machine::is_runtime_allocation(&claimed);
 
         let quantity = claimed.quantity.unwrap_or(0).max(0);
         let rate = if let Some(rate) = claimed.funding.as_ref().and_then(|f| f.settlement_rate) {
@@ -1014,6 +1022,14 @@ pub fn settle_usage_funding<'a>(
             "funding.settled_at": settled_at,
             "updated_at": settled_at,
         };
+        if claimed.org_channel_guest.is_some() {
+            crate::services::org_channel_service::budget::settle(
+                db,
+                &claimed.id,
+                total.checked_add(tax)?,
+            )
+            .await?;
+        }
         super::lago_carry::commit_settlement(
             db,
             &claimed,
@@ -1895,6 +1911,7 @@ mod tests {
             .expect("insert grant");
 
         let row = UsageMeterRow {
+            org_channel_guest: None,
             rollup_pending: true,
             id: row_id.to_string(),
             transaction_id: "funding-tx-1".to_string(),

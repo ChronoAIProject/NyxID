@@ -60,6 +60,7 @@ async fn queue(f: &Fixture, event: &NyxbotEvent, question: &str) -> bool {
         OWNER,
         f.event.conversation_id.as_deref().unwrap(),
         work(event, question),
+        None,
     )
     .await
     .unwrap()
@@ -191,7 +192,8 @@ async fn queue_transaction_rolls_back_source_acceptance_when_conversation_write_
             &f.state.db,
             OWNER,
             f.event.conversation_id.as_deref().unwrap(),
-            work(&event, "question")
+            work(&event, "question"),
+            None
         )
         .await
         .is_err()
@@ -316,7 +318,8 @@ async fn every_coalesced_destination_is_revalidated_and_recipient_limit_is_atomi
             &f.state.db,
             OWNER,
             f.event.conversation_id.as_deref().unwrap(),
-            work(&invalid, "another question")
+            work(&invalid, "another question"),
+            None
         )
         .await
         .is_err()
@@ -499,6 +502,7 @@ async fn specialist_owner_private_home_keeps_its_original_delivery_authority() {
         OWNER,
         &home.id,
         work(&event, "specialist question"),
+        None,
     )
     .await
     .unwrap();
@@ -797,13 +801,27 @@ async fn personal_channel_repeat_joins_owner_app_turn_without_another_execution(
     .await
     .unwrap();
     let a = source(&f, "app-repeat").await;
-    assert!(queue(&f, &a, "same app question").await);
+    let mut repeat = work(&a, "same app question");
+    repeat.channel_contexts = vec![verified_context(&f.channel, &a)];
+    assert!(
+        delivery::enqueue(&f.state.db, OWNER, &home.id, repeat, None)
+            .await
+            .unwrap()
+    );
     let current = row(&f).await;
     assert!(current.pending_events.is_empty());
     let active = current.active_turn.as_ref().unwrap();
     assert_eq!(active.turn_id, prior.active_turn.as_ref().unwrap().turn_id);
     assert_eq!(active.origin, TurnOrigin::User);
     assert!(active.channel_event_id.is_none());
+    assert!(active.channel_context.is_none());
+    assert!(active.events.iter().all(|e| e.channel_contexts.is_empty()));
+    assert!(
+        crate::services::channel_turn_context::turn_notes(&f.state.db, &current)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(matches!(
         engine::answer_routing(&current, active).primary,
         engine::PrimaryDestination::App
@@ -965,6 +983,7 @@ async fn original_route_revocation_prunes_only_that_source_before_event_executio
                 OWNER,
                 f.event.conversation_id.as_deref().unwrap(),
                 media_work,
+                None
             )
             .await
             .unwrap()
@@ -1300,4 +1319,203 @@ async fn guest_setup_2092_queue_admission_rechecks_audience_and_source_transacti
         "revoked waits never bind or execute a turn"
     );
     assert_eq!(saved.status, "running");
+}
+
+fn verified_context(
+    channel: &NyxbotChannel,
+    event: &NyxbotEvent,
+) -> crate::models::assistant_conversation::ChannelTurnContext {
+    crate::models::assistant_conversation::ChannelTurnContext {
+        org_origin: None,
+        source_event_id: event.id.clone(),
+        channel_id: channel.id.clone(),
+        channel_bot_id: channel.channel_bot_id.clone(),
+        conversation_kind: "private".into(),
+        sender_kind: crate::models::channel_thread::ThreadSenderKind::Human,
+        guest: false,
+        original_message: true,
+        display_name: None,
+        conversation_label: None,
+        followed: false,
+    }
+}
+
+#[tokio::test]
+async fn identity_2187_coalesced_bot_sources_are_scoped_and_pruned_before_runtime() {
+    let f = fixture("identity_2187_coalesced").await;
+    let (mut second, _) = channel(&f.state, "gateway").await;
+    second.owner_sender_ids = vec!["8".into()];
+    f.state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .replace_one(doc! {"_id":&second.id}, &second)
+        .await
+        .unwrap();
+    f.state.db.collection::<bson::Document>(THREADS).insert_one(doc! {
+        "_id":Uuid::new_v4().to_string(),"channel_id":&second.id,"user_id":OWNER,"partition":PARTITION,
+        "conversation_id":&f.event.conversation_id,"kind":"private","owner_chat":true,"platform_chat_id":"second-chat",
+        "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+    let a = source(&f, "context-a").await;
+    let mut b = source(&f, "context-b").await;
+    b.channel_id = second.id.clone();
+    b.delivery.as_mut().unwrap().origin.nyxbot_channel_id = second.id.clone();
+    b.delivery.as_mut().unwrap().sender_id = "8".into();
+    b.delivery.as_mut().unwrap().source_route_id = second.route_id.clone();
+    b.delivery.as_mut().unwrap().source_route_api_key_id = Some(second.route_api_key_id.clone());
+    f.state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .replace_one(doc! {"_id":&b.id}, &b)
+        .await
+        .unwrap();
+    for (channel, source) in [(&f.channel, &a), (&second, &b)] {
+        let mut event = work(source, "same question");
+        event.channel_contexts = vec![verified_context(channel, source)];
+        assert!(
+            delivery::enqueue(
+                &f.state.db,
+                OWNER,
+                f.event.conversation_id.as_deref().unwrap(),
+                event,
+                None
+            )
+            .await
+            .unwrap()
+        );
+    }
+    let queued = row(&f).await;
+    assert_eq!(queued.pending_events.len(), 1);
+    assert_eq!(queued.pending_events[0].channel_contexts.len(), 2);
+    assert_eq!(
+        queued.pending_events[0].channel_contexts[1].source_event_id,
+        b.id
+    );
+    f.state
+        .db
+        .collection::<bson::Document>(EVENTS)
+        .update_one(
+            doc! {"_id":&a.id},
+            doc! {"$set":{"delivery.sender_id":"revoked-owner"}},
+        )
+        .await
+        .unwrap();
+    follow::prune_queue(&f.state.db, OWNER, &queued.id)
+        .await
+        .unwrap();
+    let pruned = row(&f).await;
+    assert_eq!(pruned.pending_events[0].channel_contexts.len(), 1);
+    assert_eq!(
+        pruned.pending_events[0].channel_contexts[0].channel_bot_id,
+        second.channel_bot_id
+    );
+    let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+        conversation_id: Some(queued.id.clone()),
+        agent_id: None,
+        text: String::new(),
+        model: None,
+        access_mode: None,
+    });
+    start.origin = TurnOrigin::Event;
+    let Started::Turn { receiver, .. } = start_server_turn(
+        &f.state,
+        OWNER,
+        start,
+        Pool::Team {
+            owner: OWNER,
+            limit: 1,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("event turn must start")
+    };
+    final_reply(receiver).await.unwrap();
+    let observed = f.calls.lock().await;
+    assert_eq!(observed.len(), 1);
+    let contexts = turn_context_tests::contexts(&observed[0]);
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(
+        contexts[0]["identity"]["channel_bot_id"],
+        second.channel_bot_id
+    );
+    assert_eq!(contexts[0]["source_event_id"], b.id);
+    assert_eq!(contexts[0]["event_id"], pruned.pending_events[0].id);
+    assert!(
+        !observed[0]["input"]
+            .as_str()
+            .unwrap()
+            .contains(&f.channel.channel_bot_id)
+    );
+}
+
+#[tokio::test]
+async fn identity_2187_later_queued_source_lookup_error_fails_before_model_input() {
+    let f = fixture("identity_2187_lookup_failure").await;
+    for i in 0..2 {
+        let source = source(&f, &format!("lookup-{i}")).await;
+        let mut event = work(&source, "same coalesced question");
+        let mut context = verified_context(&f.channel, &source);
+        if i == 1 {
+            // A later required read fails BSON decoding after the earlier
+            // source rendered successfully. No partial notes may be used.
+            context.channel_id = "broken-source-channel".into();
+            let mut broken = bson::to_document(&f.channel).unwrap();
+            broken.insert("_id", &context.channel_id);
+            broken.insert("created_at", "invalid database datetime");
+            f.state
+                .db
+                .collection::<bson::Document>(CHANNELS)
+                .insert_one(broken)
+                .await
+                .unwrap();
+        }
+        event.channel_contexts = vec![context];
+        assert!(
+            delivery::enqueue(
+                &f.state.db,
+                OWNER,
+                f.event.conversation_id.as_deref().unwrap(),
+                event,
+                None
+            )
+            .await
+            .unwrap()
+        );
+    }
+    let queued = row(&f).await;
+    assert_eq!(queued.pending_events.len(), 1);
+    assert_eq!(queued.pending_events[0].source_event_ids.len(), 2);
+    assert_eq!(queued.pending_events[0].channel_contexts.len(), 2);
+    let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+        conversation_id: Some(queued.id.clone()),
+        agent_id: None,
+        text: String::new(),
+        model: None,
+        access_mode: None,
+    });
+    start.origin = TurnOrigin::Event;
+    let Started::Turn { receiver, .. } = start_server_turn(
+        &f.state,
+        OWNER,
+        start,
+        Pool::Team {
+            owner: OWNER,
+            limit: 1,
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("event turn must start")
+    };
+    assert!(final_reply(receiver).await.is_err());
+    assert!(
+        f.calls.lock().await.is_empty(),
+        "neither an incomplete context nor a bare question reaches the model"
+    );
 }

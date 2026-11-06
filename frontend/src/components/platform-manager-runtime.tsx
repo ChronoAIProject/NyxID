@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -81,7 +82,7 @@ export function ManagerRuntimeSettings({
   const query = useManagerRuntime(profile.id);
   if (query.isPending)
     return (
-      <p role="status" className="text-12">
+      <p role="status" className="text-14">
         Loading bot access settings...
       </p>
     );
@@ -94,7 +95,7 @@ export function ManagerRuntimeSettings({
     );
   if (!query.data.supported)
     return (
-      <p role="status" className="text-12 text-muted-foreground">
+      <p role="status" className="text-14 text-muted-foreground">
         Public and personal bot access is not supported by this server.
       </p>
     );
@@ -223,7 +224,7 @@ function BasicRuntimeForm({
       "This bot is retired. Prepare another shared bot to enable access.",
   }[state];
   return (
-    <section className="space-y-4 rounded-xl border border-border bg-card p-4 text-12">
+    <section className="space-y-4 rounded-xl border border-border bg-card p-4 text-14">
       <div className="flex flex-wrap gap-2">
         <Badge variant={active ? "success" : "warning"}>{statusLabel}</Badge>
         <Badge
@@ -270,7 +271,7 @@ function BasicRuntimeForm({
           void save();
         }}
       >
-        <label className="flex items-start gap-2">
+        <Label className="flex items-start gap-2">
           <Checkbox
             checked={publicEnabled}
             onCheckedChange={(value) => setPublic(value === true)}
@@ -278,8 +279,8 @@ function BasicRuntimeForm({
           <span>
             Public FAQ — approved help for visitors, without personal data.
           </span>
-        </label>
-        <label className="flex items-start gap-2">
+        </Label>
+        <Label className="flex items-start gap-2">
           <Checkbox
             checked={personal}
             onCheckedChange={(value) => setPersonal(value === true)}
@@ -288,9 +289,9 @@ function BasicRuntimeForm({
             Personal NyxBot — sign in, review consent and confirm in this
             private conversation.
           </span>
-        </label>
+        </Label>
         {runtime?.public_policy ? (
-          <label className="block space-y-1">
+          <Label className="block space-y-1">
             Public answers
             <select
               aria-label="Public answers"
@@ -303,7 +304,7 @@ function BasicRuntimeForm({
               </option>
               <option value="ai">Saved public AI configuration</option>
             </select>
-          </label>
+          </Label>
         ) : (
           <p className="text-muted-foreground">
             Public answers use the built-in approved FAQ. No inference credits
@@ -518,7 +519,7 @@ export function AiRuntimeForm({
   return (
     <Form {...form}>
       <form
-        className="space-y-4 rounded-xl border border-border bg-card p-4 text-12"
+        className="space-y-4 rounded-xl border border-border bg-card p-4 text-14"
         onSubmit={form.handleSubmit(enable)}
       >
         <div className="flex flex-wrap gap-2">
@@ -575,7 +576,7 @@ export function AiRuntimeForm({
                   <FormControl>
                     <Input {...field} inputMode="decimal" />
                   </FormControl>
-                  <p className="text-11 text-muted-foreground">Credits</p>
+                  <p className="text-13 text-muted-foreground">Credits</p>
                   <FormMessage />
                 </FormItem>
               )}

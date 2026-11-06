@@ -200,12 +200,17 @@ lane cards. Legacy billing is labeled superseded while lanes are configured.
 
 ## Billing lanes and durable accounting
 
-Platform-key usage is billed to the requesting person regardless of the granting audience.
-An organization grant authorizes its members to use NyxID's key; it never charges that
-organization's wallet for the master credential. `BillingOwnerResolver::resolve_for_execution`
-uses the final credential class: `NyxidManagedMaster` selects the person's wallet and billing
-rollout flag, while org BYOK and agent override credentials retain org-wallet billing.
-Resource authorization, approval ownership, and rate limiting are unchanged.
+Ordinary platform-key execution preserves the requesting billing principal and
+`PaysFrom::Personal` classification without an owner-type lookup. Org-member
+execution bills the member; an org-owned API key retains its org principal and
+the same `Personal` classification. The new `OrgWallet` lane is the server-constructed typed
+`ExecutionLane::OrgChannelGuest`: a live org-specialist channel binding with
+admin-enabled guest exposure, delegated services intersected with agent grants
+and guest operation policy, a provisioned org wallet and exact daily budget.
+That lane bills the org for the guest's model and tools, including platform keys.
+The transport admin is not a sponsor. Ordinary org API keys, personal guests,
+shared agents and org members cannot claim this exception. Resource ACLs and
+platform-key grant checks still run before credential decryption.
 
 `ServiceBilling.byok_pricing` and `platform_key_pricing` are optional `LanePricing`
 blocks. Existing `metric`, decimal `credits_per_unit`, `lago_metric_code`, `sync_status`

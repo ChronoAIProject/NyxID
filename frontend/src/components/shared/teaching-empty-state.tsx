@@ -107,15 +107,15 @@ export function TeachingEmptyState({
     >
       <Icon className={cn(iconClassName ?? DEFAULT_ICON_CLASS)} />
       <div className="space-y-1.5 max-w-md">
-        <p className="text-15 font-semibold text-foreground">{title}</p>
-        <p className="text-12 text-muted-foreground leading-relaxed">
+        <p className="type-card-title text-foreground">{title}</p>
+        <p className="text-14 text-muted-foreground">
           {description}
         </p>
       </div>
       {ctaButton}
       {jumpStarts.length > 0 ? (
         <div className="mt-1 flex flex-wrap items-center justify-center gap-2">
-          <span className="text-11 text-muted-foreground">Or start with:</span>
+          <span className="text-13 text-muted-foreground">Or start with:</span>
           {jumpStarts.map((j) => (
             <Button
               key={j.label}

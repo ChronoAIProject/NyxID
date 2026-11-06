@@ -37,7 +37,7 @@ export function BillingUsageExplorer({
       <CardHeader className="usage-explorer-heading">
         <div>
           <CardTitle>Usage overview</CardTitle>
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             Compare metered quantities and see how your usage is funded.
           </p>
         </div>

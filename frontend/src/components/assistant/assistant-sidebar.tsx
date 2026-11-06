@@ -1,3 +1,4 @@
+import { Label } from "@/components/ui/label";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { AssistantAccountMenu } from "@/components/assistant/assistant-account-menu";
 import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
@@ -91,7 +92,7 @@ const TITLE_FADE =
 
 function GroupLabel({ children }: { readonly children: string }) {
   return (
-    <div className="px-3 py-2 text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+    <div className="shell-group-label">
       {children}
     </div>
   );
@@ -100,7 +101,7 @@ function GroupLabel({ children }: { readonly children: string }) {
 /** An owner's agents or crews: a top-level section label, flush with WORKSPACE. */
 function OwnerLabel({ children }: { readonly children: ReactNode }) {
   return (
-    <p className="-ml-2 px-3 py-2 text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
+    <p className="-ml-2 shell-group-label">
       {children}
     </p>
   );
@@ -119,14 +120,16 @@ function ComingSoonItem({
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <div
+        <button
+          type="button"
           aria-disabled="true"
-          className="flex w-full cursor-not-allowed items-center gap-3 rounded-lg px-3 py-1.5 text-13 text-muted-foreground opacity-50"
+          data-keep-drawer-open=""
+          className="shell-nav-item flex w-full cursor-not-allowed items-center text-left text-muted-foreground opacity-50"
         >
           <Icon className="h-4 w-4 shrink-0 text-text-tertiary" />
           <span className="min-w-0 flex-1 truncate">{label}</span>
           {trailing}
-        </div>
+        </button>
       </TooltipTrigger>
       <TooltipContent side="right">Coming soon</TooltipContent>
     </Tooltip>
@@ -188,10 +191,10 @@ function ConversationRow({
         aria-label={shownTitle}
         aria-describedby={showDraft ? draftPreviewId : undefined}
         className={cn(
-          "w-full overflow-hidden px-2 py-1 text-left text-13 transition-colors",
+          "w-full overflow-hidden px-2 py-1 text-left transition-colors",
           active
-            ? "font-medium text-foreground"
-            : "text-muted-foreground group-hover:text-foreground",
+            ? "type-active-nav-item text-foreground"
+            : "type-nav-item text-muted-foreground group-hover:text-foreground",
           "[@media(hover:none)]:[mask-image:linear-gradient(to_right,#000_calc(100%_-_3rem),transparent_calc(100%_-_1.75rem))]",
           "group-hover:[mask-image:linear-gradient(to_right,#000_calc(100%_-_3rem),transparent_calc(100%_-_1.75rem))]",
           menuOpen && TITLE_FADE,
@@ -203,12 +206,12 @@ function ConversationRow({
             className="h-3 w-3 shrink-0 text-text-tertiary"
           />
           <span className="min-w-0 truncate">{shownTitle}</span>
-          {conversation.platform_thread && <span className="shrink-0 rounded bg-muted px-1 text-10 text-muted-foreground">{channelPlatformName(conversation.platform_thread.platform)}</span>}
+          {conversation.platform_thread && <span className="shrink-0 rounded bg-muted px-1 text-12 text-muted-foreground">{channelPlatformName(conversation.platform_thread.platform)}</span>}
         </span>
         {showDraft && (
           <span
             id={draftPreviewId}
-            className="mt-0.5 flex min-w-0 items-center gap-1 text-11 leading-normal text-text-tertiary"
+            className="mt-0.5 flex min-w-0 items-center gap-1 text-13 text-text-tertiary"
           >
             <PencilLine aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
             <span className="sr-only">Draft: </span>
@@ -224,7 +227,7 @@ function ConversationRow({
             data-icon-button=""
             data-keep-drawer-open=""
             className={cn(
-              "absolute right-1 top-1 flex items-center justify-center rounded-md bg-card text-13 text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
+              "absolute right-1 top-1 flex items-center justify-center rounded-md bg-card text-15 text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
               "pointer-events-none opacity-0",
               "[@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100",
               "group-hover:pointer-events-auto group-hover:opacity-100",
@@ -345,20 +348,20 @@ function ChannelThreadsGroup({
         aria-label={`${group.label} on ${platform}, ${String(count)} ${count === 1 ? "chat" : "chats"}${running ? ", working" : ""}`}
         onClick={() => setPinned({ open: !open, active: activeThreadId })}
         data-keep-drawer-open=""
-        className="flex w-full items-center gap-1.5 rounded-lg py-1 pl-2 pr-2 text-left text-12 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+        className="flex w-full items-center gap-1.5 rounded-lg py-1 pl-2 pr-2 text-left text-14 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
       >
         <ChevronRight
           aria-hidden="true"
           className={cn("h-3 w-3 shrink-0 transition-transform", open && "rotate-90")}
         />
         <span className="min-w-0 flex-1 truncate">{group.label}</span>
-        <span className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-normal text-text-tertiary @min-[15rem]:inline">
+        <span className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 type-group-label text-text-tertiary @min-[15rem]:inline">
           {platform}
         </span>
         {running ? (
           <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
         ) : null}
-        <span className="shrink-0 tabular-nums text-11">{count}</span>
+        <span className="shrink-0 tabular-nums text-13">{count}</span>
       </button>
       {open ? (
         // The guide line runs down from the chevron's centre.
@@ -367,7 +370,7 @@ function ChannelThreadsGroup({
             const children = visible.filter((thread) => (thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id) === chatId);
             const followed = children.some((thread) => thread.channel?.thread_id);
             return <div key={chatId}>
-              {followed ? <p className="px-3 pt-1 text-11 text-text-tertiary">{children.find((thread) => thread.channel?.parent_title)?.channel?.parent_title ?? "Channel chat"}</p> : null}
+              {followed ? <p className="px-3 pt-1 text-13 text-text-tertiary">{children.find((thread) => thread.channel?.parent_title)?.channel?.parent_title ?? "Channel chat"}</p> : null}
               <div className={followed ? "ml-2 border-l border-hairline pl-1" : undefined}>{children.map(renderThread)}</div>
             </div>;
           })}
@@ -376,7 +379,7 @@ function ChannelThreadsGroup({
               type="button"
               onClick={() => setShown((value) => value + CHANNEL_THREADS_SHOWN * 4)}
               data-keep-drawer-open=""
-              className="w-full rounded-lg px-3 py-1 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+              className="w-full rounded-lg px-3 py-1 text-left text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
             >
               Show {String(Math.min(hidden, CHANNEL_THREADS_SHOWN * 4))} more
             </button>
@@ -394,7 +397,7 @@ function HandleTooltip({ handle, children }: { readonly handle?: string; readonl
     <TooltipProvider delayDuration={200}>
       <Tooltip>
         <TooltipTrigger asChild>{children}</TooltipTrigger>
-        <TooltipContent side="bottom" align="start" className="text-11">{handle}</TooltipContent>
+        <TooltipContent side="bottom" align="start" className="text-13">{handle}</TooltipContent>
       </Tooltip>
     </TooltipProvider>
   );
@@ -480,10 +483,10 @@ function AgentRow({
             className={cn(
               // The whole row highlights (also while its options button is
               // hovered); only its content fades under that button.
-              "flex w-full items-center rounded-lg py-1 pl-3 pr-2 text-left text-13 transition-colors group-hover:bg-sidebar-hover",
+              "flex w-full items-center rounded-lg py-1 pl-3 pr-2 text-left transition-colors group-hover:bg-sidebar-hover",
               selected
-                ? "font-medium text-foreground"
-                : "text-muted-foreground group-hover:text-foreground",
+                ? "type-active-nav-item text-foreground"
+                : "type-nav-item text-muted-foreground group-hover:text-foreground",
               agent.status === "destroyed" && "opacity-50",
             )}
           >
@@ -519,14 +522,14 @@ function AgentRow({
               {platforms.slice(0, 1).map((platform) => (
                 <span
                   key={platform}
-                  className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-normal text-text-tertiary @min-[15rem]:inline"
+                  className="hidden shrink-0 rounded-md border border-hairline bg-overlay px-1 type-group-label text-text-tertiary @min-[15rem]:inline"
                 >
                   {channelPlatformName(platform)}
                   {platforms.length > 1 ? ` +${String(platforms.length - 1)}` : ""}
                 </span>
               ))}
               {pending > 0 ? (
-                <span className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning">
+                <span className="shrink-0 rounded-md border border-warning/30 bg-warning/10 px-1.5 type-group-label text-warning">
                   {pending}
                 </span>
               ) : null}
@@ -542,7 +545,7 @@ function AgentRow({
                 aria-label={`Options for ${name}`}
                 data-keep-drawer-open=""
                 className={cn(
-                  "absolute right-1 top-1/2 flex size-[1.5em] -translate-y-1/2 items-center justify-center rounded-md bg-card text-13 text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
+                  "absolute right-1 top-1/2 flex size-[1.5em] -translate-y-1/2 items-center justify-center rounded-md bg-card text-15 text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
                   "pointer-events-none opacity-0",
                   "[@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100",
                   "group-hover:pointer-events-auto group-hover:opacity-100",
@@ -587,7 +590,7 @@ function AgentRow({
         >
           {threads.own.map((conversation) => renderThread(conversation))}
           {model.threadsLoading && !model.threads.length ? (
-            <p className="px-3 py-1.5 text-11 text-text-tertiary">
+            <p className="px-3 py-1.5 text-13 text-text-tertiary">
               Loading threads...
             </p>
           ) : null}
@@ -604,7 +607,7 @@ function AgentRow({
               type="button"
               onClick={() => model.onNewThread(agent.id)}
               aria-label={`New chat with ${name}`}
-              className="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-12 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-14 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
             >
               <Plus aria-hidden="true" className="h-3 w-3" />
               New chat
@@ -632,7 +635,7 @@ function AgentsSection({
     // NyxBot pinned first; the server already orders the rest.
     .sort((a, b) => Number(b.kind === "nyxbot") - Number(a.kind === "nyxbot"));
   return (
-    <div className="space-y-0.5">
+    <div className="shell-nav-stack">
       {agentOwnerSections(visible).map((section) => (
         <section key={section.id} aria-label={`${section.label} agents`}>
           <OwnerLabel>{section.label} agents</OwnerLabel>
@@ -653,7 +656,7 @@ function AgentsSection({
           type="button"
           aria-pressed={showDestroyed}
           onClick={() => setShowDestroyed((value) => !value)}
-          className="w-full rounded-lg px-3 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+          className="w-full rounded-lg px-3 py-1.5 text-left text-13 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
         >
           {showDestroyed ? "Hide destroyed" : `Show destroyed (${String(destroyed.length)})`}
         </button>
@@ -682,6 +685,7 @@ function CreateAgentMenu({
         <DropdownMenuTrigger asChild>
           {compact ? (
             <button data-icon-button=""
+              data-tour="create-agent"
               type="button"
               aria-label="Create new agent"
               title="Create new agent"
@@ -696,7 +700,8 @@ function CreateAgentMenu({
               // The dialogs are rendered by this sidebar; closing the mobile
               // drawer would unmount them.
               data-keep-drawer-open=""
-              className="mb-0.5 flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left text-13 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground data-[state=open]:bg-overlay data-[state=open]:text-foreground"
+              data-tour="create-agent"
+              className="mb-0.5 flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left shell-nav-item text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground data-[state=open]:bg-overlay data-[state=open]:text-foreground"
             >
               <Plus aria-hidden="true" className="h-4 w-4 shrink-0 text-text-tertiary" />
               <span className="truncate">Create new agent</span>
@@ -735,7 +740,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
   // With no crews yet, the personal section still offers the first one.
   if (!sections.size) sections.set("personal", []);
   return (
-    <div className="space-y-0.5">
+    <div className="shell-nav-stack">
       {[...sections.entries()].map(([owner, groups]) => {
         const label = `${owner === "personal" ? "Personal" : (groups[0]?.owner?.name ?? "Organization")} crews`;
         return (
@@ -754,7 +759,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
                     .map((member) => agentTitle(member))
                     .join(", ")}${working ? `, ${String(working)} working` : ""}`}
                   className={cn(
-                    "group flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-13 transition-colors",
+                    "group flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left shell-nav-item transition-colors",
                     selected
                       ? "bg-overlay-strong font-medium text-foreground"
                       : "text-muted-foreground hover:bg-sidebar-hover hover:text-foreground",
@@ -762,6 +767,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
                 >
                   <AgentAvatarStack agents={group.members} size="xs" max={3} ring="ring-sidebar group-hover:ring-sidebar-hover" />
                   <span className="min-w-0 flex-1 truncate">{group.name}</span>
+                  <GroupUnread group={group} />
                   {working ? (
                     <span
                       aria-hidden="true"
@@ -772,14 +778,14 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
               );
             })}
             {owner === "personal" && model.loading && !model.groups.length ? (
-              <p className="px-3 py-1.5 text-11 text-text-tertiary">Loading crews...</p>
+              <p className="px-3 py-1.5 text-13 text-text-tertiary">Loading crews...</p>
             ) : null}
             {owner === "personal" && !model.loading && !model.groups.length ? (
               <button
                 type="button"
                 onClick={model.onNewGroup}
                 data-keep-drawer-open=""
-                className="w-full rounded-lg px-3 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
+                className="w-full rounded-lg px-3 py-1.5 text-left type-row-title text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
               >
                 Chat with several agents at once
               </button>
@@ -932,13 +938,13 @@ export function AssistantSidebar({
       )}
 
       <GroupLabel>Workspace</GroupLabel>
-      <div className="space-y-0.5 px-2">
+      <div className="shell-nav-stack px-2">
         {agents?.onHome ? (
           <button
             type="button"
             onClick={agents.onHome}
             aria-current={agents.homeActive ? "page" : undefined}
-            className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left text-13 transition-colors ${
+            className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-left shell-nav-item transition-colors ${
               agents.homeActive
                 ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground"
@@ -952,7 +958,7 @@ export function AssistantSidebar({
         ) : (
           <Link
             to="/assistant"
-            className="flex items-center gap-3 rounded-lg px-3 py-1.5 text-13 text-muted-foreground hover:bg-overlay hover:text-foreground"
+            className="flex items-center gap-3 rounded-lg px-3 py-1.5 shell-nav-item text-muted-foreground hover:bg-overlay hover:text-foreground"
           >
             <HomeGlyph className="h-4 w-4" />
             Home
@@ -978,9 +984,10 @@ export function AssistantSidebar({
           <Link
             key={item.view}
             to={item.to}
+            data-tour={item.view}
             aria-current={activeView === item.view ? "page" : undefined}
             className={cn(
-              "flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 transition-colors",
+              "flex w-full items-center gap-3 rounded-lg px-3 py-1.5 shell-nav-item transition-colors",
               activeView === item.view
                 ? "bg-overlay-strong font-medium text-foreground"
                 : "text-muted-foreground hover:bg-overlay hover:text-foreground",
@@ -1000,7 +1007,7 @@ export function AssistantSidebar({
         <Link
           to="/assistant/plugins"
           aria-current={pluginsActive ? "page" : undefined}
-          className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 transition-colors ${
+          className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 shell-nav-item transition-colors ${
             pluginsActive
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:bg-overlay hover:text-foreground"
@@ -1016,7 +1023,7 @@ export function AssistantSidebar({
             icon={FileText}
             label="Artifacts"
             trailing={
-              <span className="font-mono text-9 text-text-tertiary">
+              <span className="font-mono text-12 text-text-tertiary">
                 {counts.data?.artifacts ?? 0}
               </span>
             }
@@ -1024,8 +1031,9 @@ export function AssistantSidebar({
         ) : null}
         <Link
           to="/assistant/approvals"
+          data-tour="approvals"
           aria-current={approvalsActive ? "page" : undefined}
-          className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 transition-colors ${
+          className={`flex w-full items-center gap-3 rounded-lg px-3 py-1.5 shell-nav-item transition-colors ${
             approvalsActive
               ? "bg-overlay-strong font-medium text-foreground"
               : "text-muted-foreground hover:bg-overlay hover:text-foreground"
@@ -1036,7 +1044,7 @@ export function AssistantSidebar({
           />
           <span className="min-w-0 flex-1 truncate">Approvals</span>
           {(counts.data?.pendingApprovals ?? 0) > 0 && (
-            <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning">
+            <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 type-group-label text-warning">
               {counts.data?.pendingApprovals}
             </span>
           )}
@@ -1049,7 +1057,7 @@ export function AssistantSidebar({
       {notice ? (
         <p
           role="status"
-          className="mx-2 mb-2 rounded-md border border-border bg-overlay px-2.5 py-2 text-10 leading-relaxed text-muted-foreground"
+          className="mx-2 mb-2 rounded-md border border-border bg-overlay px-2.5 py-2 text-12 text-muted-foreground"
         >
           {notice}
         </p>
@@ -1072,7 +1080,7 @@ export function AssistantSidebar({
             <div className="-mx-2">
               <GroupLabel>Chats</GroupLabel>
             </div>
-            <div className="space-y-0.5">{conversations.map(renderRow)}</div>
+            <div className="shell-nav-stack">{conversations.map(renderRow)}</div>
           </>
         ) : null}
       </nav>
@@ -1086,18 +1094,18 @@ export function AssistantSidebar({
             data-keep-drawer-open=""
             data-assistant-account-fallback="menu"
             className={cn(
-              "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-overlay",
+              "shell-user-block w-full transition-colors hover:bg-overlay",
               Boolean(accountPanel.panel) && "bg-overlay-strong font-medium text-foreground",
             )}
           >
-            <div className="flex shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay-strong p-[0.375em]">
+            <div className="shell-user-avatar border border-hairline bg-overlay-strong">
               <User className="h-3.5 w-3.5 text-text-tertiary" />
             </div>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-12 font-medium text-foreground">
+            <div className="shell-user-copy">
+              <p className="truncate shell-user-name">
                 {user?.display_name ?? "User"}
               </p>
-              <p className="truncate text-10 text-text-tertiary">
+              <p className="truncate shell-user-email">
                 {user?.email ?? ""}
               </p>
             </div>
@@ -1171,12 +1179,12 @@ function RenameChatInline({
             setError("Could not rename this chat. Try again.");
           }
         })}>
-          <label htmlFor="chat-title" className="text-12">
+          <Label htmlFor="chat-title">
             Title
-          </label>
+          </Label>
           <Input autoFocus id="chat-title" maxLength={200} {...form.register("title")} />
           {error ? (
-            <p role="alert" className="mt-2 text-12 text-destructive">
+            <p role="alert" className="mt-2 text-14 text-destructive">
               {error}
             </p>
           ) : null}
@@ -1198,7 +1206,7 @@ function RenameChatInline({
 }
 
 const RAIL_BUTTON =
-  "assistant-icon-button relative inline-flex shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring data-[state=open]:bg-overlay data-[state=open]:text-foreground";
+  "ui-icon-button relative inline-flex shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring data-[state=open]:bg-overlay data-[state=open]:text-foreground";
 
 /** One rail icon with its name in a tooltip. */
 function RailItem({ label, children }: { readonly label: string; readonly children: ReactNode }) {
@@ -1251,7 +1259,7 @@ function SidebarRail({
       <div className="flex h-full min-h-0 flex-col items-center bg-sidebar">
         <nav
           aria-label="Workspace and agents"
-          className="flex min-h-0 w-full flex-1 flex-col items-center gap-1 overflow-y-auto overscroll-contain py-1 [scrollbar-width:none]"
+          className="shell-nav-stack min-h-0 w-full flex-1 items-center overflow-y-auto overscroll-contain py-1 [scrollbar-width:none]"
         >
           <RailItem label="Home">
             {agents?.onHome ? (
@@ -1268,6 +1276,7 @@ function SidebarRail({
             <RailItem key={item.view} label={item.label}>
               <Link
                 to={item.to}
+                data-tour={item.view}
                 aria-label={item.label}
                 aria-current={activeView === item.view ? "page" : undefined}
                 className={linkClass(activeView === item.view)}
@@ -1279,6 +1288,7 @@ function SidebarRail({
           <RailItem label={pendingApprovals ? `Approvals (${String(pendingApprovals)} waiting)` : "Approvals"}>
             <Link
               to="/assistant/approvals"
+              data-tour="approvals"
               aria-label={pendingApprovals ? `Approvals, ${String(pendingApprovals)} waiting` : "Approvals"}
               aria-current={activeView === "approvals" ? "page" : undefined}
               className={linkClass(activeView === "approvals")}
@@ -1323,6 +1333,7 @@ function SidebarRail({
                   className={linkClass(selected)}
                 >
                   <AgentAvatarStack agents={group.members} size="xs" max={2} ring="ring-sidebar" />
+                  <GroupUnread group={group} compact />
                 </button>
               </RailItem>
             );
@@ -1360,15 +1371,15 @@ function LegacyRailChats({ conversations, activeConversationId, onSelect }: {
         <button data-icon-button="" type="button" aria-label="Previous chats" title="Previous chats" className={RAIL_BUTTON}><MessageSquare className="h-4 w-4" /></button>
       </PopoverTrigger>
       <PopoverContent side="right" align="start" className="w-72 p-2">
-        <p className="px-2 py-1 text-12 font-medium">Previous chats</p>
-        <ul aria-label="Previous chats" className="max-h-80 space-y-0.5 overflow-y-auto">
+        <p className="px-2 py-1 type-row-title">Previous chats</p>
+        <ul aria-label="Previous chats" className="max-h-80 shell-nav-stack overflow-y-auto">
           {conversations.map((chat) => (
             <li key={chat.id}>
-              <button type="button" aria-current={chat.id === activeConversationId ? "page" : undefined} onClick={() => { setOpen(false); onSelect(chat.id); }} className="w-full truncate rounded-md px-2 py-1.5 text-left text-12 text-muted-foreground hover:bg-overlay hover:text-foreground">{chat.title}</button>
+              <button type="button" aria-current={chat.id === activeConversationId ? "page" : undefined} onClick={() => { setOpen(false); onSelect(chat.id); }} className="w-full truncate rounded-md px-2 py-1.5 text-left text-14 text-muted-foreground hover:bg-overlay hover:text-foreground">{chat.title}</button>
             </li>
           ))}
         </ul>
-        {!conversations.length ? <p className="px-2 py-1.5 text-11 text-text-tertiary">No chats yet.</p> : null}
+        {!conversations.length ? <p className="px-2 py-1.5 text-13 text-text-tertiary">No chats yet.</p> : null}
       </PopoverContent>
     </Popover>
   );
@@ -1466,25 +1477,25 @@ function RailAgentChats({
   const chats = selected ? model.threads : (threads.data ?? []);
   const loading = selected ? Boolean(model.threadsLoading) : threads.isPending;
   return (
-    <div className="space-y-1 text-12">
+    <div className="space-y-1 text-14">
       <div className="flex items-center gap-2 px-1 pb-1">
         <AgentAvatar agent={agent} size="sm" />
         <span className="min-w-0 flex-1 truncate font-medium text-foreground">{agentTitle(agent)}</span>
         <button
           type="button"
           onClick={onNewChat}
-          className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+          className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 type-row-title text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
         >
           <Plus aria-hidden="true" className="h-3 w-3" />
           New chat
         </button>
       </div>
       {loading && !chats.length ? (
-        <p className="px-2 py-1.5 text-11 text-text-tertiary">Loading chats...</p>
+        <p className="px-2 py-1.5 text-13 text-text-tertiary">Loading chats...</p>
       ) : !chats.length ? (
-        <p className="px-2 py-1.5 text-11 text-text-tertiary">No chats yet.</p>
+        <p className="px-2 py-1.5 text-13 text-text-tertiary">No chats yet.</p>
       ) : (
-        <ul aria-label={`${agentTitle(agent)} chats`} className="space-y-0.5">
+        <ul aria-label={`${agentTitle(agent)} chats`} className="shell-nav-stack">
           {chats.slice(0, RAIL_THREADS).map((chat) => (
             <li key={chat.id}>
               <button
@@ -1506,11 +1517,36 @@ function RailAgentChats({
         <button
           type="button"
           onClick={onAll}
-          className="w-full rounded-md px-2 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
+          className="w-full rounded-md px-2 py-1.5 text-left type-row-title text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
         >
           All chats ({chats.length})
         </button>
       ) : null}
     </div>
+  );
+}
+function GroupUnread({ group, compact = false }: {
+  readonly group: AssistantGroup;
+  readonly compact?: boolean;
+}) {
+  const unread = group.collaboration?.unread_count ?? 0;
+  const mentions = group.collaboration?.mention_count ?? 0;
+  return (
+    <>
+      {unread > 0 ? (
+        <span
+          aria-label="Unread messages"
+          className={cn("h-1.5 w-1.5 shrink-0 rounded-full bg-primary", compact && "absolute top-0.5 right-0.5")}
+        />
+      ) : null}
+      {mentions > 0 ? (
+        <span
+          aria-label={`${mentions} mentions`}
+          className={cn("rounded-full bg-primary/10 px-1.5 type-group-label text-primary", compact && "absolute -bottom-0.5 right-0 bg-primary px-1 text-primary-foreground")}
+        >
+          @{mentions > 99 ? "99+" : mentions}
+        </span>
+      ) : null}
+    </>
   );
 }

@@ -226,7 +226,7 @@ function CredentialForm({
         ) : (
           <KeyRound className="size-4 text-muted-foreground" />
         )}
-        <h2 className="text-15 font-semibold">{provider.label}</h2>
+        <h2 className="type-card-title">{provider.label}</h2>
         <Badge variant={provider.available ? "success" : "secondary"}>
           {refreshRequired
             ? "Refresh required"
@@ -236,7 +236,7 @@ function CredentialForm({
         </Badge>
       </div>
       {sharedProvider && (
-        <p className="text-xs text-muted-foreground">
+        <p className="text-13 text-muted-foreground">
           Shared with the {sharedProvider} provider.
         </p>
       )}
@@ -309,13 +309,13 @@ function CredentialForm({
               </Button>
             </div>
             {form.watch(`fields.${field.name}`) === null && (
-              <p className="text-xs text-destructive">
+              <p className="text-13 text-destructive">
                 Will be cleared when you confirm changes.
               </p>
             )}
-            <p className="text-xs text-muted-foreground">{field.help}</p>
+            <p className="text-13 text-muted-foreground">{field.help}</p>
             {form.formState.errors.fields?.[field.name] && (
-              <p className="text-xs text-destructive">
+              <p className="text-13 text-destructive">
                 {form.formState.errors.fields[field.name]?.message}
               </p>
             )}
@@ -367,8 +367,8 @@ function CredentialForm({
         )}
       </div>
       <div className="max-w-2xl space-y-3">
-        <h3 className="text-13 font-medium">Setup checklist</h3>
-        <ol className="list-decimal space-y-3 pl-4 text-xs text-muted-foreground">
+        <h3 className="type-card-title">Setup checklist</h3>
+        <ol className="list-decimal space-y-3 pl-4 text-13 text-muted-foreground">
           {provider.setup_checklist.map((step) => (
             <li key={step}>{step}</li>
           ))}

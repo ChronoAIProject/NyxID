@@ -669,7 +669,8 @@ async fn org_agent_delegation_runs_with_org_authority_and_reports_to_assigning_n
             &agent,
             "Must not start",
             Some(&nyxbot.id),
-            None
+            None,
+            None,
         ))
         .await
         .is_err()
@@ -1853,7 +1854,7 @@ async fn nyxbot_adds_services_to_a_specialist_holding_an_org_service() {
         refused[1]["reason"]
             .as_str()
             .unwrap()
-            .contains("Unknown or unavailable service: no-such-api"),
+            .contains("Unknown service or no access: no-such-api"),
         "{value}"
     );
     // Nothing grantable: an error that says why.
@@ -1879,7 +1880,7 @@ async fn nyxbot_adds_services_to_a_specialist_holding_an_org_service() {
         value["message"]
             .as_str()
             .unwrap()
-            .contains("Unknown or unavailable service: no-such-api"),
+            .contains("Unknown service or no access: no-such-api"),
         "{value}"
     );
     server.abort();
@@ -2556,7 +2557,8 @@ async fn skill_allow_routes_attachment_to_nyxbot_and_deduplicates_requests() {
                 .unwrap();
         assert!(error);
         assert_eq!(retry["error"], "acknowledgement_denied");
-        f.state.db.drop().await.unwrap();
+        // Registered cleanup drops this database after runtime teardown stops
+        // its readiness heartbeat; dropping it here races that live writer.
     }
 }
 
@@ -3904,7 +3906,11 @@ async fn org_channel_targets_are_refused_before_any_owner_confirmation() {
                     assert!(error, "{tool} {selector}: {value}");
                     assert_eq!(
                         value,
-                        acks::organization_agent_channel_refusal(),
+                        if selector == agent.id && tool != "nyxid__channel_bot_setup_link" {
+                            acks::organization_agent_channel_disabled_refusal()
+                        } else {
+                            acks::organization_agent_channel_refusal()
+                        },
                         "{tool} {selector} {mode:?}"
                     );
                     assert_eq!(
@@ -4257,7 +4263,8 @@ async fn add_service_settings_link_resolves_authorized_catalog_and_returns_hoste
         assert_eq!(value["service_slug"], catalog.slug);
         assert!(value.get("url").is_none());
     }
-    let (plugins, error) = execute_tool(
+    // Without a named service there is still no page link: connect guidance only.
+    let (unnamed, error) = execute_tool(
         &state,
         &chat,
         "nyxid__settings_link",
@@ -4265,12 +4272,8 @@ async fn add_service_settings_link_resolves_authorized_catalog_and_returns_hoste
     )
     .await;
     assert!(!error);
-    assert!(
-        plugins["url"]
-            .as_str()
-            .unwrap()
-            .ends_with("/assistant/plugins")
-    );
+    assert_eq!(unnamed["action"], "connect_service");
+    assert!(unnamed.get("url").is_none(), "{unnamed}");
     state
         .db
         .collection::<bson::Document>(SERVICES)
@@ -4390,4 +4393,63 @@ async fn private_posts_2124_tool_refuses_guests_and_specialists_and_keeps_confir
     );
     f.state.db.drop().await.unwrap();
     specialist.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_channel_enabled_admin_tools_retain_confirmation_and_members_cannot_link() {
+    use crate::services::{feature_flag_service as flags, org_channel_service as org};
+    let f = crate::services::org_agent_tests::Fixture::new("team_org_channel_enabled").await;
+    let (agent, _) = f.create().await;
+    flags::set_platform_override(
+        &f.state.db,
+        org::FLAG,
+        &flags::FlagTarget::Global,
+        true,
+        &f.admin,
+    )
+    .await
+    .unwrap();
+    crate::services::assistant_settings_service::update(
+        &f.state.db,
+        &f.admin,
+        crate::services::assistant_settings_service::Update {
+            access_mode: Some(crate::models::assistant_settings::AccessMode::AskEveryTime),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let row = crate::services::assistant_authority_tests::new_orchestrator(
+        &f.state,
+        &f.admin,
+        "Link an organization bot",
+    )
+    .await;
+    let chat = acks::for_key(&f.state.db, &f.admin, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    for (tool, args) in channel_target_calls(&agent.id) {
+        let (value, error) = execute_tool(&f.state, &chat, tool, &args).await;
+        assert!(error, "{tool}: {value}");
+        if tool == "nyxid__channel_bot_setup_link" {
+            assert_eq!(value, acks::organization_agent_channel_refusal());
+        } else {
+            assert_eq!(
+                value["error"], "acknowledgement_required",
+                "{tool}: {value}"
+            );
+            assert!(
+                preflight_channel_target(
+                    &f.state,
+                    &f.member,
+                    tool.trim_start_matches("nyxid__"),
+                    &args
+                )
+                .await
+                .is_err()
+            );
+        }
+    }
+    f.state.db.drop().await.unwrap();
 }

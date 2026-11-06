@@ -102,6 +102,57 @@ test("assistant link classification preserves the exact web handoff and admits n
   );
 });
 
+test("connect links from any embedded domain set open native UI, resolving relative links against the active set", () => {
+  const active = "https://nyx.chrono-ai.example";
+  const next = "https://nyxid.example";
+  const trusted = [active, active, next];
+  const fromNext = assistantLinkTarget(`${next}/connect/${token}`, trusted)!;
+  assert.equal(fromNext.kind, "connect");
+  assert.equal(fromNext.href, `${next}/connect/${token}`);
+  assert.equal(
+    assistantLinkTarget(`/connect/${token}`, trusted)!.href,
+    `${active}/connect/${token}`,
+  );
+  assert.equal(
+    safeAssistantLinkUrl(`${next}/connect/${token}`, trusted),
+    `${next}/connect/${token}`,
+  );
+  assert.equal(
+    assistantLinkTarget(`https://other.example/connect/${token}`, trusted),
+    null,
+  );
+  assert.equal(assistantLinkTarget(`/connect/${token}`, []), null);
+});
+
+test("NyxBot add-service links select native service setup; anything else stays a web link", () => {
+  const github = assistantLinkTarget(
+    `${origin}/keys?tab=services&action=add-service&slug=api-github`,
+    origin,
+  )!;
+  assert.equal(github.kind, "service");
+  assert.equal(github.kind === "service" && github.slug, "api-github");
+  assert.equal(
+    assistantLinkLabel(github, "Connect another GitHub account"),
+    "Connect another GitHub account",
+  );
+  assert.equal(assistantLinkLabel(github, "GitHub"), "Connect GitHub");
+  const any = assistantLinkTarget(
+    "/keys?action=add-service&tab=services",
+    origin,
+  )!;
+  assert.equal(any.kind, "service");
+  assert.equal(any.kind === "service" && any.slug, undefined);
+  for (const bad of [
+    `${origin}/keys?tab=services`,
+    `${origin}/keys?tab=nyxid&action=create-key`,
+    `${origin}/keys?tab=services&action=add-service&slug=api-github&next=x`,
+    `${origin}/keys?tab=services&action=add-service&slug=api-github&slug=x`,
+    `${origin}/keys?tab=services&action=add-service&slug=..%2Fadmin`,
+    `https://other.test/keys?tab=services&action=add-service&slug=api-github`,
+  ])
+    assert.equal(assistantLinkTarget(bad, origin), null, bad);
+});
+
 test("hosted connection form validation, challenge merging and polling policy match the web", () => {
   const p = {
     ...preview(),
@@ -191,12 +242,16 @@ function flowHarness() {
   let terminalStatus = "pending";
   let finished = 0;
   let enabled = true;
+  let catalogUnavailable = false;
   const h = hookHarness<any>({
     "../groups/useGroupRuntime": { useGroupAvailability: () => availability },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
     "../../lib/api/servicesApi": {
       servicesApi: {
-        catalogEntry: async () => ({ platform_key: { available: true } }),
+        catalogEntry: async () => {
+          if (catalogUnavailable) throw new Error("Catalog unavailable");
+          return { platform_key: { available: true } };
+        },
       },
     },
     "../../lib/api/connectLinksApi": {
@@ -236,6 +291,9 @@ function flowHarness() {
     writes,
     browsers,
     availability,
+    failCatalog: () => {
+      catalogUnavailable = true;
+    },
     setPreview: (next: typeof value) => {
       value = next;
     },
@@ -259,6 +317,28 @@ function flowHarness() {
     finished: () => finished,
   };
 }
+test("hosted preview supplies credential fields even when catalog metadata fails", async () => {
+  const f = flowHarness();
+  try {
+    const fields = [
+      { name: "app_id", label: "App ID", secret: false },
+      { name: "app_secret", label: "App Secret", secret: true },
+    ];
+    await f.h.settle();
+    f.failCatalog();
+    f.setPreview({
+      ...preview(),
+      connect_method: "api_key",
+      token_exchange_credential_fields: fields,
+    });
+    await f.h.value().reload();
+    await f.h.settle();
+    assert.deepEqual(f.h.value().credentialFields, fields);
+  } finally {
+    f.h.unmount();
+  }
+});
+
 test("real hosted flow fences double approval, unavailable/expired actions, account changes and late completion", async () => {
   const x = flowHarness();
   await x.h.settle();
@@ -441,6 +521,7 @@ test("real link host routes account panels, preserves channel URL, retains the t
   };
   let scope = "chat-a";
   let epoch = 1;
+  const minted: string[] = [];
   const transcript = {
     type: "Transcript",
     props: { draft: "Keep this draft" },
@@ -465,7 +546,11 @@ test("real link host routes account panels, preserves channel URL, retains the t
         dispatch: (action: any) => actions.push(action),
       }),
     },
-    "../../lib/env": { NYXID_FRONTEND_URL: origin },
+    "../../lib/env": {
+      getFrontendUrl: () => origin,
+      NYXID_TRUSTED_FRONTEND_URLS: [origin],
+      firstPartyFrontendUrls: () => [origin],
+    },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "../../components/workspace/WorkspaceUI": {
@@ -481,6 +566,19 @@ test("real link host routes account panels, preserves channel URL, retains the t
     "lucide-react-native": { X: "X" },
     "expo-web-browser": {
       openBrowserAsync: async (href: string) => browsers.push(href),
+    },
+    "../../lib/api/connectLinksApi": {
+      connectLinksApi: {
+        create: async (slug: string) => {
+          minted.push(slug);
+          if (slug === "broken") throw new Error("not connectable");
+          return {
+            id: "link",
+            connect_url: `${origin}/connect/${token}`,
+            expires_at: "2099-01-01T00:00:00Z",
+          };
+        },
+      },
     },
   });
   const Host = h.load(
@@ -500,6 +598,33 @@ test("real link host routes account panels, preserves channel URL, retains the t
   assert.equal(actions.at(-1).payload.params.screen, "AccountSecurity");
   open(`${origin}/assistant?panel=settings&panelTab=display`);
   assert.equal(actions.at(-1).payload.params.params.section, "display");
+  open(`${origin}/keys?tab=services&action=add-service`);
+  assert.equal(actions.at(-1).payload.params.screen, "Plugins");
+  assert.equal(actions.at(-1).payload.params.params.tab, "connectors");
+  // A failed mint falls back to the native setup page for that service.
+  open(`${origin}/keys?tab=services&action=add-service&slug=broken`);
+  await h.settle();
+  assert.equal(actions.at(-1).payload.params.screen, "ServiceSetup");
+  assert.equal(actions.at(-1).payload.params.params.catalogSlug, "broken");
+  assert.equal(
+    nodes(h.value()).find((n) => n.type === "Connect"),
+    undefined,
+  );
+  // The button starts a real hosted connection; a double tap mints once.
+  const github = `${origin}/keys?tab=services&action=add-service&slug=api-github`;
+  open(github);
+  open(github);
+  await h.settle();
+  h.flush();
+  assert.equal(minted.filter((slug) => slug === "api-github").length, 1);
+  assert.equal(
+    nodes(h.value()).find((n) => n.type === "Connect")!.props.token,
+    token,
+  );
+  nodes(h.value())
+    .find((n) => n.type === "Modal")!
+    .props.onRequestClose();
+  h.flush();
   const channel = `${origin}/channel-bots/connect/telegram?label=Release%20crew&target_org_id=org&x=kept`;
   open(channel);
   nodes(h.value())
@@ -549,8 +674,14 @@ test("real link host routes account panels, preserves channel URL, retains the t
   epoch++;
   h.render();
   availability.active = false;
+  const before = actions.length;
   open(`${origin}/assistant?panel=billing`);
-  assert.equal(actions.length, 3, "inactive account/thread does not navigate");
+  open(`${origin}/keys?tab=services&action=add-service&slug=api-github`);
+  assert.equal(
+    actions.length,
+    before,
+    "inactive account/thread does not navigate",
+  );
   h.unmount();
 });
 
@@ -570,6 +701,7 @@ test("real native connection card exposes web credential/device/terminal control
     busy: false,
     disabled: false,
     platformAvailable: true,
+    credentialFields: [] as { name: string; label: string; secret: boolean }[],
     usePlatformKey: false,
     device: undefined as any,
     oauth: undefined as any,
@@ -589,7 +721,25 @@ test("real native connection card exposes web credential/device/terminal control
       Fragment: "Fragment",
     },
     "../../components/ServiceIcon": { ServiceIcon: "ServiceIcon" },
-    "react-native": { View: "View" },
+    "react-native": {
+      View: "View",
+      Text: "Text",
+      Pressable: "Pressable",
+      StyleSheet: { create: (value: unknown) => value },
+    },
+    "@tanstack/react-query": {
+      useQuery: () => ({ data: { email: "owner@example.test" } }),
+    },
+    "lucide-react-native": {
+      ArrowRight: "ArrowRight",
+      ExternalLink: "ExternalLink",
+    },
+    "../../components/ConnectionIdentityHeading": {
+      ConnectionIdentityHeading: "IdentityHeading",
+    },
+    "../../lib/api/http": { getCurrentUserProfileRequest: async () => ({}) },
+    "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+    "../../theme/designTokens": { fonts: {} },
     "../../components/SegmentControl": { SegmentControl: "Segment" },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
       ["ActionButton", "Card", "Field", "Label", "Notice"].map((name) => [
@@ -609,6 +759,44 @@ test("real native connection card exposes web credential/device/terminal control
     )!;
   const button = (label: string) =>
     nodes(h.value()).find((n) => n.props.label === label)!;
+  // Same layout as the web connector page: identity heading, request strip,
+  // arrowed primary action, centred Decline and the signed-in account.
+  const expand = (n: any): any =>
+    !n?.props
+      ? n
+      : typeof n.type === "function"
+        ? expand(n.type(n.props))
+        : {
+            ...n,
+            props: {
+              ...n.props,
+              children: [n.props.children].flat(Infinity).map(expand),
+            },
+          };
+  const tree = () => nodes(expand(h.value()));
+  const heading = nodes(h.value()).find((n) => n.type === "IdentityHeading")!;
+  assert.equal(
+    heading.props.title,
+    `NyxID wants to connect to your ${p.service_name}`,
+  );
+  assert.equal(heading.props.serviceSlug, p.service_slug);
+  assert.ok(
+    tree().some(
+      (n) => n.props.accessibilityLabel === "Requested by: Researcher",
+    ),
+  );
+  assert.equal(
+    typeof button("Approve & connect").props.trailingIcon,
+    "function",
+  );
+  assert.equal(button("Decline").type.name, "QuietAction");
+  assert.ok(
+    tree().some(
+      (n) =>
+        n.type === "Text" &&
+        [n.props.children].flat(Infinity).includes("owner@example.test"),
+    ),
+  );
   assert.equal(field("API key").props.secureTextEntry, true);
   field("API key").props.onChangeText("review-key");
   field("Service URL").props.onChangeText("https://gateway.test");
@@ -622,6 +810,43 @@ test("real native connection card exposes web credential/device/terminal control
     "",
     "secret leaves local input state after submission",
   );
+  flow.credentialFields = [
+    { name: "app_id", label: "App ID", secret: false },
+    { name: "app_secret", label: "App Secret", secret: true },
+  ];
+  h.render();
+  assert.equal(field("API key"), undefined);
+  assert.equal(field("App ID").props.secureTextEntry, false);
+  assert.equal(field("App Secret").props.secureTextEntry, true);
+  field("App ID").props.onChangeText("cli_app");
+  h.flush();
+  const before = submitted.length;
+  await button("Approve & connect").props.onPress();
+  await h.settle();
+  assert.equal(submitted.length, before, "partial credentials never submit");
+  assert.equal(flow.error, "Enter App Secret.");
+  field("App ID").props.onChangeText("cli_app");
+  field("App Secret").props.onChangeText("bot-secret");
+  h.flush();
+  await button("Approve & connect").props.onPress();
+  await h.settle();
+  assert.equal(
+    submitted.at(-1).credential,
+    JSON.stringify({ app_id: "cli_app", app_secret: "bot-secret" }),
+  );
+  assert.equal(field("App ID").props.value, "");
+  assert.equal(field("App Secret").props.value, "");
+  flow.usePlatformKey = true;
+  h.render();
+  assert.equal(field("App ID"), undefined);
+  await button("Approve connection").props.onPress();
+  await h.settle();
+  assert.deepEqual(
+    submitted.at(-1),
+    { use_platform_key: true },
+    "platform selection does not require the hidden personal credential fields",
+  );
+  flow.usePlatformKey = false;
   flow.device = {
     code: "ABCD",
     url: "https://provider.test/code",
@@ -646,13 +871,8 @@ test("real native connection card exposes web credential/device/terminal control
   flow.preview = { ...p, status: "completed" };
   h.render();
   assert.equal(button("Decline"), undefined);
-  assert.ok(
-    nodes(h.value()).some(
-      (n) =>
-        n.props.children === "GitHub connected" ||
-        (Array.isArray(n.props.children) &&
-          n.props.children.join("") === "GitHub connected"),
-    ),
-  );
+  const done = nodes(h.value()).find((n) => n.type === "IdentityHeading")!;
+  assert.equal(done.props.title, `${p.service_name} connected`);
+  assert.equal(done.props.complete, true);
   h.unmount();
 });

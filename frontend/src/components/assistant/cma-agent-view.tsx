@@ -116,9 +116,13 @@ export function CmaAgentView({
         </span>
         <div className="min-w-0">
           {!panel && (
-            <p className="mb-1 text-11 text-text-tertiary">Cloud assistant</p>
+            <p className="mb-1 type-secondary text-text-tertiary">Cloud assistant</p>
           )}
-          <Heading className="text-22 font-semibold tracking-tight">
+          <Heading
+            className={panel
+              ? "type-dialog-title tracking-tight"
+              : "type-compact-page-title sm:type-page-title tracking-tight"}
+          >
             {agent.data?.label ?? "Cloud assistant"}
           </Heading>
           <div className="mt-2 flex flex-wrap items-center gap-3 text-12">
@@ -193,7 +197,7 @@ export function CmaAgentView({
           className="mt-4 flex min-h-0 flex-1 flex-col gap-3 data-[state=inactive]:hidden"
         >
           {responseId && (
-            <div className="flex shrink-0 items-center gap-2 border-b border-hairline pb-3 text-11 text-text-tertiary">
+            <div className="flex shrink-0 items-center gap-2 border-b border-hairline pb-3 type-secondary text-text-tertiary">
               <Link2 aria-hidden className="size-3 shrink-0" />
               <p className="min-w-0 flex-1">
                 {locating
@@ -272,13 +276,13 @@ export function CmaAgentView({
         </TabsContent>
       </Tabs>
       <footer className="flex shrink-0 flex-wrap items-center gap-3 border-t border-hairline pt-3">
-        <p className="min-w-0 basis-full text-11 leading-relaxed text-text-tertiary sm:min-w-32 sm:flex-1 sm:basis-auto">
+        <p className="min-w-0 basis-full type-secondary text-text-tertiary sm:min-w-32 sm:flex-1 sm:basis-auto">
           {panel
             ? "Continue through NyxBot"
             : "Continue working with this assistant through NyxBot. Results return to the original chat."}
         </p>
         {live && tab === "conversation" && (
-          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3 text-11 text-text-tertiary sm:flex-none">
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3 type-secondary text-text-tertiary sm:flex-none">
             <span role="status">
               {stream.state === "connected"
                 ? "Live updates connected"
@@ -308,7 +312,7 @@ export function CmaAgentView({
                 assistant.
               </DialogDescription>
             </DialogHeader>
-            <dl className="space-y-2 text-11 text-text-tertiary">
+            <dl className="space-y-2 type-secondary text-text-tertiary">
               <div>
                 <dt>Assistant reference</dt>
                 <dd className="break-all font-mono">{remote}</dd>

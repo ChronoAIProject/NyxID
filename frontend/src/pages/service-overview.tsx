@@ -83,7 +83,7 @@ export function ServiceOverviewPage() {
           ? { view: "routing" }
           : {}
       }
-      className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+      className="inline-flex items-center gap-1.5 type-row-title text-muted-foreground hover:text-foreground"
     >
       <ArrowLeft className="size-3" />
       All services
@@ -134,7 +134,7 @@ export function ServiceOverviewPage() {
           "Connections, configuration and history for this service."
         }
       />
-      <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
+      <div className="flex flex-wrap gap-4 text-13 text-muted-foreground">
         <span>
           {group.connections.length}{" "}
           {group.connections.length === 1 ? "connection" : "connections"}
@@ -153,7 +153,7 @@ export function ServiceOverviewPage() {
               href={entry.documentation_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-primary-text hover:underline"
+              className="type-row-title text-primary-text hover:underline"
             >
               Service documentation
             </a>

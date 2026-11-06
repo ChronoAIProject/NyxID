@@ -30,13 +30,13 @@ export function NotFoundPage({
   return (
     <div className="flex min-h-[60vh] w-full flex-col items-center justify-center gap-1 px-6 py-12 text-center">
       <RoadBarrierIcon className="h-48 w-48 text-muted-foreground/30" />
-      <p className="font-mono text-xs uppercase tracking-widest text-text-tertiary">
+      <p className="font-mono text-13 uppercase tracking-widest text-text-tertiary">
         {code}
       </p>
-      <h1 className="mt-2 font-serif text-28 font-normal text-foreground">
+      <h1 className="mt-2 font-serif type-metric text-foreground">
         {title}
       </h1>
-      <p className="mt-1 max-w-sm text-sm text-muted-foreground">
+      <p className="mt-1 max-w-sm text-14 text-muted-foreground">
         {description}
       </p>
       {action ? <div className="mt-6">{action}</div> : null}

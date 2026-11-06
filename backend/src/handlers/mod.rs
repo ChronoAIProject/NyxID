@@ -14,6 +14,8 @@ pub mod admin_platform_credentials;
 pub mod admin_roles;
 pub mod admin_sa_connections;
 pub mod admin_sa_providers;
+pub mod admin_sandbox_rates;
+pub mod admin_sandbox_settings;
 pub mod admin_service_accounts;
 pub mod admin_upload_retention;
 pub mod admin_usage;
@@ -110,6 +112,7 @@ pub mod proxy;
 pub mod public_mcp;
 pub mod public_proxy;
 pub mod runtime_config;
+pub mod sandbox_billing;
 pub mod service_account_key_reads;
 #[cfg(test)]
 mod service_account_key_reads_tests;
@@ -151,6 +154,7 @@ pub mod assistant_feedback;
 mod assistant_feedback_tests;
 pub mod assistant_group;
 pub mod assistant_nyxagent;
+pub mod assistant_onboarding;
 pub mod assistant_team;
 pub mod channel_platforms;
 #[cfg(test)]
@@ -224,6 +228,12 @@ pub mod telegram_managers;
 
 pub mod nyxbot_gateway_releases;
 
+pub mod billing_benefits;
 pub mod monitoring;
 
 pub mod collaboration_group;
+
+pub mod cma_sessions;
+pub mod org_specialist_channels;
+
+pub(crate) mod execution_permission_resume;

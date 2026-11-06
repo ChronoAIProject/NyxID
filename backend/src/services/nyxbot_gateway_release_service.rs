@@ -601,6 +601,7 @@ pub(crate) async fn retire_connection(
             let current=db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"_id":&row.id,"user_id":&row.user_id}).session(&mut *session).await?.ok_or_else(conflict)?;
             if (reason==ReleaseReason::SetupFailed && current.status!="pending") || (reason==ReleaseReason::OrgAccessLost && !matches!(current.status.as_str(),"pending"|"active")) {return Ok(Vec::new());}
             let ids=retire_in_session(&state,&current,reason,session).await?;
+            if current.org_specialist.is_some() {super::org_channel_service::lifecycle::retire_in_session(&db,session,&current.id,None).await?;}
             db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id},doc! {"$set":{"status":&status,"last_error":&error,"gateway_no_progress":false,"updated_at":bson::DateTime::now()},
                 "$unset":{"gateway_setup_release_id":"","agent_key_ciphertext":"","pending_agent_api_key_id":"","pending_route_api_key_id":"","link_code_hash":"","link_code_expires_at":""}}).session(&mut *session).await?;
             super::channel_thread_follow_service::suspend_in_session(&db,&current.user_id,&current.id,error.as_deref().unwrap_or("disconnected"),session).await?;
@@ -719,7 +720,7 @@ fn backoff(attempt: i64) -> i64 {
     }
 }
 
-async fn destination(state: &AppState, release: &Release) -> AppResult<bool> {
+pub(crate) async fn destination(state: &AppState, release: &Release) -> AppResult<bool> {
     let row =
         match super::assistant_service::resolve_admin_service_by_slug(&state.db, "cmaeg").await {
             Ok(row) => row,
@@ -1250,17 +1251,23 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
     reconcile_step(state).await
 }
 
-pub(crate) fn spawn_worker(state: AppState) {
+pub(crate) fn spawn_worker(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        let mut host_move = super::nyxbot_gateway_host_move::Reconciler::default();
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
+            // The first tick runs immediately, inside this spawned task. Never
+            // block boot; reconcile before release destination validation.
+            if host_move.tick(&state).await.is_err() {
+                tracing::warn!("Gateway host reconciliation deferred");
+            }
             if sweep(&state).await.is_err() {
                 tracing::debug!("Gateway release maintenance deferred");
             }
         }
-    });
+    })
 }
 
 pub(crate) async fn reconcile_step(state: &AppState) -> AppResult<()> {

@@ -85,7 +85,14 @@ Feature flag access can be delegated to any user or group with
 `feature-flag-admin` (manage all flags, including built-ins). Both roles use
 Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-roles-and-management).
 
+NyxBot can retain generated Sandbox files privately in owner Web chats when
+`assistant:generated-artifacts` is enabled. Images and supported videos preview
+inline, other files download, and saved results recover onto the original reply
+without rerunning the Sandbox. See [generated files and rollout](docs/chat/10-uploads.md#generated-sandbox-files).
+
 ## What NyxID Does
+
+- **Track delegated automation work** — optional coordinator completion keeps scheduled and webhook assistant runs waiting for specialist assignments and group handoffs, resumes the coordinator with results, and shows a completion deadline and Cancel action in run history. Enrollment is disabled by default and requires fleet readiness. See [NyxBot schedules](docs/NYXBOT_SCHEDULES.md).
 
 - **Allocate repeatable credits** — admin Credits supports exact one-time or recurring allocations, optional shared-total service ceilings, and reclaim of each allocation's unspent remainder. Existing free-unit allowances stay separate. New policy authoring is off until all billing writers are upgraded; see [credit allocation accounting and rollout](docs/BILLING_EXACT_ACCOUNTING.md#allocation-local-service-ceilings-and-reclaim).
 
@@ -96,6 +103,8 @@ Admin → Feature Flags. See [feature flag management](docs/API.md#feature-flag-
 - **Adjust your chat layout** — resize the message column with the two desktop handles, or set shared chat width and maximum composer height in Settings → Display. Individual desktop threads include a message index for navigating long conversations, while scroll fades and compact conversation controls preserve reading space. Preferences apply to all chats in this browser. See [assistant UI](docs/chat/05-frontend-ui.md).
 
 - **Speak to NyxBot and specialists** — voice calls start with saved account preferences and show live captions and audio activity in the composer. Change the next call’s defaults through Voice settings in the composer chevron. Dictation offers click-to-toggle or hold-to-talk capture, microphone selection, and transcript review before insertion into a draft. Platform audio requires enabled voice features, a configured provider and tariff, and sufficient funding; microphone access is requested when capture is activated. See [voice and dictation](docs/chat/11-voice.md#19-implemented-composer-voice-and-dictation).
+
+- **Use Bot voice from an independent device** — publish one Voice connection for a personal Bot and grant that connection to the device's Agent Key. Devices retain their own login credentials while conversations use the selected Bot's existing tools, confirmations and billing. Remote speech notifications use the same authorized call. The feature is disabled by default; see [Agent Key voice](docs/chat/12-agent-key-voice.md).
 
 - **Display source images in NyxBot** — supported Notion reads return image references that NyxBot can retain as encrypted chat attachments and deliver through supported channels. The shared retrieval tool rechecks source access; see [source resources and image display](docs/chat/10-source-resources.md).
 

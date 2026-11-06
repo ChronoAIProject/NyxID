@@ -528,14 +528,14 @@ export class NyxAgentHttpFixtures {
       return;
     }
     const acknowledgements = row.history.acknowledgements;
-    if (text === "Review formatting and receipt") {
+    if (["Review formatting and receipt", "Review **literal** formatting and receipt"].includes(text)) {
       acknowledgements.push(acknowledgement({
         kind: "skills", status: "allowed", decided_by: "access_mode",
         summary: "Formatting proposal approved",
         creation_turn_id: row.history.conversation.active_turn!.turn_id,
         decided_at: new Date().toISOString(),
       }));
-      row.reply = "**Formatting reviewed**\n\n```ts\nconst answer = 42;\n```\n<function_calls><invoke name=\"private_tool\">hidden arguments</invoke></function_calls>";
+      row.reply = "**Formatting reviewed**\n\n`  inline  code  ` and keep  repeated spaces.\n\n```ts\nconst answer = 42;\n```\n<function_calls><invoke name=\"private_tool\">hidden arguments</invoke></function_calls>";
       return;
     }
     if (text === "Show the lobby camera") {
@@ -1541,6 +1541,7 @@ export class NyxAgentHttpFixtures {
         attachment_ids?: string[];
         text: string;
         model?: string;
+        acknowledgement_id?: string;
       };
       if (request.conversation_id && request.agent_id) {
         return failure(400, "agent_id only applies to new threads");
@@ -1581,6 +1582,9 @@ export class NyxAgentHttpFixtures {
       };
       this.push(row, "user", request.text, turn);
       const userMessage = row.history.messages.at(-1)!;
+      if (request.acknowledgement_id && globalThis.__nyxidAssistantHttpFaults?.markContinuations) {
+        userMessage.continuation_of = request.acknowledgement_id;
+      }
       userMessage.attachments = (request.attachment_ids ?? []).flatMap((attachmentId) => {
         const upload = this.uploads.get(`conversations/${id}/${attachmentId}`);
         return upload ? [upload.item] : [];
@@ -1609,7 +1613,10 @@ export class NyxAgentHttpFixtures {
           if (current.notice) {
             emit("turn.notice", { code: "context_reset", message: "Context reset" });
           }
-          emit("block.delta", { block_id: block, text: "Your connected services" });
+          emit("block.delta", {
+            block_id: block,
+            text: globalThis.__nyxidAssistantHttpFaults?.partialText ?? "Your connected services",
+          });
           timer = setInterval(() => {
             if (current.settleAt && current.settleAt <= Date.now()) this.settle(current);
             if (current.history.conversation.active_turn?.turn_id === turn) return;

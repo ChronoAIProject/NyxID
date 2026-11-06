@@ -30,7 +30,7 @@ use crate::{
     services::nyxbot_response_recovery as recovery,
 };
 
-fn native_channel<'a>(
+pub(super) fn native_channel<'a>(
     state: &'a AppState,
 ) -> futures::future::BoxFuture<'a, (NyxbotChannel, String)> {
     Box::pin(native_channel_impl(state))
@@ -107,8 +107,61 @@ fn frames(wire: &str) -> Vec<Value> {
 async fn native_response_replays_after_restart_with_cursor_and_current_binding() {
     let (state, calls, server) = setup("native_response_replay").await;
     let (row, key) = native_channel(&state).await;
+    let bots = state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME);
+    bots.update_one(
+        doc! {"_id":&row.channel_bot_id},
+        doc! {"$set":{"status":"pending_webhook","webhook_registered":false}},
+    )
+    .await
+    .unwrap();
     let request = native_event(&row, "500", "Hello");
+    assert!(
+        respond(&state, "invalid-key", &request, "native-unauthenticated")
+            .await
+            .status()
+            .is_client_error()
+    );
+    let mut wrong = request.clone();
+    wrong["event_context"]["activity"]["source"]["bot_id"] = json!("999");
+    assert!(
+        respond(&state, &key, &wrong, "native-mismatched")
+            .await
+            .status()
+            .is_client_error()
+    );
+    bots.update_one(
+        doc! {"_id":&row.channel_bot_id},
+        doc! {"$set":{"platform_bot_id":"999"}},
+    )
+    .await
+    .unwrap();
+    assert!(
+        respond(&state, &key, &request, "native-stale-identity")
+            .await
+            .status()
+            .is_client_error()
+    );
+    assert_eq!(
+        channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+            .await
+            .unwrap()
+            .status,
+        "pending_webhook"
+    );
+    bots.update_one(
+        doc! {"_id":&row.channel_bot_id},
+        doc! {"$set":{"platform_bot_id":"100"}},
+    )
+    .await
+    .unwrap();
     let response = respond(&state, &key, &request, "native-500").await;
+    let activated = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    assert_eq!(activated.status, "active");
+    assert!(!activated.webhook_registered);
     assert_eq!(response.status(), StatusCode::OK);
     let id = response.headers()["x-cma-response-id"]
         .to_str()
@@ -744,12 +797,20 @@ async fn native_discord_follow_reuses_members_expiry_stop_and_other_mentions_imp
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
         .mount(&http)
         .await;
+    Mock::given(path("/guilds/300/roles"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id":"900","managed":true,"tags":{"bot_id":"100"}},
+            {"id":"901","managed":true,"tags":{"bot_id":"999"}}
+        ])))
+        .expect(1)
+        .mount(&http)
+        .await;
     Mock::given(path_regex("^/channels/201/messages/[0-9]+$")).respond_with(|r:&wiremock::Request| {
         let id=r.url.path().rsplit('/').next().unwrap();
         let mention=match id {"601"=>json!([{"id":"100"}]),"603"=>json!([{"id":"8"}]),_=>json!([])};
         ResponseTemplate::new(200).set_body_json(json!({"id":id,"channel_id":"201","type":0,
             "author":{"id":"7","bot":false},"content":if id=="604" {"stop following"} else {"Hello"},
-            "mentions":mention,"mention_roles":[],"mention_everyone":false,"attachments":[]}))
+            "mentions":mention,"mention_roles":if id=="607" {json!(["900"])} else {json!([])},"mention_everyone":false,"attachments":[]}))
     }).mount(&http).await;
     for (id, expect_turn) in [
         ("601", true),
@@ -758,6 +819,7 @@ async fn native_discord_follow_reuses_members_expiry_stop_and_other_mentions_imp
         ("606", false),
         ("604", false),
         ("605", false),
+        ("607", true),
     ] {
         if id == "606" {
             state.db.collection::<NyxbotThread>(THREADS).update_many(doc! {"channel_id":&row.id,"record_scope":"platform_thread"},
@@ -787,6 +849,21 @@ async fn native_discord_follow_reuses_members_expiry_stop_and_other_mentions_imp
             before + usize::from(expect_turn),
             "{id}: {output}"
         );
+        if id == "607" {
+            let source = state
+                .db
+                .collection::<crate::models::channel_message::ChannelMessage>(
+                    crate::models::channel_message::COLLECTION_NAME,
+                )
+                .find_one(doc! {"channel_bot_id":&row.channel_bot_id,"platform_message_id":id})
+                .await
+                .unwrap()
+                .unwrap();
+            let diagnostic = source.nyxbot_admission.unwrap();
+            assert_eq!(diagnostic.disposition, "addressed_managed_role");
+            assert!(diagnostic.turn_id.is_some());
+            assert_eq!(diagnostic.thread_follow_selection.as_deref(), Some("child"));
+        }
         if id == "601" {
             assert_eq!(state.db.collection::<NyxbotThread>(THREADS).count_documents(
                 doc! {"channel_id":&row.id,"record_scope":"platform_thread","follow_state":"active"}
@@ -800,7 +877,7 @@ async fn native_discord_follow_reuses_members_expiry_stop_and_other_mentions_imp
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(child.follow.follow_state.as_deref(), Some("stopped"));
+    assert_eq!(child.follow.follow_state.as_deref(), Some("active"));
     assert!(
         http.received_requests()
             .await
@@ -885,6 +962,12 @@ async fn native_enrollment_both_paths_gate_preparation_and_preserve_source_on_re
         }
         row = load_channel(&state, OWNER, &row.id).await.unwrap();
         assert!(crate::services::nyxbot_gateway_source::ready(&row));
+        if fresh {
+            let audit = state.db.collection::<crate::models::audit_log::AuditLog>(crate::models::audit_log::COLLECTION_NAME)
+                .find_one(doc! {"event_type":"nyxbot_channel_connected","event_data.channel_agent_id":&row.id}).await.unwrap().unwrap().event_data.unwrap();
+            assert_eq!(audit["transport"], "gateway");
+            assert_eq!(audit["gateway_native_activation"], "pending_discovery");
+        }
         assert_eq!(row.gateway_bot_id.as_deref(), Some("100"));
         assert_eq!(
             row.gateway_native_activation.as_deref(),
@@ -1421,4 +1504,106 @@ async fn native_async_reply_thread_mode_and_delivery_receipts_iteration(native_t
         assert_eq!(saved.gateway_native_delivery.as_deref(), Some(expected));
     }
     upstream.abort();
+}
+
+#[tokio::test]
+async fn native_gateway_problem_code_is_bounded_persisted_surfaced_and_attempt_fenced() {
+    let (state, _, server) = setup("native_problem_code").await;
+    let (row, _) = native_channel(&state).await;
+    let channels = state.db.collection::<NyxbotChannel>(CHANNELS);
+    channels
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"gateway_setup_release_id":"attempt"}},
+        )
+        .await
+        .unwrap();
+    let response = GatewayResponse {
+        status: 400,
+        body: json!({"code":"discord.invalid_intents-v1", "detail":"private token https://private.example"}),
+    };
+    record_gateway_rejection(&state, &row, "attempt", &response)
+        .await
+        .unwrap();
+    let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(
+        saved.gateway_native_activation.as_deref(),
+        Some("gateway_rejected_request")
+    );
+    assert_eq!(
+        saved.gateway_native_activation_detail.as_deref(),
+        Some("discord.invalid_intents-v1")
+    );
+    let api = serde_json::to_value(ChannelAgentResponse::from(&saved)).unwrap();
+    assert_eq!(
+        api["gateway_native_activation_detail"],
+        "discord.invalid_intents-v1"
+    );
+    assert!(!api.to_string().contains("private token"));
+    assert_eq!(
+        gateway_diagnostic_audit(json!({"channel_agent_id":row.id}), &saved)["gateway_native_activation_detail"],
+        "discord.invalid_intents-v1"
+    );
+    // A late response from an old preparation cannot replace these diagnostics.
+    record_gateway_rejection(
+        &state,
+        &row,
+        "older-attempt",
+        &GatewayResponse {
+            status: 400,
+            body: json!({"code":"stale"}),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .gateway_native_activation_detail,
+        saved.gateway_native_activation_detail
+    );
+    crate::services::nyxbot_gateway_source::record_activation(
+        &state.db,
+        &row,
+        &json!({"native_discord_activation":{"state":"selected"}}),
+    )
+    .await
+    .unwrap();
+    assert!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .gateway_native_activation_detail
+            .is_none()
+    );
+    for code in [
+        Value::Null,
+        json!(""),
+        json!("Uppercase"),
+        json!("human prose"),
+        json!("https://private.example"),
+        json!("a".repeat(65)),
+        json!("private\ncode"),
+        json!(17),
+    ] {
+        record_gateway_rejection(
+            &state,
+            &row,
+            "attempt",
+            &GatewayResponse {
+                status: 400,
+                body: json!({"code":code,"detail":"private token"}),
+            },
+        )
+        .await
+        .unwrap();
+        let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert!(saved.gateway_native_activation_detail.is_none());
+        let api = serde_json::to_value(ChannelAgentResponse::from(&saved)).unwrap();
+        assert!(api.get("gateway_native_activation_detail").is_none());
+        assert!(!api.to_string().contains("private token"));
+    }
+    server.abort();
+    state.db.drop().await.unwrap();
 }

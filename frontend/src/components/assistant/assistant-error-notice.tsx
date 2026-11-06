@@ -29,7 +29,7 @@ export function AssistantErrorNotice({
       >
         <div
           role="alert"
-          className="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/5 py-2.5 pl-4 pr-2 text-12 text-destructive"
+          className="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/5 py-2.5 pl-4 pr-2 text-14 text-destructive"
         >
           <p className="min-w-0 flex-1 whitespace-pre-line break-words py-0.5">{message}</p>
           <button data-icon-button=""

@@ -1,10 +1,21 @@
+import { Label } from "@/components/ui/label";
+import { CompactScroll } from "@/components/ui/compact-title";
+import { FormViewport } from "@/components/ui/form-viewport";
+import { describeChanges, labelValue } from "@/lib/grouped-form-changes";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { machineSettingsFormSchema } from "@/schemas/machines";
 import {
-  MachineIsolationBadge,
-  MachineSharingBadge,
+  GroupedList,
+  GroupedRow,
+  GroupedSelectTrigger as SelectTrigger,
+} from "@/components/ui/grouped-list";
+import { GroupedFormActions } from "@/components/ui/grouped-form";
+import { ChevronRight } from "lucide-react";
+import {
   MachineIsolationDetails,
   MachineSeparationSupport,
 } from "@/components/shared/machine-isolation";
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useAppForm } from "@/components/ui/form";
 import { MachineUpdate } from "@/components/shared/machine-update";
@@ -20,31 +31,14 @@ import {
 import { NewAgentDialog } from "@/components/assistant/nyxbot-agent-forms";
 import { SHARED_LEGACY_WARNING, SINGLE_USER_WARNING } from "@/schemas/machines";
 import type { NodeInfo } from "@/types/nodes";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import {
   Select,
   SelectContent,
   SelectItem,
-  SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-
-function SettingsSection({
-  title,
-  children,
-}: {
-  readonly title: string;
-  readonly children: ReactNode;
-}) {
-  return (
-    <section className="min-w-0 space-y-3 rounded-xl border border-border/50 bg-card p-4">
-      <h3 className="text-13 font-semibold text-foreground">{title}</h3>
-      {children}
-    </section>
-  );
-}
 
 export function MachineSettings({
   node,
@@ -62,6 +56,7 @@ export function MachineSettings({
   const agents = useNyxBotAgents();
   const grants = useSetNyxBotAgentGrants();
   const form = useAppForm({
+    resolver: zodResolver(machineSettingsFormSchema),
     defaultValues: {
       confirm: node.machine_confirm ?? "none",
       allow: node.allow_single_user_saved_logins ?? false,
@@ -129,266 +124,356 @@ export function MachineSettings({
       setSaving(false);
     }
   }
+  function discard() {
+    form.reset();
+    setAutomaticDraft(undefined);
+    setDraftGrants({});
+    setAcknowledged(false);
+    setError(undefined);
+  }
   if (!machine) return null;
   return (
     <>
       <form
         aria-label="Machine settings"
         onSubmit={form.handleSubmit(save)}
-        className="flex min-h-0 min-w-0 flex-1 flex-col text-12"
+        className="flex min-h-0 min-w-0 flex-1 flex-col text-14"
       >
-        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 pb-5 [overflow-wrap:anywhere]">
-          {update ? (
-            <SettingsSection title="Version and updates">
-              <MachineUpdate name={node.name} status={update} />
-              <label className="flex items-start gap-2">
-                <Checkbox
-                  checked={automatic}
-                  disabled={!canManage}
-                  onCheckedChange={(value) => setAutomaticDraft(value === true)}
-                />
-                <span>
-                  Update automatically when idle
-                  <span className="mt-1 block text-muted-foreground">
-                    Recommended. Updates wait until no job, turn, live desktop
-                    or owner control is active. You receive an update
-                    notification.
-                  </span>
-                </span>
-              </label>
-            </SettingsSection>
-          ) : null}
-          <SettingsSection title="Status and capabilities">
-            <div className="flex flex-wrap gap-2">
-              <Badge variant={node.is_connected ? "success" : "secondary"}>
-                {node.is_connected ? "Connected" : "Disconnected"}
-              </Badge>
-              <MachineIsolationBadge machine={machine} />
-              <MachineSharingBadge />
-            </div>
-            <p>
-              {[
+        <FormViewport className="flex min-h-0 flex-1 flex-col"><CompactScroll className="flex-1 space-y-6 px-5 pb-5 [overflow-wrap:anywhere]">
+          {update && (
+            <>
+              <MachineUpdate grouped name={node.name} status={update} />
+              <GroupedList
+                title="Automatic updates"
+                footer="Recommended. Updates wait until no job, turn, live desktop or owner control is active. You receive an update notification."
+              >
+                <GroupedRow asChild interactive>
+                  <Label>
+                    <span className="min-w-0 flex-1">
+                      Update automatically when idle
+                    </span>
+                    <Switch
+                      checked={automatic}
+                      disabled={!canManage}
+                      onCheckedChange={(value) => setAutomaticDraft(value === true)}
+                    />
+                  </Label>
+                </GroupedRow>
+              </GroupedList>
+            </>
+          )}
+          <GroupedList
+            title="Status and capabilities"
+            footer={
+              <>
+                <p>Workspace roots: {machine.roots.join(", ")}</p>
+                <MachineIsolationDetails machine={machine} />
+                <p>
+                  Agents configured for Shared legacy can run granted commands
+                  and file tools in shared mode, even when separation is
+                  unavailable. A separated assignment refuses execution if its
+                  separate workspace is unavailable; it never falls back to
+                  shared mode.
+                </p>
+                <MachineSeparationSupport humanOnly machine={machine} />
+              </>
+            }
+          >
+            <GroupedRow
+              title={node.is_connected ? "Connected" : "Disconnected"}
+              description={[machine.os, machine.arch].join(" / ")}
+            />
+            <GroupedRow
+              title="Enabled capabilities"
+              description={[
                 machine.shell && "Commands",
                 machine.files && "Files",
                 (machine.browser ?? machine.computer) && "Browser",
                 machine.computer && "Computer",
               ]
                 .filter(Boolean)
-                .join(" · ")}{" "}
-              · {machine.os} / {machine.arch}
-            </p>
-            <p className="text-muted-foreground">
-              Workspace roots: {machine.roots.join(", ")}
-            </p>
-            <MachineIsolationDetails machine={machine} />
-            <p className="text-muted-foreground">
-              Agents configured for Shared legacy can run granted commands and
-              file tools in shared mode, even when separation is unavailable.
-              A separated assignment refuses execution if its separate workspace
-              is unavailable; it never falls back to shared mode.
-            </p>
-            <MachineSeparationSupport machine={machine} />
-          </SettingsSection>
-          {machine.computer || machine.browser ? (
-            <SettingsSection title="Live desktop">
-              <p className="text-muted-foreground">
-                {machine.computer_ready
-                  ? "Ready"
-                  : "Permissions or display unavailable"}{" "}
-                · {machine.computer_mode} mode · cua{" "}
-                {machine.cua_version ?? "unavailable"}
-              </p>
-              {machine.computer_permissions ? (
-                <p className="text-muted-foreground">
-                  Screen Recording:{" "}
-                  {machine.computer_permissions.screen_recording
-                    ? "allowed"
-                    : "not granted"}
-                  . Accessibility:{" "}
-                  {machine.computer_permissions.accessibility
-                    ? "allowed"
-                    : "not granted"}
-                  . Enable permissions for the app running the node in macOS
-                  System Settings.
-                </p>
-              ) : null}
-              <Button asChild className="max-w-full">
+                .join(" · ")}
+            />
+            <GroupedRow
+              title="Sharing set per agent"
+              description={
+                !machine.shell || machine.commands_isolated === true
+                  ? undefined
+                  : machine.commands_isolated === false
+                    ? "Not isolated"
+                    : "Isolation unknown: update to check"
+              }
+            />
+          </GroupedList>
+          {(machine.computer || machine.browser) && (
+            <GroupedList
+              title="Live desktop"
+              footer={
+                machine.computer_permissions && (
+                  <p>
+                    Screen Recording:{" "}
+                    {machine.computer_permissions.screen_recording
+                      ? "allowed"
+                      : "not granted"}
+                    . Accessibility:{" "}
+                    {machine.computer_permissions.accessibility
+                      ? "allowed"
+                      : "not granted"}
+                    . Enable permissions for the app running the node in macOS
+                    System Settings.
+                  </p>
+                )
+              }
+            >
+              <GroupedRow
+                title={
+                  machine.computer_ready
+                    ? "Ready"
+                    : "Permissions or display unavailable"
+                }
+                description={`${machine.computer_mode} mode · cua ${machine.cua_version ?? "unavailable"}`}
+              />
+              <GroupedRow asChild interactive>
                 <Link
                   to="/assistant/machines/$nodeId/desktop"
                   params={{ nodeId: node.id }}
                   search={{ conversation_id: undefined }}
                 >
-                  Open live desktop
-                </Link>
-              </Button>
-            </SettingsSection>
-          ) : null}
-          {canManage ? (
-            <SettingsSection title="Owner confirmation">
-              <p className="text-muted-foreground">
-                Choose when an agent must ask before acting on this machine.
-              </p>
-              <Select
-                value={confirm}
-                onValueChange={(value) =>
-                  form.setValue("confirm", value as typeof confirm)
-                }
-                disabled={saving}
-              >
-                <SelectTrigger
-                  aria-label="Owner confirmation"
-                  className="w-full"
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">No confirmation</SelectItem>
-                  <SelectItem value="changes">Confirm changes</SelectItem>
-                  <SelectItem value="all">Confirm every operation</SelectItem>
-                </SelectContent>
-              </Select>
-            </SettingsSection>
-          ) : null}
-          {canManage && (machine.browser ?? machine.computer) && !machine.browser_isolated ? (
-            <SettingsSection title="Saved logins on a shared OS user">
-              <p className="text-muted-foreground">{SINGLE_USER_WARNING}</p>
-              <label className="flex items-start gap-3">
-                <Checkbox
-                  className="mt-0.5 shrink-0"
-                  checked={allow}
-                  disabled={saving}
-                  onCheckedChange={(value) => {
-                    form.setValue("allow", value === true);
-                    setAcknowledged(false);
-                  }}
-                />
-                <span>Allow saved-login typing on this machine</span>
-              </label>
-              {allow && !node.allow_single_user_saved_logins ? (
-                <label className="flex items-start gap-3 rounded-lg border border-warning/30 p-3">
-                  <Checkbox
-                    className="mt-0.5 shrink-0"
-                    checked={acknowledged}
-                    onCheckedChange={(value) => setAcknowledged(value === true)}
+                  <span className="flex-1">Open live desktop</span>
+                  <ChevronRight
+                    aria-hidden
+                    className="size-[1.125em] text-text-tertiary"
                   />
-                  <span>
-                    I understand the shared-user risk and allow typing.
-                  </span>
-                </label>
-              ) : null}
-            </SettingsSection>
-          ) : null}
-          {canManage ? <SettingsSection title="Agent separation choices">
-            <p className="text-muted-foreground">New assignments need a recorded choice and confirmed support. Existing Shared legacy assignments retain their configured access. Open an agent’s access settings to select supported separation or explicitly approve shared legacy access through its owner card.</p>
-            <p className="text-muted-foreground">{SHARED_LEGACY_WARNING}</p>
-            {(agents.data?.agents ?? []).filter(agent => agent.status !== "destroyed" && (agent.kind === "nyxbot" || agent.machines?.includes(node.id))).map(agent => <Button key={agent.id} asChild variant="outline" className="max-w-full whitespace-normal">
-              <Link to="/assistant" search={{ agent: agent.id, details: "grants" }}>Review {agent.display_name ?? agent.name} separation</Link>
-            </Button>)}
-          </SettingsSection> : null}
-          {canManage ? (
-            <SettingsSection title="Specialist access">
-              <p className="text-muted-foreground">
-                NyxBot uses configured assignments on machines you own or administer.
-                Choose which specialists may use this one, then review their separation
-                choices and capabilities.
-              </p>
-              {agents.isPending ? (
-                <p role="status">Loading specialists…</p>
-              ) : agents.error ? (
-                <p role="alert" className="text-destructive">
-                  {agents.error.message}
-                </p>
-              ) : specialists.length ? (
-                <fieldset disabled={saving} className="space-y-3">
-                  <legend className="sr-only">
-                    Specialists allowed on this machine
-                  </legend>
-                  {specialists.map((agent) => (
-                    <label
-                      key={agent.id}
-                      className="flex min-w-0 items-start gap-3"
-                    >
-                      <Checkbox
-                        className="mt-0.5 shrink-0"
-                        checked={
-                          draftGrants[agent.id] ??
-                          agent.machines?.includes(node.id) ??
-                          false
-                        }
-                        onCheckedChange={(checked) =>
-                          setDraftGrants((previous) => ({
-                            ...previous,
-                            [agent.id]: checked === true,
-                          }))
+                </Link>
+              </GroupedRow>
+            </GroupedList>
+          )}
+          {canManage && (
+            <GroupedList
+              title="Owner confirmation"
+              footer="Choose when an agent must ask before acting on this machine."
+            >
+              <GroupedRow
+                title="Owner confirmation"
+                accessory={
+                  <Select
+                    value={confirm}
+                    onValueChange={(value) =>
+                      form.setValue("confirm", value as typeof confirm)
+                    }
+                    disabled={saving}
+                  >
+                    <SelectTrigger aria-label="Owner confirmation">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">No confirmation</SelectItem>
+                      <SelectItem value="changes">Confirm changes</SelectItem>
+                      <SelectItem value="all">Confirm every operation</SelectItem>
+                    </SelectContent>
+                  </Select>
+                }
+              />
+            </GroupedList>
+          )}
+          {canManage &&
+            (machine.browser ?? machine.computer) &&
+            !machine.browser_isolated && (
+              <GroupedList
+                title="Saved logins on a shared OS user"
+                footer={<p className="text-warning">{SINGLE_USER_WARNING}</p>}
+              >
+                <GroupedRow asChild interactive>
+                  <Label>
+                    <span className="min-w-0 flex-1">
+                      Allow saved-login typing on this machine
+                    </span>
+                    <Switch
+                      checked={allow}
+                      disabled={saving}
+                      onCheckedChange={(value) => {
+                        form.setValue("allow", value === true);
+                        setAcknowledged(false);
+                      }}
+                    />
+                  </Label>
+                </GroupedRow>
+                {allow && !node.allow_single_user_saved_logins && (
+                  <GroupedRow asChild interactive>
+                    <Label>
+                      <span className="min-w-0 flex-1">
+                        I understand the shared-user risk and allow typing.
+                      </span>
+                      <Switch
+                        checked={acknowledged}
+                        disabled={saving}
+                        onCheckedChange={(value) => setAcknowledged(value === true)
                         }
                       />
-                      <span className="min-w-0">
-                        {agent.display_name ?? agent.name}
-                      </span>
-                    </label>
-                  ))}
-                </fieldset>
-              ) : (
-                <div className="space-y-3">
-                  <p className="text-muted-foreground">
-                    No specialists yet. Create one for a focused role, then
-                    grant it this machine.
-                  </p>
-                  <Button type="button" onClick={() => setCreating(true)}>
-                    Create a specialist
-                  </Button>
-                </div>
-              )}
-            </SettingsSection>
-          ) : null}
-          <SettingsSection title="Saved logins">
-            <p className="text-muted-foreground">
-              Manage website logins separately. Agents can fill approved fields
-              in the secure browser; the developer browser never receives saved
-              logins.
-            </p>
-            <Button
-              asChild
-              variant="outline"
-              className="max-w-full whitespace-normal"
-            >
-              <Link to="/assistant/machines" search={{ tab: "logins" }}>
-                Manage saved logins
-              </Link>
-            </Button>
-          </SettingsSection>
-        </div>
-        {canManage ? (
-          <footer className="shrink-0 space-y-2 border-t border-border bg-surface px-5 py-4">
-            {error ? (
-              <p role="alert" className="break-words text-destructive">
-                {error}
-              </p>
-            ) : null}
-            <div className="flex items-center justify-end gap-3">
-              <Button
-                type="submit"
-                variant="primary"
-                disabled={
-                  !changed ||
-                  (allow &&
-                    !node.allow_single_user_saved_logins &&
-                    !acknowledged)
+                    </Label>
+                  </GroupedRow>
+                )}
+              </GroupedList>
+            )}
+          {canManage && (
+            <>
+              <GroupedList
+                title="Agent separation choices"
+                footer={
+                  <>
+                    <p>
+                      New assignments need a recorded choice and confirmed
+                      support. Existing Shared legacy assignments retain their
+                      configured access. Open an agent’s access settings to
+                      select supported separation or explicitly approve shared
+                      legacy access through its owner card.
+                    </p>
+                    <p className="text-warning">{SHARED_LEGACY_WARNING}</p>
+                  </>
                 }
-                isLoading={saving}
               >
-                Save machine settings
-              </Button>
-            </div>
-          </footer>
-        ) : null}
+                {(agents.data?.agents ?? [])
+                  .filter(
+                    agent => agent.status !== "destroyed" && (agent.kind === "nyxbot" || agent.machines?.includes(node.id)),
+                  )
+                  .map((agent) => (
+                    <GroupedRow key={agent.id} asChild interactive>
+                      <Link
+                        to="/assistant"
+                        search={{ agent: agent.id, details: "grants" }}
+                      >
+                        <span className="min-w-0 flex-1">
+                          Review {agent.display_name ?? agent.name} separation
+                        </span>
+                        <ChevronRight
+                          aria-hidden
+                          className="size-[1.125em] shrink-0 text-text-tertiary"
+                        />
+                      </Link>
+                    </GroupedRow>
+                  ))}
+              </GroupedList>
+              <GroupedList
+                title="Specialist access"
+                footer={
+                  <>
+                    <p>
+                      NyxBot uses configured assignments on machines you own or
+                      administer. Choose which specialists may use this one,
+                      then review their separation choices and capabilities.
+                    </p>
+                    {agents.error && (
+                      <p role="alert" className="text-destructive">
+                        {agents.error.message}
+                      </p>
+                    )}
+                  </>
+                }
+              >
+                {agents.isPending ? (
+                  <GroupedRow role="status" title="Loading specialists…" />
+                ) : specialists.length ? (
+                  <fieldset disabled={saving}>
+                    <Label asChild><legend className="sr-only">
+                      Specialists allowed on this machine
+                    </legend></Label>
+                    {specialists.map((agent) => (
+                      <GroupedRow key={agent.id} asChild interactive>
+                        <Label>
+                          <span className="min-w-0 flex-1">
+                            {agent.display_name ?? agent.name}
+                          </span>
+                          <Checkbox
+                            checked={
+                              draftGrants[agent.id] ??
+                              agent.machines?.includes(node.id) ??
+                              false
+                            }
+                            onCheckedChange={(checked) =>
+                              setDraftGrants((previous) => ({
+                                ...previous,
+                                [agent.id]: checked === true,
+                              }))
+                            }
+                          />
+                        </Label>
+                      </GroupedRow>
+                    ))}
+                  </fieldset>
+                ) : (
+                  !agents.error && (
+                    <>
+                      <GroupedRow
+                        title="No specialists yet"
+                        description="Create one for a focused role, then grant it this machine."
+                      />
+                      <GroupedRow asChild interactive>
+                        <button type="button" onClick={() => setCreating(true)}>
+                          Create a specialist
+                        </button>
+                      </GroupedRow>
+                    </>
+                  )
+                )}
+              </GroupedList>
+            </>
+          )}
+          <GroupedList
+            title="Saved logins"
+            footer={
+              <>
+                <p>
+                  Manage website logins separately. Agents can fill approved
+                  fields in the secure browser; the developer browser never
+                  receives saved logins.
+                </p>
+                {error && (
+                  <p role="alert" className="text-destructive">
+                    {error}
+                  </p>
+                )}
+              </>
+            }
+          >
+            <GroupedRow asChild interactive>
+              <Link to="/assistant/machines" search={{ tab: "logins" }}>
+                <span className="flex-1">Manage saved logins</span>
+                <ChevronRight
+                  aria-hidden
+                  className="size-[1.125em] text-text-tertiary"
+                />
+              </Link>
+            </GroupedRow>
+          </GroupedList>
+        </CompactScroll></FormViewport>
+        {canManage && (
+          <GroupedFormActions
+            changes={() => [
+              ...describeChanges(form.formState.defaultValues, form.getValues(), [
+                { key: "confirm", label: "Confirmations", format: labelValue({ none: "No confirmation", changes: "Confirm changes", all: "Confirm every operation" }) },
+                { key: "allow", label: "Allow saved logins on single-user machines" },
+              ]),
+              ...describeChanges({ automatic: update?.automatic ?? false }, { automatic }, [{ key: "automatic", label: "Update automatically when idle" }]),
+              ...grantChanges.map((agent) => ({ label: `Specialist access · ${agent.display_name || agent.name}`, before: agent.machines?.includes(node.id) ? "On" : "Off", after: draftGrants[agent.id] ? "On" : "Off" })),
+            ]}
+            label="machine settings"
+            dirty={Boolean(changed)}
+            pending={saving}
+            disabled={
+              allow && !node.allow_single_user_saved_logins && !acknowledged
+            }
+            save={form.handleSubmit(save)}
+            discard={discard}
+            saveLabel="Save changes"
+          />
+        )}
       </form>
-      {creating ? (
+      {creating && (
         <NewAgentDialog
           onClose={() => setCreating(false)}
           onCreated={() => setCreating(false)}
         />
-      ) : null}
+      )}
     </>
   );
 }

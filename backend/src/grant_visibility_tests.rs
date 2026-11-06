@@ -164,6 +164,19 @@ async fn assert_benefits_visible(state: &AppState, actor_id: &str, owner_id: Opt
     assert_eq!(grants.per_page, 1);
     assert_eq!(grants.total, 1);
     assert_eq!(allowances.allowances.len(), 1);
+    let Json(preview) = crate::handlers::billing_benefits::get(
+        State(state.clone()),
+        test_auth_user(actor_id),
+        Query(crate::handlers::billing_benefits::BenefitsQuery {
+            owner_id: owner_id.map(str::to_owned),
+            page: Some(1),
+        }),
+    )
+    .await
+    .expect("authorized benefit preview");
+    assert_eq!(preview.summary.unreserved.to_string(), "5");
+    assert_eq!(preview.grants.len(), 1);
+    assert_eq!(preview.allowances.len(), 1);
 }
 
 #[tokio::test]
@@ -198,6 +211,18 @@ async fn benefit_reads_allow_personal_org_admin_and_org_member_but_reject_non_me
     .await;
     assert_benefits_visible(&fixture.state, &fixture.personal_id, None).await;
 
+    let preview_error = crate::handlers::billing_benefits::get(
+        State(fixture.state.clone()),
+        test_auth_user(&fixture.non_member_id),
+        Query(crate::handlers::billing_benefits::BenefitsQuery {
+            owner_id: Some(fixture.org_id.clone()),
+            page: Some(1),
+        }),
+    )
+    .await
+    .err()
+    .expect("non-member preview must fail");
+    assert!(matches!(preview_error, AppError::Forbidden(_)));
     let grant_error = billing_credits::user_list_grants(
         State(fixture.state.clone()),
         test_auth_user(&fixture.non_member_id),

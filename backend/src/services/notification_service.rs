@@ -702,7 +702,23 @@ pub async fn send_approval_notification(
     request: &ApprovalRequest,
     org_name: Option<&str>,
 ) -> AppResult<NotificationResult> {
-    let channel = get_or_create_channel(db, user_id).await?;
+    let proposal = request.execution_proposal.is_some();
+    let channel = if proposal {
+        let Some(channel) = db
+            .collection::<NotificationChannel>(COLLECTION_NAME)
+            .find_one(doc! {"user_id":user_id})
+            .await?
+        else {
+            return Ok(NotificationResult {
+                channels: Vec::new(),
+                telegram_chat_id: None,
+                telegram_message_id: None,
+            });
+        };
+        channel
+    } else {
+        get_or_create_channel(db, user_id).await?
+    };
 
     // Only treat `org_name` as meaningful when the request itself carries
     // the org-policy flag. This keeps the "from_org_policy is the
@@ -730,29 +746,48 @@ pub async fn send_approval_notification(
                 .as_deref()
                 .unwrap_or(&request.requester_type);
 
-            match telegram_service::send_approval_message(
-                http_client,
-                bot_token,
-                chat_id,
-                &request.id,
-                &request.service_name,
-                &request.service_slug,
-                requester_label,
-                request
-                    .action_description
-                    .as_deref()
-                    .unwrap_or(&request.operation_summary),
-                channel.approval_timeout_secs,
-                effective_org_name,
-            )
-            .await
-            {
-                Ok(message_id) => {
-                    channels_used.push("telegram".to_string());
+            if proposal {
+                let link = format!(
+                    "{}{}",
+                    config.frontend_url.trim_end_matches('/'),
+                    super::assistant_links::AssistantPage::Approvals.path()
+                );
+                let text = format!(
+                    "An execution permission needs your review. Open the web app: {}",
+                    html_escape(&link)
+                );
+                if telegram_service::send_text_message(http_client, bot_token, chat_id, &text)
+                    .await
+                    .is_ok()
+                {
+                    channels_used.push("telegram".into());
                     telegram_chat_id = Some(chat_id);
-                    telegram_message_id = Some(message_id);
                 }
-                Err(e) => tracing::warn!("Telegram notification failed: {e}"),
+            } else {
+                match telegram_service::send_approval_message(
+                    http_client,
+                    bot_token,
+                    chat_id,
+                    &request.id,
+                    &request.service_name,
+                    &request.service_slug,
+                    requester_label,
+                    request
+                        .action_description
+                        .as_deref()
+                        .unwrap_or(&request.operation_summary),
+                    channel.approval_timeout_secs,
+                    effective_org_name,
+                )
+                .await
+                {
+                    Ok(message_id) => {
+                        channels_used.push("telegram".to_string());
+                        telegram_chat_id = Some(chat_id);
+                        telegram_message_id = Some(message_id);
+                    }
+                    Err(e) => tracing::warn!("Telegram notification failed: {e}"),
+                }
             }
         }
     }
@@ -768,14 +803,23 @@ pub async fn send_approval_notification(
             "deeplink".to_string(),
             format!("nyxid://challenge/{}", request.id),
         );
-        if let Some(method) = &request.http_method {
-            data.insert("http_method".to_string(), method.clone());
-        }
-        if let Some(resource) = &request.resource {
-            data.insert("resource".to_string(), resource.clone());
-        }
-        if let Some(verb) = &request.verb {
-            data.insert("verb".to_string(), verb.clone());
+        if proposal {
+            data.insert("decision_kind".into(), "execution_permission".into());
+            data.insert("can_decide".into(), "false".into());
+            data.insert(
+                "review_path".into(),
+                super::assistant_links::AssistantPage::Approvals.path(),
+            );
+        } else {
+            if let Some(method) = &request.http_method {
+                data.insert("http_method".to_string(), method.clone());
+            }
+            if let Some(resource) = &request.resource {
+                data.insert("resource".to_string(), resource.clone());
+            }
+            if let Some(verb) = &request.verb {
+                data.insert("verb".to_string(), verb.clone());
+            }
         }
         // When the request is created under an org policy, inject the
         // org context so the mobile app can render the org badge on
@@ -978,6 +1022,21 @@ pub async fn send_silent_push_to_user(
     Ok(())
 }
 
+const NEW_CHANNEL_APPROVAL_TIMEOUT_SECS: u32 = 300;
+
+/// Resolve the legacy wait timeout without creating a channel after an
+/// execution proposal has captured its authority snapshot. Missing fields on
+/// existing rows still use NotificationChannel's legacy serde default.
+pub(crate) async fn approval_timeout_secs(db: &Database, user_id: &str) -> AppResult<u32> {
+    Ok(db
+        .collection::<NotificationChannel>(COLLECTION_NAME)
+        .find_one(doc! { "user_id": user_id })
+        .await?
+        .map_or(NEW_CHANNEL_APPROVAL_TIMEOUT_SECS, |channel| {
+            channel.approval_timeout_secs
+        }))
+}
+
 /// Get the user's notification channel settings, creating defaults if none exist.
 pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<NotificationChannel> {
     let collection = db.collection::<NotificationChannel>(COLLECTION_NAME);
@@ -995,9 +1054,10 @@ pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<No
         telegram_enabled: false,
         telegram_link_code: None,
         telegram_link_code_expires_at: None,
-        approval_timeout_secs: 300,
+        approval_timeout_secs: NEW_CHANNEL_APPROVAL_TIMEOUT_SECS,
         grant_expiry_days: 30,
         approval_required: None,
+        group_mentions_enabled: true,
         push_enabled: false,
         push_devices: vec![],
         created_at: now,
@@ -1363,6 +1423,106 @@ pub async fn machine_control_requested(
         .await;
     }
     Ok(())
+}
+
+/// Group mentions reuse registered push devices only; never Telegram or email.
+/// As with approval pushes, transcript content is absent from title/body/data.
+pub async fn send_group_mention_push(
+    state: &crate::AppState,
+    user: &str,
+    group: &str,
+    name: &str,
+    sender: &str,
+) -> AppResult<bool> {
+    send_group_mention_push_with(
+        &state.db,
+        user,
+        group,
+        name,
+        sender,
+        &state.config.frontend_url,
+        |device, title, body, data| async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                send_push_to_device(
+                    &state.http_client,
+                    state.fcm_auth.as_deref(),
+                    state.apns_auth.as_deref(),
+                    &state.config,
+                    &device,
+                    &title,
+                    &body,
+                    &data,
+                ),
+            )
+            .await
+            .map_err(|_| AppError::Internal("Group mention push timed out".into()))?
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_group_mention_push_with<F, Fut>(
+    db: &Database,
+    user: &str,
+    group: &str,
+    name: &str,
+    sender: &str,
+    frontend: &str,
+    send: F,
+) -> AppResult<bool>
+where
+    F: Fn(DeviceToken, String, String, HashMap<String, String>) -> Fut,
+    Fut: std::future::Future<Output = AppResult<PushResult>>,
+{
+    let Some(channel) = db
+        .collection::<NotificationChannel>(COLLECTION_NAME)
+        .find_one(doc! {"user_id":user,"push_enabled":true,"group_mentions_enabled":{"$ne":false}})
+        .await?
+    else {
+        return Ok(false);
+    };
+    let label = |value: &str| {
+        value
+            .chars()
+            .filter(|c| {
+                !c.is_control() && !matches!(c,'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}')
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(80)
+            .collect::<String>()
+    };
+    let title = format!("Mention in {}", label(name));
+    let body = format!("{} mentioned you", label(sender));
+    let data = HashMap::from([
+        ("type".into(), "group_mention".into()),
+        ("group_id".into(), group.into()),
+        (
+            "deeplink".into(),
+            super::assistant_links::AssistantPage::Group { group }.url(frontend),
+        ),
+    ]);
+    let mut sent = Vec::new();
+    let mut invalid = Vec::new();
+    for device in unique_devices_by_token(&channel.push_devices) {
+        match send(device.clone(), title.clone(), body.clone(), data.clone()).await {
+            Ok(PushResult::Success) => sent.push(device.device_id.clone()),
+            Ok(PushResult::TokenInvalid) => invalid.push(device.device_id.clone()),
+            Err(_) => tracing::debug!("Group mention push unavailable"),
+        }
+    }
+    if !invalid.is_empty() {
+        remove_stale_device_tokens(db, &channel.id, &invalid).await;
+    }
+    if !sent.is_empty() {
+        update_device_last_used(db, &channel.id, &sent).await;
+    }
+    Ok(!sent.is_empty())
 }
 
 #[cfg(test)]
@@ -1991,5 +2151,69 @@ mod tests {
                 .is_some_and(|preview| preview.chars().count() <= PUSH_TRIGGER_PREVIEW_MAX_CHARS)
         );
         assert!(!rendered.push_data.contains_key("envelope"));
+    }
+}
+
+#[cfg(test)]
+mod group_mention_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    #[tokio::test]
+    async fn group_mention_push_uses_registered_devices_settings_and_private_preview_policy() {
+        let db = crate::test_utils::connect_test_database("notification_group_push")
+            .await
+            .unwrap();
+        let user = uuid::Uuid::new_v4().to_string();
+        let channel = get_or_create_channel(&db, &user).await.unwrap();
+        assert!(channel.group_mentions_enabled);
+        let device = DeviceToken {
+            device_id: uuid::Uuid::new_v4().to_string(),
+            platform: "fcm".into(),
+            token: "test-token".into(),
+            device_name: None,
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+        db.collection::<NotificationChannel>(COLLECTION_NAME).update_one(doc! {"_id":&channel.id},doc! {"$set":{"push_enabled":true,"push_devices":[bson::to_document(&device).unwrap()]}}).await.unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        for enabled in [false, true] {
+            db.collection::<NotificationChannel>(COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":&channel.id},
+                    doc! {"$set":{"group_mentions_enabled":enabled}},
+                )
+                .await
+                .unwrap();
+            let sink = sent.clone();
+            let delivered = send_group_mention_push_with(
+                &db,
+                &user,
+                "nyxg-test",
+                "Group\nname",
+                "Kai\u{202e}",
+                "https://nyxid.example",
+                move |device, title, body, data| {
+                    assert_eq!(device.token, "test-token");
+                    sink.lock().unwrap().push((title, body, data));
+                    async { Ok(PushResult::Success) }
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(delivered, enabled);
+        }
+        {
+            let rows = sent.lock().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].0, "Mention in Groupname");
+            assert_eq!(rows[0].1, "Kai mentioned you");
+            assert_eq!(
+                rows[0].2["deeplink"],
+                "https://nyxid.example/assistant?c=nyxg-test"
+            );
+            assert_eq!(rows[0].2.len(), 3); // no text/preview, key, card or account payload
+        }
+        db.drop().await.unwrap();
     }
 }

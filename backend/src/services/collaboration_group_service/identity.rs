@@ -27,15 +27,21 @@ impl AgentIdentity {
 /// One actor, group and optional immutable request chain. Fields are private;
 /// callers cannot transplant this snapshot to another group/requester/agent.
 pub struct RequestAccess {
+    pub(super) execution_enrolled: bool,
     pub(super) group: AssistantGroup,
     pub(super) actor: String,
     pub(super) request_id: Option<String>,
     pub(super) agents: BTreeMap<String, AgentIdentity>,
+    pub(super) participants: Vec<svc::org_group_service::Participant>,
     membership_ids: Vec<String>,
     active_org_ids: Vec<String>,
     pub(super) enabled_people: HashSet<String>,
 }
 impl RequestAccess {
+    pub(crate) fn public_text(&self, text: &str) -> String {
+        let agents: Vec<_> = self.agents.values().map(|a| a.agent.clone()).collect();
+        super::people::public_text(text, &self.participants, &agents)
+    }
     pub fn matches(&self, actor: &str, group: &str, request: Option<&str>) -> bool {
         self.actor == actor && self.group.id == group && self.request_id.as_deref() == request
     }
@@ -106,6 +112,7 @@ pub(super) async fn for_group(
     )
     .await?;
     people.extend(memberships.iter().map(|m| m.org_user_id.clone()));
+    people.extend(group.participant_user_ids.iter().cloned());
     let users: Vec<User> = rows(
         db,
         USERS,
@@ -251,6 +258,19 @@ pub(super) async fn for_group(
         );
     }
     Ok(RequestAccess {
+        execution_enrolled: users.iter().any(|u| {
+            u.id == actor
+                && svc::execution_permission_enrollment::snapshot::candidate(
+                    db,
+                    u,
+                    &memberships
+                        .iter()
+                        .filter(|m| m.member_user_id == actor)
+                        .map(|m| (m.org_user_id.clone(), m.role))
+                        .collect::<Vec<_>>(),
+                )
+        }),
+        participants: super::people::project(&group, &users),
         group,
         actor: actor.into(),
         request_id: None,

@@ -48,6 +48,14 @@ pub enum TurnOrigin {
 /// `text` is NyxID-authored and bounded; it never carries secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentEvent {
+    /// Server-verified channel provenance, bound individually to accepted sources.
+    /// Reply-recipient joins do not contribute provenance to an existing turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channel_contexts: Vec<ChannelTurnContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_work: Option<super::trigger_run::AutomationWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegated_result: Option<super::assistant_delegated_image::Assignment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -92,6 +100,27 @@ pub struct AgentEvent {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelTurnContext {
+    /// Exact server-validated organization source, retained independently of
+    /// mutable reply preferences and revalidated before rendering model input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_origin: Option<Box<ChannelOrigin>>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub conversation_label: Option<String>,
+    #[serde(default)]
+    pub followed: bool,
+    pub source_event_id: String,
+    pub channel_id: String,
+    pub channel_bot_id: String,
+    pub conversation_kind: String,
+    pub sender_kind: super::channel_thread::ThreadSenderKind,
+    pub guest: bool,
+    pub original_message: bool,
+}
+
 impl AgentEvent {
     /// Carry the server-proven owner invocation family.
     pub fn for_invocation(mut self, id: Option<&str>) -> Self {
@@ -124,6 +153,8 @@ pub fn carried_report_to(report_to: Option<&str>, provenance: u8) -> Option<Stri
 /// channel bot through the Agent Event Gateway. Identifiers only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelOrigin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_execution: Option<Box<super::org_channel::Execution>>,
     /// Original native provider event for asynchronous updates; never a capability.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_event_id: Option<String>,
@@ -225,6 +256,9 @@ pub struct TurnActivity {
     pub label: String,
     #[serde(default)]
     pub digest: Option<String>,
+    /// Additive semantic retry identity; `digest` retains the legacy exact call.
+    #[serde(default)]
+    pub retry_identity: Option<String>,
     /// `running`, `completed`, or `error`.
     pub status: String,
     #[serde(default)]
@@ -246,11 +280,17 @@ pub struct ToolFailure {
 /// `assistant_attachments`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnAttachment {
+    #[serde(default, flatten)]
+    pub artifact: super::generated_artifact::Metadata,
+
     /// Whether this tool image may accompany a reply sent to a channel chat.
     #[serde(default)]
     pub chat_delivery: Option<bool>,
     #[serde(default)]
     pub image_input: Option<String>,
+    /// Bounded image-delivery reason; older readers retain the ordinary status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_input_reason: Option<String>,
     /// None preserves legacy automatic inspection. False requests display only.
     #[serde(default)]
     pub image_inspection: Option<bool>,
@@ -322,6 +362,17 @@ pub struct StreamReply {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_work: Option<super::trigger_run::AutomationWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_watch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
+    /// Authenticated source of this turn only; never inherited from reply routing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_context: Option<ChannelTurnContext>,
+    #[serde(default)]
+    pub business_system_success: bool,
     #[serde(default)]
     pub delegated_images: super::assistant_delegated_image::DelegatedImages,
     #[serde(default)]
@@ -499,6 +550,11 @@ pub enum TitleSource {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantConversation {
+    /// Hot-path hint only. Receipt cleanup never depends on this marker.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automation_v2: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_head: Option<super::generated_artifact::DeliveryHead>,
     #[serde(default)]
     pub collaboration: Option<super::assistant_group_collaboration::ExecutionBinding>,
     /// Server-created, tool-free visitor model initialization. Never client input.

@@ -518,9 +518,11 @@ Even when the requester owns the agent, a new multi-person group turn receives
 only group-visible context and explicitly shared team memory. It never injects
 owner private memory/roster, private notes, direct chat history, home-thread
 pending work or unrelated card decisions. Guest turns receive only permitted
-group transcript text, omit team/private memory and retain channel guest upload
-restrictions. They cannot fetch other people's uploads or call upload/machine
-tools. Prompt and recap builders must enforce these projections in code.
+group transcript text and the exact request's publicly posted images, and omit
+team/private memory. Image delivery binds the original uploader, request, message,
+live membership, retention and the owner's current guest opt-in. Other requests,
+private drafts, documents and owner uploads remain unavailable; guest account and
+machine tools stay refused. Platform/channel guests retain their media refusal. Prompt and recap builders must enforce these projections in code.
 
 Each lane has independent session/checkpoint state. A private chat cannot resume
 a group session, and guest/authenticated lanes cannot resume each other. Privacy
@@ -919,7 +921,7 @@ personal crews or org groups.
 Only successful final text and explicitly chat-deliverable tool images are
 published as replies. Failed turns publish a deduplicated notice containing only
 the public agent name and normalized error code; failed drafts, account details
-and upstream diagnostics are never published. Guest images, inspection-only
+and upstream diagnostics are never published. Guest-produced tool images, inspection-only
 images, tool traces and exact cards remain private. Published image joins survive hidden-thread cleanup and follow
 group deletion and upload retention. Uploads stay private while drafts; published
 uploads require current participation, and model reads additionally bind the
@@ -1005,3 +1007,145 @@ Phase 1 and single-person shared crews are implemented. The implementation uses 
 withheld and no new enum values are written to legacy fields. Phase 2 includes
 the public surfaces and UI described above; new work remains default off until
 the shared-agents flag and full-fleet collaboration readiness gate allow it.
+
+### Collaboration participant mentions and turn identity
+
+Collaboration group rosters expose each active person's public display name and
+stable, group-specific `@person-<digest>` handle. The digest is derived from the
+group and account identity; it is not the account UUID or a login identifier.
+The composer searches display names alongside agent names and inserts the exact
+handle as a chip. The To/+Add control continues to select agent execution
+recipients; people are addressed through inline mentions, not sticky recipients.
+Bare whitespace-separated names use hyphens (`@calvin-tan`); ambiguous people or
+people/agent names require the exact picker handle. Collaboration agents also
+receive stable `@agent-<digest>` handles through the additive `mention_handle`
+response field. Exact agent UUIDs retain routing priority for compatibility, and
+handoffs ignore ambiguous tokens instead of selecting a namesake.
+
+The server resolves mentions against active group membership in the message
+transaction and stores `GroupMessage.mentioned_participant_ids` (serde-defaulted
+empty for old rows). It stores the author's public display name for retained
+attribution. Nonparticipants and removed people never resolve or receive a
+mention notification. A stale exact person handle retains people-only intent
+without resolving a recipient. A people-only message creates no request chain,
+turn, cards or billing and leaves handoff budgets and sticky agent recipients
+untouched. Mixed mentions keep normal agent routing. Without a people mention,
+existing explicit/sticky/lead rules remain unchanged. People-only uploads keep
+the existing requirement to select an agent. Agent replies may also mention
+people, without creating a handoff or changing the original requester.
+
+Every collaboration execution lane, including owner-paid guests, receives a
+bounded turn-only roster of public display names and handles, an explicit
+original requester, attributed public transcript lines and resolved people
+mentions. Names and message text are quoted untrusted data, not grants or proof
+of a legal identity. Guest participants are authenticated NyxID group members;
+providing their group-visible names does not expose the agent owner's private
+information. No login email, account UUID in prose, owner roster, owner memory
+or participant private notes are added. Legacy crews and private prompts are
+unchanged. The collaboration-only note bound accommodates all 16 participants
+and eight agents; private-thread note limits stay unchanged.
+
+Mentions render once, inline in the message text; the resolved participant IDs
+are an index for counts and delivery, not a second chip row. All supported
+mention producers resolve the message text, so there is no separate-row fallback.
+Metadata left behind by hidden tool-call markup does not create a visible chip.
+Copy continues to use the clean, name-based text projection.
+
+Each current participant has an additive `assistant_group_read_states` row
+(unique group/person) with `last_seen_seq` and optional `last_push_at`. Group
+responses add `collaboration.last_seen_seq`, `unread_count`, and `mention_count`.
+Counts include retained human and agent posts after the marker, exclude the
+person's own human posts and system notices, and require live participation.
+The sidebar shows an unread dot and an @ count. Opening a visible transcript
+posts its last received sequence to the first-party-human-only
+`POST /assistant/nyxagent/groups/{id}/read`; `$max` prevents older tabs moving
+backwards, and the server clamps to the current public sequence. Background
+polling and older-page loading do not clear unseen messages. The existing live
+stream still carries group IDs only and refreshes the transcript/list.
+
+Public human posts and published agent replies transactionally enqueue
+text-free `assistant_group_mention_notifications`. A bounded sweep and immediate
+post/settlement dispatch reuse `notification_service`'s registered FCM/APNs
+push devices. `notifications/settings.group_mentions_enabled` is additive,
+default-on (including legacy absent fields), and exposed as **Mentions in groups**;
+`push_enabled` and registered/configured devices are also required. No browser
+Web Push subscription path exists; unconfigured platforms are skipped. No
+Telegram/bot post or email is sent. Pushes include bounded, sanitized sender
+and group labels and an `AssistantPage::Group` canonical link. Like approval
+pushes, they omit message previews and private content entirely.
+
+A transaction claims each notification once and coalesces human and agent
+mentions together to at most one push per person/group per five minutes.
+Further mentions still increase the count; already-read messages do not push.
+The sharing flag, collaboration readiness, live membership, message readability
+and preferences are checked before dispatch. A claim is never retried after an
+ambiguous external send, so delivery is best-effort; the in-app counts are the
+durable record. Audits/logs contain identifiers and delivery status only.
+Departure removes pending delivery, so rejoining cannot revive an old
+notification. Private read/coalescing markers survive departure (without any
+read access) so leave/rejoin cannot bypass the five-minute limit. Group deletion
+and personal erasure remove both collections, including orphan personal rows.
+Claimed orphan intents expire after seven days. Agent mentions cannot bypass the shared rate limit or notify nonmembers.
+
+Older replicas ignore these fields/collections and do not produce pushes or
+read markers; new UI tolerates absent counts. Settings saves omit an absent,
+untouched mention preference so an older response cannot overwrite an opt-out
+on a newer writer. Upgrade all writers/workers for
+complete notification coverage. The existing sharing and collaboration readiness
+gates remain authoritative; legacy personal crews/org groups are unchanged.
+
+People-only routing uses the existing `assistant:collaboration-groups-v1`
+readiness gate and sharing flag. This is additive reader compatibility, not a
+new fleet capability: old replicas ignore the new message field and do not
+understand person handles. During a mixed deployment an omitted-recipient
+people-only post handled by an old replica may still route to the sticky/lead
+agent. New UI sends the already-supported explicit empty agent list for
+people-only drafts, but API/tool callers using text-only targeting must wait
+for the entire fleet upgrade. Existing rows need no migration or enum change.
+
+
+### Public agent references and request images
+
+Group transcripts render known `@UUID` mentions as named chips for the current
+agent or human participant. Unknown UUID mentions display `@unknown member`
+and do not select any handoff target; an unknown-only collaboration address
+cannot fall back to a sticky agent. The collaboration API projects raw references to public handles (including for
+older/native readers), and the web transcript/copy projection renders named
+chips/text. Stored message text and exact recipient IDs remain unchanged for
+routing/audit compatibility. Older clients without chips show the public handle. Ordinary agent handles also render as chips. The
+model's collaboration roster and retained history use public handles, never
+member UUIDs in prose. Legacy transcript author prefixes for departed members
+use a neutral former-member label; ordinary resource IDs in message text are
+preserved. Stable instructions explicitly require `@handle` and
+invalidate older session instruction bindings. Only group-member agents are
+loaded, never the owner's private roster. Exact old `@UUID` handoffs still
+resolve against current membership and the original requester's live authority.
+
+A collaboration guest may view only image uploads on the exact group message
+it is answering. They use the same capability-negotiated `image_plan`, canonical
+NyxID attachment URLs and thread-key content route as authenticated turns.
+Preparation and download recheck the request/message binding, requester,
+membership, active turn, retention and current owner guest opt-in; download
+rechecks after decryption. Opt-out stops delivery. Discovery is limited to that
+request's images; no previous request, another participant's files, private draft
+or owner upload is available. Guest turns still cannot upload, use machines,
+or export uploads through attachment egress tools.
+
+Unsupported image types, capability absence and image count/size limits use
+`IMAGE_FALLBACK`; expired or missing files produce explicit availability notes.
+Non-image documents are explicitly withheld from collaboration guests. The
+model is told never to claim viewing/reading withheld attachments. Retention
+tracks the original uploader even when the guest execution key belongs to the
+agent owner, including `images_delete_after_turn`. Channel/platform guests still
+never ingest or download user media. NyxAgent's configured-origin check is
+unchanged; operations must keep its `NYXID_BASE_URL` aligned with NyxID's
+canonical `BASE_URL`.
+
+### Separate org-specialist channel authority
+
+The default-off org-specialist channel feature reuses the public-transcript /
+per-actor execution pattern, without allowing org agents to be shared or
+allowing guests in org collaboration groups. Its explicitly enabled channel
+guest lane is a separate, budgeted org-wallet authority, including platform
+keys. None of the personal shared-agent or org-group billing rules changes.
+See [organization specialists on bots](09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).

@@ -21,6 +21,9 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 #[derive(Debug, Serialize)]
 pub struct ApprovalRequestItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_proposal:
+        Option<crate::services::execution_permission_dispatch::proposals::ProposalView>,
     pub id: String,
     pub service_name: String,
     pub service_slug: String,
@@ -75,6 +78,8 @@ pub struct ApprovalRequestsResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ApprovalGrantItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionPermissionItem>,
     pub id: String,
     pub service_id: String,
     pub service_name: String,
@@ -102,6 +107,8 @@ pub struct ApprovalGrantItem {
 
 #[derive(Debug, Serialize)]
 pub struct ApprovalGrantAuthorizationEvidenceResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionPermissionItem>,
     pub id: String,
     pub service_id: String,
     pub requester_id: String,
@@ -115,6 +122,7 @@ pub struct ApprovalGrantAuthorizationEvidenceResponse {
 impl ApprovalGrantAuthorizationEvidenceResponse {
     fn from_grant_item(item: &ApprovalGrantItem) -> Self {
         Self {
+            execution: item.execution.clone(),
             id: item.id.clone(),
             service_id: item.service_id.clone(),
             requester_id: item.requester_id.clone(),
@@ -123,6 +131,61 @@ impl ApprovalGrantAuthorizationEvidenceResponse {
             revoked: item.revoked,
             org_scoped: item.org_scoped,
             org_id: item.org_id.clone(),
+        }
+    }
+}
+
+/// Display effective permission validity, not the legacy TTL sentinel. Never
+/// expose retained HTTP bytes, resource rules, or execution-authority digests.
+/// The bounded review is private to the first-party human.
+#[derive(Clone, Debug, Serialize)]
+pub struct ExecutionPermissionItem {
+    pub review: Option<crate::models::execution_proposal::Review>,
+    pub source_request_id: Option<String>,
+    pub source_review_path: Option<String>,
+    pub last_dispatched_at: Option<String>,
+    pub version: u32,
+    pub supported: bool,
+    pub validity: Option<&'static str>,
+    pub valid_from: Option<String>,
+    pub valid_until: Option<String>,
+    pub actor_user_id: Option<String>,
+    pub connection_id: Option<String>,
+    pub revision: Option<i64>,
+}
+
+impl ExecutionPermissionItem {
+    fn from_permission(value: &crate::models::execution_permission::ExecutionPermission) -> Self {
+        use crate::models::execution_permission::{VERSION, Validity};
+        let contract = value.v1.as_ref().filter(|_| value.version == VERSION);
+        let (validity, valid_from, valid_until) = match contract.map(|c| &c.validity) {
+            Some(Validity::Operation { expires_at, .. }) => {
+                (Some("operation"), None, Some(expires_at.to_rfc3339()))
+            }
+            Some(Validity::Task { hard_deadline, .. }) => {
+                (Some("task"), None, Some(hard_deadline.to_rfc3339()))
+            }
+            Some(Validity::Window { starts_at, ends_at }) => (
+                Some("window"),
+                Some(starts_at.to_rfc3339()),
+                Some(ends_at.to_rfc3339()),
+            ),
+            Some(Validity::Persistent) => (Some("persistent"), None, None),
+            None => (None, None, None),
+        };
+        Self {
+            review: None,
+            source_request_id: None,
+            source_review_path: None,
+            last_dispatched_at: None,
+            version: value.version,
+            supported: contract.is_some(),
+            validity,
+            valid_from,
+            valid_until,
+            actor_user_id: contract.map(|c| c.subject.actor_user_id.clone()),
+            connection_id: contract.map(|c| c.binding.connection_id.clone()),
+            revision: contract.map(|c| c.revision),
         }
     }
 }
@@ -137,6 +200,9 @@ pub struct ApprovalGrantsResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ApprovalStatusResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution:
+        Option<crate::services::execution_permission_dispatch::proposals::v2::ExecutionView>,
     pub status: String,
     pub expires_at: String,
 }
@@ -184,6 +250,9 @@ fn to_approval_request_item(
     };
     let resolved_org_name = if from_org_policy { org_name } else { None };
     ApprovalRequestItem {
+        execution_proposal: crate::services::execution_permission_dispatch::proposals::view(
+            &request,
+        ),
         id: request.id,
         service_name: request.service_name,
         service_slug: request.service_slug,
@@ -225,6 +294,39 @@ fn to_approval_grant_item(
     };
     let resolved_org_name = if org_scoped { org_name } else { None };
     ApprovalGrantItem {
+        execution: grant.execution.as_ref().map(|permission| {
+            let mut item = ExecutionPermissionItem::from_permission(permission);
+            item.review = grant.execution_review.clone();
+            item.source_request_id = Some(grant.approval_request_id.clone());
+            item.source_review_path =
+                permission
+                    .v1
+                    .as_ref()
+                    .and_then(|c| match &c.context.audience {
+                        crate::models::execution_permission::Audience::Group {
+                            group_id, ..
+                        } => Some(
+                            crate::services::assistant_links::AssistantPage::Group {
+                                group: group_id,
+                            }
+                            .path(),
+                        ),
+                        _ => match &c.context.conversation {
+                            crate::models::execution_permission::ConversationScope::Exact {
+                                conversation_id,
+                            } => Some(
+                                crate::services::assistant_links::AssistantPage::ReviewCard {
+                                    conversation: conversation_id,
+                                    card: &grant.approval_request_id,
+                                }
+                                .path(),
+                            ),
+                            _ => None,
+                        },
+                    });
+            item.last_dispatched_at = grant.execution_last_used_at.map(|d| d.to_rfc3339());
+            item
+        }),
         id: grant.id,
         service_id: grant.service_id,
         service_name: grant.service_name,
@@ -239,6 +341,22 @@ fn to_approval_grant_item(
         org_id,
         org_name: resolved_org_name,
     }
+}
+
+fn grant_item_for_caller(
+    grant: crate::models::approval_grant::ApprovalGrant,
+    org_name: Option<String>,
+    auth: &AuthUser,
+) -> ApprovalGrantItem {
+    let mut item = to_approval_grant_item(grant, org_name);
+    if super::login_client_context::require_first_party_human(auth).is_err()
+        && let Some(execution) = item.execution.as_mut()
+    {
+        execution.review = None;
+        execution.source_review_path = None;
+        execution.source_request_id = None;
+    }
+    item
 }
 
 /// Translate a scoped admin's `allowed_service_ids` (which live in
@@ -402,6 +520,13 @@ async fn ensure_caller_can_decide(
     request: &crate::models::approval_request::ApprovalRequest,
     auth_user_id: &str,
 ) -> AppResult<Option<std::sync::Arc<crate::services::org_agent_service::RequestAccess>>> {
+    if request.execution_proposal.is_some() {
+        return if request.user_id == auth_user_id {
+            Ok(None)
+        } else {
+            Err(AppError::NotFound("Permission request not found".into()))
+        };
+    }
     let group_access =
         crate::services::org_group_service::authorize_approval(db, request, auth_user_id, None)
             .await?;
@@ -557,13 +682,14 @@ pub async fn list_requests(
     };
 
     let status_refs: Vec<&str> = parsed_statuses.iter().map(|s| s.as_str()).collect();
-    let (requests, total) = approval_service::list_requests(
+    let (requests, total) = approval_service::list_requests_with_proposals(
         &state.db,
         &listing_user_id,
         &admin_branches,
         &status_refs,
         page,
         per_page,
+        super::login_client_context::require_first_party_human(&auth_user).is_ok(),
     )
     .await?;
 
@@ -612,6 +738,9 @@ pub async fn get_request_by_id(
     let user_id = auth_user.user_id.to_string();
     let request = approval_service::get_request(&state.db, &request_id).await?;
 
+    if request.execution_proposal.is_some() {
+        super::login_client_context::require_first_party_human(&auth_user)?;
+    }
     ensure_caller_can_decide(&state.db, &request, &user_id).await?;
 
     // Single-row path: look up the owning org name directly when the
@@ -624,7 +753,15 @@ pub async fn get_request_by_id(
     } else {
         None
     };
-    Ok(Json(to_approval_request_item(request, org_name)))
+    let result = crate::services::execution_permission_dispatch::proposals::result_for_human(
+        &state, &request,
+    )
+    .await?;
+    let mut item = to_approval_request_item(request, org_name);
+    if let Some(proposal) = item.execution_proposal.as_mut() {
+        proposal.result_text = result;
+    }
+    Ok(Json(item))
 }
 
 /// GET /api/v1/approvals/requests/{request_id}/status
@@ -648,6 +785,28 @@ pub async fn get_request_status(
         ));
     }
     let request = approval_service::get_request(&state.db, &request_id).await?;
+    if request
+        .execution_proposal
+        .as_ref()
+        .is_some_and(|p| p.version == 2)
+    {
+        let execution = crate::services::execution_permission_dispatch::proposals::v2::readback(
+            &state, &auth_user, &request,
+        )
+        .await
+        .map_err(|error| match error {
+            AppError::NotFound(_) => AppError::NotFound("Approval request not found".into()),
+            error => error,
+        })?;
+        return Ok(Json(ApprovalStatusResponse {
+            status: request.status,
+            expires_at: request.expires_at.to_rfc3339(),
+            execution: Some(execution),
+        }));
+    }
+    if auth_user.api_key_purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound {
+        return Err(AppError::NotFound("Approval request not found".into()));
+    }
     let owner_user_id = auth_user.effective_approval_owner_user_id();
     let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
         AppError::Forbidden("Session-authenticated callers cannot poll approval status".to_string())
@@ -707,6 +866,7 @@ pub async fn get_request_status(
     }
 
     Ok(Json(ApprovalStatusResponse {
+        execution: None,
         status: request.status,
         expires_at: request.expires_at.to_rfc3339(),
     }))
@@ -990,7 +1150,7 @@ pub async fn list_grants(
             } else {
                 None
             };
-            to_approval_grant_item(g, name)
+            grant_item_for_caller(g, name, &auth_user)
         })
         .collect();
 
@@ -1163,7 +1323,7 @@ pub async fn get_grant_authorization(
         }
         None
     };
-    let item = to_approval_grant_item(grant, org_name);
+    let item = grant_item_for_caller(grant, org_name, &auth_user);
     Ok(Json(
         ApprovalGrantAuthorizationEvidenceResponse::from_grant_item(&item),
     ))
@@ -1901,6 +2061,30 @@ pub async fn delete_service_config(
     }))
 }
 
+/// Dedicated first-party permission authoring; legacy Allow never reaches this service.
+pub async fn decide_execution_request(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(input): Json<crate::services::execution_permission_dispatch::proposals::Decision>,
+) -> AppResult<Json<ApprovalRequestItem>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    let row = crate::services::execution_permission_dispatch::proposals::decide(
+        &state, &owner, &id, &input,
+    )
+    .await?;
+    if let Ok(p) = crate::services::execution_permission_dispatch::proposals::proposal(&row) {
+        let conversation = p.conversation_id.clone();
+        let wake_state = state.clone();
+        let wake_owner = owner.clone();
+        tokio::spawn(async move {
+            super::assistant_team::wake(&wake_state, &wake_owner, &conversation).await;
+        });
+    }
+    Ok(Json(to_approval_request_item(row, None)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1909,6 +2093,7 @@ mod tests {
 
     fn sample_request(user_id: &str) -> ApprovalRequest {
         ApprovalRequest {
+            execution_proposal: None,
             assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
@@ -1943,6 +2128,62 @@ mod tests {
             exact_service: None,
             created_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn execution_grant_listing_uses_effective_validity_and_redacts_bindings() {
+        use crate::models::execution_permission::Validity;
+        let mut row = crate::services::execution_permission::tests::fixture();
+        let at = row.granted_at;
+        for (validity, kind, end) in [
+            (Validity::Persistent, "persistent", None),
+            (
+                Validity::Window {
+                    starts_at: at,
+                    ends_at: at + chrono::Duration::hours(1),
+                },
+                "window",
+                Some((at + chrono::Duration::hours(1)).to_rfc3339()),
+            ),
+            (
+                Validity::Task {
+                    task: crate::models::execution_permission::TaskRef {
+                        root_kind: crate::models::execution_permission::TaskRootKind::Message,
+                        root_id: "root".into(),
+                    },
+                    hard_deadline: at,
+                },
+                "task",
+                Some(at.to_rfc3339()),
+            ),
+        ] {
+            row.execution
+                .as_mut()
+                .unwrap()
+                .v1
+                .as_mut()
+                .unwrap()
+                .validity = validity;
+            let item = ExecutionPermissionItem::from_permission(row.execution.as_ref().unwrap());
+            assert!(item.supported);
+            assert_eq!(item.validity, Some(kind));
+            assert_eq!(item.valid_until, end);
+            let json = serde_json::to_string(&item).unwrap();
+            for hidden in [
+                "authority_digest",
+                "credential_id",
+                "operations",
+                "resource_policy",
+                "9999",
+            ] {
+                assert!(!json.contains(hidden));
+            }
+        }
+        row.execution.as_mut().unwrap().version = 99;
+        let unknown = ExecutionPermissionItem::from_permission(row.execution.as_ref().unwrap());
+        assert!(!unknown.supported);
+        assert!(unknown.validity.is_none());
+        assert!(unknown.actor_user_id.is_none());
     }
 
     #[test]
@@ -2020,6 +2261,10 @@ mod tests {
     fn to_approval_grant_item_stamps_org_fields_when_org_scoped() {
         use crate::models::approval_grant::ApprovalGrant;
         let grant = ApprovalGrant {
+            execution_review: None,
+            execution_last_used_at: None,
+            execution_use: None,
+            execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: "org_abc".to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),
@@ -2046,6 +2291,10 @@ mod tests {
     fn to_approval_grant_item_omits_org_fields_for_personal_grants() {
         use crate::models::approval_grant::ApprovalGrant;
         let grant = ApprovalGrant {
+            execution_review: None,
+            execution_last_used_at: None,
+            execution_use: None,
+            execution: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: "user_1".to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),
@@ -2104,6 +2353,7 @@ mod tests {
     #[test]
     fn approval_status_response_serialization() {
         let resp = ApprovalStatusResponse {
+            execution: None,
             status: "pending".to_string(),
             expires_at: "2025-01-01T00:05:00Z".to_string(),
         };
@@ -2159,6 +2409,7 @@ mod tests {
     #[test]
     fn approval_grant_item_skip_serializing_none_fields() {
         let item = ApprovalGrantItem {
+            execution: None,
             id: "g1".to_string(),
             service_id: "svc_1".to_string(),
             service_name: "OpenAI".to_string(),

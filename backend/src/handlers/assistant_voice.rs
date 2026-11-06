@@ -1,12 +1,14 @@
+mod client_key;
+pub(crate) mod internal;
+pub use client_key::{publish_voice_service, voice_service};
 mod dictation;
 mod socket;
 pub use dictation::{dictation_options, dictation_stream};
 pub use socket::stream;
-// Human-only voice control and durable request dispatch.
+// First-party browser voice adapter and durable request dispatch.
 use crate::{
     AppState,
     errors::{AppError, AppResult},
-    models::assistant_voice::{VoiceInputMode, VoiceKeySource, VoicePreferences},
     mw::auth::AuthUser,
     services::{assistant_nyxagent as engine, assistant_voice as voice},
 };
@@ -15,61 +17,12 @@ use axum::{
     extract::{Path, Query, State},
 };
 use mongodb::bson::doc;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Preferences {
-    pub service_id: String,
-    pub connection_id: Option<String>,
-    pub key_source: VoiceKeySource,
-    pub model: String,
-    pub voice: Option<String>,
-    #[serde(default)]
-    pub input_mode: VoiceInputMode,
-    pub language: Option<String>,
-    #[serde(default)]
-    pub notify_on_completion: bool,
-}
-impl From<VoicePreferences> for Preferences {
-    fn from(v: VoicePreferences) -> Self {
-        Self {
-            service_id: v.service_id,
-            connection_id: v.connection_id,
-            key_source: v.key_source,
-            model: v.model,
-            voice: v.voice,
-            input_mode: v.input_mode,
-            language: v.language,
-            notify_on_completion: v.notify_on_completion,
-        }
-    }
-}
-impl From<Preferences> for VoicePreferences {
-    fn from(v: Preferences) -> Self {
-        Self {
-            service_id: v.service_id,
-            connection_id: v.connection_id,
-            key_source: v.key_source,
-            model: v.model,
-            voice: v.voice,
-            input_mode: v.input_mode,
-            language: v.language,
-            notify_on_completion: v.notify_on_completion,
-        }
-    }
-}
-pub fn preference_patch<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<Option<Option<Preferences>>, D::Error> {
-    Option::<Preferences>::deserialize(d).map(Some)
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OptionsQuery {
-    conversation_id: Option<String>,
-}
+pub use crate::services::voice::application::{
+    ActiveSessionResponse, ControlRequest, OptionsQuery, Preferences, RequestResponse,
+    SessionResponse, StartRequest, StartResponse, preference_patch,
+};
 
 pub async fn options(
     State(state): State<AppState>,
@@ -77,32 +30,11 @@ pub async fn options(
     Query(q): Query<OptionsQuery>,
 ) -> AppResult<Json<serde_json::Value>> {
     super::login_client_context::require_first_party_human(&auth)?;
-    let user = auth.user_id.to_string();
-    voice::require_enabled(&state.db, &user).await?;
-    let options = if let Some(id) = q.conversation_id {
-        let thread = voice::thread(&state.db, &user, &id).await?;
-        voice::options(&state.db, &state.encryption_keys, &thread).await?
-    } else {
-        voice::settings_options(&state.db, &state.encryption_keys, &user).await?
-    };
-    Ok(Json(serde_json::json!({"options":options,"limits": {
-        "call_seconds":crate::models::assistant_voice::MAX_CALL_SECONDS,"idle_seconds":crate::models::assistant_voice::IDLE_SECONDS,"idle_warning_seconds":crate::models::assistant_voice::IDLE_WARNING_SECONDS,
-        "transmitting_calls":1,"queued_requests":crate::models::assistant_voice::MAX_QUEUED},"recording":false})))
+    crate::services::voice::application::options(&state, &auth, q)
+        .await
+        .map(Json)
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StartRequest {
-    pub client_request_id: String,
-    pub preferences: Preferences,
-    #[serde(default)]
-    pub sdp_offer: String,
-}
-#[derive(Serialize)]
-pub struct StartResponse {
-    session: SessionResponse,
-    sdp_answer: String,
-}
 pub async fn start(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -110,82 +42,11 @@ pub async fn start(
     headers: axum::http::HeaderMap,
     Json(body): Json<StartRequest>,
 ) -> AppResult<Json<StartResponse>> {
-    use crate::errors::voice_start::Stage;
-    let result = async {
-        super::login_client_context::require_first_party_human(&auth)
-            .map_err(|e| Stage::Origin.error(e))?;
-        require_origin(&state, &headers).map_err(|e| Stage::Origin.error(e))?;
-        let started = Box::pin(crate::services::voice::runtime::start(
-            &state,
-            &auth.user_id.to_string(),
-            &id,
-            &body.client_request_id,
-            body.preferences.into(),
-            &body.sdp_offer,
-        ))
-        .await?;
-        Ok(Json(StartResponse {
-            session: started.session.into(),
-            sdp_answer: started.sdp,
-        }))
-    }
-    .await;
-    crate::services::voice::diagnostics::finish(
-        &state.db,
-        &auth.user_id.to_string(),
-        result,
-        Stage::Transport,
-    )
-    .await
-}
-
-#[derive(Serialize)]
-pub struct SessionResponse {
-    created_at: chrono::DateTime<chrono::Utc>,
-    closed_at: Option<chrono::DateTime<chrono::Utc>>,
-    id: String,
-    generation: i64,
-    state: crate::models::assistant_voice_session::SessionState,
-    muted: bool,
-    input_muted: bool,
-    end_requested: bool,
-    control_revision: i64,
-    observed_seconds: i64,
-    reserved_until: i64,
-    final_usage_confirmed: bool,
-    end_reason: Option<String>,
-    idle_warning: bool,
-    resumable: bool,
-}
-impl From<crate::models::assistant_voice_session::VoiceSession> for SessionResponse {
-    fn from(row: crate::models::assistant_voice_session::VoiceSession) -> Self {
-        Self {
-            id: row.id,
-            generation: row.generation,
-            created_at: row.created_at,
-            closed_at: row.closed_at,
-            state: row.state,
-            muted: row.desired_muted,
-            input_muted: row.input_muted,
-            end_requested: row.end_requested,
-            control_revision: row.control_revision,
-            observed_seconds: row.observed_seconds,
-            reserved_until: row.reserved_until,
-            final_usage_confirmed: row.final_usage_confirmed,
-            end_reason: row.end_reason,
-            idle_warning: (chrono::Utc::now() - row.last_user_at).num_seconds() >= 165,
-            resumable: !row.dictation
-                && row.protocol
-                    != Some(crate::models::downstream_service::VoiceProtocol::XaiRealtime)
-                && row.provider_session_id.is_some()
-                && row.live_slot,
-        }
-    }
-}
-
-#[derive(Serialize)]
-pub struct ActiveSessionResponse {
-    session: Option<SessionResponse>,
+    super::login_client_context::require_first_party_human(&auth)?;
+    client_key::start_origin(&state, &auth, &headers).await?;
+    crate::services::voice::application::start(&state, &auth, id, body)
+        .await
+        .map(Json)
 }
 
 pub async fn active_session(
@@ -194,32 +55,22 @@ pub async fn active_session(
     Path(id): Path<String>,
 ) -> AppResult<Json<ActiveSessionResponse>> {
     super::login_client_context::require_first_party_human(&auth)?;
-    let user = auth.user_id.to_string();
-    let session =
-        crate::services::voice::session::active_for_conversation(&state.db, &user, &id).await?;
-    Ok(Json(ActiveSessionResponse {
-        session: session.map(Into::into),
-    }))
+    crate::services::voice::application::active_session(&state, &auth, id)
+        .await
+        .map(Json)
 }
+
 pub async fn session_status(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((id, sid)): Path<(String, String)>,
 ) -> AppResult<Json<SessionResponse>> {
     super::login_client_context::require_first_party_human(&auth)?;
-    Ok(Json(
-        crate::services::voice::session::get(&state.db, &auth.user_id.to_string(), &id, &sid)
-            .await?
-            .into(),
-    ))
+    crate::services::voice::application::session_status(&state, &auth, id, sid)
+        .await
+        .map(Json)
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ControlRequest {
-    command_id: String,
-    expected_revision: i64,
-    action: String,
-}
+
 pub async fn control(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -229,70 +80,39 @@ pub async fn control(
 ) -> AppResult<Json<SessionResponse>> {
     super::login_client_context::require_first_party_human(&auth)?;
     require_origin(&state, &headers)?;
-    if crate::services::voice::session::get(&state.db, &auth.user_id.to_string(), &id, &sid)
-        .await?
-        .dictation
-        && body.action != "end"
-    {
-        return Err(AppError::Forbidden(
-            "Dictation only supports ending capture".into(),
-        ));
-    }
-    Ok(Json(
-        crate::services::voice::session::control(
-            &state.db,
-            &auth.user_id.to_string(),
-            &id,
-            &sid,
-            &body.command_id,
-            body.expected_revision,
-            &body.action,
-        )
-        .await?
-        .into(),
-    ))
+    crate::services::voice::application::control(&state, &auth, id, sid, body)
+        .await
+        .map(Json)
 }
 
-#[derive(Serialize)]
-pub struct RequestResponse {
-    outcome: Option<&'static str>,
-    pending_acknowledgement_ids: Vec<String>,
-    id: String,
-    state: crate::models::assistant_voice::RequestState,
-    turn_id: String,
-}
 pub async fn request(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((id, rid)): Path<(String, String)>,
 ) -> AppResult<Json<RequestResponse>> {
     super::login_client_context::require_first_party_human(&auth)?;
-    let user = auth.user_id.to_string();
-    let row = voice::get(&state.db, &user, &id, &rid).await?;
-    Ok(Json(RequestResponse {
-        outcome: voice::request_outcome(&row),
-        pending_acknowledgement_ids: row.pending_acknowledgement_ids,
-        id: row.id,
-        state: row.state,
-        turn_id: row.turn_id,
-    }))
+    crate::services::voice::application::request(&state, &auth, id, rid)
+        .await
+        .map(Json)
 }
+
 pub async fn cancel(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((id, rid)): Path<(String, String)>,
 ) -> AppResult<()> {
     super::login_client_context::require_first_party_human(&auth)?;
-    let user = auth.user_id.to_string();
-    let request = voice::get(&state.db, &user, &id, &rid).await?;
-    voice::cancel(&state.db, &user, &id, &rid).await?;
-    super::mcp_transport::async_operations::drain_cancellations(&state, &user, &id).await?;
-    if let Some(task) = request.task_conversation_id {
-        super::mcp_transport::async_operations::drain_cancellations(&state, &user, &task).await?;
+    let cancelled = crate::services::voice::application::cancel(&state, &auth, id, rid).await?;
+    for conversation in cancelled {
+        super::mcp_transport::async_operations::drain_cancellations(
+            &state,
+            &auth.user_id.to_string(),
+            &conversation,
+        )
+        .await?;
     }
     Ok(())
 }
-
 /// The normal owner limiter, turn fence and egress policy apply to queued speech.
 /// Sweeps retry admission only; a claimed turn is never replayed after a crash.
 pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
@@ -338,6 +158,7 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
                 conversation_id:Some(request.task_conversation_id.clone().ok_or_else(|| AppError::Conflict("Voice task thread unavailable".into()))?),text:message.text,
                 model:None,agent_id:None,attachment_ids:Vec::new(),access_mode:None,
             });
+            start.execution_enrollment = request.execution_enrolled;
             if let Some(task_id) = request.task_conversation_id.as_deref()
                 && state.db.collection::<crate::models::assistant_conversation::AssistantConversation>(
                     crate::models::assistant_conversation::COLLECTION_NAME,
@@ -433,6 +254,7 @@ pub(crate) fn spawn_dispatch(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::assistant_voice::{VoiceKeySource, VoicePreferences};
 
     #[test]
     fn preferences_preserve_omitted_and_reset_explicit_null() {

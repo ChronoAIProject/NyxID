@@ -226,6 +226,7 @@ async fn claim(
     profile: &str,
     force: bool,
     budget: Duration,
+    org_origin: Option<&crate::models::assistant_conversation::ChannelOrigin>,
 ) -> AppResult<Option<(String, AssistantConversation)>> {
     let context = (
         state.db.clone(),
@@ -235,10 +236,16 @@ async fn claim(
         profile.to_owned(),
         force,
         budget,
+        org_origin.cloned(),
     );
-    super::transaction_service::run_db_only(&state.db,&context,|tx,(db,keys,actor,agent,profile,force,budget)|Box::pin(async move {
+    super::transaction_service::run_db_only(&state.db,&context,|tx,(db,keys,actor,agent,profile,force,budget,org_origin)|Box::pin(async move {
         super::erasure_admission::fence_in_session(db,actor,tx).await?;
         fence_admin(db, actor, &agent.user_id, tx).await?;
+        if let Some(origin)=org_origin {
+            let e=origin.org_execution.as_ref().ok_or_else(super::org_channel_service::denied)?;
+            if !e.guest || e.actor_id!=*actor {return Err(super::org_channel_service::denied());}
+            Box::pin(super::org_channel_service::validate_in_session(db,tx,origin,actor,&agent.id,true)).await?;
+        }
         let changed=db.collection::<Document>("assistant_agents").update_one(doc!{"_id":&agent.id,"user_id":&agent.user_id,"destroyed_at":null,"model":&agent.model},doc!{"$inc":{"guest_setup_fence":1_i64}}).session(&mut *tx).await?;
         if changed.matched_count!=1 { return Err(AppError::Conflict("Assistant changed during setup".into())); }
         let rows=db.collection::<Document>(execution::COLLECTION);
@@ -259,6 +266,7 @@ async fn claim(
         let mut row=team::create_automation_thread(db,keys,actor,agent,"Preparing visitors",tx).await?;
         if row.shared_agent_thread {return Err(AppError::Forbidden("Shared setup refused".into()));}
         row.guest_model_setup=true;
+        row.channel=org_origin.clone();
         row.model=profile.clone();
         super::assistant_agent_credential_service::apply_authority(db, actor, &row.credential_api_key_id,
             &super::assistant_agent_credential_service::KeyAuthority::ModelSetup(agent.user_id.clone()), tx).await?;
@@ -267,8 +275,11 @@ async fn claim(
         db.collection::<AssistantConversation>("assistant_conversations").replace_one(doc!{"_id":&row.id},&row).session(&mut *tx).await?;
         let id=existing.as_ref().and_then(|r|r.get_str("_id").ok()).map(str::to_owned).unwrap_or_else(||uuid::Uuid::new_v4().to_string());
         let claim=uuid::Uuid::new_v4().to_string();
+        let notice_actor=if let Some(origin)=org_origin {
+            db.collection::<Document>("nyxbot_channels").find_one(doc!{"_id":&origin.nyxbot_channel_id}).session(&mut *tx).await?.and_then(|r|r.get_str("user_id").ok().map(str::to_owned))
+        } else {None};
         rows.replace_one(doc!{"_id":&id},doc!{"_id":&id,"kind":KIND,"user_id":actor,"agent_id":&agent.id,"profile":profile,
-            "status":"setting_up","claim":&claim,"conversation_id":&row.id,"api_key_id":&row.credential_api_key_id,
+            "notice_actor":notice_actor,"status":"setting_up","claim":&claim,"conversation_id":&row.id,"api_key_id":&row.credential_api_key_id,
             "model_failures":model_failures,"retry_config":retry_config,"retry_target":retry_target,
             "until":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::from_std(*budget).expect("bounded setup budget")+chrono::Duration::seconds(5)),
             "expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::days(7))}).upsert(true).session(&mut *tx).await?;
@@ -311,7 +322,62 @@ async fn kick_bounded(
     force: bool,
     budget: Duration,
 ) -> AppResult<bool> {
+    kick_with_origin(state, actor, agent_id, profile, force, budget, None).await
+}
+
+pub(crate) async fn kick_org_channel(
+    state: &AppState,
+    origin: &crate::models::assistant_conversation::ChannelOrigin,
+    profile: &str,
+) -> AppResult<bool> {
+    let e = origin
+        .org_execution
+        .as_ref()
+        .ok_or_else(super::org_channel_service::denied)?;
+    if !e.guest {
+        return Err(super::org_channel_service::denied());
+    }
+    Box::pin(super::org_channel_service::validate(
+        &state.db,
+        origin,
+        &e.actor_id,
+        &e.agent_id,
+    ))
+    .await?;
+    kick_with_origin(
+        state,
+        &e.actor_id,
+        &e.agent_id,
+        profile,
+        false,
+        WAIT,
+        Some(origin),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn kick_with_origin(
+    state: &AppState,
+    actor: &str,
+    agent_id: &str,
+    profile: &str,
+    force: bool,
+    budget: Duration,
+    org_origin: Option<&crate::models::assistant_conversation::ChannelOrigin>,
+) -> AppResult<bool> {
     let agent = team::agent(&state.db, actor, agent_id).await?;
+    if actor == agent.user_id
+        && org_origin.is_none()
+        && state
+            .db
+            .collection::<Document>("users")
+            .find_one(doc! {"_id":actor,"user_type":"org"})
+            .await?
+            .is_some()
+    {
+        return Err(super::org_channel_service::denied());
+    }
     if !eligible(&state.db, actor, &agent).await? {
         return Ok(true);
     }
@@ -347,8 +413,16 @@ async fn kick_bounded(
     {
         return Ok(true);
     }
-    if let Some((token, row)) =
-        claim(state, actor, &agent, profile, force || !valid, budget).await?
+    if let Some((token, row)) = claim(
+        state,
+        actor,
+        &agent,
+        profile,
+        force || !valid,
+        budget,
+        org_origin,
+    )
+    .await?
     {
         let state = state.clone();
         tokio::spawn(run(state, token, row, budget));
@@ -363,6 +437,7 @@ pub(crate) fn ensure<'a>(
     profile: &'a str,
     force: bool,
     deadline: tokio::time::Instant,
+    org_origin: Option<&'a crate::models::assistant_conversation::ChannelOrigin>,
 ) -> futures::future::BoxFuture<'a, AppResult<bool>> {
     Box::pin(async move {
         if tokio::time::Instant::now() >= deadline {
@@ -375,7 +450,7 @@ pub(crate) fn ensure<'a>(
         let budget = deadline
             .saturating_duration_since(tokio::time::Instant::now())
             .min(WAIT);
-        if kick_bounded(state, actor, agent_id, profile, force, budget).await? {
+        if kick_with_origin(state, actor, agent_id, profile, force, budget, org_origin).await? {
             return Ok(true);
         }
         loop {
@@ -503,11 +578,13 @@ async fn run_inner(
         access_mode: None,
     });
     start.origin = TurnOrigin::Event;
+    start.org_access = super::org_channel_service::conversation_access(&state.db, row).await?;
     let agent = team::agent_for_conversation(&state.db, row).await?;
     if !eligible(&state.db, &row.user_id, &agent).await? {
         return Err(AppError::Forbidden("Shared setup refused".into()));
     }
     let ids = engine::OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: row.id.clone(),
         turn_id: uuid::Uuid::new_v4().to_string(),
         message_id: uuid::Uuid::new_v4().to_string(),
@@ -716,7 +793,7 @@ pub(crate) async fn guest_deadline(
             .and_then(|t| t.channel_event_id.as_deref())
         && let Some(event) = db
             .collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
-            .find_one(doc! {"_id":event,"user_id":&row.user_id})
+            .find_one(doc! {"_id":event,"$or":[{"user_id":&row.user_id},{"delivery.origin.org_execution.actor_id":&row.user_id}]})
             .projection(doc! {"guest_setup_deadline":1})
             .await?
         && let Ok(deadline) = event.get_datetime("guest_setup_deadline")
@@ -752,6 +829,8 @@ pub(crate) async fn failure(
     if let Some(reason) = reason.filter(|s| failure_code(s)) {
         error = error.with_model_route_reason(Some(&reason));
         error.metadata = Some(Box::new(TurnMetadata {
+            artifact_recovery_target: None,
+            artifact_delivery: None,
             failure_reason: Some(Box::new(TurnFailureReason {
                 source: "nyxid".into(),
                 stage: "guest_setup".into(),
@@ -786,14 +865,15 @@ async fn notify(db: mongodb::Database, actor: &str, agent: &str, profile: &str) 
         && row.get_bool("notice_pending") == Ok(true)
         && let (Ok(reason), Ok(token)) = (row.get_str("reason"), row.get_str("claim"))
     {
-        let result = execution::readiness_notice::enqueue_failure(
-            &db,
-            actor,
-            agent,
-            reason,
-            failure_fix(reason),
-        )
-        .await;
+        let notice_actor = row.get_str("notice_actor").unwrap_or(actor);
+        let fix = if notice_actor != actor {
+            "Check the organization's model connection and billing wallet. Guest setup retries automatically."
+        } else {
+            failure_fix(reason)
+        };
+        let result =
+            execution::readiness_notice::enqueue_failure(&db, notice_actor, agent, reason, fix)
+                .await;
         match result {
             Ok(())
             | Err(AppError::NotFound(_) | AppError::Forbidden(_) | AppError::ErasurePreparing) => {}
@@ -834,11 +914,12 @@ mod tests {
         let agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
             .await
             .unwrap();
-        let (_, row) = claim(&f.state, &f.owner, &agent, &agent.model, false, WAIT)
+        let (_, row) = claim(&f.state, &f.owner, &agent, &agent.model, false, WAIT, None)
             .await
             .unwrap()
             .unwrap();
         let ids = engine::OwnerTurnIds {
+            artifact_budget: Default::default(),
             conversation_id: row.id.clone(),
             turn_id: Uuid::new_v4().to_string(),
             message_id: Uuid::new_v4().to_string(),
@@ -1004,8 +1085,8 @@ mod tests {
             .await
             .unwrap();
         let (first, second) = tokio::join!(
-            claim(&f.state, &f.owner, &agent, &agent.model, false, WAIT),
-            claim(&f.state, &f.owner, &agent, &agent.model, false, WAIT)
+            claim(&f.state, &f.owner, &agent, &agent.model, false, WAIT, None),
+            claim(&f.state, &f.owner, &agent, &agent.model, false, WAIT, None)
         );
         let rows = [first.unwrap(), second.unwrap()];
         assert_eq!(rows.iter().filter(|r| r.is_some()).count(), 1);
@@ -1298,7 +1379,7 @@ async fn guest_setup_2092_org_setup_uses_linking_admin_not_org_or_member() {
     let (agent, _) = f.create().await;
     assert!(eligible(&f.state.db, &f.admin, &agent).await.unwrap());
     assert!(eligible(&f.state.db, &f.member, &agent).await.is_err());
-    let (_, hidden) = claim(&f.state, &f.admin, &agent, &agent.model, false, WAIT)
+    let (_, hidden) = claim(&f.state, &f.admin, &agent, &agent.model, false, WAIT, None)
         .await
         .unwrap()
         .unwrap();
@@ -1374,4 +1455,97 @@ pub(crate) async fn restrict_callback(
     serde_json::to_vec(&parsed)
         .map(bytes::Bytes::from)
         .map_err(|_| AppError::Internal("Model setup projection failed".into()))
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn org_channel_setup_uses_verified_org_payer_and_shared_durable_claim_without_admin_sponsorship()
+ {
+    let mut f = super::org_channel_service::tests::Fixture::new("org_channel_setup_claim").await;
+    f.wallet().await;
+    f.guests(vec![]).await;
+    let first = f.guest("one").await;
+    let second = f.guest("two").await;
+    let (a, b) = tokio::join!(
+        claim(
+            &f.org.state,
+            &f.org.org,
+            &f.agent,
+            &f.agent.model,
+            false,
+            WAIT,
+            Some(&first)
+        ),
+        claim(
+            &f.org.state,
+            &f.org.org,
+            &f.agent,
+            &f.agent.model,
+            false,
+            WAIT,
+            Some(&second)
+        )
+    );
+    let claims = [a.unwrap(), b.unwrap()];
+    assert_eq!(claims.iter().filter(|c| c.is_some()).count(), 1);
+    let (_, hidden) = claims.into_iter().flatten().next().unwrap();
+    assert_eq!(hidden.user_id, f.org.org);
+    assert!(hidden.guest_model_setup && !hidden.guest_turn && hidden.pending_events.is_empty());
+    let access = super::org_channel_service::conversation_access(&f.org.state.db, &hidden)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(access.channel().unwrap().guest_payer().is_some());
+    let key = f.org.key(&hidden).await;
+    assert!(!key.allow_all_services && !key.allow_all_nodes && key.allowed_service_ids.is_empty());
+    let auth = Box::pin(crate::mw::auth::api_key_auth_user(
+        &f.org.state.db,
+        &key,
+        None,
+        None,
+        None,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(auth.user_id.to_string(), f.org.org);
+    let payer = f
+        .org
+        .state
+        .billing
+        .owner_resolver()
+        .resolve_for_assistant_execution(
+            &f.org.org,
+            &f.org.org,
+            crate::models::usage_meter::CredentialClass::NyxidManagedMaster,
+            auth.org_agent_access.as_deref(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(payer.owner_id, f.org.org);
+    assert!(
+        engine::list(&f.org.state.db, &f.org.org, 100, None, None)
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.id != hidden.id)
+    );
+    assert!(
+        kick(&f.org.state, &f.org.org, &f.agent.id, &f.agent.model, false)
+            .await
+            .is_err(),
+        "an org id alone cannot authorize setup"
+    );
+    f.org.revoke(&f.org.admin).await;
+    assert!(
+        Box::pin(crate::mw::auth::api_key_auth_user(
+            &f.org.state.db,
+            &key,
+            None,
+            None,
+            None
+        ))
+        .await
+        .is_err()
+    );
+    f.org.state.db.drop().await.unwrap();
 }

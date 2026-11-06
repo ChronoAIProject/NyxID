@@ -49,7 +49,7 @@ export function XEventsSettings({ bot }: { readonly bot: ChannelBotDetail }) {
       onSubmit={form.handleSubmit(save)}
       className="space-y-4 border-t border-border px-4 py-4"
     >
-      <h3 className="text-sm font-medium">Events to receive</h3>
+      <h3 className="type-row-title">Events to receive</h3>
       {choices.map(
         ({ subscription, subscription_label, label, description }) => {
           const value = subscription as XChannelEvent;
@@ -72,7 +72,7 @@ export function XEventsSettings({ bot }: { readonly bot: ChannelBotDetail }) {
                 <Label htmlFor={`${bot.id}-x-${value}`}>
                   {subscription_label ?? label}
                 </Label>
-                <p className="text-xs text-muted-foreground">{description}</p>
+                <p className="text-13 text-muted-foreground">{description}</p>
               </div>
             </div>
           );
@@ -81,14 +81,14 @@ export function XEventsSettings({ bot }: { readonly bot: ChannelBotDetail }) {
       {catalog.error && (
         <ErrorBanner message="Event choices could not be loaded." />
       )}
-      <p className="text-xs text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         Public replies support text. Reply events cover direct replies to your
         posts; protected posts are not delivered. Received events and sent
         replies use this service&apos;s request price. If write permission is
         missing, reconnect the account below and save again.
       </p>
       {form.formState.errors.events?.message && (
-        <p role="alert" className="text-xs text-destructive">
+        <p role="alert" className="text-13 text-destructive">
           {form.formState.errors.events.message}
         </p>
       )}

@@ -9,6 +9,7 @@ import { allDocPages } from "./src/features/docs/manifest"
 import { routingPreview } from "./dev/routing-preview"
 import { machineSeccomp } from "./scripts/machine-seccomp"
 import { buildVersion } from "./scripts/build-version"
+import { buildLegalMarkdown, buildRobots, buildSitemap } from "./scripts/public-origin.mjs"
 
 const backendUrl = process.env.BACKEND_URL || "http://localhost:3001"
 
@@ -107,8 +108,6 @@ interface DocFile {
   raw: string
 }
 
-// Canonical origin for sitemap <loc> entries (matches public/robots.txt).
-const SITEMAP_BASE = "https://nyx.chrono-ai.fun"
 // Public, indexable routes outside the docs tree.
 const STATIC_SITEMAP_ROUTES = ["/", "/docs", "/blog", "/privacy", "/terms"]
 
@@ -117,6 +116,7 @@ function docsSync(): Plugin {
   const outDir = path.resolve(__dirname, "public/docs")
   const sitemapPath = path.resolve(__dirname, "public/sitemap.xml")
   let isBuild = false
+  let outputDir = ""
 
   const parseMeta = (raw: string) => {
     const front = raw.match(/^---\n([\s\S]*?)\n---/)?.[1] ?? ""
@@ -134,13 +134,9 @@ function docsSync(): Plugin {
       ...STATIC_SITEMAP_ROUTES,
       ...allDocPages().map((p) => `/docs/${p.slug}`),
     ]
-    const body = urls
-      .map((u) => `  <url><loc>${SITEMAP_BASE}${u}</loc></url>`)
-      .join("\n")
     fs.writeFileSync(
       sitemapPath,
-      `<?xml version="1.0" encoding="UTF-8"?>\n` +
-        `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${body}\n</urlset>\n`,
+      buildSitemap(urls, process.env),
     )
   }
 
@@ -218,6 +214,24 @@ function docsSync(): Plugin {
     name: "nyxid-docs-sync",
     configResolved(config) {
       isBuild = config.command === "build"
+      outputDir = path.resolve(config.root, config.build.outDir)
+    },
+    writeBundle() {
+      if (!isBuild) return
+      const robotsPath = path.join(outputDir, "robots.txt")
+      if (fs.existsSync(robotsPath)) {
+        fs.writeFileSync(
+          robotsPath,
+          buildRobots(fs.readFileSync(robotsPath, "utf8"), process.env),
+        )
+      }
+      const termsPath = path.join(outputDir, "legal/terms.md")
+      if (fs.existsSync(termsPath)) {
+        fs.writeFileSync(
+          termsPath,
+          buildLegalMarkdown(fs.readFileSync(termsPath, "utf8"), process.env),
+        )
+      }
     },
     buildStart() {
       const errors = lint(sync())

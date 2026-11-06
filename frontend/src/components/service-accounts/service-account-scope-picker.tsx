@@ -20,7 +20,7 @@ export function ServiceAccountScopePicker({
   const isAdmin = useAuthStore((state) => state.user?.is_admin ?? false);
   return (
     <div className="space-y-2">
-      <p className="text-xs text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         Choose scope segments or type a complete scope. Select a pill to edit
         it.
       </p>
@@ -39,7 +39,7 @@ export function ServiceAccountScopePicker({
         value={value.split(/\s+/).filter(Boolean)}
         onChange={(values) => onChange(values.join(" "))}
       />
-      <p className="text-xs text-muted-foreground">
+      <p className="text-13 text-muted-foreground">
         {isAdmin
           ? "Saving catalog:skills:read grants catalog and key metadata reads across all current and future catalog services. Add catalog:skills:write to amend skill recommendations. These accounts are managed by platform administrators."
           : "Platform catalog scopes must be granted by a platform administrator."}

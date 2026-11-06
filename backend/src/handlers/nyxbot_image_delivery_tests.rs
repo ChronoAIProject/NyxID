@@ -121,6 +121,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
     for index in 0..2 {
         let bytes = format!("pixels-{index}");
         let row = AssistantAttachment {
+            artifact: Default::default(),
             secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
             origin: "tool".into(),
@@ -144,6 +145,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
             .await
             .unwrap();
         attachments.push(TurnAttachment {
+            artifact: Default::default(),
             id: row.id,
             label: "private_tool_label".into(),
             content_type: row.content_type,
@@ -152,6 +154,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
             pages: None,
             chat_delivery: None,
             image_input: None,
+            image_input_reason: None,
             image_inspection: None,
         });
     }
@@ -2512,7 +2515,7 @@ async fn nyxbot_queued_direct_source_admission_preserves_original_anchor_for_tex
         work.source_event_ids = vec![f.event.id.clone()];
         work.reply_to = vec![f.event.delivery.as_ref().unwrap().origin.clone()];
         assert!(
-            delivery::enqueue(&f.state.db, OWNER, &conversation, work)
+            delivery::enqueue(&f.state.db, OWNER, &conversation, work, None)
                 .await
                 .unwrap()
         );
@@ -2651,6 +2654,7 @@ async fn full_direct_owner_queue_refuses_truthfully_without_accepting_another_so
                 OWNER,
                 conversation,
                 super::source_queue_tests::work(&source, &format!("question {i}")),
+                None
             )
             .await
             .unwrap()

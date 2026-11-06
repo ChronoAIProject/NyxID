@@ -213,7 +213,7 @@ it.each(["slack", "discord", "telegram"] as const)(
       name: `Open saved ${name} thread`,
     });
     expect(saved).toHaveAttribute("href", "/assistant?c=saved-native-thread");
-    expect(screen.getByText(new RegExp(`${name} account`))).toHaveTextContent(
+    expect(screen.getByText(new RegExp(`${name} account`)).closest("section")).toHaveTextContent(
       "Native Person",
     );
     await waitFor(() => expect(window.location.href).not.toContain(token));

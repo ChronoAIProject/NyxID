@@ -86,7 +86,7 @@ export function CmaConversation({
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 flex-wrap items-center gap-2 pb-3">
-        <p className="min-w-0 flex-1 text-11 leading-relaxed text-text-tertiary">
+        <p className="min-w-0 flex-1 type-secondary text-text-tertiary">
           Requests and replies from all NyxBot chats that use this assistant, in
           time order.
         </p>
@@ -116,7 +116,7 @@ export function CmaConversation({
           {entries.map(({ turn, events: turnEvents, date }, index) => (
             <Fragment key={turn.turn_sequence}>
               {date && date !== entries[index - 1]?.date && (
-                <p className="flex items-center justify-center gap-4 text-11 text-text-tertiary">
+                <p className="flex items-center justify-center gap-4 type-meta text-text-tertiary">
                   <span aria-hidden className="h-px w-12 bg-hairline" />
                   {date}
                   <span aria-hidden className="h-px w-12 bg-hairline" />
@@ -180,7 +180,7 @@ function ConversationEntry({
       className="scroll-m-4 space-y-6"
     >
       {linked && requestIndex === -1 && (
-        <p className="text-11 text-nyx-secondary-400">From your chat</p>
+        <p className="type-meta text-nyx-secondary-400">From your chat</p>
       )}
       {messages.map((message, index) => (
         <CmaMessage

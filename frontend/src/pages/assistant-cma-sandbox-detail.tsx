@@ -15,7 +15,7 @@ export function AssistantCmaSandboxDetailPage() {
   return (
     <div className="mx-auto w-full max-w-4xl">
       <div className="mb-6 flex items-center justify-between gap-3">
-        <h1 className="text-24 font-semibold">
+        <h1 className="type-compact-page-title sm:type-page-title">
           {query.data?.label ?? "Sandbox"}
         </h1>
         <Button

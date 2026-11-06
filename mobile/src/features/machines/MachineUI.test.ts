@@ -23,7 +23,7 @@ function setup() {
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
     "../../lib/api/ApiError": { ApiError },
-    "../../lib/env": { NYXID_FRONTEND_URL: "https://example.test" },
+    "../../lib/env": { getFrontendUrl: () => "https://example.test" },
   });
   const module = harness.load(
     fileURLToPath(new URL("./MachineUI.tsx", import.meta.url)),

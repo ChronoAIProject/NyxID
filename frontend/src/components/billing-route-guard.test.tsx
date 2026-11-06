@@ -1,3 +1,4 @@
+import { rememberBillingCheckout } from "@/lib/billing-checkout-return";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { User } from "@/types/api";
@@ -10,6 +11,7 @@ const { navigate } = vi.hoisted(() => ({
 
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => navigate,
+  useSearch: () => ({}),
 }));
 
 function testUser(billingAvailable: boolean): User {
@@ -31,6 +33,7 @@ function testUser(billingAvailable: boolean): User {
 
 beforeEach(() => {
   navigate.mockReset();
+  sessionStorage.clear();
   useAuthStore.setState({
     user: null,
     isAuthenticated: false,
@@ -102,4 +105,15 @@ it("redirects a signed-in assistant visitor with a missing billing capability", 
   await waitFor(() =>
     expect(navigate).toHaveBeenCalledWith({ to: "/dashboard", replace: true }),
   );
+});
+
+it("waits for authentication then restores org checkout before mounting the personal wallet", async () => {
+  const actor = "11111111-1111-4111-8111-111111111111";
+  const org = "22222222-2222-4222-8222-222222222222";
+  rememberBillingCheckout(actor, org, "panel");
+  render(<BillingRouteGuard><div>Billing content</div></BillingRouteGuard>);
+  expect(navigate).not.toHaveBeenCalled();
+  act(() => useAuthStore.setState({ user: { ...testUser(true), id: actor }, isAuthenticated: true, isLoading: false }));
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/assistant", search: { panel: "billing", panelOwnerId: org }, replace: true }));
+  expect(screen.queryByText("Billing content")).not.toBeInTheDocument();
 });

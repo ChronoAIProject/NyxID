@@ -6,7 +6,10 @@ import {
   workspaceContextChatNavigationAction,
   type WorkspaceChatTarget,
 } from "./workspaceChatNavigation";
-import { assistantHomeParams } from "./assistantChatParams";
+import {
+  assistantHomeParams,
+  newAssistantChatParams,
+} from "./assistantChatParams";
 import { openWorkspaceSheetAction } from "./navigationHierarchy";
 import {
   apply,
@@ -75,6 +78,16 @@ test("per-agent compose always starts a fresh empty normal chat for NyxBot and s
       );
     }
   }
+});
+
+test("a prepared new chat becomes the root chat with its exact params, closing the page it came from", () => {
+  const caller = pushContent(fixture(), "Automations");
+  const params = newAssistantChatParams();
+  const next = select(caller, { kind: "new", params });
+  assert.equal(content(next).routes.length, 1);
+  assert.equal(selected(content(next)).name, "Assistant");
+  assert.equal(selected(content(next)).key, content(caller).routes[0]!.key);
+  assert.deepEqual(selected(content(next)).params, params);
 });
 
 test("logo/Chat Home is explicit and never inherits an agent or thread draft", () => {

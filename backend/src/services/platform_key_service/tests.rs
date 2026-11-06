@@ -694,6 +694,8 @@ async fn platform_key_http_llm_gateway_and_mcp_use_server_credential_and_live_ac
     )
     .unwrap();
     let ctx = mcp_service::McpExecContext {
+        strict_response_utf8: false,
+        execution_permission: None,
         assistant_chat: None,
         response_body_limit: None,
         actor_user_id: None,
@@ -2017,6 +2019,8 @@ fn legacy_and_explicit_master_credentials_cannot_use_owner_node_routes() {
     let mut service = platform_service();
     service.requires_user_credential = false;
     let mut target = proxy_service::ProxyTarget {
+        execution_request: None,
+        execution_permission: None,
         credential_deferred: false,
         workspace_destinations_pending: false,
         target_id: None,

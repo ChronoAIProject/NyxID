@@ -615,3 +615,77 @@ the shared ten-second admission delay; policy constants live in
 `services/assistant_engine_policy.rs`. Exhaustion
 reports the measured wait. A missing wait field on older runs is not a zero-wait
 claim.
+
+## Coordinator completion v2
+
+`AUTOMATION_CONTINUATION_V2_ENABLED=false` preserves legacy completion. With it
+on, first assistant admission enrolls only after the full declared/drained fleet
+advertises `automation:coordinator-completion-v2`. Missing readiness falls back to
+legacy admission. Started runs and confirmation waits admitted by legacy code
+finish using legacy behavior. No trigger protocol stamp or data migration exists.
+
+The coordinator is the thread selected by the delivery: NyxBot's home for a home
+delivery; the trigger's dedicated NyxBot or specialist thread for a dedicated
+webhook; or the new thread for a per-run delivery. Run now uses the same delivery
+policy. A specialist receiving a webhook can therefore be the coordinator. Group
+members and directly assigned specialists are child work; their replies do not
+complete the run by themselves.
+
+V2 tracks accepted direct assignments, group dispatches and members' @mention
+handoffs until their results are durably delivered. It resumes the coordinator
+with those results automatically. Failed/stopped/deleted children produce failure
+results. Group handoffs also obey `max_group_handoffs` and the hourly group limit.
+Capacity/limit refusals are visible tool errors or group result notices, never
+silently accepted work. Child confirmation and asynchronous work retain the same
+logical work identity. Webhook children inherit the run's confirmation floor
+(`changes` or `destructive`), a stricter v2-only rule, without inheriting the
+coordinator's credentials, grants or execution permissions. Automation work stays
+outside execution-permission coverage, including child and continuation turns.
+
+Initial admission debits the owner's occurrence budgets once (30/hour and
+300/day by default). Neither coordinator nor confirmation continuations debit or
+defer on those budgets. Each v2 run has at most 32 delegated dispatches and 32
+coordinator continuations, normal model billing, and a fixed one-hour hard
+deadline (`COORDINATOR_DEADLINE_SECONDS`) starting at initial admission. History
+shows the waiting deadline and the terminal `coordinator_timeout` reason. Result
+publication wakes the run; a 60–300 second backstop recovers missed callbacks
+without replaying an admitted child. Admission uses a separate 120-second lease, checked transactionally with its
+claim fence. Its future runs through driver spawn without a wall-clock timeout,
+so a committed turn cannot be orphaned by dropping admission. Child confirmation
+and async fences write the child's thread; only registration, settlement and
+coordinator continuation admission contend on the run row. New indexes on
+existing collections are partial indexes covering enrolled work only.
+
+Direct assignments retain the acting person's live org/shared-agent authority
+and the target's own grants. Personal groups accept available owned, org and
+shared specialists, resolving recipients by mentions, then the group's saved
+selection, then its lead. Organization-group posting remains unavailable to
+NyxBot, as on the legacy path; collaboration groups keep their separate routing.
+
+On a thread that has hosted v2 work, Stop cancels ordinary watches and machine
+jobs, including background work from earlier turns, while preserving work bound
+to other live runs. Machine jobs retain an optional run ID for this lifecycle
+selection. Scoped machine cancellation uses exact job/turn cancellation; older
+nodes receive individual job cancellations rather than a conversation-wide
+cancellation that could stop another run.
+
+Stop targets the captured active turn; an idle Stop does not select a waiting
+run. Use Cancel on a waiting run in Automations history, or the first-party human
+`POST /api/v1/triggers/{id}/runs/{run_id}/cancel` route. Cancel is owner-scoped,
+idempotent after termination, and fences descendants and queued results.
+
+Deploy upgraded binaries with the option off first. Drain old/unregistered
+writers, configure the complete identical `SECURITY_ROLLOUT_REPLICAS` roster,
+unique `INSTANCE_NAME`s and `SECURITY_ROLLOUT_DRAINED=true`, then enable the option
+on every replica. `GET /api/v1/admin/automation-continuations/readiness` is a
+metadata-only admin/operator diagnostic for admission readiness and indexed drain
+blockers. Disabling prevents new enrollment while existing v2 runs and their
+children continue draining. Before downgrading, disable everywhere, drain or
+cancel enrolled runs, and require no nonterminal runs, bound queued events,
+active children, pending receipts, group followers, cards or async watches in the
+diagnostic. The roster is an operator assertion; it cannot discover hidden old
+writers. A disabled option alone does not make a downgrade safe.
+
+Completion records the coordinator's settled result; verifying external business
+outcomes such as published post IDs remains the coordinator agent's job and is
+outside this change (the remaining part of issue #2040).

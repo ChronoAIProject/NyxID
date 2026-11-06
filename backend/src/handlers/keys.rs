@@ -470,6 +470,9 @@ pub struct KeyResponse {
     pub node_priority: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_status: Option<String>,
+    /// Advisory only: grants remain configurable during a routing outage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_unavailable_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_last_heartbeat_at: Option<String>,
     pub connected: bool,
@@ -2860,6 +2863,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         node_id: result.service.node_id.clone(),
         node_priority: result.service.node_priority,
         node_status: None,
+        execution_unavailable_reason: None,
         node_last_heartbeat_at: None,
         connected: true,
         requires_connection: false,
@@ -3004,6 +3008,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         node_id: view.node_id,
         node_priority: view.node_priority,
         node_status: None,
+        execution_unavailable_reason: None,
         node_last_heartbeat_at: None,
         connected: true,
         requires_connection: false,
@@ -3133,6 +3138,28 @@ async fn enrich_key_node_metadata(
                             }
                         };
                         key.node_status = Some(status.to_string());
+                        if !crate::services::node_routing_service::is_node_dispatchable(
+                            node, ws_manager,
+                        ) {
+                            let service_owner = match &key.credential_source {
+                                crate::handlers::user_services_handler::CredentialSourceResponse::Personal => actor_user_id,
+                                crate::handlers::user_services_handler::CredentialSourceResponse::Org { org_id, .. } => org_id,
+                            };
+                            let fallback_available = if let Some(catalog_id) =
+                                key.catalog_service_id.as_deref()
+                            {
+                                !crate::services::node_routing_service::list_dispatchable_binding_node_ids(
+                                    db, service_owner, catalog_id, ws_manager,
+                                ).await?.is_empty()
+                            } else {
+                                false
+                            };
+                            if !fallback_available {
+                                let reason = if node.is_active { status } else { "disabled" };
+                                key.execution_unavailable_reason =
+                                    Some(format!("node {} {reason}", node.name));
+                            }
+                        }
                     }
                 }
             } else {

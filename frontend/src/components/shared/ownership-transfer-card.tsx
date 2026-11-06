@@ -43,7 +43,7 @@ function TransferCard({
   return (
     <DetailSection title="Ownership transfer">
       <div className="flex flex-col gap-4 p-5 sm:flex-row sm:items-start sm:justify-between">
-        <div className="max-w-2xl space-y-2 text-xs text-muted-foreground">
+        <div className="max-w-2xl space-y-2 text-13 text-muted-foreground">
           <p>
             Transfer {kind === "service" ? "the catalog definition for " : ""}
             {resource.name} to another person or organization.

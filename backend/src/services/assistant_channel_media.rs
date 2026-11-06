@@ -139,6 +139,20 @@ fn outcome(
 
 type ItemOrder = HashMap<(String, usize, bool), (usize, usize)>;
 
+fn source_filter(row: &AssistantConversation, event: &str, turn: Option<&str>) -> bson::Document {
+    let mut filter = doc! {"_id":event,"conversation_id":&row.id};
+    if let Some(origin) = super::org_channel_service::origin(row) {
+        filter.insert("channel_id", &origin.nyxbot_channel_id);
+        filter.insert("delivery.origin.org_execution.actor_id", &row.user_id);
+    } else {
+        filter.insert("user_id", &row.user_id);
+    }
+    if let Some(turn) = turn {
+        filter.insert("turn_id", turn);
+    }
+    filter
+}
+
 fn remember_order(order: &mut ItemOrder, event: &NyxbotEvent) {
     if let Some(media) = &event.media {
         for (position, item) in media.items.iter().enumerate() {
@@ -249,9 +263,12 @@ async fn request(
     row: &AssistantConversation,
     event: &NyxbotEvent,
 ) -> AppResult<authority::MediaRequest> {
+    if super::org_channel_service::event_actor(event) != row.user_id {
+        return Err(AppError::NotFound("Channel media unavailable".into()));
+    }
     let mut channel = db
         .collection::<NyxbotChannel>(crate::models::nyxbot_channel::COLLECTION_NAME)
-        .find_one(doc! {"_id":&event.channel_id,"user_id":&row.user_id})
+        .find_one(doc! {"_id":&event.channel_id,"user_id":&event.user_id})
         .await?
         .ok_or_else(|| AppError::NotFound("Channel media unavailable".into()))?;
     let source = db
@@ -376,8 +393,7 @@ async fn collect(
         let Some(event) = state
             .db
             .collection::<NyxbotEvent>(EVENTS)
-            .find_one(doc! {"_id":id,"user_id":&row.user_id,
-            "conversation_id":&row.id,"turn_id":&message.turn_id})
+            .find_one(source_filter(row, id, Some(&message.turn_id)))
             .await?
         else {
             receipt.failed.push(MediaOutcome {

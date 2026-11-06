@@ -14,7 +14,7 @@ const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
 function elements(root: Element): Element[] {
   return [root, ...[root.props.children].flat(Infinity).flatMap((child) => child && typeof child === "object" && "props" in child ? elements(child) : [])];
 }
-const text = (root: Element) => elements(root).flatMap((item) => [item.props.children, item.props.message].flat(Infinity)).filter((value) => typeof value === "string").join(" ");
+const text = (root: Element) => elements(root).flatMap((item) => [item.props.children, item.props.message, item.props.label].flat(Infinity)).filter((value) => typeof value === "string").join(" ");
 const ready = (data: unknown) => ({ data: { kind: "ready", data } });
 
 function setup({ params = {}, states = {} }: { params?: { period?: string; ownerId?: string }; states?: Record<string, State> } = {}) {
@@ -40,7 +40,7 @@ function setup({ params = {}, states = {} }: { params?: { period?: string; owner
     allowances: ready(contracts.allowancesSchema.parse({ allowances: [allowanceFixture] })),
   };
   const jsx = (type: unknown, props: Record<string, any>) => ({ type, props });
-  const harness = hookHarness<Element>({
+  const mocks: Record<string, unknown> = {
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "react-native": { AppState: appState, View: "View", StyleSheet: { create: (styles: unknown) => styles } },
     "@react-navigation/native": { useIsFocused: () => focused },
@@ -55,6 +55,7 @@ function setup({ params = {}, states = {} }: { params?: { period?: string; owner
     },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(["ActionButton", "Card", "Label", "Notice", "WorkspacePage"].map((name) => [name, name])),
     "../../components/SegmentControl": { SegmentControl: "SegmentControl" },
+    "../../components/settings/SettingsList": { SettingsPage: "SettingsPage", SettingsGroup: "SettingsGroup", SettingsRow: "SettingsRow" },
     "../../hooks/useNetworkStatus": { useNetworkStatus: () => ({ isConnected: online, recheckConnection: () => recheck() }) },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
     "../auth/AuthSessionContext": { useAuthSession: () => ({ isAuthenticated: authenticated }) },
@@ -63,7 +64,11 @@ function setup({ params = {}, states = {} }: { params?: { period?: string; owner
     "./billingContracts": contracts,
     "./credits": credits,
     "./BillingPresentation": Object.fromEntries(["BillingHistoryRow", "BillingServiceCard", "BillingWalletCard"].map((name) => [name, name])),
-  });
+    "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
+  };
+  const harness = hookHarness<Element>(mocks);
+  // The real pull-refresh hook runs on the harness's React.
+  mocks["../../hooks/usePullRefresh"] = harness.load(fileURLToPath(new URL("../../hooks/usePullRefresh.ts", import.meta.url)));
   const { UsageCreditsScreen } = harness.load(fileURLToPath(new URL("./UsageCreditsScreen.tsx", import.meta.url))) as { UsageCreditsScreen: (props: unknown) => Element };
   harness.mount(() => UsageCreditsScreen({ route: { params } }));
   const all = () => elements(harness.value());
@@ -94,13 +99,13 @@ function setup({ params = {}, states = {} }: { params?: { period?: string; owner
 test("personal balance alone is visible, without headings, account selectors or eager usage", async (t) => {
   const screen = setup({ params: { ownerId: ORG_ADMIN } });
   t.after(screen.harness.unmount);
-  assert.equal(screen.harness.value().props.showHeading, false);
-  assert.equal(screen.harness.value().props.subtitle, undefined);
+  assert.equal(screen.harness.value().type, "SettingsPage");
   assert.equal(screen.find("BillingWalletCard").props.wallet.balance, "-0.000000000001");
   assert.equal(screen.find("BillingWalletCard").props.grants.length, 1);
   assert.equal(screen.find("BillingWalletCard").props.allowances.length, 1);
   assert.equal(screen.find("BillingHistoryRow").props.expanded, false);
-  assert.match(screen.text(), /To add credits, use NyxID on the web\./);
+  // App Review 3.1.1/3.1.3: no purchase call to action outside In-App Purchase, not even text.
+  assert.doesNotMatch(screen.text(), /add credits|on the web|top.?up|buy|purchase/i);
   assert.doesNotMatch(screen.text(), /Personal usage|Credit grants|account selection|Personal account/);
   assert.equal(screen.all().some((item) => item.type === "SegmentControl" || item.type === "BillingServiceCard"), false);
   assert.equal(screen.all().some((item) => item.props.accessibilityRole === "link" || item.props.href || item.props.url), false);
@@ -156,9 +161,13 @@ for (const state of ["unsupported", "disabled"] as const) {
 }
 
 test("loading, offline without cache and empty balances do not show section placeholders", async (t) => {
-  const screen = setup({ states: { wallet: { isPending: true } } });
+  const screen = setup({ states: { wallet: { isPending: true, isFetching: true } } });
   t.after(screen.harness.unmount);
-  assert.match(screen.text(), /Loading…/);
+  const skeleton = screen.all().find((item) => item.type === "SkeletonRows");
+  assert.equal(skeleton?.props.accessibilityLabel, "Loading balance");
+  assert.doesNotMatch(screen.text(), /Loading…/);
+  // A first load or background fetch never shows the pull spinner.
+  assert.equal(screen.harness.value().props.refreshing, false);
   screen.setOnline(false);
   assert.match(screen.text(), /Offline. Connect to load your balance/);
   await screen.readEnabled();
@@ -170,6 +179,20 @@ test("loading, offline without cache and empty balances do not show section plac
   assert.match(screen.text(), /Offline. Showing your saved balance/);
   assert.equal(screen.all().some((item) => item.type === "BillingWalletCard"), true);
   assert.doesNotMatch(screen.text(), /No active credit grants|No usage allowances/);
+});
+
+test("only a pull shows the refresh spinner, never a background fetch", async (t) => {
+  const screen = setup({ states: { wallet: { ...ready(contracts.walletSchema.parse(walletFixture)), isFetching: true } } });
+  t.after(screen.harness.unmount);
+  assert.equal(screen.harness.value().props.refreshing, false);
+  screen.states.wallet = ready(contracts.walletSchema.parse(walletFixture));
+  screen.harness.render();
+  screen.harness.value().props.onRefresh();
+  screen.harness.flush();
+  assert.equal(screen.harness.value().props.refreshing, true);
+  await screen.harness.settle();
+  assert.equal(screen.harness.value().props.refreshing, false);
+  assert.deepEqual(screen.refreshed.sort(), ["allowances", "grants", "wallet"]);
 });
 
 test("explicit wallet absence remains distinct even when benefit routes are unsupported", (t) => {
@@ -263,7 +286,7 @@ test("large service lists expand only inside optional history", (t) => {
   assert.equal(screen.all().some((item) => item.type === "BillingServiceCard"), false);
   screen.toggle();
   assert.equal(screen.all().filter((item) => item.type === "BillingServiceCard").length, 10);
-  screen.find("ActionButton", "Show more services").props.onPress();
+  screen.find("SettingsRow", "Show More Services").props.onPress();
   screen.harness.flush();
   assert.equal(screen.all().filter((item) => item.type === "BillingServiceCard").length, 11);
 });

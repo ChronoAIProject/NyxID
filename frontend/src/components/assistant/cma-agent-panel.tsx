@@ -58,7 +58,7 @@ export function CmaAgentPanel({
       >
         <div className="flex shrink-0 items-center justify-between gap-3">
           <SheetHeader className="min-w-0 text-left">
-            <SheetTitle className="text-11 font-normal leading-relaxed text-text-tertiary">
+            <SheetTitle className="type-secondary text-text-tertiary">
               Cloud assistant
             </SheetTitle>
             <SheetDescription className="sr-only">

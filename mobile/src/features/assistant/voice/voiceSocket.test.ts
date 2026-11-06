@@ -46,7 +46,7 @@ function fixture(overrides: Partial<Input> = {}) {
     }
   }
   const connect = createVoiceSocketFactory({
-    apiBaseUrl: "https://api.nyx.example/api/v1/",
+    getApiBaseUrl: () => "https://api.nyx.example/api/v1/",
     origin: "https://nyx.example",
     epoch,
     getEpoch: () => epoch,
@@ -91,7 +91,7 @@ test("native control WebSocket keeps the bearer in headers and targets only the 
 });
 
 test("configured HTTP development endpoints use ws and preserve the API prefix", async () => {
-  const f = fixture({ apiBaseUrl: "http://127.0.0.1:3001/api/v1" });
+  const f = fixture({ getApiBaseUrl: () => "http://127.0.0.1:3001/api/v1" });
   await f.connect(path, new AbortController().signal);
   assert.equal(f.opened[0]?.url, `ws://127.0.0.1:3001/api/v1${path}`);
 });
@@ -124,7 +124,7 @@ test("invalid API destinations are rejected before credentials are loaded", asyn
     "https://api.nyx.example/api/v1#fragment",
     "not-a-url",
   ]) {
-    const f = fixture({ apiBaseUrl });
+    const f = fixture({ getApiBaseUrl: () => apiBaseUrl });
     await assert.rejects(f.connect(path, new AbortController().signal));
     assert.equal(f.refreshes(), 0);
     assert.equal(f.loads(), 0);
@@ -252,16 +252,10 @@ test("missing human tokens and refresh/storage failures do not fall back to unau
   assert.equal(storageFailure.opened.length, 0);
 });
 
-test("dictation uses the same authenticated native socket with its exact dedicated path", async () => {
-  const f = fixture();
-  const dictation = `/assistant/nyxagent/conversations/${thread}/dictation`;
-  await f.connect(dictation, new AbortController().signal);
-  assert.equal(f.opened[0]?.url, `wss://api.nyx.example/api/v1${dictation}`);
-  assert.equal(f.opened[0]?.options.headers.Origin, "https://nyx.example");
-  for (const invalid of [
-    `${dictation}?model=other`,
-    dictation.replace(thread, "../other"),
-    `${dictation}/stream`,
-  ])
-    await assert.rejects(f.connect(invalid, new AbortController().signal));
+test("a socket factory resolves the API base when each connection opens", async () => {
+  let base = "https://old-api.example/api/v1";
+  const f = fixture({ getApiBaseUrl: () => base });
+  base = "https://api.nyxid.ai/api/v1";
+  await f.connect(path, new AbortController().signal);
+  assert.equal(f.opened[0]?.url, `wss://api.nyxid.ai/api/v1${path}`);
 });

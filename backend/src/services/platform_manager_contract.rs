@@ -813,6 +813,28 @@ pub trait PublicTurnProducer: Send + Sync {
 /// Part 3 supplies this service adapter over the existing metered proxy core.
 #[async_trait]
 pub trait NyxAgentEgress: Send + Sync {
+    /// Server-bound retained assistant effect. Unsupported adapters never replay it.
+    async fn resume_execution(
+        &self,
+        _row: &crate::models::assistant_conversation::AssistantConversation,
+        _resume: crate::services::execution_permission_dispatch::proposals::Resume,
+    ) -> AppResult<axum::response::Response> {
+        Err(crate::errors::AppError::Forbidden(
+            "Execution resume is unavailable on this adapter".into(),
+        ))
+    }
+
+    /// Optional owner metadata, requested only for image-bearing turns. The
+    /// adapter reuses account discovery and must never provision credentials.
+    async fn model_image_input(
+        &self,
+        _authority: &NyxAgentExecutionContext,
+        _model: &str,
+        _policy: Option<crate::services::billing::route_inventory::BillingRoutePolicy>,
+    ) -> Option<bool> {
+        None
+    }
+
     async fn preload_skills(
         &self,
         _row: &crate::models::assistant_conversation::AssistantConversation,

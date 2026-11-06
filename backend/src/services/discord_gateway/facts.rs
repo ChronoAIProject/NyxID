@@ -67,7 +67,7 @@ pub(super) fn normalize(
     {
         return Err(Failure::Protocol);
     }
-    let bot_mentioned = mentions
+    let user_mentioned = mentions
         .iter()
         .any(|m| m["id"].as_str() == Some(&bot.platform_bot_id));
     let others = mentions
@@ -86,7 +86,10 @@ pub(super) fn normalize(
     {
         return Err(Failure::Protocol);
     }
-    let broadcast_roles = !roles.is_empty();
+    let managed_role_mentioned = super::roles::mentioned(bot, &message);
+    let bot_mentioned = user_mentioned || managed_role_mentioned;
+    let broadcast_role_count = (roles.len() - usize::from(managed_role_mentioned)) as u16;
+    let broadcast_roles = broadcast_role_count > 0;
     let mentions_others =
         others && !bot_mentioned && !broadcast_everyone_or_here && !broadcast_roles;
     let reference = &message["message_reference"];
@@ -147,6 +150,8 @@ pub(super) fn normalize(
             version: 1,
             bot_id: bot.platform_bot_id.clone(),
             bot_mentioned,
+            managed_role_mentioned,
+            broadcast_role_count,
             mentions_others,
             broadcast_everyone_or_here,
             broadcast_roles,

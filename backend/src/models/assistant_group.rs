@@ -93,6 +93,9 @@ pub struct GroupMessage {
     pub text: String,
     #[serde(default)]
     pub recipient_agent_ids: Vec<String>,
+    /// Live collaboration participants mentioned when this message was published.
+    #[serde(default)]
+    pub mentioned_participant_ids: Vec<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
@@ -102,6 +105,8 @@ pub struct GroupMessage {
 /// member cards.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupFollower {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<AutomationGroupRequest>,
     pub conversation_id: String,
     /// Its post; the summary covers the messages after it.
     pub since_seq: i64,
@@ -124,6 +129,8 @@ impl GroupFollower {
 /// when an agent hands work to another member.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(default)]
     pub collaboration: Option<super::assistant_group_collaboration::RequestBinding>,
     #[serde(rename = "_id")]
@@ -137,4 +144,23 @@ pub struct GroupRequest {
     pub hops_remaining: i32,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+}
+
+/// Bounded per-request work survives queue taking and callback crashes.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AutomationGroupRequest {
+    pub id: String,
+    pub work: super::trigger_run::AutomationWork,
+    pub hops_remaining: i32,
+    pub dispatches: Vec<AutomationGroupDispatch>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AutomationGroupDispatch {
+    pub id: String,
+    pub agent_id: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }

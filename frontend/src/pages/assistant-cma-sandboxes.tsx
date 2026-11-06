@@ -105,8 +105,8 @@ export function AssistantCmaSandboxesPage() {
     <div className="mx-auto w-full max-w-4xl space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="mb-2 text-11 text-text-tertiary">Workspace</p>
-          <h1 className="text-24 font-semibold tracking-tight">Sandboxes</h1>
+          <p className="mb-2 type-secondary text-text-tertiary">Workspace</p>
+          <h1 className="type-compact-page-title sm:type-page-title tracking-tight">Sandboxes</h1>
           <p className="mt-2 text-13 text-text-tertiary">
             Only Sandboxes created through NyxID appear here and use this
             allocation.
@@ -165,12 +165,12 @@ export function AssistantCmaSandboxesPage() {
             className="mx-auto mb-5 size-10 text-text-tertiary"
             strokeWidth={1.25}
           />
-          <h2 className="text-20 font-semibold">
+          <h2 className="type-section-heading">
             {query.data?.sandboxes.some((row) => row.retired_at)
               ? "Environment retired"
               : "Room for your next task"}
           </h2>
-          <p className="mx-auto mt-3 max-w-sm text-13 leading-relaxed text-text-tertiary">
+          <p className="mx-auto mt-3 max-w-sm type-secondary text-text-tertiary">
             NyxBot creates an environment when a task needs it. Simply opening
             this page doesn’t start one.
           </p>
@@ -193,7 +193,7 @@ function Notice({ children }: { readonly children: React.ReactNode }) {
   return (
     <div
       role="status"
-      className="rounded-lg border border-warning/30 bg-warning/5 p-4 text-12 leading-relaxed text-muted-foreground"
+      className="rounded-lg border border-warning/30 bg-warning/5 p-4 type-secondary text-muted-foreground"
     >
       {children}
     </div>
@@ -257,12 +257,12 @@ export function CmaSandboxCard({
             </span>
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2.5">
-                <h2 className="break-words text-15 font-semibold">
+                <h2 className="break-words type-card-title">
                   {sandbox.label}
                 </h2>
                 <span
                   className={cn(
-                    "rounded-full border border-hairline px-2 py-0.5 text-10",
+                    "rounded-full border border-hairline px-2 py-0.5 type-badge",
                     status === "ready"
                       ? "text-success"
                       : unknown || pending
@@ -273,7 +273,7 @@ export function CmaSandboxCard({
                   {statusLabels[status] ?? "Not confirmed"}
                 </span>
               </div>
-              <p className="mt-1 break-all font-mono text-10 text-text-tertiary">
+              <p className="mt-1 break-all font-mono type-secondary text-text-tertiary">
                 {sandbox.cma_sandbox_id ?? "Environment identity pending"}
               </p>
             </div>
@@ -300,32 +300,32 @@ export function CmaSandboxCard({
           </div>
         )}
         <div className="border-y border-hairline bg-overlay px-5 py-5 sm:px-6">
-          <h3 className="mb-4 text-11 font-medium text-text-tertiary">
+          <h3 className="mb-4 type-group-label text-text-tertiary">
             Resources
           </h3>
           <dl className="grid grid-cols-2 gap-5">
             <div>
-              <dt className="flex items-center gap-1.5 text-11 text-text-tertiary">
+              <dt className="flex items-center gap-1.5 type-secondary text-text-tertiary">
                 <Cpu className="size-3" />
                 CPU
               </dt>
-              <dd className="mt-2 text-13 font-medium">
+              <dd className="mt-2 type-secondary-emphasis">
                 {capacity(sandbox.capacity?.cpu_millis, 1000, "vCPU")}
               </dd>
             </div>
             <div>
-              <dt className="flex items-center gap-1.5 text-11 text-text-tertiary">
+              <dt className="flex items-center gap-1.5 type-secondary text-text-tertiary">
                 <MemoryStick className="size-3" />
                 Memory
               </dt>
-              <dd className="mt-2 text-13 font-medium">
+              <dd className="mt-2 type-secondary-emphasis">
                 {capacity(sandbox.capacity?.memory_mib, 1024, "GiB")}
               </dd>
             </div>
           </dl>
         </div>
         <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-4 sm:px-6">
-          <div className="space-y-1 text-11 text-text-tertiary">
+          <div className="space-y-1 type-meta text-text-tertiary">
             <p className="flex items-center gap-1.5">
               <Clock3 className="size-3" />
               CMA · Last active {dateLabel(sandbox.last_activity_at)}

@@ -769,81 +769,113 @@ async fn pool_ai_anthropic_stream_has_one_openai_completion_sequence() {
     }
 }
 
-#[tokio::test]
-async fn pool_ai_codex_catalog_with_custom_connection_slug_uses_local_destination() {
-    for entry in [Entry::Slug, Entry::Gateway] {
-        for stream in [false, true] {
-            let result = json!({"id":"resp_local","status":"completed","model":"review-backup-model", "output":[{"type":"function_call","id":"fc_item","call_id":"call_correlation","name":"lookup","arguments":"{}"}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}});
-            let native = format!(
-                "data: {}\n\ndata: {}\n\n",
-                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_item","call_id":"call_correlation","name":"lookup"}}),
-                json!({"type":"response.completed","response":result})
-            );
-            let fixture = fixture(
-                "pool_codex_destination",
-                ResponseTemplate::new(200).set_body_raw(native, "text/event-stream"),
+async fn assert_codex_catalog_with_custom_connection_slug_uses_local_destination(
+    entry: Entry,
+    stream: bool,
+) {
+    let result = json!({"id":"resp_local","status":"completed","model":"review-backup-model", "output":[{"type":"function_call","id":"fc_item","call_id":"call_correlation","name":"lookup","arguments":"{}"}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}});
+    let native = format!(
+        "data: {}\n\ndata: {}\n\n",
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_item","call_id":"call_correlation","name":"lookup"}}),
+        json!({"type":"response.completed","response":result})
+    );
+    let fixture = fixture(
+        "pool_codex_destination",
+        ResponseTemplate::new(200).set_body_raw(native, "text/event-stream"),
+    )
+    .await;
+    fixture
+        .state
+        .db
+        .collection::<Document>("downstream_services")
+        .update_one(
+            doc! {"slug":"review-inference-1"},
+            doc! {"$set":{"slug":"llm-openai-codex","inference.wire_protocol":"openai_responses"}},
+        )
+        .await
+        .unwrap();
+    if stream {
+        fixture
+            .state
+            .db
+            .collection::<Document>("user_services")
+            .update_one(
+                doc! {"slug":"review-ai-1"},
+                doc! {"$set":{"custom_user_agent":"pool-configured-UA"}},
             )
-            .await;
-            fixture.state.db.collection::<Document>("downstream_services").update_one(doc! {"slug":"review-inference-1"},doc! {"$set":{"slug":"llm-openai-codex","inference.wire_protocol":"openai_responses"}}).await.unwrap();
-            if stream {
-                fixture
-                    .state
-                    .db
-                    .collection::<Document>("user_services")
-                    .update_one(
-                        doc! {"slug":"review-ai-1"},
-                        doc! {"$set":{"custom_user_agent":"pool-configured-UA"}},
-                    )
-                    .await
-                    .unwrap();
-            }
-            let body = json!({"model":"pool:review-ai-route","stream":stream,"messages":[{"role":"user","content":"lookup"},{"role":"assistant","tool_calls":[{"id":"call_previous","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_previous","content":"result"}]});
-            let response = call(&fixture, entry, "chat/completions", body)
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
-            let text = String::from_utf8(bytes.to_vec()).unwrap();
-            assert!(text.contains("call_correlation"));
-            assert!(!text.contains("fc_item"));
-            if stream {
-                assert_eq!(text.matches("[DONE]").count(), 1);
-            } else {
-                let body: Value = serde_json::from_str(&text).unwrap();
-                assert_eq!(
-                    body["choices"][0]["message"]["tool_calls"][0]["id"],
-                    "call_correlation"
-                );
-            }
-            let sent = fixture.second.received_requests().await.unwrap();
-            assert_eq!(sent.len(), 1);
-            assert_eq!(sent[0].url.path(), "/v1/responses");
-            assert_eq!(sent[0].headers["originator"], "codex_cli_rs");
-            assert_eq!(sent[0].headers["accept"], "text/event-stream");
-            if stream {
-                assert_eq!(sent[0].headers["user-agent"], "pool-configured-UA");
-            } else {
-                assert!(
-                    sent[0].headers["user-agent"]
-                        .to_str()
-                        .unwrap()
-                        .starts_with("codex_cli_rs/")
-                );
-            }
-            assert_eq!(sent[0].headers["accept-encoding"], "identity");
-            let request: Value = serde_json::from_slice(&sent[0].body).unwrap();
-            assert_eq!(request["stream"], true);
-            assert!(
-                request["input"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|item| item["type"] == "function_call_output"
-                        && item["call_id"] == "call_previous")
-            );
-            fixture.state.db.drop().await.unwrap();
-        }
+            .await
+            .unwrap();
     }
+    let body = json!({"model":"pool:review-ai-route","stream":stream,"messages":[{"role":"user","content":"lookup"},{"role":"assistant","tool_calls":[{"id":"call_previous","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"tool","tool_call_id":"call_previous","content":"result"}]});
+    let response = call(&fixture, entry, "chat/completions", body)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(text.contains("call_correlation"));
+    assert!(!text.contains("fc_item"));
+    if stream {
+        assert_eq!(text.matches("[DONE]").count(), 1);
+    } else {
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            body["choices"][0]["message"]["tool_calls"][0]["id"],
+            "call_correlation"
+        );
+    }
+    let sent = fixture.second.received_requests().await.unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].url.path(), "/v1/responses");
+    assert_eq!(sent[0].headers["originator"], "codex_cli_rs");
+    assert_eq!(sent[0].headers["accept"], "text/event-stream");
+    if stream {
+        assert_eq!(sent[0].headers["user-agent"], "pool-configured-UA");
+    } else {
+        assert!(
+            sent[0].headers["user-agent"]
+                .to_str()
+                .unwrap()
+                .starts_with("codex_cli_rs/")
+        );
+    }
+    assert_eq!(sent[0].headers["accept-encoding"], "identity");
+    let request: Value = serde_json::from_slice(&sent[0].body).unwrap();
+    assert_eq!(request["stream"], true);
+    assert!(
+        request["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |item| item["type"] == "function_call_output" && item["call_id"] == "call_previous"
+            )
+    );
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn pool_ai_codex_custom_slug_nonstream_uses_local_destination() {
+    assert_codex_catalog_with_custom_connection_slug_uses_local_destination(Entry::Slug, false)
+        .await;
+}
+
+#[tokio::test]
+async fn pool_ai_codex_custom_slug_stream_uses_local_destination() {
+    assert_codex_catalog_with_custom_connection_slug_uses_local_destination(Entry::Slug, true)
+        .await;
+}
+
+#[tokio::test]
+async fn pool_ai_codex_custom_gateway_nonstream_uses_local_destination() {
+    assert_codex_catalog_with_custom_connection_slug_uses_local_destination(Entry::Gateway, false)
+        .await;
+}
+
+#[tokio::test]
+async fn pool_ai_codex_custom_gateway_stream_uses_local_destination() {
+    assert_codex_catalog_with_custom_connection_slug_uses_local_destination(Entry::Gateway, true)
+        .await;
 }
 
 #[tokio::test]
@@ -1425,51 +1457,68 @@ async fn pool_ai_unknown_openai_provider_preserves_explicit_stream_options_witho
     }
 }
 
-#[tokio::test]
-async fn pool_ai_custom_api_prefixes_match_actual_native_dispatch() {
-    for prefix in [
-        "",
-        "/v1beta/openai",
-        "/openai/deployments/name",
-        "/backend-api/codex",
-        "/openai",
-    ] {
-        let fixture = fixture(
-            "pool_api_prefix",
-            ResponseTemplate::new(200).set_body_json(anthropic_text_response()),
-        )
-        .await;
-        fixture
-            .state
-            .db
-            .collection::<Document>("user_endpoints")
-            .update_one(
-                doc! {"label":"review-ai-1"},
-                doc! {"$set":{"url":format!("{}{prefix}",fixture.second.uri())}},
-            )
-            .await
-            .unwrap();
-        let response = call(
-            &fixture,
-            Entry::Slug,
-            "chat/completions",
-            json!({"messages":[{"role":"user","content":"hi"}]}),
+async fn assert_pool_ai_custom_api_prefix_matches_actual_native_dispatch(prefix: &str) {
+    let fixture = fixture(
+        "pool_api_prefix",
+        ResponseTemplate::new(200).set_body_json(anthropic_text_response()),
+    )
+    .await;
+    fixture
+        .state
+        .db
+        .collection::<Document>("user_endpoints")
+        .update_one(
+            doc! {"label":"review-ai-1"},
+            doc! {"$set":{"url":format!("{}{prefix}",fixture.second.uri())}},
         )
         .await
         .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        to_bytes(response.into_body(), 4096).await.unwrap();
-        let sent = fixture.second.received_requests().await.unwrap();
-        assert_eq!(
-            sent[0].url.path(),
-            if prefix.is_empty() {
-                "/v1/messages".into()
-            } else {
-                format!("{prefix}/messages")
-            }
-        );
-        fixture.state.db.drop().await.unwrap();
-    }
+    let response = call(
+        &fixture,
+        Entry::Slug,
+        "chat/completions",
+        json!({"messages":[{"role":"user","content":"hi"}]}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    to_bytes(response.into_body(), 4096).await.unwrap();
+    let sent = fixture.second.received_requests().await.unwrap();
+    assert_eq!(
+        sent[0].url.path(),
+        if prefix.is_empty() {
+            "/v1/messages".into()
+        } else {
+            format!("{prefix}/messages")
+        }
+    );
+    fixture.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn pool_ai_custom_empty_api_prefix_matches_actual_native_dispatch() {
+    assert_pool_ai_custom_api_prefix_matches_actual_native_dispatch("").await;
+}
+
+#[tokio::test]
+async fn pool_ai_custom_v1beta_openai_api_prefix_matches_actual_native_dispatch() {
+    assert_pool_ai_custom_api_prefix_matches_actual_native_dispatch("/v1beta/openai").await;
+}
+
+#[tokio::test]
+async fn pool_ai_custom_deployment_api_prefix_matches_actual_native_dispatch() {
+    assert_pool_ai_custom_api_prefix_matches_actual_native_dispatch("/openai/deployments/name")
+        .await;
+}
+
+#[tokio::test]
+async fn pool_ai_custom_codex_api_prefix_matches_actual_native_dispatch() {
+    assert_pool_ai_custom_api_prefix_matches_actual_native_dispatch("/backend-api/codex").await;
+}
+
+#[tokio::test]
+async fn pool_ai_custom_openai_api_prefix_matches_actual_native_dispatch() {
+    assert_pool_ai_custom_api_prefix_matches_actual_native_dispatch("/openai").await;
 }
 
 #[tokio::test]

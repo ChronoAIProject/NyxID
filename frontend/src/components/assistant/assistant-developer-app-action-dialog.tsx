@@ -258,7 +258,7 @@ export function AssistantDeveloperAppActionDialog({
                 />
               </div>
             ) : null}
-            <p className="font-mono text-xs text-muted-foreground">
+            <p className="font-mono text-13 text-muted-foreground">
               {result.id}
             </p>
           </div>
@@ -280,17 +280,17 @@ export function AssistantDeveloperAppActionDialog({
                     id="developer-redirects"
                     value={redirectUris}
                     onChange={(event) => setRedirectUris(event.target.value)}
-                    className="min-h-20 w-full border border-input bg-background px-3 py-2 text-sm"
+                    className="min-h-20 w-full border border-input bg-background px-3 py-2 text-14"
                   />
                 </div>
               </>
             ) : (
-              <p className="font-mono text-xs text-muted-foreground">
+              <p className="font-mono text-13 text-muted-foreground">
                 {clientId}
               </p>
             )}
             {destructive ? (
-              <label className="flex items-start gap-2 text-xs">
+              <Label className="flex items-start gap-2">
                 <Checkbox
                   checked={confirmed}
                   onCheckedChange={(value) => setConfirmed(value === true)}
@@ -299,12 +299,12 @@ export function AssistantDeveloperAppActionDialog({
                   <ShieldAlert className="size-3" />I understand this revokes
                   OAuth access.
                 </span>
-              </label>
+              </Label>
             ) : null}
           </div>
         )}
         {error ? (
-          <p role="alert" className="text-xs text-destructive">
+          <p role="alert" className="text-13 text-destructive">
             {error}
           </p>
         ) : null}

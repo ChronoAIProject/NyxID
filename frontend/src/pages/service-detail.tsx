@@ -311,7 +311,7 @@ export function ServiceDetailPage() {
         />
         {service.developer_app_ids && service.developer_app_ids.length > 0 && (
           <div className="space-y-1 py-2">
-            <p className="text-12 text-muted-foreground">
+            <p className="text-14 text-muted-foreground">
               Developer App Scoping
             </p>
             <div className="flex flex-wrap gap-1.5">
@@ -324,7 +324,7 @@ export function ServiceDetailPage() {
                 );
               })}
             </div>
-            <p className="text-xs text-muted-foreground">
+            <p className="text-13 text-muted-foreground">
               Users who consent to these apps will have this service
               auto-provisioned.
             </p>
@@ -439,7 +439,7 @@ export function ServiceDetailPage() {
                 )}
               </>
             ) : (
-              <p className="text-12 text-muted-foreground">
+              <p className="text-14 text-muted-foreground">
                 SSH configuration is missing for this service.
               </p>
             )}
@@ -644,7 +644,7 @@ export function ServiceDetailPage() {
                   )}
                 {service.capabilities && (
                   <div className="space-y-1 py-2">
-                    <p className="text-12 text-muted-foreground">
+                    <p className="text-14 text-muted-foreground">
                       Capabilities
                     </p>
                     <div className="flex flex-wrap gap-1.5">
@@ -658,7 +658,7 @@ export function ServiceDetailPage() {
                       {Object.entries(service.capabilities).every(
                         ([, v]) => v !== true,
                       ) && (
-                        <span className="text-xs text-muted-foreground">
+                        <span className="text-13 text-muted-foreground">
                           None configured
                         </span>
                       )}
@@ -674,7 +674,7 @@ export function ServiceDetailPage() {
             {service.default_request_headers &&
             service.default_request_headers.length > 0 ? (
               <div className="space-y-2 p-4">
-                <p className="text-xs text-muted-foreground">
+                <p className="text-13 text-muted-foreground">
                   Injected on every proxied request. Non-overridable entries
                   replace caller-supplied values; overridable ones yield to
                   them.
@@ -688,7 +688,7 @@ export function ServiceDetailPage() {
                 />
               </div>
             ) : (
-              <div className="m-4 rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
+              <div className="m-4 rounded-lg bg-overlay px-4 py-3 text-14 text-muted-foreground">
                 No default headers configured for this service.
               </div>
             )}
@@ -808,7 +808,7 @@ function ServiceCredentialPushSection({
             void form.handleSubmit(handlePushCredential)(event)
           }
         >
-          <p className="text-12 text-muted-foreground">
+          <p className="text-14 text-muted-foreground">
             Create pending metadata for the node, then encrypt the secret in the
             browser on the accept page.
           </p>
@@ -1009,7 +1009,7 @@ function AnonymousEndpointsSection({
       <div className="space-y-5 p-5">
         <div className="flex items-center gap-2">
           <Globe2 className="h-4 w-4 text-primary-text" />
-          <span className="text-13 font-medium">Public proxy rules</span>
+          <span className="type-card-title">Public proxy rules</span>
         </div>
 
         <Form {...form}>
@@ -1100,7 +1100,7 @@ function AnonymousEndpointsSection({
         <div className="space-y-2">
           {isLoading && <Skeleton className="h-12 w-full" />}
           {!isLoading && (!endpoints || endpoints.length === 0) && (
-            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
+            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">
               No anonymous endpoints configured.
             </div>
           )}
@@ -1139,7 +1139,7 @@ const PUBLIC_METHODS = [
  */
 function WideOpenAnonymousWarning() {
   return (
-    <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3 text-12 text-warning">
+    <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3 text-14 text-warning">
       <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px] border border-warning/20 bg-warning/10">
         <AlertTriangle className="h-3.5 w-3.5" />
       </span>
@@ -1403,12 +1403,12 @@ function YourRoutingSection({
       </CardHeader>
       <CardContent className="space-y-3">
         {count === 0 ? (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             You haven't bound this service to your account yet, so there's no
             routing to configure here.
           </p>
         ) : (
-          <p className="text-xs text-muted-foreground">
+          <p className="text-13 text-muted-foreground">
             You have {String(count)} personal bindings for this service. Manage
             each one's routing in AI Services.
           </p>

@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { z } from "zod";
 import {
-  ActionButton,
-  Label,
-  Notice,
-} from "../../components/workspace/WorkspaceUI";
+  SettingsGroup,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
+import { SkeletonRows } from "../../components/Skeleton";
+import { Notice } from "../../components/workspace/WorkspaceUI";
 import { requestJson } from "../../lib/api/http";
 import { desktopEntryParams, desktopMetadataSchema } from "./desktopEntry";
 import type { MachineDesktopParams } from "./desktop/desktopRoutes";
@@ -69,25 +70,38 @@ export function MachineDesktopEntries({
     refetchInterval: runtime.active ? 10_000 : false,
     refetchIntervalInBackground: false,
   });
+  const displayName = (display: "secure" | "dev") =>
+    display === "dev" ? "Developer" : "Secure";
+  if (query.error)
+    return <Notice tone="error" message={machineError(query.error)} />;
+  if (query.isPending)
+    return (
+      <SkeletonRows
+        rows={1}
+        icon={false}
+        detail={false}
+        title
+        accessibilityLabel="Checking desktop sessions"
+      />
+    );
   return (
-    <>
-      {query.isPending && <Label muted>Checking desktop sessions…</Label>}
-      {query.error && (
-        <Notice tone="error" message={machineError(query.error)} />
-      )}
-      {!query.error &&
-        query.data?.rows.map((row) => (
-          <ActionButton
-            compact
-            key={row.session_id}
-            label={`View desktop · ${row.display === "dev" ? "Developer" : "Secure"} · ${row.status}`}
-            variant="secondary"
-            disabled={!runtime.active}
-            onPress={() => onOpen(desktopEntryParams(row, conversationId))}
-          />
-        ))}
-      {!query.error &&
-        !conversationId &&
+    <SettingsGroup
+      title="Desktop"
+      inset={false}
+      footer="Viewing leaves the task running. Desktop availability is checked when opened."
+    >
+      {query.data?.rows.map((row) => (
+        <SettingsRow
+          key={row.session_id}
+          label={`${displayName(row.display)} desktop`}
+          value={row.status}
+          accessibilityLabel={`View desktop · ${displayName(row.display)} · ${row.status}`}
+          accessibilityHint="Opens the live desktop viewer"
+          disabled={!runtime.active}
+          onPress={() => onOpen(desktopEntryParams(row, conversationId))}
+        />
+      ))}
+      {!conversationId &&
         query.data?.contexts.flatMap((context) =>
           (["secure", "dev"] as const).map((display) => {
             if (
@@ -99,11 +113,12 @@ export function MachineDesktopEntries({
             )
               return null;
             return (
-              <ActionButton
-                compact
+              <SettingsRow
                 key={`${context.context_id}:${display}`}
-                label={`View desktop · ${context.agent_name} · ${context.actor_label} · ${display === "dev" ? "Developer" : "Secure"}`}
-                variant="secondary"
+                label={context.agent_name}
+                detail={`${context.actor_label} · ${displayName(display)} desktop`}
+                accessibilityLabel={`View desktop · ${context.agent_name} · ${context.actor_label} · ${displayName(display)}`}
+                accessibilityHint="Opens the live desktop viewer"
                 disabled={!runtime.active}
                 onPress={() =>
                   onOpen({ nodeId, contextId: context.context_id, display })
@@ -112,25 +127,19 @@ export function MachineDesktopEntries({
             );
           }),
         )}
-      {!query.error &&
-        query.data &&
+      {query.data &&
         !query.data.rows.length &&
         !query.data.contexts.length &&
         (conversationId ? (
-          <Label muted>No desktop is linked to this conversation.</Label>
+          <SettingsRow label="No desktop is linked to this conversation." />
         ) : (
-          <ActionButton
-            compact
-            label="View desktop"
-            variant="secondary"
+          <SettingsRow
+            label="View Desktop"
+            accessibilityHint="Opens the live desktop viewer"
             disabled={!runtime.active}
             onPress={() => onOpen({ nodeId })}
           />
         ))}
-      <Label muted>
-        Viewing leaves the task running. Desktop availability is checked when
-        opened.
-      </Label>
-    </>
+    </SettingsGroup>
   );
 }

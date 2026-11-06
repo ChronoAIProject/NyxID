@@ -4,7 +4,7 @@ import { ACCOUNT_DELETION_DISCLOSURE } from "@/lib/account-deletion-policy";
 export function AccountDeletionDisclosure() {
   return (
     <div
-      className="space-y-3 text-12"
+      className="space-y-3 text-14"
       role="note"
       aria-label="Machine data deletion and retained records"
     >

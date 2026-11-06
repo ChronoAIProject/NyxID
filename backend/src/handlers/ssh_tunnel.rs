@@ -401,7 +401,7 @@ async fn handle_ssh_socket(
     let billing_owner = match state
         .billing
         .owner_resolver()
-        .resolve_for_execution(
+        .resolve_for_ordinary_execution(
             &billing_resolution_user_id,
             &resource_owner_id,
             credential_class,
@@ -1920,7 +1920,7 @@ mod tests {
         let payer = state
             .billing
             .owner_resolver()
-            .resolve_for_execution(
+            .resolve_for_ordinary_execution(
                 &billing_principal_user_id,
                 &auth_context.owner_user_id,
                 crate::models::usage_meter::CredentialClass::NodeManaged,

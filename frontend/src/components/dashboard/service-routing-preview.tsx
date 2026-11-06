@@ -30,7 +30,7 @@ export default function ServiceRoutingPreview({
   if (keys.isLoading) return <Skeleton className="h-64 w-full" />;
   if (keys.error)
     return (
-      <div className="rounded-xl border p-6 text-sm">
+      <div className="rounded-xl border p-6 text-14">
         Connections could not be loaded.{" "}
         <Button variant="outline" onClick={() => void keys.refetch()}>
           Retry

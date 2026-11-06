@@ -1,7 +1,13 @@
 import { ServiceIcon } from "../../components/ServiceIcon";
 import { useEffect, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, View } from "react-native";
-import { Check, ChevronDown, ChevronRight, X } from "lucide-react-native";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  ShieldCheck,
+  X,
+} from "lucide-react-native";
 import { Label } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
 import { radius, TOUCH_TARGET } from "../../theme/designTokens";
@@ -30,15 +36,21 @@ export function AssistantActivityDisclosure({
   onToggle,
   activityTotal,
   turnLabel,
+  turnFailed = false,
   metadata,
   decisions = [],
+  confirmationActivityIds,
 }: {
   activities: Activity[];
   onToggle: () => void;
   activityTotal?: number | null;
   turnLabel?: string;
+  /** The turn itself failed, even if every action in it completed. */
+  turnFailed?: boolean;
   metadata?: AssistantMessage["turn_metadata"];
   decisions?: AssistantAcknowledgement[];
+  /** Calls that raised a confirmation card, including cards still pending. */
+  confirmationActivityIds?: ReadonlySet<string>;
 }) {
   const { colors } = useTheme();
   const [open, setOpen] = useState(false);
@@ -54,12 +66,23 @@ export function AssistantActivityDisclosure({
     (metadata?.capacity_wait_ms ?? 0) > 0 || (metadata?.attempts ?? 0) > 1;
   if (!activities.length && !waited && !delivery && !decisions.length)
     return null;
+  // A call refused only to ask for a confirmation card paused; it did not fail.
+  const gated = new Set(
+    activities
+      .filter(
+        (activity) =>
+          activity.status === "error" &&
+          (confirmationActivityIds?.has(activity.id) ||
+            decisions.some((row) => row.activity_id === activity.id)),
+      )
+      .map((activity) => activity.id),
+  );
   const failed = activities.filter(
-    (activity) => activity.status === "error",
+    (activity) => activity.status === "error" && !gated.has(activity.id),
   ).length;
   const status = activities.some((activity) => activity.status === "running")
     ? "running"
-    : failed
+    : failed || turnFailed
       ? "error"
       : "completed";
   const total = Math.max(activities.length, activityTotal ?? 0);
@@ -80,47 +103,51 @@ export function AssistantActivityDisclosure({
   const Chevron = open ? ChevronDown : ChevronRight;
 
   return (
-    <View
-      style={[
-        styles.container,
-        { backgroundColor: colors.cardSoft, borderColor: colors.border },
-      ]}
-    >
+    <View style={styles.container}>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel={`Turn details: ${summary}`}
         accessibilityHint={open ? "Hide action details" : "Show action details"}
         accessibilityState={{ expanded: open }}
+        hitSlop={{ top: 7, bottom: 7 }}
         onPress={() => {
           onToggle();
           setOpen((value) => !value);
         }}
         style={({ pressed }) => [
           styles.summary,
-          { opacity: pressed ? 0.65 : 1 },
+          { backgroundColor: colors.segmentTrack, opacity: pressed ? 0.65 : 1 },
         ]}
       >
-        <View
-          accessibilityElementsHidden
-          importantForAccessibility="no-hide-descendants"
-        >
-          <Chevron size={14} color={colors.textSecondary} />
-        </View>
         <ActivityStatusIcon status={status} />
-        <Label muted style={styles.count}>
+        <Label
+          muted
+          numberOfLines={1}
+          maxFontSizeMultiplier={1.3}
+          style={styles.count}
+        >
           {summary}
           {total > activities.length
             ? ` · latest ${activities.length} of ${total} shown`
             : ""}
         </Label>
+        <View
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        >
+          <Chevron size={16} color={colors.textSecondary} />
+        </View>
       </Pressable>
       {open ? (
-        <View style={[styles.details, { borderColor: colors.border }]}>
+        <View style={styles.details}>
           {activities.map((activity) => {
-            const description = describeToolActivity(
-              activity.label,
-              activity.status === "completed" ? "done" : activity.status,
-            );
+            const confirmation = gated.has(activity.id);
+            const description = confirmation
+              ? "Asked for your confirmation"
+              : describeToolActivity(
+                  activity.label,
+                  activity.status === "completed" ? "done" : activity.status,
+                );
             const elapsed = elapsedLabel(
               activity.started_at,
               activity.status === "running"
@@ -133,25 +160,19 @@ export function AssistantActivityDisclosure({
                 key={activity.id}
                 accessible
                 accessibilityRole="text"
-                accessibilityLabel={`${description}, ${activity.label}, ${activity.status === "error" ? "Failed" : activity.status === "completed" ? "Succeeded" : "Running"}${elapsed ? `, ${elapsed}` : ""}`}
+                accessibilityLabel={`${description}, ${activity.label}, ${confirmation ? "Confirmation requested" : activity.status === "error" ? "Failed" : activity.status === "completed" ? "Succeeded" : "Running"}${elapsed ? `, ${elapsed}` : ""}`}
                 style={styles.activity}
               >
-                <ServiceIcon
-                  slug={
-                    activity.label.includes("__") &&
-                    !activity.label.startsWith("nyx__")
-                      ? activity.label.split("__")[0]
-                      : undefined
-                  }
-                  size="xs"
+                <ActivityStatusIcon
+                  status={confirmation ? "confirmation" : activity.status}
                 />
-                <ActivityStatusIcon status={activity.status} />
                 <View style={styles.activityText}>
                   <Label
                     muted
                     style={[
                       styles.description,
-                      activity.status === "error" && { color: colors.danger },
+                      activity.status === "error" &&
+                        !confirmation && { color: colors.danger },
                     ]}
                   >
                     {description}
@@ -172,7 +193,7 @@ export function AssistantActivityDisclosure({
                         {decisionTitle(row)}
                       </Label>
                     ))}
-                  {activity.status === "error" ? (
+                  {activity.status === "error" && !confirmation ? (
                     <Label
                       style={[styles.description, { color: colors.danger }]}
                     >
@@ -181,6 +202,11 @@ export function AssistantActivityDisclosure({
                     </Label>
                   ) : null}
                 </View>
+                {/* The connected service, trailing so every row's text aligns;
+                    NyxID's own tools carry no service mark. */}
+                {serviceSlug(activity.label) ? (
+                  <ServiceIcon slug={serviceSlug(activity.label)} size="xs" />
+                ) : null}
               </View>
             );
           })}
@@ -217,7 +243,18 @@ export function AssistantActivityDisclosure({
   );
 }
 
-function ActivityStatusIcon({ status }: { status: Activity["status"] }) {
+/** "api-github__get_repo" -> "api-github"; NyxID's own tools have none. */
+function serviceSlug(label: string): string | undefined {
+  if (!label.includes("__")) return undefined;
+  const slug = label.split("__")[0]!;
+  return slug === "nyx" || slug === "nyxid" ? undefined : slug;
+}
+
+function ActivityStatusIcon({
+  status,
+}: {
+  status: Activity["status"] | "confirmation";
+}) {
   const { colors } = useTheme();
   return (
     <View
@@ -227,6 +264,8 @@ function ActivityStatusIcon({ status }: { status: Activity["status"] }) {
     >
       {status === "running" ? (
         <ActivityIndicator size="small" color={colors.primary} />
+      ) : status === "confirmation" ? (
+        <ShieldCheck size={14} color={colors.textSecondary} />
       ) : status === "error" ? (
         <X size={14} color={colors.danger} />
       ) : (
@@ -251,23 +290,28 @@ function DeliveryNotice({
 }
 
 const styles = StyleSheet.create({
-  container: { borderWidth: 1, borderRadius: radius.md, overflow: "hidden" },
+  // A slim full-width row that reads as tappable (tint and a trailing
+  // chevron); details open beneath it on a thin left rule.
+  container: { gap: 6 },
   summary: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    minHeight: TOUCH_TARGET,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    minHeight: TOUCH_TARGET - 6,
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: radius.md + 2,
   },
-  count: { fontSize: 12, lineHeight: 18, flexShrink: 1 },
+  count: { fontSize: 13, lineHeight: 18, flex: 1 },
   status: {
     width: 20,
     height: 20,
     alignItems: "center",
     justifyContent: "center",
   },
-  details: { borderTopWidth: 1, padding: 10, gap: 8 },
+  // Rows share the header's columns: status icon under its icon, text under
+  // its label.
+  details: { paddingHorizontal: 12, paddingVertical: 2, gap: 10 },
   activity: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
   activityText: { flex: 1, gap: 2 },
   description: { fontSize: 12, lineHeight: 20 },

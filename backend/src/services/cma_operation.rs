@@ -202,10 +202,11 @@ pub fn metadata(contract: &AsyncOperationContract, args: &Value) -> Option<CmaOp
         .find_map(|key| identifier(args[key].as_str(), Some("agt_")))
         .or_else(|| identifier(args.pointer("/conversation/id")?.as_str(), Some("agt_")));
     Some(CmaOperation {
+        observer_binding: None,
         receipt_id: None,
         seen_working: false,
         kind,
-        agent_id,
+        agent_id: (kind == Presentation::Agent).then_some(agent_id).flatten(),
         agent_ref_id: None,
         response_id: None,
         approval_scan: None,
@@ -313,15 +314,25 @@ pub fn observed(cma: &mut CmaOperation, value: &Value) {
     {
         cma.agent_id = Some(id);
     }
+    // A successful Response submission already carries its authenticated
+    // receipt identity. Persist it without needing an unleased provider read;
+    // sparse observations cannot clear it or bind this watch to another task.
+    if cma.kind == Presentation::Response
+        && cma.response_id.is_none()
+        && let Some(id) = identifier(value["id"].as_str(), Some("resp_"))
+    {
+        cma.response_id = Some(id);
+    }
 }
 
 /// A browser-only link: no DNS lookup, server-side fetch, or URL derivation.
-pub(super) fn validated_callback_url(value: Option<&str>) -> Option<String> {
+pub(crate) fn validated_callback_url(value: Option<&str>) -> Option<String> {
     let value = value?;
-    if !(value.starts_with("https://") || value.starts_with("http://"))
-        || value
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+    if !value.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http")
+    }) || value
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
     {
         return None;
     }
@@ -331,8 +342,12 @@ pub(super) fn validated_callback_url(value: Option<&str>) -> Option<String> {
         super::url_validation::MAX_URL_LEN,
     )
     .ok()?;
-    let url = url::Url::parse(value).ok()?;
-    if url.query().is_some() || url.fragment().is_some() {
+    let parsed = url::Url::parse(value).ok()?;
+    let userinfo = value
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split('/').next())
+        .is_some_and(|authority| authority.contains('@'));
+    if userinfo || parsed.query().is_some() || parsed.fragment().is_some() {
         return None;
     }
     Some(value.to_owned())
@@ -370,6 +385,7 @@ pub async fn record_observation(
         )
         .await?;
     let approval_enqueued = if updated.matched_count == 1 {
+        super::cma_session_origin::record_best_effort(db, watch, &cma).await;
         match register_observed_reference(state, watch, &cma, value).await {
             Ok(queued) => queued,
             Err(error) => {
@@ -402,7 +418,7 @@ pub async fn register_observed_reference(
         service.catalog_service_id.ok_or_else(||crate::errors::AppError::Forbidden("CMA catalog identity unavailable".into()))?
     } else { watch.service_id.clone() };
     let gateway = super::nyxbot_cma_gateway::CatalogCmaGateway::for_service(state, &service_id)
-        .with_watch_authority(watch);
+        .with_watch_authority(watch, state.node_ws_manager.clone());
     if gateway.service_id(&watch.user_id).await? != service_id {
         return Ok(false);
     }
@@ -617,6 +633,8 @@ fn approval_event(
         &watch.id,
     ));
     event.invocation_id = watch.delivery.invocation_id.clone();
+    event.automation_work = watch.delivery.automation_work.clone();
+    event.execution_task = watch.execution_task.clone();
     event.bound = watch.delivery.report_provenance == REPORT_PROVENANCE_V1;
     event.report_to = carried_report_to(
         watch.delivery.report_to.as_deref(),
@@ -733,6 +751,8 @@ async fn observe_approval(
         let result:crate::errors::AppResult<bool>=Box::pin(async {
             super::erasure_admission::fence_in_session(&db,&watch.user_id,session).await?;
             if !super::assistant_invocation_service::fence_in_session(&db,session,&watch.user_id,watch.delivery.invocation_id.as_deref()).await? {return Ok(false);}
+            if let Some(work) = watch.delivery.automation_work.as_ref() {super::trigger_schedule::continuation::fence_work(&db, &watch.user_id, &watch.conversation_id, work, session).await?;}
+            if let Some(task) = &watch.execution_task {super::execution_permission_dispatch::tasks::fence(&db, session, task).await?;}
             let filter=doc!{"_id":&watch.id,"user_id":&watch.user_id,"state":"waiting","lease_id":&watch.lease_id,"cma.checked_at":checked_at};
             let changed=db.collection::<bson::Document>(COLLECTION_NAME).update_one(filter,doc!{"$set":{"cma.approval_scan":bson::to_bson(&scan).map_err(|_|crate::errors::AppError::Internal("Invalid CMA approval observation".into()))?}}).session(&mut *session).await?;
             if changed.matched_count==1 && !events.is_empty() {
@@ -945,7 +965,7 @@ mod tests {
             &json!({"status":"private output", "phase":"private output", "agent_id":"sk-secret"}),
         );
         assert!(cma.status.is_none() && cma.phase.is_none());
-        assert_eq!(cma.agent_id.as_deref(), Some("agt_test"));
+        assert!(cma.agent_id.is_none());
         for id in [
             "sk-0123456789abcdefghijklmnop",
             "nyxid_ag_secret",
@@ -953,6 +973,107 @@ mod tests {
         ] {
             assert!(identifier(Some(id), None).is_none());
         }
+    }
+
+    #[test]
+    fn cma_response_and_provisioning_identity_require_observed_receipts() {
+        let mut eps = endpoints();
+        apply_contracts("cma", &mut eps);
+        let mut contract = eps[0].async_operation.clone().unwrap();
+        for kind in [Presentation::Provisioning, Presentation::Response] {
+            contract.presentation = Some(kind);
+            let mut cma = metadata(&contract, &json!({"agent_id":"agt_request"})).unwrap();
+            assert!(cma.agent_id.is_none());
+            assert!(cma.agent_ref_id.is_none());
+            assert!(cma.response_id.is_none());
+            observed(
+                &mut cma,
+                &json!({"agent_id":"agt_receipt","status":"queued"}),
+            );
+            assert_eq!(cma.agent_id.as_deref(), Some("agt_receipt"));
+        }
+    }
+
+    #[test]
+    fn cma_response_receipt_binds_its_identity_without_reference_enrichment() {
+        let mut eps = endpoints();
+        apply_contracts("cma", &mut eps);
+        let mut contract = eps[0].async_operation.clone().unwrap();
+        contract.presentation = Some(Presentation::Response);
+        let mut cma = metadata(
+            &contract,
+            &json!({"agent_id":"agt_request","id":"resp_request","response_id":"resp_request"}),
+        )
+        .unwrap();
+        assert!(cma.agent_id.is_none() && cma.response_id.is_none());
+        observed(
+            &mut cma,
+            &json!({"id":"resp_command","conversation":{"id":"agt_receipt"},"status":"queued"}),
+        );
+        assert_eq!(cma.agent_id.as_deref(), Some("agt_receipt"));
+        assert_eq!(cma.response_id.as_deref(), Some("resp_command"));
+        assert!(cma.agent_ref_id.is_none());
+        for value in [
+            json!({"status":"in_progress"}),
+            json!({"id":"resp_other","status":"in_progress"}),
+            json!({"id":null,"status":"completed"}),
+        ] {
+            observed(&mut cma, &value);
+            assert_eq!(cma.response_id.as_deref(), Some("resp_command"));
+        }
+        for kind in [Presentation::Provisioning, Presentation::Agent] {
+            contract.presentation = Some(kind);
+            let mut other = metadata(&contract, &json!({})).unwrap();
+            observed(&mut other, &json!({"id":"resp_command","status":"queued"}));
+            assert!(other.agent_id.is_none());
+            assert!(other.response_id.is_none());
+        }
+        contract.presentation = Some(Presentation::Response);
+        let mut unknown = metadata(&contract, &json!({})).unwrap();
+        for id in ["lifecycle-1", "agt_receipt", "resp_", "resp_line\nbreak"] {
+            observed(&mut unknown, &json!({"id":id,"status":"queued"}));
+            assert!(unknown.response_id.is_none(), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn cma_approval_event_preserves_original_automation_and_execution_task() {
+        use crate::models::async_service_operation::{AsyncServiceOperation, CmaPendingApproval};
+        use mongodb::bson::{self, doc};
+        let now = bson::DateTime::now();
+        let watch: AsyncServiceOperation = bson::from_document(doc! {
+            "_id":"approval-watch","user_id":"owner","conversation_id":"thread",
+            "agent_id":"specialist","turn_id":"original-turn","api_key_id":"original-key",
+            "service_id":"cma","submit_endpoint_id":"submit",
+            "contract":{"status_operation":"status","result_operation":"result","id_field":"/id",
+                "id_parameter":"id","status_field":"/status","success_states":["done"],"failure_states":["failed"]},
+            "execution_task":{"version":1_i32,"task":{"root_kind":"message","root_id":"original-message"},
+                "actor_user_id":"owner","audience":{"kind":"private","user_id":"owner"},
+                "epoch":3_i64,"hard_deadline":now,"cancelled":false,"parent_turn_id":"original-turn"},
+            "delivery":{"origin":"trigger","invocation_id":"original-invocation",
+                "automation_work":{"run_id":"run","work_id":"work","coordinator_thread_id":"coordinator","role":"direct"}},
+            "state":"waiting","attempts":0,"lease_until":null,
+            "created_at":now,"deadline":now,"poll_at":now,"expires_at":now
+        })
+        .unwrap();
+        let event = approval_event(
+            &watch,
+            "agt_original",
+            "resp_original",
+            &prepare_approval_scan(None, 4, 12),
+            &CmaPendingApproval {
+                approval_id: "approval".into(),
+                notified: false,
+            },
+        );
+        assert_eq!(event.automation_work, watch.delivery.automation_work);
+        assert_eq!(event.execution_task, watch.execution_task);
+        assert_eq!(event.invocation_id, watch.delivery.invocation_id);
+        assert_eq!(event.agent_id.as_deref(), Some(watch.agent_id.as_str()));
+        assert_eq!(
+            event.question_key.as_deref(),
+            Some(super::super::async_service_operation::cma_approval_watch_key(&watch.id).as_str())
+        );
     }
 
     #[test]
@@ -1001,17 +1122,18 @@ mod tests {
     fn cma_v2_stream_supplies_the_agent_identity_and_callback() {
         let mut eps = endpoints();
         apply_contracts("cma", &mut eps);
-        let contract = eps[0].async_operation.as_ref().unwrap();
+        let mut contract = eps[0].async_operation.clone().unwrap();
+        contract.presentation = Some(Presentation::Agent);
         for args in [
             json!({"agent_id":"agt_test"}),
             json!({"conversation":{"id":"agt_test"}}),
         ] {
             assert_eq!(
-                metadata(contract, &args).unwrap().agent_id.as_deref(),
+                metadata(&contract, &args).unwrap().agent_id.as_deref(),
                 Some("agt_test")
             );
         }
-        let mut cma = metadata(contract, &json!({})).unwrap();
+        let mut cma = metadata(&contract, &json!({})).unwrap();
         let response = response_metadata(concat!(
             "event: response.created\ndata: {\"response\":{\"id\":\"resp_test\",\"conversation\":{\"id\":\"agt_test\"},\"status\":\"queued\",\"callback_url\":\"https://staging.example:8443/agents/agt_test\"}}\n\n",
             "event: response.completed\ndata: {\"response\":{\"id\":\"resp_test\",\"conversation\":{\"id\":\"agt_test\"},\"status\":\"completed\"}}\n\n",
@@ -1043,6 +1165,7 @@ mod tests {
             "https://cma.example/agents/agt_test",
             "https://staging.example:8443/agents/agt_test",
             "http://localhost:8080/agents/agt_test",
+            "HTTPS://CMA.example/agents/agt_test",
         ] {
             observed(&mut cma, &json!({"callback_url":callback}));
             assert_eq!(card_url(&cma).as_deref(), Some(callback));
@@ -1067,6 +1190,8 @@ mod tests {
         let mut cma = metadata(eps[0].async_operation.as_ref().unwrap(), &json!({})).unwrap();
         for callback in [
             json!(null),
+            json!("https://cma.example/agent?secret=value"),
+            json!("https://cma.example/agent#secret"),
             json!(false),
             json!({"url":"https://cma.example"}),
             json!(""),
@@ -1075,8 +1200,7 @@ mod tests {
             json!("javascript:alert(1)"),
             json!("data:text/html,secret"),
             json!("https://user:secret@cma.example/agents/agt_test"),
-            json!("https://cma.example/agents/agt_test?token=secret"),
-            json!("https://cma.example/agents/agt_test#secret"),
+            json!("https://@cma.example/agents/agt_test"),
             json!(" https://cma.example/agents/agt_test"),
             json!("https://cma.example/agents/agt_\ntest"),
             json!("https://cma.example/agents/agt_\\test"),

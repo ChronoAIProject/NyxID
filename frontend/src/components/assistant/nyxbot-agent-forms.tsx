@@ -1,3 +1,6 @@
+import { Label } from "@/components/ui/label";
+import { useDrawerSearchEntries } from "@/lib/drawer-search";
+import { flushSync } from "react-dom";
 import { useEffect, useState } from "react";
 import { useOrgs } from "@/hooks/use-orgs";
 import { useFeature } from "@/hooks/use-feature-flag";
@@ -6,32 +9,46 @@ import {
   Select,
   SelectContent,
   SelectItem,
-  SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Check } from "lucide-react";
 import {
-  Dialog,
+  GroupedList,
+  GroupedRow,
+  GroupedInput,
+  GroupedFooter,
+} from "@/components/ui/grouped-list";
+import {
   DialogBody,
-  DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
   Form,
   FormControl,
-  FormDescription,
   FormField,
   FormItem,
   FormLabel,
   FormMessage,
   useAppForm,
 } from "@/components/ui/form";
-import { Input } from "@/components/ui/input";
+import {
+  GroupedSelectTrigger as SelectTrigger,
+  GroupedTextarea,
+} from "@/components/ui/grouped-list";
+import {
+  GroupedField,
+  GroupedLabel,
+  GroupedDescription,
+  GroupedMessage,
+} from "@/components/ui/grouped-fields";
+import {
+  GroupedDialog,
+  GroupedDialogContent,
+} from "@/components/ui/grouped-dialog";
+import { GroupedDialogActions } from "@/components/ui/grouped-form";
 import { Switch } from "@/components/ui/switch";
 import { MachineGrantPicker } from "./machine-grant-picker";
 import { useKeys } from "@/hooks/use-keys";
@@ -46,7 +63,7 @@ import {
 export const PERSONA_HINT = "e.g. warm, concise, uses emoji sparingly";
 
 export const TEXTAREA_CLASS =
-  "min-h-20 w-full rounded-lg border border-input bg-transparent px-3 py-1.5 text-12 leading-relaxed text-foreground placeholder:text-text-tertiary focus-visible:border-input-focus focus-visible:outline-none aria-invalid:border-destructive";
+  "min-h-20 w-full rounded-lg border border-input bg-transparent px-3 py-1.5 text-14 text-foreground placeholder:text-text-tertiary focus-visible:border-input-focus focus-visible:outline-none aria-invalid:border-destructive";
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -60,73 +77,153 @@ export function ServiceGrantPicker({
   value,
   onChange,
   disabled,
+  footer,
   org,
 }: {
   readonly org?: string;
   readonly value: readonly string[];
   readonly onChange: (slugs: string[]) => void;
   readonly disabled?: boolean;
+  readonly footer?: React.ReactNode;
 }) {
   const keys = useKeys({ includeTools: true });
-  const services = (keys.data ?? [])
-    .filter((key) => key.is_active &&
+  const [search, setSearch] = useState("");
+  const inventory = (keys.data ?? [])
+    .filter(
+      (key) =>
+        key.is_active &&
         (!org ||
           (key.credential_source?.type === "org" &&
             key.credential_source.org_id === org &&
             key.credential_source.allowed)),
     )
-    .map((key) => ({ slug: org ? key.id : key.slug, label: key.label }));
+    .map((key) => ({
+      slug: org ? key.id : key.slug,
+      label: key.label,
+      unavailable: key.execution_unavailable_reason ??
+        (key.credential_missing || (key.credential_binding === "platform" && key.platform_key_available === false)
+          ? "credential unavailable" : undefined),
+    }));
+  const services = [
+    ...new Map(inventory.map((service) => [service.slug, service])).values(),
+  ];
   const known = new Set(services.map((service) => service.slug));
   const rows = [
     ...services,
-    ...value.filter((slug) => !known.has(slug)).map((slug) => ({ slug, label: slug })),
+    ...value.filter((slug) => !known.has(slug)).map((slug) => ({ slug, label: slug, unavailable: undefined })),
   ];
+  useDrawerSearchEntries(keys.isPending ? [] : rows.map((service) => ({
+    id: `service-${service.slug}`, title: service.label, breadcrumb: `Access › Services › ${service.slug}`,
+    keywords: `${service.slug} ${value.includes(service.slug) ? "Granted" : "Available"}`,
+    reveal: () => setSearch(""),
+  })));
   function toggle(slug: string, checked: boolean) {
     onChange(checked ? [...value, slug] : value.filter((item) => item !== slug));
   }
   if (keys.isPending) {
     return (
-      <p className="text-12 text-text-tertiary">Loading your services...</p>
+      <GroupedList title="Services" footer={footer}>
+        <GroupedRow title="Loading your services..." />
+      </GroupedList>
     );
   }
   if (!rows.length) {
     return (
-      <p className="rounded-lg border border-dashed border-border px-3 py-2 text-12 text-muted-foreground">
-        You have no connected services yet. Connect a service first, then grant it
-        here; the agent uses only what you grant.
-      </p>
+      <GroupedList title="Services" footer={
+        <>
+          {footer}
+          <p>
+            You have no connected services yet. Connect a service first, then
+            grant it here; the agent uses only what you grant.
+          </p>
+        </>
+      }>
+        <GroupedRow title="No connected services" />
+      </GroupedList>
     );
   }
   return (
-    <ul
-      aria-label="Services"
-      className="assistant-scrollbar relative max-h-44 space-y-0.5 overflow-y-auto rounded-lg border border-border p-1"
+    <GroupedList
+      title="Services"
+      footer={
+        <>
+          {footer}
+          {keys.error ? (
+            <span role="alert" className="text-destructive">
+              Could not refresh services. Your selections are kept.
+            </span>
+          ) : null}
+        </>
+      }
     >
-      {rows.map((service) => {
-        const id = `grant-${service.slug}`;
-        return (
-          <li key={service.slug}>
-            <label
-              htmlFor={id}
-              className="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-12 hover:bg-overlay"
-            >
-              <Checkbox
-                id={id}
-                checked={value.includes(service.slug)}
+      {rows.length > 8 ? (
+        <GroupedRow>
+          <GroupedInput
+            aria-label="Search services"
+            placeholder="Search services"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </GroupedRow>
+      ) : null}
+      <div
+        role="group"
+        aria-label="Services"
+        className={
+          rows.length > 12
+            ? "assistant-scrollbar max-h-80 overflow-y-auto"
+            : undefined
+        }
+      >
+        {rows
+          .filter((service) =>
+            `${service.label} ${service.slug}`
+              .toLowerCase()
+              .includes(search.toLowerCase()),
+          )
+          .map((service) => (
+            <GroupedRow data-drawer-search-target={`service-${service.slug}`} key={service.slug} asChild interactive>
+              <button
+                type="button"
+                role="checkbox"
+                aria-checked={value.includes(service.slug)}
                 disabled={disabled}
-                onCheckedChange={(checked) => toggle(service.slug, checked === true)}
-              />
-              <span className="min-w-0 flex-1 truncate text-foreground">
-                {service.label}
-              </span>
-              <span className="shrink-0 font-mono text-10 text-text-tertiary">
-                {service.slug}
-              </span>
-            </label>
-          </li>
-        );
-      })}
-    </ul>
+                onClick={() =>
+                  toggle(service.slug, !value.includes(service.slug))
+                }
+              >
+                <span className="min-w-0 flex-1 break-words text-foreground">
+                  {service.label}
+                  <span className="mt-0.5 block font-mono type-secondary text-text-tertiary">
+                    {service.slug}
+                  </span>
+                  {service.unavailable ? (
+                    <span className="mt-0.5 block type-secondary text-warning">
+                      Currently not executable ({service.unavailable}).
+                    </span>
+                  ) : null}
+                </span>
+                <Check
+                  aria-hidden
+                  className={
+                    value.includes(service.slug)
+                      ? "size-[1.125em] shrink-0 text-primary"
+                      : "invisible size-[1.125em] shrink-0"
+                  }
+                />
+              </button>
+            </GroupedRow>
+          ))}
+        {search &&
+        !rows.some((service) =>
+          `${service.label} ${service.slug}`
+            .toLowerCase()
+            .includes(search.toLowerCase()),
+        ) ? (
+          <GroupedRow title="No matching services" />
+        ) : null}
+      </div>
+    </GroupedList>
   );
 }
 
@@ -147,33 +244,35 @@ function AgentOwnerPicker({
 }) {
   const writable = useWritableOrgs();
   return (
-    <div className="space-y-2">
-      <label className="text-12 font-medium" htmlFor="agent-owner">
-        Ownership
-      </label>
-      <Select
-        value={value ?? "personal"}
-        onValueChange={(id) => onChange(id === "personal" ? undefined : id)}
-      >
-        <SelectTrigger id="agent-owner">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="personal">Personal</SelectItem>
-          {writable.map((org) => (
-            <SelectItem key={org.id} value={org.id}>
-              {org.display_name ?? org.slug}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      {value ? (
-        <p className="text-11 text-muted-foreground">
-          Admins and Members maintain this agent. Each member has private chats;
-          memory is shared.
-        </p>
-      ) : null}
-    </div>
+    <GroupedList
+      footer={
+        value
+          ? "Admins and Members maintain this agent. Each member has private chats; memory is shared."
+          : undefined
+      }
+    >
+      <GroupedRow>
+        <Label className="flex-1" htmlFor="agent-owner">
+          Ownership
+        </Label>
+        <Select
+          value={value ?? "personal"}
+          onValueChange={(id) => onChange(id === "personal" ? undefined : id)}
+        >
+          <SelectTrigger id="agent-owner">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="personal">Personal</SelectItem>
+            {writable.map((org) => (
+              <SelectItem key={org.id} value={org.id}>
+                {org.display_name ?? org.slug}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </GroupedRow>
+    </GroupedList>
   );
 }
 
@@ -186,11 +285,15 @@ export function NewAgentDialog({
   /** "org" starts on the first organization the person can create agents for. */
   readonly owner?: "personal" | "org";
   readonly onClose: () => void;
-  readonly onCreated: (created: { id: string; home_conversation_id: string }) => void;
+  readonly onCreated: (created: {
+    id: string;
+    home_conversation_id: string;
+  }) => void;
 }) {
   const create = useCreateNyxBotAgent();
   const orgAgentsEnabled = useFeature(FEATURE_FLAG.ORG_AGENTS);
   const form = useAppForm<AssistantAgentCreate>({
+    mode: "onChange",
     resolver: zodResolver(assistantAgentCreateSchema),
     defaultValues: {
       name: "",
@@ -202,8 +305,6 @@ export function NewAgentDialog({
     },
   });
   const [error, setError] = useState<string>();
-  const name = form.watch("name");
-  const description = form.watch("description");
   const org = form.watch("org");
   const firstOrg = useWritableOrgs()[0]?.id;
   // Organizations may still be loading when the dialog opens; preselect once known.
@@ -216,6 +317,7 @@ export function NewAgentDialog({
     setError(undefined);
     try {
       const created = await create.mutateAsync(values);
+      flushSync(() => form.reset(values));
       onCreated(created);
     } catch (cause) {
       setError(errorMessage(cause, "Could not create the agent. Try again."));
@@ -223,13 +325,13 @@ export function NewAgentDialog({
   }
 
   return (
-    <Dialog
+    <GroupedDialog
       open
       onOpenChange={(open) => {
         if (!open && !create.isPending) onClose();
       }}
     >
-      <DialogContent scrollMode="body" className="md:max-w-lg">
+      <GroupedDialogContent scrollMode="body" className="md:max-w-lg">
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>New agent</DialogTitle>
           <DialogDescription>
@@ -241,7 +343,7 @@ export function NewAgentDialog({
         </DialogHeader>
         <Form {...form}>
           <form noValidate onSubmit={form.handleSubmit(submit)}>
-            <DialogBody className="space-y-4 pb-1">
+            <DialogBody className="space-y-6 pb-4">
               {orgAgentsEnabled ? (
                 <AgentOwnerPicker
                   value={org}
@@ -254,174 +356,197 @@ export function NewAgentDialog({
                   }}
                 />
               ) : (
-                <p className="text-11 text-text-tertiary">
-                  Organization agents are not enabled yet.
-                </p>
+                <GroupedList title="Ownership">
+                  <GroupedRow title="Personal" />
+                  <GroupedFooter>
+                    Organization agents are not enabled yet.
+                  </GroupedFooter>
+                </GroupedList>
               )}
-              <FormField
-                control={form.control}
-                name="name"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Name</FormLabel>
-                    <FormControl>
-                      <Input
-                        placeholder="researcher"
-                        autoComplete="off"
-                        maxLength={32}
-                        {...field}
-                        onChange={(event) => field.onChange(event.target.value.toLowerCase())}
-                      />
-                    </FormControl>
-                    <FormDescription className="text-11">
-                      The @handle: lowercase letters, digits and hyphens.
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="display_name"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>
-                      Display name{" "}
-                      <span className="font-normal text-text-tertiary">
-                        (optional)
-                      </span>
-                    </FormLabel>
-                    <FormControl>
-                      <Input
-                        placeholder="Luna"
-                        autoComplete="off"
-                        maxLength={ASSISTANT_AGENT_DISPLAY_NAME_MAX}
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormDescription className="text-11">
-                      Shown instead of the @handle.
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="description"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Role</FormLabel>
-                    <FormControl>
-                      <textarea
-                        className={TEXTAREA_CLASS}
-                        maxLength={2048}
-                        placeholder="Tracks open GitHub issues and reports the urgent ones."
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="persona"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>
-                      Persona{" "}
-                      <span className="font-normal text-text-tertiary">
-                        (optional)
-                      </span>
-                    </FormLabel>
-                    <FormControl>
-                      <textarea
-                        className={TEXTAREA_CLASS}
-                        maxLength={ASSISTANT_AGENT_PERSONA_MAX}
-                        placeholder={PERSONA_HINT}
-                        {...field}
-                      />
-                    </FormControl>
-                    <FormDescription className="text-11">
-                      Personality and tone only; it never changes what the agent
-                      may do.
-                    </FormDescription>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+              <GroupedList title="Profile">
+                <FormField
+                  control={form.control}
+                  name="name"
+                  render={({ field }) => (
+                    <GroupedField>
+                      <GroupedLabel>Name</GroupedLabel>
+                      <FormControl>
+                        <GroupedInput
+                          placeholder="researcher"
+                          autoComplete="off"
+                          maxLength={32}
+                          {...field}
+                          onChange={(event) => field.onChange(event.target.value.toLowerCase())
+                          }
+                        />
+                      </FormControl>
+                      <GroupedDescription className="text-13">
+                        The @handle: lowercase letters, digits and hyphens.
+                      </GroupedDescription>
+                      <GroupedMessage />
+                    </GroupedField>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="display_name"
+                  render={({ field }) => (
+                    <GroupedField>
+                      <GroupedLabel>
+                        Display name{" "}
+                        <span className="text-text-tertiary">
+                          (optional)
+                        </span>
+                      </GroupedLabel>
+                      <FormControl>
+                        <GroupedInput
+                          placeholder="Luna"
+                          autoComplete="off"
+                          maxLength={ASSISTANT_AGENT_DISPLAY_NAME_MAX}
+                          {...field}
+                        />
+                      </FormControl>
+                      <GroupedDescription className="text-13">
+                        Shown instead of the @handle.
+                      </GroupedDescription>
+                      <GroupedMessage />
+                    </GroupedField>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="description"
+                  render={({ field }) => (
+                    <GroupedField>
+                      <GroupedLabel>Role</GroupedLabel>
+                      <FormControl>
+                        <GroupedTextarea
+                          maxLength={2048}
+                          placeholder="Tracks open GitHub issues and reports the urgent ones."
+                          {...field}
+                        />
+                      </FormControl>
+                      <GroupedMessage />
+                    </GroupedField>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="persona"
+                  render={({ field }) => (
+                    <GroupedField>
+                      <GroupedLabel>
+                        Persona{" "}
+                        <span className="text-text-tertiary">
+                          (optional)
+                        </span>
+                      </GroupedLabel>
+                      <FormControl>
+                        <GroupedTextarea
+                          maxLength={ASSISTANT_AGENT_PERSONA_MAX}
+                          placeholder={PERSONA_HINT}
+                          {...field}
+                        />
+                      </FormControl>
+                      <GroupedDescription className="text-13">
+                        Personality and tone only; it never changes what the
+                        agent may do.
+                      </GroupedDescription>
+                      <GroupedMessage />
+                    </GroupedField>
+                  )}
+                />
+              </GroupedList>
               <FormField
                 control={form.control}
                 name="services"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Services it may use</FormLabel>
                     <ServiceGrantPicker
+                      footer={<FormMessage className="text-13" />}
                       org={org}
-                      value={field.value} onChange={field.onChange} />
-                    <FormMessage />
+                      value={field.value}
+                      onChange={field.onChange}
+                    />
                   </FormItem>
                 )}
               />
-              {(["machines", ...(org ? [] : ["logins"])] as (
+              {(
+                ["machines", ...(org ? [] : ["logins"])] as (
                   | "machines"
                   | "logins"
                 )[]
               ).map((kind) => (
-                <FormField key={kind} control={form.control} name={kind} render={({ field }) => (
-                  <FormItem>
+                <FormField
+                  key={kind}
+                  control={form.control}
+                  name={kind}
+                  render={({ field }) => (
+                    <FormItem>
                       <MachineGrantPicker
                         org={org}
-                        kind={kind} value={field.value ?? []} onChange={field.onChange} disabled={create.isPending} />
-                      <FormMessage />
+                        kind={kind}
+                        value={field.value ?? []}
+                        onChange={field.onChange}
+                        disabled={create.isPending}
+                        footer={<FormMessage className="text-13" />}
+                      />
                     </FormItem>
-                )} />
+                  )}
+                />
               ))}
               {!org ? (
                 <FormField
-                control={form.control}
-                name="account_read"
-                render={({ field }) => (
-                  <FormItem>
-                    <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
-                      <div className="space-y-1">
-                        <FormLabel>Read my account</FormLabel>
-                        <FormDescription className="text-12">
+                  control={form.control}
+                  name="account_read"
+                  render={({ field }) => (
+                    <GroupedList title="Account access">
+                      <GroupedField inline>
+                        <div className="min-w-0 flex-1">
+                          <FormLabel>
+                            Read my account
+                          </FormLabel>
+                          <GroupedDescription>
                             Lets it look up your keys, services and nodes. It
                             can never change or delete them.
-                          </FormDescription>
-                      </div>
-                      <FormControl>
-                        <Switch checked={field.value} onCheckedChange={field.onChange} />
-                      </FormControl>
-                    </div>
-                  </FormItem>
-                )}
-              />
+                          </GroupedDescription>
+                        </div>
+                        <FormControl>
+                          <Switch checked={field.value} onCheckedChange={field.onChange} />
+                        </FormControl>
+                      </GroupedField>
+                    </GroupedList>
+                  )}
+                />
               ) : null}
               {error ? (
-                <p role="alert" className="text-12 text-destructive">
-                  {error}
-                </p>
+                <GroupedList
+                  footer={
+                    <p role="alert" className="text-destructive">
+                      {error}
+                    </p>
+                  }
+                >
+                  <GroupedRow title="Agent could not be created" />
+                </GroupedList>
               ) : null}
             </DialogBody>
-            <DialogFooter className="pt-4">
-              <Button type="button" variant="ghost" onClick={onClose} disabled={create.isPending}>
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                variant="primary"
-                isLoading={create.isPending}
-                disabled={!name.trim() || !description.trim()}
-              >
-                Create agent
-              </Button>
-            </DialogFooter>
+            <GroupedDialogActions
+              intent="create"
+              label="new agent"
+              dirty={form.formState.isDirty}
+              pending={create.isPending}
+              disabled={!form.formState.isValid}
+              save={form.handleSubmit(submit)}
+              discard={() => {
+                form.reset();
+                setError(undefined);
+              }}
+              saveLabel="Create agent"
+            />
           </form>
         </Form>
-      </DialogContent>
-    </Dialog>
+      </GroupedDialogContent>
+    </GroupedDialog>
   );
 }

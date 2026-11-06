@@ -185,6 +185,7 @@ pub async fn admit(
         None
     };
     let ids = engine::OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: start
             .conversation_id
             .clone()
@@ -193,6 +194,7 @@ pub async fn admit(
         message_id: Uuid::new_v4().to_string(),
     };
     let invocation = AssistantInvocation {
+        execution_task: None,
         id: Uuid::new_v4().to_string(),
         user_id: owner.into(),
         idempotency_key: key.into(),
@@ -505,6 +507,7 @@ pub async fn decision_in_session(
                 .and_then(|routing| routing.report_to()),
         )
         .for_invocation(Some(id));
+    event.execution_task = card.execution_task.clone();
     event.id = Uuid::new_v5(
         &Uuid::NAMESPACE_OID,
         format!("invocation-decision:{}", card.id).as_bytes(),
@@ -543,6 +546,15 @@ async fn cancel_in_session(
         assistant_acknowledgement as cards, async_service_operation as operations,
         nyxbot_channel as watches,
     };
+    if row.execution_task.is_some() {
+        super::execution_permission_dispatch::proposals::cancel_in_session(
+            db,
+            session,
+            doc! {"user_id":owner,"execution_proposal.v1.invocation_id":&row.id},
+            "invocation_stopped",
+        )
+        .await?;
+    }
     let conversations = db.collection::<bson::Document>(CONVERSATIONS);
     let mut cursor = db
         .collection::<AssistantConversation>(CONVERSATIONS)
@@ -1321,7 +1333,37 @@ async fn snapshot_in_session(
             .session(&mut *session)
             .await?
             .is_some();
-    let background = async_count + watch_count + jobs + outbox + publications;
+    let mut permission_work = 0;
+    if row.execution_task.is_some() {
+        let requests:Vec<crate::models::approval_request::ApprovalRequest>=db.collection("approval_requests")
+            .find(doc!{"user_id":owner,"$or":[{"execution_proposal.v1.invocation_id":&row.id,"execution_proposal.v1.state":{"$in":["pending","queued","preparing","dispatched","waiting"]}},{"execution_proposal.v2.invocation_id":&row.id,"execution_proposal.v2.state":{"$in":["pending","queued","preparing","dispatched","waiting"]}}]})
+            .limit(33).session(&mut *session).await?.stream(&mut *session).try_collect().await?;
+        for request in requests {
+            if request.status == "pending" && request.expires_at > Utc::now() {
+                if let Ok(p) = super::execution_permission_dispatch::proposals::proposal(&request) {
+                    actions.push(RequiredAction {
+                        id: request.id.clone(),
+                        conversation_id: p.conversation_id.clone(),
+                        kind: "execution_permission".into(),
+                        expires_at: request.expires_at,
+                    });
+                } else if let Ok(p) =
+                    super::execution_permission_dispatch::proposals::v2::proposal(&request)
+                    && let Some(conversation_id) = &p.conversation_id
+                {
+                    actions.push(RequiredAction {
+                        id: request.id.clone(),
+                        conversation_id: conversation_id.clone(),
+                        kind: "execution_permission".into(),
+                        expires_at: request.expires_at,
+                    });
+                }
+            } else {
+                permission_work += 1;
+            }
+        }
+    }
+    let background = async_count + watch_count + jobs + outbox + publications + permission_work;
     let error = turns.iter().rev().find_map(|t| t.error_code.clone());
     let review_reason = if !row.unconfirmed_async_cancellations.is_empty() {
         Some("async_cancellation_unconfirmed")

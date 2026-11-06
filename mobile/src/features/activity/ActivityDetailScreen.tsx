@@ -1,15 +1,9 @@
 import { ServiceIcon } from "../../components/ServiceIcon";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getFrontendUrl } from "../../lib/env";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { capture } from "../../lib/telemetry";
-import {
-  AppState,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { AppState, Linking, StyleSheet, Text, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useFocusEffect } from "@react-navigation/native";
 import {
@@ -18,14 +12,16 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { ScreenContainer } from "../../components/ScreenContainer";
-
-import { FullScreenLoading } from "../../components/FullScreenLoading";
+import { SkeletonRows } from "../../components/Skeleton";
 import { ToastOverlay, type ToastState } from "../../components/ToastOverlay";
 import { setActiveChallengeId } from "../../lib/notifications/pushNotifications";
-import { StatusBadge } from "../../components/StatusBadge";
-import { PrimaryButton } from "../../components/PrimaryButton";
-import { ApprovalEvidence } from "./ApprovalEvidence";
+import { ApprovalDecisionPair } from "../../components/ChallengeCard";
+import {
+  SettingsGroup,
+  SettingsPage,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
+import { ApprovalEvidence, approvalExpiryLabel } from "./ApprovalEvidence";
 import { mobileApi } from "../../lib/api/mobileApi";
 import {
   getChallengeActionState,
@@ -34,9 +30,7 @@ import {
   formatGrantDuration,
 } from "./challengeUiState";
 import { useTheme } from "../../theme/ThemeContext";
-import type { ThemeColors } from "../../theme/mobileTheme";
-import { radius, spacing, typeScale } from "../../theme/designTokens";
-import { createFlowStyles } from "../../theme/flowStyles";
+import { spacing, typeScale } from "../../theme/designTokens";
 import type { WorkspaceContentParamList } from "../../app/navigationTypes";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import {
@@ -50,38 +44,8 @@ type Props = NativeStackScreenProps<
   "ActivityDetail"
 >;
 
-function DetailRow({
-  label,
-  value,
-  isLast,
-  valueColor,
-  flowStyles,
-}: {
-  label: string;
-  value: string;
-  isLast?: boolean;
-  valueColor?: string;
-  flowStyles: ReturnType<typeof createFlowStyles>;
-}) {
-  return (
-    <View style={isLast ? flowStyles.rowLast : flowStyles.row}>
-      <Text style={flowStyles.rowLabel}>{label}</Text>
-      <Text
-        style={[
-          flowStyles.rowValue,
-          valueColor ? { color: valueColor } : undefined,
-        ]}
-      >
-        {value}
-      </Text>
-    </View>
-  );
-}
-
 export function ActivityDetailScreen({ navigation, route }: Props) {
   const { colors } = useTheme();
-  const styles = useMemo(() => createStyles(colors), [colors]);
-  const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
   const { challengeId } = route.params;
   const queryClient = useQueryClient();
   const { isConnected } = useNetworkStatus();
@@ -232,7 +196,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   const viewedEmittedRef = useRef<string | null>(null);
   const decided = useRef(false);
   const decidable = useRef(false);
-  decidable.current = data?.status === "PENDING";
+  decidable.current = data?.status === "PENDING" && !data.execution_proposal;
   useEffect(
     () => () => {
       if (viewedAtRef.current != null && decidable.current && !decided.current)
@@ -333,31 +297,26 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
 
   if (isLoading) {
     return (
-      <FullScreenLoading
-        title="Loading detail..."
-        subtitle="Fetching challenge information"
-      />
+      <SettingsPage>
+        <SkeletonRows rows={4} icon={false} accessibilityLabel="Loading request" />
+        <SkeletonRows rows={2} icon={false} detail={false} />
+      </SettingsPage>
     );
   }
 
   if (isError || !data) {
     return (
-      <ScreenContainer>
-        <View style={styles.errorWrap}>
-          <Text style={styles.errorTitle}>Challenge Unavailable</Text>
-          <Text style={styles.errorMsg}>
-            {getChallengeQueryErrorMessage(error)}
-          </Text>
-          <View style={styles.errorActions}>
-            <PrimaryButton
-              label="Back"
-              kind="ghost"
-              onPress={() => navigation.goBack()}
-            />
-            <PrimaryButton label="Retry" onPress={() => refetch()} />
-          </View>
-        </View>
-      </ScreenContainer>
+      <SettingsPage>
+        <SettingsGroup
+          inset={false}
+          footer={getChallengeQueryErrorMessage(error)}
+        >
+          <SettingsRow label="Request unavailable" />
+        </SettingsGroup>
+        <SettingsGroup inset={false}>
+          <SettingsRow tone="action" label="Retry" onPress={() => refetch()} />
+        </SettingsGroup>
+      </SettingsPage>
     );
   }
 
@@ -365,181 +324,122 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   const grantDurationLabel = formatGrantDuration(
     settingsQuery.data?.grant_expiry_days,
   );
-  const riskColorMap = {
-    high: colors.riskHigh.text,
-    medium: colors.riskMedium.text,
-    low: colors.riskLow.text,
-    unknown: colors.textSecondary,
-  };
-  const riskColor = riskColorMap[data.risk_level];
   const isGrantMode = data.approval_mode === "grant";
+  const summary =
+    data.summary.trim() || `${data.action} ${data.resource}`.trim();
+  const status =
+    actionState.statusLabel.charAt(0) +
+    actionState.statusLabel.slice(1).toLowerCase();
+  const risk =
+    data.risk_level.charAt(0).toUpperCase() + data.risk_level.slice(1);
+  const decisionNotes = [
+    data.is_destructive === true ? "This operation is destructive." : null,
+    actionState.reason,
+    actionState.canDecide
+      ? isGrantMode
+        ? `Approving allows matching requests for ${grantDurationLabel} without another decision.`
+        : "Approval applies only to this request."
+      : null,
+  ].filter(Boolean);
 
   return (
-    <ScreenContainer>
-      <ScrollView
-        style={flowStyles.content}
-        contentContainerStyle={[
-          flowStyles.scrollContent,
-          { paddingHorizontal: spacing.xxl },
-        ]}
-      >
-        {isGrantMode && (
-          <Text style={styles.screenSub}>
-            Review this request before creating reusable access for{" "}
-            {grantDurationLabel}.
-          </Text>
-        )}
-        {data.from_org_policy ? (
-          <Text style={styles.orgContext}>
-            On behalf of {data.org_name ?? "your org"}
-          </Text>
-        ) : null}
-
-        <View style={styles.detailCard}>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <ServiceIcon slug={data.service_slug} size="md" />
-            <Text style={flowStyles.cardTitle}>Request Context</Text>
-          </View>
-          <DetailRow
-            label="Action"
-            value={data.action}
-            flowStyles={flowStyles}
+    <View style={styles.fill}>
+      <SettingsPage>
+        <SettingsGroup
+          footer={
+            data.from_org_policy
+              ? `On behalf of ${data.org_name ?? "your org"}.`
+              : undefined
+          }
+        >
+          <SettingsRow
+            leading={<ServiceIcon slug={data.service_slug} size="md" />}
+            label={data.title}
+            detail={summary}
           />
-          <DetailRow
-            label="Resource"
-            value={data.resource}
-            flowStyles={flowStyles}
-          />
-          <DetailRow
-            label="Client"
-            value={data.request_context.client}
-            flowStyles={flowStyles}
-          />
-          <DetailRow
-            label="Risk Level"
-            value={
-              data.risk_level.charAt(0).toUpperCase() + data.risk_level.slice(1)
-            }
-            valueColor={riskColor}
-            flowStyles={flowStyles}
-          />
-          <DetailRow
-            label="Status"
-            value={actionState.statusLabel}
-            valueColor={colors.warning}
-            flowStyles={flowStyles}
-          />
-          {isGrantMode && (
-            <DetailRow
-              label="Grant Duration"
-              value={grantDurationLabel}
-              flowStyles={flowStyles}
-            />
-          )}
-          {data.from_org_policy ? (
-            <DetailRow
-              label="Org"
-              value={data.org_name ?? "Unnamed org"}
-              flowStyles={flowStyles}
-            />
-          ) : null}
-          <DetailRow
+        </SettingsGroup>
+        <SettingsGroup title="Request" inset={false}>
+          <SettingsRow label="Action" value={data.action} />
+          <SettingsRow label="Resource" value={data.resource} />
+          <SettingsRow label="Client" value={data.request_context.client} />
+          <SettingsRow
             label="Requester"
             value={data.request_context.requester}
-            isLast
-            flowStyles={flowStyles}
           />
-          <ApprovalEvidence challenge={data} />
-        </View>
-
-        {actionState.reason ? (
-          <View style={styles.stateNotice}>
-            <Text style={styles.stateNoticeText}>{actionState.reason}</Text>
-          </View>
-        ) : null}
-
-        {actionState.canDecide && (
-          <View style={flowStyles.actionWrap}>
-            <PrimaryButton
-              label="Approve"
-              onPress={() => decideMutation.mutate("APPROVE")}
-              disabled={decideMutation.isPending}
+          {data.from_org_policy ? (
+            <SettingsRow label="Org" value={data.org_name ?? "Unnamed org"} />
+          ) : null}
+        </SettingsGroup>
+        <SettingsGroup
+          title="Decision"
+          inset={false}
+          footer={
+            decisionNotes.length ? (
+              <Text
+                style={[
+                  styles.footer,
+                  {
+                    color:
+                      data.is_destructive === true
+                        ? colors.danger
+                        : colors.textMuted,
+                  },
+                ]}
+              >
+                {decisionNotes.join(" ")}
+              </Text>
+            ) : undefined
+          }
+        >
+          <SettingsRow
+            label="Status"
+            value={status}
+            accessibilityLabel={`Status, ${status}`}
+          />
+          <SettingsRow
+            label="Risk level"
+            value={risk}
+            valueTone={data.risk_level === "high" ? "danger" : "default"}
+          />
+          <SettingsRow
+            label="Approval"
+            value={isGrantMode ? "Grant mode" : "Per-request"}
+          />
+          {isGrantMode && (
+            <SettingsRow label="Grant duration" value={grantDurationLabel} />
+          )}
+          <SettingsRow label="Expires" value={approvalExpiryLabel(data)} />
+        </SettingsGroup>
+        <ApprovalEvidence challenge={data} />
+        {data.execution_proposal && (
+          <SettingsGroup inset={false}>
+            <SettingsRow
+              tone="action"
+              label="Review in the web app"
+              accessibilityRole="link"
+              onPress={() =>
+                void Linking.openURL(`${getFrontendUrl()}/assistant/approvals`)
+              }
             />
-            <PrimaryButton
-              label="Deny"
-              kind="danger"
-              onPress={() => decideMutation.mutate("DENY")}
-              disabled={decideMutation.isPending}
-            />
-          </View>
+          </SettingsGroup>
         )}
-      </ScrollView>
+        {actionState.canDecide && (
+          <SettingsGroup inset={false}>
+            <ApprovalDecisionPair
+              divider={false}
+              disabled={decideMutation.isPending}
+              onApprove={() => decideMutation.mutate("APPROVE")}
+              onDeny={() => decideMutation.mutate("DENY")}
+            />
+          </SettingsGroup>
+        )}
+      </SettingsPage>
       <ToastOverlay toast={toast} bottom={64} />
-    </ScreenContainer>
+    </View>
   );
 }
 
-const createStyles = (c: ThemeColors) =>
-  StyleSheet.create({
-    backBtn: {
-      paddingVertical: spacing.xs,
-    },
-    backText: {
-      ...typeScale.caption,
-      color: c.textMuted,
-    },
-    screenTitle: {
-      ...typeScale.pageHeader,
-      color: c.textPrimary,
-    },
-    screenSub: {
-      ...typeScale.label,
-      color: c.textSecondary,
-    },
-    orgContext: {
-      ...typeScale.overline,
-      color: c.textSecondary,
-      letterSpacing: 1.5,
-    },
-    // DESIGN.md §Banners & callouts: rounded-xl warning callout, theme-aware tint.
-    stateNotice: {
-      borderRadius: radius.lg,
-      backgroundColor: c.warningTone.bg,
-      borderWidth: 1,
-      borderColor: c.warningTone.border,
-      padding: spacing.lg,
-    },
-    stateNoticeText: {
-      ...typeScale.label,
-      color: c.warningTone.text,
-    },
-    // DESIGN.md §DetailSection: rounded-xl + 50%-opacity chrome border.
-    detailCard: {
-      borderRadius: radius.lg,
-      borderWidth: 1,
-      borderColor: c.borderSoft,
-      backgroundColor: c.card,
-      padding: spacing.xxl,
-      gap: spacing.md,
-    },
-    errorWrap: {
-      flex: 1,
-      justifyContent: "center",
-      alignItems: "center",
-      paddingHorizontal: spacing.xxl,
-      gap: spacing.lg,
-    },
-    errorTitle: {
-      ...typeScale.h2,
-      color: c.textPrimary,
-    },
-    errorMsg: {
-      ...typeScale.description,
-      color: c.textSecondary,
-      textAlign: "center",
-    },
-    errorActions: {
-      flexDirection: "row",
-      gap: spacing.md,
-    },
-  });
+const styles = StyleSheet.create({
+  fill: { flex: 1 },
+  footer: { ...typeScale.small, paddingHorizontal: spacing.xxl },
+});

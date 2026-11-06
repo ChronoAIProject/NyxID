@@ -142,21 +142,23 @@ function workspaceActiveView(view: WorkspaceView) {
 }
 
 function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
-  if (view === "plugins") return <PluginsView />;
-  if (view === "approvals") return <ApprovalsView />;
   return (
     <div
-      className={`h-full px-4 py-6 sm:px-6 lg:px-10 ${view === "cma-agent" ? "overflow-hidden" : "overflow-y-auto"}`}
+      className={`h-full shell-page-content ${view === "cma-agent" ? "overflow-hidden" : "overflow-y-auto"}`}
       style={{ paddingBottom: "max(2rem, var(--sab))" }}
     >
       <Suspense
         fallback={
-          <p role="status" className="text-12 text-text-tertiary">
+          <p role="status" className="text-14 text-text-tertiary">
             Loading {workspaceTitles[view]}...
           </p>
         }
       >
-        {view === "automations" ? (
+        {view === "plugins" ? (
+          <PluginsView />
+        ) : view === "approvals" ? (
+          <ApprovalsView />
+        ) : view === "automations" ? (
           <AutomationsPage />
         ) : view === "machines" ? (
           <MachinesPage />

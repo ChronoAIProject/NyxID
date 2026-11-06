@@ -12,10 +12,16 @@ async function setTextScale(scope: Page | Locator, scale: number) {
 }
 
 const unexpectedRequests = new WeakMap<Page, string[]>();
+const resizeErrors = new WeakMap<Page, string[]>();
 
 test.beforeEach(async ({ page, context }) => {
   const unexpected: string[] = [];
   unexpectedRequests.set(page, unexpected);
+  const errors: string[] = [];
+  resizeErrors.set(page, errors);
+  page.on("pageerror", error => {
+    if (error.message.includes("ResizeObserver")) errors.push(error.message);
+  });
   // Keep chat fixtures while account requests use this spec's populated HTTP fixtures.
   await context.route("**/src/lib/mock-data.ts*", async (route) => {
     const response = await route.fetch({ headers: { ...route.request().headers(), "if-none-match": "", "if-modified-since": "" } });
@@ -79,12 +85,14 @@ test.beforeEach(async ({ page, context }) => {
     await context.route(`**/api/v1${path}*`, (route) => route.fulfill({ json }));
   }
   await context.route("**/api/v1/assistant/nyxagent/machines?**", (route) => route.fulfill({ json: [] }));
+  await context.route("**/api/v1/assistant/nyxagent/cma-sessions?**", (route) => route.fulfill({ json: { sessions: [] } }));
   await context.route("**/api/v1/orgs", (route) => route.fulfill({ json: { orgs: [] } }));
   await context.route("**/api/v1/channel-bots?**", (route) => route.fulfill({ json: { bots: [], total: 0 } }));
 });
 
 test.afterEach(({ page }) => {
   expect(unexpectedRequests.get(page)).toEqual([]);
+  expect(resizeErrors.get(page)).toEqual([]);
 });
 
 for (const width of [320, 390, 768, 1024, 1280]) {
@@ -95,8 +103,7 @@ for (const width of [320, 390, 768, 1024, 1280]) {
       await page.setViewportSize({ width, height: 900 });
       await openAssistant(page, { faults: { nyxagentEnabled: true } });
       await expect(page.getByRole("button", { name: "Account menu", includeHidden: true })).toBeAttached();
-      if (width < 768) await page.getByRole("button", { name: "Open chats" }).click();
-      await page.getByRole("button", { name: "Account menu" }).click();
+      await openAccountMenu(page);
       await page
         .getByRole("menuitem", { name: "Settings", exact: true })
         .click();
@@ -323,15 +330,14 @@ for (const width of [320, 390, 768, 1024, 1280]) {
       });
       await expectUsable(live);
       await live.fill("12");
-      await expectUsable(
-        page.getByRole("button", { name: "Save settings", exact: true }),
-      );
-      await page
-        .getByRole("button", { name: "Save settings", exact: true })
-        .click();
-      await expect(
-        page.getByRole("button", { name: "Save settings", exact: true }),
-      ).toBeDisabled();
+      const bar = page.getByRole("region", { name: "Unsaved changes", exact: true });
+      const save = bar.getByRole("button", { name: "Save changes", exact: true });
+      await expectUsable(save);
+      await save.click();
+      const review = page.getByRole("dialog", { name: "Review changes", exact: true });
+      await expect(review).toContainText("Live specialists");
+      await review.getByRole("button", { name: "Save changes", exact: true }).click();
+      await expect(bar).toHaveCount(0);
 
       await expectUsable(
         page.getByRole("button", { name: "Timezone and automation budgets" }),
@@ -365,20 +371,17 @@ for (const width of [320, 390, 768, 1024, 1280]) {
         exact: true,
       });
       await hourly.fill("4");
-      await expectUsable(
-        page.getByRole("button", { name: "Save preferences", exact: true }),
-      );
-      await page
-        .getByRole("button", { name: "Save preferences", exact: true })
-        .click();
-      await expect(
-        page.getByRole("button", { name: "Save preferences", exact: true }),
-      ).toHaveCount(0);
+      await expectUsable(save);
+      await save.click();
+      await expect(review).toContainText("Runs per hour");
+      await review.getByRole("button", { name: "Save changes", exact: true }).click();
+      await expect(bar).toHaveCount(0);
       await page
         .getByRole("button", { name: "Timezone and automation budgets" })
         .click();
       await expect(hourly).toHaveValue("4");
 
+      await page.getByRole("button", { name: "Connect another bot", exact: true }).click();
       const available = page.getByRole("list", {
         name: "Channel bots you can connect",
       });
@@ -416,6 +419,7 @@ for (const width of [320, 390, 768, 1024, 1280]) {
       await expectUsable(renew);
       await renew.click();
       await expect(ownerLink.locator("code")).not.toHaveText(code ?? "");
+      await page.getByRole("button", { name: "Back to Channels", exact: true }).click();
 
       const connected = page.getByRole("list", {
         name: "Connected channel bots",
@@ -439,7 +443,7 @@ for (const width of [320, 390, 768, 1024, 1280]) {
       await connected
         .getByRole("button", { name: "Chats and who can talk", exact: true })
         .click();
-      const chats = connected.getByRole("list", {
+      const chats = page.getByRole("list", {
         name: "Chats of NyxID Approvals",
         exact: true,
       });
@@ -476,7 +480,7 @@ for (const width of [320, 390, 768, 1024, 1280]) {
         }),
       );
       await expectUsable(
-        connected.getByRole("combobox", {
+        page.getByRole("combobox", {
           name: "Who can talk to NyxID Approvals in private chats",
           exact: true,
         }),
@@ -719,6 +723,7 @@ test("rendered assistant settings links open over their current chat and keep ne
   const newTab = await popup;
   await expect(newTab).toHaveURL(/panel=settings/);
   await newTab.close();
+  await page.bringToFront();
   expect(new URL(page.url()).searchParams.get("panel")).toBeNull();
   await link.click();
   await expect(page.getByRole("dialog", { name: "Account Settings" }).getByRole("tab", { name: "Security" })).toHaveAttribute("data-state", "active");
