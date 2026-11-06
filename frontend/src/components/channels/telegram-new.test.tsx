@@ -462,3 +462,50 @@ it("removes the cached recovery anchor when its deadline passes with stale polli
   await waitFor(() => expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument(), { timeout: 2000 });
   expect(screen.queryByRole("button", { name: "Open creation form" })).not.toBeInTheDocument();
 });
+
+it("shows the server setup reason and recovery actions instead of stale creation instructions", async () => {
+  mockGet.mockResolvedValue(configuration({
+    ...request,
+    status: "waiting_bot",
+    setup_notice: {
+      reason: "superseded",
+      message: "This setup link was replaced or its destination changed.",
+      status_url: "https://app.nyxid.test/channel-bots?connect=telegram-new&request_id=old",
+      new_setup_url: "https://app.nyxid.test/channel-bots?connect=telegram-new",
+      agent_url: "https://app.nyxid.test/assistant?agent=original",
+    },
+  }));
+  setup();
+  expect(await screen.findByText("This setup link was replaced or its destination changed.")).toHaveAttribute("role", "status");
+  expect(screen.getByRole("link", { name: "Check status" })).toHaveAttribute("href", expect.stringContaining("request_id=old"));
+  expect(screen.getByRole("link", { name: "Open the agent" })).toHaveAttribute("href", "https://app.nyxid.test/assistant?agent=original");
+  expect(screen.getByRole("link", { name: "Start a new setup" })).toHaveAttribute("href", "https://app.nyxid.test/channel-bots?connect=telegram-new");
+  expect(screen.queryByRole("button", { name: "Reopen Telegram" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Waiting for a verified bot creation/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Saved until/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Cancel setup" })).toBeInTheDocument();
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
+it("keeps saved setup recovery visible when the manager is unavailable", async () => {
+  mockGet.mockResolvedValue({
+    ...configuration({
+      ...request,
+      setup_notice: {
+        reason: "manager_changed",
+        message: "The Telegram setup manager changed. Check status in NyxID.",
+        status_url: "https://app.nyxid.test/channel-bots?connect=telegram-new&request_id=old",
+        new_setup_url: "https://app.nyxid.test/channel-bots?connect=telegram-new",
+        agent_url: null,
+      },
+    }),
+    available: false,
+    manager_username: null,
+  });
+  setup();
+  expect(await screen.findByText("The Telegram setup manager changed. Check status in NyxID.")).toHaveAttribute("role", "status");
+  expect(screen.getByRole("link", { name: "Check status" })).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Open the agent" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/An administrator needs to configure a manager/)).not.toBeInTheDocument();
+  expect(mockPost).not.toHaveBeenCalled();
+});

@@ -29,6 +29,8 @@ use crate::models::telegram_bot_request::{MANAGED_BOTS, ManagedBotEvents};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 pub(crate) use prompt::PROMPT_HORIZON_SECS;
+pub use setup_status::SetupNotice;
+use setup_status::SetupReason;
 
 pub struct TelegramNewService<'a> {
     pub manager_id: Option<i64>,
@@ -315,6 +317,10 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> Result<(), mongodb::error
         (
             doc! {"challenge_hash": 1},
             IndexOptions::builder().unique(true).build(),
+        ),
+        (
+            doc! {"manager_bot_id": 1, "previous_challenge_hashes": 1},
+            IndexOptions::default(),
         ),
         (
             doc! {"actor_user_id": 1},
@@ -617,6 +623,7 @@ impl TelegramNewService<'_> {
             status: Status::WaitingTelegram,
             active: true,
             revision: 0,
+            previous_challenge_hashes: Vec::new(),
             challenge_hash: hash(&challenge),
             telegram_user_id: None,
             telegram_bot_id: None,
@@ -730,7 +737,8 @@ impl TelegramNewService<'_> {
                 super::platform_provisioning_service::fence_request(&db, &captured, false, session).await?;
                 Ok(db.collection::<TelegramBotRequest>(REQUESTS).update_one(
                     doc! {"_id": &captured.id, "revision": captured.revision, "active": true},
-                    doc! {"$set": {"challenge_hash": &challenge_hash}, "$inc": {"revision": 1_i64, "connection_generation": 1_i64}},
+                    doc! {"$set": {"challenge_hash": &challenge_hash}, "$inc": {"revision": 1_i64, "connection_generation": 1_i64},
+                        "$push": {"previous_challenge_hashes": {"$each": [&captured.challenge_hash], "$slice": -4}}},
                 ).session(&mut *session).await?)
             }.await;
             super::api_key_mutation_service::transaction_result(outcome)
@@ -974,6 +982,9 @@ impl TelegramNewService<'_> {
         let command = message["text"]
             .as_str()
             .and_then(|text| manager_command(text, &manager_username));
+        if command.is_some() && !super::telegram_input::original(&update) {
+            return Ok(None);
+        }
         if let Some(("/start", "")) = command {
             let latest = self
                 .db
@@ -997,12 +1008,16 @@ impl TelegramNewService<'_> {
                 let bot = self.db.collection::<ChannelBot>(BOTS).find_one(doc! {"platform_bot_id": manager_id.to_string(), "platform_profile_id": {"$exists": true}}).await?;
                 return Ok(bot.map(|bot| (bot, update)));
             }
-            if pending.is_none()
-                && latest
-                    .as_ref()
-                    .is_some_and(|request| request.status == Status::Expired)
-            {
-                self.send_expired_setup(token, user_id).await?;
+            if let Some(request) = latest.as_ref().filter(|_| pending.is_none()) {
+                if request.status == Status::WaitingConsent {
+                    if self.owner_still_authorized(request).await? {
+                        self.send_consent(token, request).await?;
+                    } else {
+                        self.reply_to_closed_setup(token, user_id, request).await?;
+                    }
+                } else {
+                    self.reply_to_closed_setup(token, user_id, request).await?;
+                }
                 return Ok(None);
             }
             return self
@@ -1012,14 +1027,43 @@ impl TelegramNewService<'_> {
         }
         if let Some(("/start", challenge)) = command {
             if challenge.len() != 48 || !challenge.bytes().all(|b| b.is_ascii_hexdigit()) {
+                self.send_setup_notice(token, user_id, None, SetupReason::Missing)
+                    .await?;
                 return Ok(None);
             }
-            if self.db.collection::<TelegramBotRequest>(REQUESTS).find_one(doc! {
-                "manager_bot_id": manager_id, "challenge_hash": hash(challenge), "status": "expired",
-                "$or": [{"telegram_user_id": null}, {"telegram_user_id": user_id}],
-                "$and": [{"$or": [{"setup_authority": null}, {"setup_authority.telegram_sender_id": user_id}]}]
-            }).await?.is_some() {
-                self.send_expired_setup(token, user_id).await?;
+            let captured = self
+                .db
+                .collection::<TelegramBotRequest>(REQUESTS)
+                .find_one(doc! {
+                    "manager_bot_id": manager_id, "challenge_hash": hash(challenge),
+                })
+                .await?;
+            let Some(captured) = captured else {
+                let replaced = self
+                    .db
+                    .collection::<TelegramBotRequest>(REQUESTS)
+                    .find_one(doc! {
+                        "manager_bot_id": manager_id, "previous_challenge_hashes": hash(challenge),
+                    })
+                    .await?;
+                self.send_setup_notice(
+                    token,
+                    user_id,
+                    replaced.as_ref(),
+                    if replaced.is_some() {
+                        SetupReason::Superseded
+                    } else {
+                        SetupReason::Missing
+                    },
+                )
+                .await?;
+                return Ok(None);
+            };
+            if !Self::sender_matches(&captured, user_id)
+                || self.setup_reason(&captured).await?.is_some()
+            {
+                self.send_setup_notice(token, user_id, Some(&captured), SetupReason::Retry)
+                    .await?;
                 return Ok(None);
             }
             // A redelivered or explicit repeated handoff preserves the original
@@ -1093,6 +1137,7 @@ impl TelegramNewService<'_> {
             };
             if let Some(request) = request {
                 if !self.owner_still_authorized(&request).await? {
+                    self.reply_to_closed_setup(token, user_id, &request).await?;
                     return Ok(None);
                 }
                 if request.status == Status::WaitingConsent {
@@ -1103,6 +1148,7 @@ impl TelegramNewService<'_> {
                         doc! {"$set": {"status": "waiting_bot"}},
                     ).return_document(ReturnDocument::After).await?;
                     let Some(request) = bound else {
+                        self.reply_to_closed_setup(token, user_id, &request).await?;
                         return Ok(None);
                     };
                     self.send_creation_prompt(
@@ -1114,6 +1160,9 @@ impl TelegramNewService<'_> {
                     )
                     .await?;
                 }
+            } else {
+                self.reply_to_closed_setup(token, user_id, &captured)
+                    .await?;
             }
             return Ok(None);
         }
@@ -1248,32 +1297,29 @@ impl TelegramNewService<'_> {
             .await?)
     }
 
-    async fn send_expired_setup(&self, token: &str, user: i64) -> AppResult<()> {
-        self.api.call(token, "sendMessage", json!({"chat_id": user,
-            "text": "This bot setup has expired. Open NyxID to start a new setup for the intended account and agent. Any bot you already created still exists in Telegram.",
-            "reply_markup": {"remove_keyboard": true}})).await?;
-        Ok(())
-    }
-
     pub(super) async fn reply_to_closed_setup(
         &self,
         token: &str,
         user: i64,
         request: &TelegramBotRequest,
     ) -> AppResult<()> {
-        let expired = self.db.collection::<bson::Document>(REQUESTS)
-            .find_one(doc! {"_id": &request.id, "expires_at": {"$lte": bson::DateTime::now()},
-                "status": {"$in": ["waiting_telegram", "waiting_bot", "waiting_consent", "expired"]}}).await?.is_some();
-        if expired {
-            self.expire().await?;
-            return self.send_expired_setup(token, user).await;
-        }
-        // Do not expose why owner, manager, link or source authority closed, and
-        // never turn this refusal into another unbound creation request.
-        self.api.call(token, "sendMessage", json!({"chat_id":user,
-            "text":"This bot setup is no longer available. Open NyxID to check its progress or ask for a new setup for the intended account and agent.",
-            "reply_markup":{"remove_keyboard":true}})).await?;
-        Ok(())
+        self.expire().await?;
+        let current = self
+            .db
+            .collection::<TelegramBotRequest>(REQUESTS)
+            .find_one(doc! {"_id": &request.id})
+            .await?;
+        self.send_setup_notice(
+            token,
+            user,
+            current.as_ref(),
+            if current.is_some() {
+                SetupReason::Retry
+            } else {
+                SetupReason::Missing
+            },
+        )
+        .await
     }
 
     pub(super) async fn reply_if_request_expired(
@@ -1289,7 +1335,8 @@ impl TelegramNewService<'_> {
                 "status": {"$in": ["waiting_telegram", "waiting_bot", "waiting_consent", "expired"]}}).await?;
         if expired.is_some() {
             self.expire().await?;
-            self.send_expired_setup(token, user).await?;
+            self.send_setup_notice(token, user, expired.as_ref(), SetupReason::Expired)
+                .await?;
         }
         Ok(())
     }
@@ -1682,3 +1729,6 @@ mod prompt;
 
 #[path = "telegram_new_recovery.rs"]
 mod recovery;
+
+#[path = "telegram_new_status.rs"]
+mod setup_status;

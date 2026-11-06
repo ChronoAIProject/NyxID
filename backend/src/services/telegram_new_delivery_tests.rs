@@ -848,10 +848,7 @@ async fn telegram_new_hosted_recovery_refuses_deleted_replaced_or_retargeted_aut
         assert_eq!(sent.len(), before + 1, "{change}");
         let refusal = sent[before].body_json::<Value>().unwrap();
         assert!(
-            refusal["text"]
-                .as_str()
-                .unwrap()
-                .contains("setup is no longer available"),
+            refusal["text"].as_str().unwrap().contains("Check status:"),
             "{change}"
         );
         assert!(
@@ -902,7 +899,7 @@ async fn telegram_new_watch_revocation_between_instructions_and_keyboard_stops_d
         sent[1].body_json::<Value>().unwrap()["text"]
             .as_str()
             .unwrap()
-            .contains("setup is no longer available")
+            .contains("Check status:")
     );
     assert!(
         sent.iter()
@@ -948,10 +945,7 @@ async fn telegram_new_closed_hosted_authority_is_acked_but_database_admission_er
     assert_eq!(sent.len(), before + 3);
     assert!(sent[before..].iter().all(|r| {
         let body = r.body_json::<Value>().unwrap();
-        body["text"]
-            .as_str()
-            .unwrap()
-            .contains("setup is no longer available")
+        body["text"].as_str().unwrap().contains("Check status:")
             && body["reply_markup"]["keyboard"].is_null()
     }));
     // A real collection validator rejects the pre-dispatch metadata write. It
@@ -1834,16 +1828,33 @@ async fn telegram_new_expired_history_does_not_intercept_newer_setup_or_platform
         let before = server.received_requests().await.unwrap().len();
         webhook(&service, &headers, command("/start", 11 + before as i64)).await;
         let sent = server.received_requests().await.unwrap();
-        assert_eq!(sent.len(), before + 2);
+        let waiting = status == Status::WaitingBot;
+        assert_eq!(sent.len(), before + if waiting { 2 } else { 1 });
         assert!(sent[before..].iter().all(|r| {
             !r.body_json::<Value>().unwrap()["text"]
                 .as_str()
                 .unwrap()
                 .contains("expired")
         }));
-        assert!(
-            sent[before + 1].body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_array()
-        );
+        if waiting {
+            assert!(
+                sent[before + 1].body_json::<Value>().unwrap()["reply_markup"]["keyboard"]
+                    .is_array()
+            );
+        } else {
+            let reply = sent[before].body_json::<Value>().unwrap();
+            assert_eq!(reply["reply_markup"]["remove_keyboard"], true);
+            assert!(
+                reply["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(if status == Status::Connected {
+                        "setup is complete"
+                    } else {
+                        "setup was cancelled"
+                    })
+            );
+        }
     }
     // An established opted-in manager retains its platform route even when the
     // latest bound historical setup itself is expired.
@@ -1908,3 +1919,6 @@ async fn telegram_new_expired_history_does_not_intercept_newer_setup_or_platform
     assert_eq!(server.received_requests().await.unwrap().len(), before);
     state.db.drop().await.unwrap();
 }
+
+#[path = "telegram_new_status_tests.rs"]
+mod status_tests;
