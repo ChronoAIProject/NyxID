@@ -281,7 +281,9 @@ pub struct ControlRequest {
 #[serde(deny_unknown_fields)]
 pub struct AnnouncementRequest {
     pub(crate) request_id: String,
-    pub(crate) text: String,
+    pub(crate) text: Option<String>,
+    #[serde(default)]
+    pub(crate) greeting: bool,
 }
 pub async fn announcement(
     state: &AppState,
@@ -302,13 +304,19 @@ pub async fn announcement(
         false,
     )
     .await?;
-    let row = crate::services::voice::announcements::enqueue(
-        &state.db,
-        &call,
-        &body.request_id,
-        &body.text,
-    )
-    .await?;
+    let row = match (body.greeting, body.text.as_deref()) {
+        (true, None) => {
+            super::announcements::enqueue_greeting(&state.db, &call, &body.request_id).await?
+        }
+        (false, Some(text)) => {
+            super::announcements::enqueue(&state.db, &call, &body.request_id, text).await?
+        }
+        _ => {
+            return Err(AppError::ValidationError(
+                "Provide text or greeting:true, never both".into(),
+            ));
+        }
+    };
     Ok(serde_json::json!({"request_id":row.request_id,"state":row.state}))
 }
 pub async fn control(
@@ -482,7 +490,7 @@ pub async fn agents(
             "service_id":service_id,"conversation_id":thread.id}));
     }
     let settings = crate::services::assistant_settings_service::get(&state.db, &user).await?;
-    Ok(json!({"agents":rows,"preferences":settings.voice.map(Preferences::from)}))
+    Ok(json!({"agents":rows,"preferences":settings.voice.map(Preferences::from),"greetings":true}))
 }
 
 #[derive(serde::Deserialize)]
