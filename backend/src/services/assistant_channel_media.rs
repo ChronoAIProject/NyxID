@@ -221,11 +221,16 @@ pub(crate) async fn pending_receipt(
 }
 
 fn context(receipt: &MediaBound, order: &ItemOrder) -> String {
-    if receipt.failed.is_empty() {
-        return String::new();
-    }
     let mut text = String::new();
-    if receipt.ok.is_empty() {
+    let originals = receipt
+        .ok
+        .iter()
+        .filter(|item| item.status == "stored_original")
+        .count();
+    if originals > 0 {
+        text.push_str(&format!("{originals} attachment(s) are saved for download in this chat, but their contents cannot be read by the assistant."));
+    }
+    if receipt.ok.is_empty() && !receipt.failed.is_empty() {
         text.push_str(FAILED_NOTE);
     }
     for item in receipt.failed.iter().take(100) {
@@ -305,7 +310,7 @@ async fn fetch_item(
     row: &AssistantConversation,
     event: &NyxbotEvent,
     item: &crate::models::nyxbot_channel::EventMediaItem,
-) -> AppResult<String> {
+) -> AppResult<(String, bool)> {
     let request = request(&state.db, row, event).await?;
     let maximum = state
         .config
@@ -347,29 +352,49 @@ async fn fetch_item(
                 let name = selector.filename.as_deref().unwrap_or("attachment");
                 let bytes = fetched.bytes.to_vec();
                 drop(fetched);
-                let upload = Box::pin(uploads::upload_channel_authorized(
-                    &state.db,
-                    &state.encryption_keys,
-                    &row.user_id,
-                    &row.id,
-                    name,
-                    bytes,
-                    UploadSource {
-                        turn_id: row
-                            .active_turn
-                            .as_ref()
-                            .expect("claimed turn")
-                            .turn_id
-                            .clone(),
-                        event_key: event.media.as_ref().expect("media event").key.clone(),
-                        index: item.index,
-                        embedded: item.embedded,
-                        declared: event.media.as_ref().expect("media event").declared,
-                    },
-                ))
-                .await?;
+                let source = UploadSource {
+                    turn_id: row
+                        .active_turn
+                        .as_ref()
+                        .expect("claimed turn")
+                        .turn_id
+                        .clone(),
+                    event_key: event.media.as_ref().expect("media event").key.clone(),
+                    index: item.index,
+                    embedded: item.embedded,
+                    declared: event.media.as_ref().expect("media event").declared,
+                };
+                let upload = if authority::expanded_relay(&authorized.bot.platform) {
+                    // Custody or membership can change while the network is in flight.
+                    Box::pin(authority::resolve(&state.db, &request)).await?;
+                    Box::pin(uploads::upload_channel_original_authorized(
+                        &state.db,
+                        &state.encryption_keys,
+                        &row.user_id,
+                        &row.id,
+                        name,
+                        bytes,
+                        source,
+                        selector.mime_type.as_deref(),
+                    ))
+                    .await?
+                } else {
+                    Box::pin(uploads::upload_channel_authorized(
+                        &state.db,
+                        &state.encryption_keys,
+                        &row.user_id,
+                        &row.id,
+                        name,
+                        bytes,
+                        source,
+                    ))
+                    .await?
+                };
                 drop(reservation);
-                return Ok(upload.id);
+                let original_only = upload.content_type == "application/octet-stream"
+                    || upload.content_type.starts_with("audio/")
+                    || upload.content_type.starts_with("video/");
+                return Ok((upload.id, original_only));
             }
         }
     }
@@ -383,6 +408,7 @@ async fn collect(
 ) -> AppResult<MediaBound> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
     let mut order = ItemOrder::new();
+    let mut rechecks = Vec::new();
     let mut receipt = MediaBound {
         event_ids: message.media_event_ids.clone(),
         ok: Vec::new(),
@@ -423,17 +449,23 @@ async fn collect(
                 result.filter(|_| tokio::time::Instant::now() < deadline)
             };
             match fetched {
-                Some(Ok(id)) => receipt.ok.push(outcome(
+                Some(Ok((id, original_only))) => receipt.ok.push(outcome(
                     &event,
                     Some(item.index),
                     item.embedded,
-                    "bound",
+                    if original_only {
+                        "stored_original"
+                    } else {
+                        "bound"
+                    },
                     Some(id),
                 )),
                 Some(Err(error)) => {
                     let status = match error {
                         AppError::ChannelMediaTooLarge => "too_large",
-                        AppError::NotFound(_) | AppError::Forbidden(_) => "source_unavailable",
+                        AppError::NotFound(_)
+                        | AppError::Forbidden(_)
+                        | AppError::SecurityReadinessUnavailable => "source_unavailable",
                         AppError::BadRequest(_) => "unsupported_or_invalid",
                         AppError::RateLimited => "rate_limited",
                         _ => "fetch_or_store_failed",
@@ -466,6 +498,31 @@ async fn collect(
                 ),
                 None,
             ));
+        }
+        if authority::expanded_relay(&media.platform) {
+            rechecks.push(event);
+        }
+    }
+    // Revalidate new adapters immediately before binding, after every fetch and
+    // extraction has completed. Unbound uploads are purged by settlement.
+    for event in rechecks {
+        let valid = match request(&state.db, row, &event).await {
+            Ok(request) => Box::pin(authority::resolve(&state.db, &request))
+                .await
+                .is_ok(),
+            Err(_) => false,
+        };
+        if !valid {
+            let (kept, refused): (Vec<_>, Vec<_>) = receipt
+                .ok
+                .into_iter()
+                .partition(|item| item.event_id != event.id);
+            receipt.ok = kept;
+            receipt.failed.extend(refused.into_iter().map(|mut item| {
+                item.status = "source_unavailable".into();
+                item.upload_id = None;
+                item
+            }));
         }
     }
     receipt.context = context(&receipt, &order);

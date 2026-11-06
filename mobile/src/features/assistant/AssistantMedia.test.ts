@@ -459,3 +459,27 @@ test("real crew receipt renderer supports notice/agent rows and removes duplicat
     x.h.unmount();
   }
 });
+
+
+test("queued channel event attachments remain visible in their own conversation", () => {
+  const attachments = [
+    { id: "photo", origin: "user_upload", content_type: "image/png", label: "photo" },
+    { id: "file", origin: "user_upload", content_type: "application/octet-stream", label: "original.bin" },
+  ];
+  const x = setup("./AssistantSystemMessage.tsx", "AssistantSystemMessage", {
+    message: { role: "event", text: "Queued owner message", attachments },
+    conversationId: "channel-thread",
+    onOpenAutomations: () => {},
+  }, {
+    "../../theme/ThemeContext": { useTheme: () => ({ colors: { segmentTrack: "#111" } }) },
+    "../../components/AgentAvatar": { AgentAvatar: "Avatar" },
+    "./AssistantMessageFooter": { AssistantMessageTime: "Time" },
+    "./AssistantAttachmentView": { AssistantAttachmentView: "Attachment" },
+    "lucide-react-native": {},
+  });
+  const rendered = x.nodes().filter((n) => n.type === "Attachment");
+  assert.equal(rendered.length, 2);
+  assert.deepEqual(rendered.map((n) => n.props.attachment), attachments);
+  assert.ok(rendered.every((n) => n.props.conversationId === "channel-thread"));
+  x.h.unmount();
+});

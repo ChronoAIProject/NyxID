@@ -79,6 +79,14 @@ itself remains unchanged. Disable ingress and drain its socket holders before
 rolling back to writers that do not coordinate the gateway handoff; see
 [Discord relay setup](CHANNEL_BOT_RELAY.md#discord-ordinary-chat-and-interactions).
 
+`assistant:channel-media-v2` gates new owner ingestion for Discord, Slack,
+WhatsApp and X relay sources under the existing `assistant:channel-media` flag.
+It is an execution capability, not a separate feature flag: admission and
+fetch/bind rechecks require a complete upgraded roster and drained old workers.
+Lark/Feishu/Telegram retain their existing owner-media gates. No guest-media
+authority is added. Keep upgraded workers until accepted media drains before
+binary rollback; see [channel media](chat/10-uploads.md#channel-rollout-and-rollback).
+
 The `approval:required-web-v1` capability is **diagnostic**, not an enforced
 activation switch. Required approval is implemented by every upgraded process
 without waiting for the readiness report. Drain and upgrade every serving
