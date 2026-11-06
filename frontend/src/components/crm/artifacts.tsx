@@ -159,7 +159,7 @@ function ObjectArtifact({ artifact }: { readonly artifact: TurnCrmArtifact }) {
         {total === 0
           ? "No records yet."
           : total == null
-            ? "Unknown records"
+            ? "Record count unavailable"
             : formatCrmCount(total, "record")}
       </p>
     </Frame>

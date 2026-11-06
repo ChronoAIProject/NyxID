@@ -125,7 +125,7 @@ it.each([
   [0, "No records yet."],
   [1, "1 record"],
   [2, "2 records"],
-  [null, "Unknown records"],
+  [null, "Record count unavailable"],
 ] as const)(
   "renders an object artifact with total %s as %s",
   async (total, expected) => {
