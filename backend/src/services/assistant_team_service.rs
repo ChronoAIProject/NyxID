@@ -48,6 +48,8 @@ pub const NYXBOT_NAME: &str = "NyxBot";
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_DESCRIPTION_CHARS: usize = 2048;
 pub const MAX_GRANT_TARGETS: usize = 32;
+/// Archive discovery is bounded separately from the complete live roster.
+pub const DESTROYED_AGENT_LIMIT: usize = 200;
 /// Loop guards for server-started event turns.
 pub const EVENT_TURNS_PER_HOUR: u64 = 20;
 /// Channel turns run at once for one owner, across all their bots and chats,
@@ -504,28 +506,56 @@ async fn qualified_name(db: &Database, agent: &AssistantAgent) -> AppResult<Stri
     Ok(format!("{prefix}/{}", agent.name))
 }
 
-/// The owner's agents: NyxBot first, then specialists oldest first.
+/// All visible live agents (NyxBot first, then oldest first), followed by the
+/// most recently destroyed agents. Archives never consume live roster slots.
 pub async fn agents(
     db: &Database,
     owner: &str,
     include_destroyed: bool,
 ) -> AppResult<Vec<AssistantAgent>> {
+    Ok(agent_roster(db, owner, include_destroyed).await?.0)
+}
+
+async fn agent_roster(
+    db: &Database,
+    owner: &str,
+    include_destroyed: bool,
+) -> AppResult<(Vec<AssistantAgent>, bool)> {
     let owners = super::org_agent_service::visible_owners(db, owner).await?;
-    let mut filter =
+    let scope =
         doc! {"user_id": {"$in": owners}, "$or": [{"user_id": owner}, {"kind": "specialist"}]};
-    if !include_destroyed {
-        filter.insert("destroyed_at", bson::Bson::Null);
-    }
-    let mut rows: Vec<AssistantAgent> = db
-        .collection::<AssistantAgent>(AGENTS)
-        .find(filter)
-        .sort(doc! {"created_at": 1})
-        .limit(200)
+    let collection = db.collection::<AssistantAgent>(AGENTS);
+    let mut live_filter = scope.clone();
+    live_filter.insert("destroyed_at", bson::Bson::Null);
+    let mut rows: Vec<AssistantAgent> = collection
+        .find(live_filter)
+        .sort(doc! {"created_at": 1, "_id": 1})
         .await?
         .try_collect()
         .await?;
     rows.sort_by_key(|agent| !agent.is_nyxbot());
-    Ok(rows)
+    if !include_destroyed {
+        return Ok((rows, false));
+    }
+    let mut archive_filter = scope;
+    archive_filter.insert("destroyed_at", doc! {"$ne": bson::Bson::Null});
+    let mut archive: Vec<AssistantAgent> = collection
+        .find(archive_filter)
+        .sort(doc! {"destroyed_at": -1, "_id": -1})
+        .limit((DESTROYED_AGENT_LIMIT + 1) as i64)
+        .await?
+        .try_collect()
+        .await?;
+    let truncated = archive.len() > DESTROYED_AGENT_LIMIT;
+    archive.truncate(DESTROYED_AGENT_LIMIT);
+    // A live row destroyed between the two reads must not appear twice.
+    let live_ids: HashSet<_> = rows.iter().map(|row| row.id.clone()).collect();
+    rows.extend(
+        archive
+            .into_iter()
+            .filter(|row| !live_ids.contains(&row.id)),
+    );
+    Ok((rows, truncated))
 }
 
 /// The agent a thread belongs to; legacy rows belong to the owner's NyxBot.
@@ -2884,11 +2914,40 @@ pub async fn summaries(
     include_destroyed: bool,
     reply_chars: usize,
 ) -> AppResult<Vec<AgentSummary>> {
+    Ok(
+        summaries_with_archive(db, owner, include_nyxbot, include_destroyed, reply_chars)
+            .await?
+            .0,
+    )
+}
+
+/// Archive metadata comes from the same bounded query as the returned rows.
+pub async fn summaries_with_archive(
+    db: &Database,
+    owner: &str,
+    include_nyxbot: bool,
+    include_destroyed: bool,
+    reply_chars: usize,
+) -> AppResult<(Vec<AgentSummary>, bool)> {
     ensure_nyxbot(db, owner).await?;
-    let mut rows = agents(db, owner, include_destroyed).await?;
+    let (mut rows, truncated) = agent_roster(db, owner, include_destroyed).await?;
     if !include_nyxbot {
         rows.retain(|agent| !agent.is_nyxbot());
     }
+    Ok((
+        summaries_for_agents(db, owner, rows, reply_chars).await?,
+        truncated,
+    ))
+}
+
+/// Summarize already resolved own/org agents, including an exact archived
+/// agent requested through its details route rather than roster discovery.
+pub(crate) async fn summaries_for_agents(
+    db: &Database,
+    owner: &str,
+    rows: Vec<AssistantAgent>,
+    reply_chars: usize,
+) -> AppResult<Vec<AgentSummary>> {
     let names = slug_names(db, &rows).await?;
     let requests = pending_requests(db, owner).await?;
     let by_thread = request_agents(db, owner, &requests, &rows).await?;

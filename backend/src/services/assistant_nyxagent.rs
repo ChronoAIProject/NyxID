@@ -1289,6 +1289,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             false,
         ),
         (
+            crate::models::assistant_agent::COLLECTION_NAME,
+            doc! {"user_id": 1, "destroyed_at": -1, "_id": -1},
+            false,
+        ),
+        (
             crate::models::nyxbot_channel::COLLECTION_NAME,
             doc! {"user_id": 1, "channel_bot_id": 1, "created_at": -1, "_id": -1},
             false,
