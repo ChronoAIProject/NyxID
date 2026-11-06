@@ -329,6 +329,8 @@ impl Fixture {
 
 #[tokio::test]
 async fn proxy_uuid_and_slug_covered_have_no_prompts_and_one_attempt_each() {
+    use tracing::instrument::WithSubscriber;
+    let captured = migration_tests::Capture::default();
     let f = Fixture::new("execution_proxy_covered").await;
     f.enroll(true).await;
     f.store(&f.grant().await).await;
@@ -336,10 +338,23 @@ async fn proxy_uuid_and_slug_covered_have_no_prompts_and_one_attempt_each() {
         "/proxy/s/execution-fixture/status".into(),
         format!("/proxy/{}/status", f.catalog),
     ] {
-        let (status, body) = f.call(&route).await;
+        let (status, body) = f.call(&route).with_subscriber(captured.subscriber()).await;
         assert_eq!(status, StatusCode::OK, "{body}");
     }
     assert_eq!(f.server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(
+        captured.0.lock().unwrap().len(),
+        2,
+        "one decision per HTTP/MCP occurrence"
+    );
+    assert!(
+        captured
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event["cause"] == "permission_covered")
+    );
     f.no_prompts().await;
     f.cleanup().await;
 }
@@ -450,6 +465,7 @@ async fn twenty_duplicate_operation_claims_send_once_and_uncertain_never_replays
             authority: OnceCell::new(),
             policies: tokio::sync::Mutex::new(Vec::new()),
             decision: OnceLock::new(),
+            observation: Default::default(),
         });
         permits.push(f.prepare(&context, &target).await);
     }
@@ -524,6 +540,7 @@ async fn claimed_before_send_crash_never_resets_the_operation() {
         authority: OnceCell::new(),
         policies: tokio::sync::Mutex::new(Vec::new()),
         decision: OnceLock::new(),
+        observation: Default::default(),
     });
     let permit = f.prepare(&ctx, &target).await;
     permit.reserve().await.unwrap();
@@ -534,6 +551,8 @@ async fn claimed_before_send_crash_never_resets_the_operation() {
 
 #[tokio::test]
 async fn mcp_endpoint_and_generic_preparation_share_the_decision_and_send_once() {
+    use tracing::instrument::WithSubscriber;
+    let captured = migration_tests::Capture::default();
     let f = Fixture::new("execution_mcp_covered").await;
     f.enroll(true).await;
     let endpoint = test_utils::test_service_endpoint(&f.catalog, "status", "GET", "/status");
@@ -565,6 +584,7 @@ async fn mcp_endpoint_and_generic_preparation_share_the_decision_and_send_once()
                     ))
                     .unwrap(),
             )
+            .with_subscriber(captured.subscriber())
             .await
             .unwrap();
         let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
@@ -575,6 +595,19 @@ async fn mcp_endpoint_and_generic_preparation_share_the_decision_and_send_once()
         assert_eq!(body["result"]["isError"], false, "{body}");
     }
     assert_eq!(f.server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(
+        captured.0.lock().unwrap().len(),
+        2,
+        "one decision per HTTP/MCP occurrence"
+    );
+    assert!(
+        captured
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event["cause"] == "permission_covered")
+    );
     f.no_prompts().await;
     f.cleanup().await;
 }
@@ -659,6 +692,8 @@ async fn connection_binding_survives_dispatch_locks_but_fences_destination_chang
 async fn unmarked_coordinator_adds_zero_database_commands() {
     use mongodb::event::{EventHandler, command::CommandEvent};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracing::instrument::WithSubscriber;
+    use tracing_subscriber::prelude::*;
     let mut f = Fixture::new("execution_zero_reads").await;
     let key = f
         .state
@@ -698,6 +733,8 @@ async fn unmarked_coordinator_adds_zero_database_commands() {
     );
     let descriptor =
         super::super::operation_descriptor::build_http_descriptor("GET", "status", None);
+    let captured = migration_tests::Capture::default();
+    let subscriber = tracing::Dispatch::new(tracing_subscriber::registry().with(captured.clone()));
     admit_http(
         &f.state,
         &auth,
@@ -714,8 +751,38 @@ async fn unmarked_coordinator_adds_zero_database_commands() {
         false,
         None,
     )
+    .with_subscriber(subscriber.clone())
     .await
     .unwrap();
+    assert!(
+        prepare(
+            &f.state,
+            None,
+            None,
+            &key.id,
+            Effect {
+                connection: &f.connection,
+                owner: &f.owner,
+                target: &target,
+                method: "GET",
+                path: "status",
+                query: None,
+                body: b"",
+                content_type: None,
+                headers: &[],
+                endpoint: None,
+                floors: &[],
+            }
+        )
+        .with_subscriber(subscriber)
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+        captured.0.lock().unwrap().is_empty(),
+        "unmarked diagnostics create neither events nor consent reads"
+    );
     assert_eq!(
         count.load(Ordering::SeqCst),
         0,
@@ -1593,6 +1660,7 @@ async fn operation_candidates_use_independent_claims_and_prefer_reusable_coverag
         authority: OnceCell::new(),
         policies: tokio::sync::Mutex::new(Vec::new()),
         decision: OnceLock::new(),
+        observation: Default::default(),
     });
     let permit = f.prepare(&ctx, &target).await;
     assert_eq!(permit.grant.id, reusable.id);
@@ -2668,5 +2736,7 @@ pub(super) mod proposal_tests;
 
 #[path = "enrollment_tests.rs"]
 mod enrollment_tests;
+#[path = "migration_tests.rs"]
+mod migration_tests;
 #[path = "proposal_v2_tests.rs"]
 mod proposal_v2_tests;

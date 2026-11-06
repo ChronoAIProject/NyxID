@@ -22,6 +22,7 @@ use crate::{
 
 mod authority;
 pub(crate) mod descendants;
+mod diagnostics;
 pub(crate) mod machine;
 mod native;
 pub(crate) mod proposals;
@@ -58,11 +59,18 @@ pub(crate) struct RequestContext {
     authority: OnceCell<Arc<authority::Snapshot>>,
     policies: tokio::sync::Mutex<Vec<(String, PolicyDecision)>>,
     decision: OnceLock<Resolution>,
+    observation: diagnostics::Observation,
 }
 
 impl std::fmt::Debug for RequestContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("RequestContext { [REDACTED] }")
+    }
+}
+
+impl Drop for RequestContext {
+    fn drop(&mut self) {
+        self.observation.abandoned(self);
     }
 }
 
@@ -143,6 +151,7 @@ impl RequestContext {
         db: &Database,
         chat: Option<&acks::ChatAuthority>,
     ) -> AppResult<bool> {
+        self.observation.stage(diagnostics::Stage::Enrollment);
         let enabled = *self
             .admission
             .get_or_try_init(|| async {
@@ -156,6 +165,10 @@ impl RequestContext {
                 || chat.is_some_and(|c| c.execution_task.is_some()))
         {
             return Err(refused());
+        }
+        if !enabled {
+            self.observation
+                .decide(diagnostics::Decision::new("legacy", "legacy_flag_off"));
         }
         Ok(enabled)
     }
@@ -302,6 +315,7 @@ impl RequestContext {
             authority: OnceCell::new(),
             policies: tokio::sync::Mutex::new(Vec::new()),
             decision: OnceLock::new(),
+            observation: Default::default(),
         }))
     }
 
@@ -367,6 +381,7 @@ impl RequestContext {
                     "execution.v1.subject.principal": bson::to_bson(&self.principal).map_err(encoding)?})
                 .limit(MAX_CANDIDATES + 1).await?.try_collect().await?;
             if rows.len() > MAX_CANDIDATES as usize {
+                self.observation.decide(diagnostics::Decision::new("operational_error", "candidate_limit_exceeded"));
                 return Err(AppError::Internal("Execution permission candidate limit exceeded".into()));
             }
             Ok(rows)
@@ -652,7 +667,7 @@ pub(crate) fn prepare<'a>(
     key: &'a str,
     effect: Effect<'a>,
 ) -> futures::future::BoxFuture<'a, AppResult<Option<Arc<Permit>>>> {
-    Box::pin(async move {
+    Box::pin(diagnostics::observe(context, async move {
         let Some(context) = context else {
             return Ok(None);
         };
@@ -679,13 +694,16 @@ pub(crate) fn prepare<'a>(
                 _ => Err(refused()),
             };
         }
+        context.observation.stage(diagnostics::Stage::Authority);
         let rows = context.candidates(db, effect.connection).await?;
         if let Some(task) = chat.and_then(|c| c.execution_task.as_ref()) {
+            context.observation.stage(diagnostics::Stage::Task);
             tasks::check(db, task).await?;
         }
         if chat.is_some_and(|c| c.collaboration_thread && c.execution_task.is_none()) {
             return Err(refused());
         }
+        context.observation.stage(diagnostics::Stage::Authority);
         let authority = context.authority(db, effect.connection, key).await?.clone();
         let binding = binding(
             db,
@@ -789,6 +807,7 @@ pub(crate) fn prepare<'a>(
                 _ => 3,
             }
         });
+        context.observation.stage(diagnostics::Stage::Coverage);
         let mut prohibited = None;
         let mut gap = candidates.is_empty();
         let mut gaps = Vec::new();
@@ -916,6 +935,9 @@ pub(crate) fn prepare<'a>(
                         .decision
                         .set(Resolution::Covered(permit.clone()))
                         .map_err(|_| refused())?;
+                    context
+                        .observation
+                        .decide(diagnostics::Decision::new("covered", "permission_covered"));
                     return Ok(Some(permit));
                 }
                 Ok(contract::Decision::RequestableGap(reason)) => {
@@ -933,6 +955,9 @@ pub(crate) fn prepare<'a>(
             }
         }
         if let Some(error) = failure {
+            context
+                .observation
+                .decide(diagnostics::Decision::failure(error));
             return Err(match error {
                 contract::EvaluationError::OutcomeUncertain => uncertain(),
                 contract::EvaluationError::ResourceVerificationRequired => AppError::Forbidden(
@@ -943,12 +968,21 @@ pub(crate) fn prepare<'a>(
                 }
             });
         }
-        if !gap && prohibited.is_some() {
+        if !gap && let Some(reason) = prohibited {
+            context
+                .observation
+                .decide(diagnostics::Decision::prohibited(reason));
             return Err(refused());
         }
         if context.resume().is_some() {
             return Err(refused());
         }
+        context.observation.decide(diagnostics::Decision::gap(
+            gaps.first()
+                .copied()
+                .unwrap_or(contract::Gap::MissingPermission),
+        ));
+        context.observation.stage(diagnostics::Stage::Proposal);
         if context.authoring_allowed()
             && context.descendant.is_none()
             && context.native.is_none()
@@ -990,7 +1024,7 @@ pub(crate) fn prepare<'a>(
         }
         let _ = context.decision.set(Resolution::Gap);
         Ok(None)
-    })
+    }))
 }
 
 impl Permit {
@@ -1062,6 +1096,7 @@ impl Permit {
                 authority: OnceCell::new(),
                 policies: tokio::sync::Mutex::new(Vec::new()),
                 decision: OnceLock::new(),
+                observation: Default::default(),
             };
             let current = binding(
                 &self.db,
@@ -1569,11 +1604,16 @@ pub(crate) fn admit_http<'a>(
     auto_connected: bool,
     legacy_operation: Option<&'a serde_json::Value>,
 ) -> futures::future::BoxFuture<'a, AppResult<()>> {
-    Box::pin(async move {
+    let observation = auth.execution_permission.as_ref();
+    Box::pin(diagnostics::observe(observation, async move {
         let Some(context) = auth.execution_permission.as_ref() else {
             return Ok(());
         };
         let Some(connection) = connection else {
+            context.observation.decide(diagnostics::Decision::new(
+                "legacy",
+                "legacy_unsupported_source",
+            ));
             return Ok(());
         };
         if method == "CONNECT"
@@ -1589,6 +1629,10 @@ pub(crate) fn admit_http<'a>(
                     || c.confirmation_policy.is_some()
             })
         {
+            context.observation.decide(diagnostics::Decision::new(
+                "legacy",
+                "legacy_unsupported_transport",
+            ));
             return Ok(());
         }
         if matches!(
@@ -1597,6 +1641,10 @@ pub(crate) fn admit_http<'a>(
                 | nyxid_service_adapters::ifttt_mcp::AUTH_METHOD
         ) || super::telnyx_platform_service::contract(&target.service).is_some()
         {
+            context.observation.decide(diagnostics::Decision::new(
+                "legacy",
+                "legacy_unsupported_transport",
+            ));
             return Ok(());
         }
         if !context
@@ -1605,7 +1653,13 @@ pub(crate) fn admit_http<'a>(
         {
             return Ok(());
         }
-        context.enable_authoring();
+        context.observation.stage(diagnostics::Stage::Authority);
+        // Preserve the proxy ingress's legacy-card retry decision. This only
+        // suppresses new proposal authoring: existing permissions, ceilings and
+        // live fences still run, then the legacy gate claims the exact card.
+        if !headers.contains_key(super::assistant_service_execution::ACK_HEADER) {
+            context.enable_authoring();
+        }
         context.capture_idempotency(headers);
         let mut drain_chat = auth.assistant_chat.as_deref().cloned();
         if let Some(chat) = drain_chat.as_mut() {
@@ -1619,6 +1673,7 @@ pub(crate) fn admit_http<'a>(
         // Marked in-flight work cannot downgrade to legacy when enrollment drains,
         // even when today's mode happens to require no discretionary prompt.
         context.candidates(&state.db, connection).await?;
+        context.observation.stage(diagnostics::Stage::Task);
         if let Some(chat) = auth.assistant_chat.as_deref()
             && let Some(task) = &chat.execution_task
         {
@@ -1630,6 +1685,7 @@ pub(crate) fn admit_http<'a>(
         if let Some(source) = &context.descendant {
             source.check(&state.db, None).await?;
         }
+        context.observation.stage(diagnostics::Stage::Authority);
         // Capture policy/credential selectors before evaluating any cached policy.
         // prepare compares them again, and the send transaction fences this same
         // evidence. A deny inserted during admission cannot become a fresh baseline.
@@ -1642,6 +1698,7 @@ pub(crate) fn admit_http<'a>(
             .await?;
         let actor = auth.effective_approval_owner_user_id();
         let owner = owner.unwrap_or(&actor);
+        context.observation.stage(diagnostics::Stage::Policy);
         let (outcome, _) = approval(
             Some(context),
             &state.db,
@@ -1657,6 +1714,9 @@ pub(crate) fn admit_http<'a>(
         )
         .await?;
         if matches!(outcome, super::approval_service::ApprovalOutcome::Denied) {
+            context
+                .observation
+                .decide(diagnostics::Decision::new("hard_denial", "policy_denied"));
             return Err(refused());
         }
         let mut floors = Vec::new();
@@ -1724,7 +1784,7 @@ pub(crate) fn admit_http<'a>(
                             &chat.api_key_id,
                         )
                         .await?;
-                        super::shared_agent_consent::always_covers(
+                        super::shared_agent_consent::has_approved_consent(
                             &state.db,
                             chat,
                             chat.org_agent_access
@@ -1817,7 +1877,7 @@ pub(crate) fn admit_http<'a>(
         .await?;
         target.execution_permission = permit;
         Ok(())
-    })
+    }))
 }
 
 pub(crate) fn approval_outcome(

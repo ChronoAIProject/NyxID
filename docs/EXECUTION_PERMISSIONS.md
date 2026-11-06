@@ -165,17 +165,18 @@ old record; no widening by inference.
 
 #2194 Phase A does not include authoring; #2195 Part A below adds assistant
 permission cards and web UI. Phase B adds the bounded adapters below, while
-mandatory-org authoring and legacy migration remain excluded. Tests cover
+mandatory-org authoring remains excluded. #2196 documents and tests legacy records as-is; it does not backfill consent. Tests cover
 the pure contract, serialization/legacy management, real proxy/MCP/LLM admission,
 provider attempt counts, task fences, concurrent claims and the unmarked database
 command budget. The adapter matrix below defines the exact boundary.
 
 ## Dispatch integration: #2194 Phase A
 
-Phase A adds default-off enforcement for existing execution-contract fixtures;
-permission authoring and the consolidated approve → persist → resume workflow
-remain #2195. It never converts a legacy approval or Always consent into an
-execution permission, and creates no proposal fields or inert cards.
+Phase A introduced enforcement; #2195 Parts A and B1 below now supply human
+authoring and the consolidated approve → persist → resume workflow for their
+listed sources. The registry default remains off, while production is globally
+enrolled. Neither dispatch nor enrollment converts a legacy approval or Always
+consent into an execution permission.
 
 ### Activation and read budget
 
@@ -221,8 +222,8 @@ the legacy gates. Disabling cannot downgrade already admitted coverage to Full.
 Decision order is ceilings/deny → full coverage evaluation → remaining floors →
 claims → final live revalidation → dispatch. **Covered** suppresses only the
 three closed eligible floors above, without making fake legacy consents or
-receipts. **RequestableGap** keeps the legacy chain except for the eligible assistant
-authoring path defined below. **Prohibited** returns before a new card
+receipts. **RequestableGap** uses a consolidated review only for the eligible Part A or B1
+source and retainable effect defined below; otherwise it keeps the legacy chain. **Prohibited** returns before a new card
 or effect. Database, provider, billing, capacity and unsupported-adapter failures
 remain operational errors. The separately authored mandatory-org marker, when
 encountered in participating admission, refuses coverage; its authoring remains
@@ -275,8 +276,8 @@ the existing 30-day retention projection. Reusable permissions are not consumed.
 The remote send is linearized at the dispatch barrier; cancellation after it can
 stop further sends but cannot undo an already admitted provider effect.
 
-Upgrade readers and dispatchers, drain older writers, then enable per-person
-cohorts. Old replicas ignore additive fields and keep their legacy behavior;
+Upgrade readers and dispatchers, drain older writers, then activate the intended
+person/org/global cohorts through the readiness gate. Old replicas ignore additive fields and keep their legacy behavior;
 they must not serve an activated cohort. Before binary rollback, disable and
 drain marked roots and claims on upgraded replicas. The `expires_at` TTL remains
 unchanged, including persistent permission sentinel retention. No legacy migration, native-policy-key cutover or version bump is included.
@@ -286,12 +287,13 @@ unchanged, including persistent permission sentinel retention. No legacy migrati
 
 ### Eligible sources and one private review
 
-Only a live, enrolled assistant chat key with a recoverable server `TaskRef` can
-create a proposal: private owner, shared-recipient and collaboration-group turns,
+A **Part A (v1)** proposal requires a live, enrolled assistant chat key with a
+recoverable server `TaskRef`: private owner, shared-recipient and collaboration-group turns,
 through ordinary HTTP proxy or MCP endpoint/generic/prepared HTTP. Guest,
 platform/channel/automation, old in-flight turns without recorded lineage,
-ordinary API-key/external and standalone LLM-gateway callers retain their existing
-gap behavior. Unsupported managed/composite transformations also retain legacy
+ordinary API-key/external and standalone LLM-gateway callers cannot create v1
+proposals. B1 below adds v2 authoring for eligible external/LLM sources; the other
+excluded sources retain their existing gap behavior. Unsupported managed/composite transformations also retain legacy
 prompts. Phase B adapters never create Part A proposals; the B1 section below adds separately tagged proposals for eligible sources.
 
 The existing `ApprovalRequest` carries one versioned `execution_proposal`.
@@ -692,3 +694,87 @@ must support the new closed Machine source/adapter variants before readiness
 allows authoring. Keep existing B1 sources available during that rollout. Before
 rolling back to B1-only binaries, drain/remove every Machine-variant proposal row,
 including terminal rows, since old typed readers cannot deserialize that variant.
+
+## Legacy mapping and admission diagnostics (#2196a)
+
+There is no data migration, backfill, index, TTL change or new environment
+variable. The following records continue through their original evaluators.
+Missing account, input, audience or lifetime bindings never become authority by
+inference. An explicit upgrade requires a new human-reviewed server-built
+execution contract; it does not relabel or delete the old record.
+
+| Existing record | Retained guarantee |
+| --- | --- |
+| Service / Agent / Key allowlists and conversation-key mirrors | Access ceilings and live owner/org/share/platform ACLs; no affirmative operation consent. |
+| Scoped operations / InputRules | Compiled method/path/query/body and contract ceilings on each prepared effect; permissions cannot widen them. |
+| Legacy ApprovalGrant in grant mode | Recorded service/requester/scope, finite expiry and revocation. Absent `org_scoped` remains personal; true retains deliberate org-member reuse. It satisfies only its own approval layer. |
+| Per-request service approval | One original waiter, expiry and cancellation; no reusable grant or inferred exact provider-idempotency promise. |
+| Exact approvals and action cards | Exact bindings, one-use claims, expiry and terminal receipts. Management cards amend only their stated ceiling after the authorized decision. |
+| Shared Always / Once / Skip | Actor connection, conversation/key, operation, share/behavior/authority bindings and original claim/skip rules. Always is not cross-conversation consent; Once never becomes Always. |
+| Full / Auto / Ask | Prompt defaults only. A matching execution permit satisfies only its named eligible floors. Explicit deny, org instruction, webhook, Machine/login and delegation requirements stay independent. |
+| Native permission keys | Immutable personal policy, adapter resource verification, live pause/revision/revocation and at most 90-day credential life. Verification is separate from the primary write claim. |
+| DurableOperationGrant | Original scheduled owner/key/connection/endpoint, finite validity, input limits, quotas, replay policy and execution journal. No counter reset or persistent conversion. |
+
+Legacy requester identity remains `AuthUser::approval_requester_id()`; it is
+not retrofitted to the new contract's explicit API-key principal. In particular,
+a general key's legacy token-subject binding must not be mistaken for a per-key
+execution contract.
+
+Billing remains on the original resolved credential/execution lane. Shared
+actor-owned credentials remain the actor's; platform-key usage is billed to the
+acting person. A permission or approval never substitutes a billing owner.
+
+Operational admission telemetry is metadata-only: a single aggregate
+`execution_permission_decision` event per request context, including prepared
+MCP re-entry and connected-wait recursion. It uses the existing structured server
+log pipeline, not product analytics (whose consent lookup would add commands).
+There is no synchronous per-request audit write, no diagnostic database lookup,
+and no event/extra command for an unmarked coordinator. Legacy outcomes are
+logged at debug; covered, requestable-gap, hard-denial and operational-error
+outcomes remain info. Diagnostic state tolerates mutex poisoning, including
+when an abandoned request is dropped during unwinding. Existing transactional
+requested/saved/denied/dispatched audits retain their original coupling.
+
+The fields are the server operation UUID, route, decision, closed cause, stage and
+whether this is a resume. Coverage also records the closed lane, validity and
+floor enums and whether an operation claim is required. No input values, paths, headers, credential identifiers,
+provider bodies or text enter the event. Decision causes distinguish:
+
+- `covered`: `permission_covered`.
+- `requestable_gap`: `permission_missing`, `subject_changed`,
+  `connection_binding_changed`, `context_changed`,
+  `operation_or_inputs_outside_scope`, `validity_not_covering`,
+  `additional_floor_required`.
+- `hard_denial`: explicit policy/ceiling, revoked or invalid permission, unsupported
+  version, used claim, dead task, resource denial or ineligible decider. A marked
+  resume that no longer covers refuses; it cannot fall back to Full.
+- `operational_error`: unavailable authority/readiness/enrollment resolution,
+  candidate overflow, required resource verification, uncertain outcome or
+  `admission_abandoned` when a started admission future is dropped.
+- `legacy`: a stale-positive hint resolved off, unsupported source/transport, or
+  no eligible floor. This is not a denial of the ordinary legacy path.
+
+The event describes **admission**, not provider completion. Independent floor
+prompts and later live fences remain possible; provider outcome/attempt evidence
+comes from existing dispatch and result receipts. Candidate failures are not
+logged individually or mistaken for the aggregate result when another whole
+permission covers. The rollout flag remains a hint plus live admission check,
+not authority; disable drains marked work without retroactively undoing a send.
+
+At rollout, an ACK_HEADER retry retains the ingress decision to use an existing
+legacy card. This suppresses only new proposal authoring: saved permissions,
+ceilings and live drain checks still run, and the normal legacy gate must match
+and consume that exact card. A forged ID or changed call cannot authorize a
+send. Shared Once and Always decisions are observed under the original exact
+actor/key/conversation/connection/operation/behavior/expiry binding. Observation
+issues no execution permit: the normal shared gate still checks live authority
+and claims Once before egress. A consumed HTTP Once decision cannot authorize
+another occurrence; changed consent must pass the original live checks.
+
+The remaining #2196 slices are explicit private cross-conversation authoring,
+verified-owner channel source/resume/result delivery, and integrated B2 evidence.
+Current assistant choices, including persistent, still bind one conversation.
+The reader's explicit `SameAudience` support is not proof of an owner-facing
+cross-conversation authoring journey. Channel/automation/guest and live voice
+remain outside the supported source list above. No #2196a test or diagnostic
+implicitly enrolls them or changes their audience.
