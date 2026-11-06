@@ -86,7 +86,7 @@ pub async fn presence(
     request: &MediaRequest,
     missing_media: bool,
 ) -> AppResult<usize> {
-    if !matches!(request.channel.platform.as_str(), "lark" | "feishu")
+    if !authority::supported_relay(&request.channel.platform)
         || !flags::personal_flag_enabled(
             db,
             &request.channel.user_id,
@@ -98,11 +98,7 @@ pub async fn presence(
     }
     match authority::source(db, request).await {
         Ok(source) => {
-            if source
-                .attachments
-                .iter()
-                .any(|a| !matches!(a.content_type.as_str(), "image" | "file"))
-            {
+            if !authority::supported_source(&source) {
                 return Ok(0);
             }
             Ok(source.attachments.len()
@@ -130,7 +126,7 @@ pub async fn presence(
 /// Source presence is computed for every sender. Only a verified owner with
 /// live authority can acquire a media claim. No gateway handles enter this API.
 pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Option<EventMedia>> {
-    if !matches!(request.channel.platform.as_str(), "lark" | "feishu") {
+    if !authority::supported_relay(&request.channel.platform) {
         return Ok(None);
     }
     let source = match authority::source(db, request).await {
@@ -156,17 +152,14 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
     {
         return Ok(None);
     }
-    // Audio/video retain their existing transcript path; no media ingestion.
-    if source
-        .attachments
-        .iter()
-        .any(|item| !matches!(item.content_type.as_str(), "image" | "file"))
-    {
+    if !authority::supported_source(&source) {
         return Ok(None);
     }
     let authorized = match Box::pin(authority::resolve(db, request)).await {
         Ok(authorized) => authorized,
-        Err(crate::errors::AppError::NotFound(_) | crate::errors::AppError::Forbidden(_)) => {
+        Err(
+            AppError::NotFound(_) | AppError::Forbidden(_) | AppError::SecurityReadinessUnavailable,
+        ) => {
             return Ok(None);
         }
         Err(error) => return Err(error),

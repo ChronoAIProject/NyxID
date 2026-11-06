@@ -63,6 +63,7 @@ pub const CAPABILITIES: &[&str] = &[
     "channel:discord-gateway",
     super::nyxbot_gateway_source::READINESS,
     super::nyxbot_response_recovery::RELAY_READINESS,
+    super::channel_media_authority::READINESS,
 ];
 pub const AUTOMATION_COMPLETION: &str = "automation:coordinator-completion-v2";
 const MAX_AGE_SECS: i64 = 45;
