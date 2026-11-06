@@ -3735,7 +3735,7 @@ async fn service_failure_handle(
     )
     .await
     {
-        Ok(handle) => Some(handle),
+        Ok(handle) => handle,
         Err(crate::errors::AppError::MonitoringNotConfigured) => None,
         Err(error) => {
             tracing::warn!(

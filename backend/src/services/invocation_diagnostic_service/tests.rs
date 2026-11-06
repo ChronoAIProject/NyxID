@@ -429,7 +429,8 @@ async fn handle_redemption_probes_once_and_completed_result_is_retry_readable() 
         &id,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .expect("diagnostic handle must be issued");
     assert!(!issued.handle.contains(&actor));
     assert!(!issued.handle.contains(&id));
 
@@ -491,7 +492,8 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
         &id,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .expect("client-bound diagnostic handle must be issued");
     let error = redeem(
         &state.db,
         &state.config,
@@ -518,7 +520,8 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
         &id,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .expect("agent-key diagnostic handle must be issued");
 
     let stranger = uuid::Uuid::new_v4().to_string();
     let error = redeem(
@@ -568,7 +571,8 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
         &id,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .expect("expiry-test diagnostic handle must be issued");
     state
         .db
         .collection::<mongodb::bson::Document>(COLLECTION_NAME)
@@ -608,7 +612,8 @@ async fn running_claims_are_never_replayed() {
         &id,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .expect("running-claim diagnostic handle must be issued");
     state
         .db
         .collection::<mongodb::bson::Document>(COLLECTION_NAME)
@@ -671,7 +676,8 @@ async fn concurrent_redemptions_start_only_one_probe() {
         &id,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .expect("concurrent-redemption diagnostic handle must be issued");
 
     let first = redeem(
         &state.db,
@@ -751,7 +757,8 @@ async fn active_execution_capacity_keeps_the_handle_pending() {
         &id,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .expect("capacity-test diagnostic handle must be issued");
 
     let result = redeem(
         &state.db,
@@ -801,7 +808,8 @@ async fn issuance_does_not_read_the_feature_flag_but_redemption_respects_it() {
         &id,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .expect("feature-flag diagnostic handle must be issued");
 
     let result = redeem(
         &state.db,

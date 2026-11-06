@@ -144,11 +144,11 @@ async fn invocation_diagnostic_success_denial_cancel_and_probe_callbacks_do_not_
 }
 
 #[tokio::test]
-async fn invocation_diagnostic_failure_returns_without_running_probe() {
+async fn invocation_diagnostic_failure_returns_without_probe_and_suppresses_duplicates() {
     let (state, actor, id, server) = fixture().await;
-    let mut request = request();
-    let invocation = HttpInvocation::start(&state, &mut request).unwrap();
-    Target::record_request(&request, Some(&id));
+    let mut initial_request = request();
+    let invocation = HttpInvocation::start(&state, &mut initial_request).unwrap();
+    Target::record_request(&initial_request, Some(&id));
     let original = Response::builder()
         .status(403)
         .body(Body::from("original operation error"))
@@ -164,6 +164,40 @@ async fn invocation_diagnostic_failure_returns_without_running_probe() {
     assert_eq!(
         to_bytes(response.into_body(), 4096).await.unwrap(),
         "original operation error"
+    );
+
+    let mut repeated_request = request();
+    let repeated_invocation = HttpInvocation::start(&state, &mut repeated_request).unwrap();
+    Target::record_request(&repeated_request, Some(&id));
+    let repeated_original = Response::builder()
+        .status(403)
+        .body(Body::from("repeated original operation error"))
+        .unwrap();
+    let repeated = HttpInvocation::finish(
+        Some(repeated_invocation),
+        &state,
+        &auth,
+        Ok(repeated_original),
+    )
+    .await
+    .unwrap();
+    assert_eq!(repeated.status(), StatusCode::FORBIDDEN);
+    assert!(!repeated.headers().contains_key(HANDLE_HEADER));
+    assert!(!repeated.headers().contains_key(EXPIRES_HEADER));
+    assert_eq!(
+        to_bytes(repeated.into_body(), 4096).await.unwrap(),
+        "repeated original operation error"
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::invocation_diagnostic::COLLECTION_NAME,
+            )
+            .count_documents(doc! {"actor_user_id":&actor,"exact_user_service_id":&id})
+            .await
+            .unwrap(),
+        1
     );
     assert!(server.received_requests().await.unwrap().is_empty());
 }
@@ -181,7 +215,8 @@ async fn redemption_rechecks_current_execution_scope_before_handle_lookup() {
         &id,
     )
     .await
-    .unwrap();
+    .unwrap()
+    .expect("diagnostic handle must be issued");
     let mut restricted = auth(&actor);
     restricted.scope = "account:read".into();
     let error = redeem(

@@ -117,7 +117,8 @@ impl HttpInvocation {
         )
         .await
         {
-            Ok(issued) => issued,
+            Ok(Some(issued)) => issued,
+            Ok(None) => return result,
             Err(crate::errors::AppError::MonitoringNotConfigured) => return result,
             Err(error) => {
                 tracing::warn!(

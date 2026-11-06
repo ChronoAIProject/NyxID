@@ -1,7 +1,9 @@
 //! Bounded secondary evidence for a failed invocation, never a replacement error.
 use std::{
+    collections::HashMap,
     sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
+    sync::{LazyLock, Mutex},
+    time::{Duration, Instant},
 };
 
 use chrono::Utc;
@@ -37,8 +39,43 @@ use crate::{
 pub(crate) const BUDGET: Duration = Duration::from_secs(3);
 pub(crate) const HANDLE_TTL_SECS: i64 = 60;
 pub(crate) const ISSUE_BUDGET: Duration = Duration::from_millis(250);
+const DUPLICATE_ISSUE_WINDOW: Duration = Duration::from_secs(10);
+const MAX_RECENT_ISSUES: usize = 4096;
 const HANDLE_PREFIX: &str = "nyx_diag_";
 static IN_FLIGHT: Semaphore = Semaphore::const_new(32);
+static RECENT_ISSUES: LazyLock<Mutex<HashMap<IssueFingerprint, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct IssueFingerprint {
+    actor_id: String,
+    auth_method: &'static str,
+    api_key_id: Option<String>,
+    client_id: Option<String>,
+    exact_user_service_id: String,
+}
+
+struct IssueReservation {
+    fingerprint: Option<IssueFingerprint>,
+}
+
+impl IssueReservation {
+    fn commit(mut self) {
+        self.fingerprint = None;
+    }
+}
+
+impl Drop for IssueReservation {
+    fn drop(&mut self) {
+        let Some(fingerprint) = self.fingerprint.take() else {
+            return;
+        };
+        RECENT_ISSUES
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&fingerprint);
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -126,8 +163,17 @@ pub(crate) async fn issue(
     api_key_id: Option<&str>,
     client_id: Option<&str>,
     exact_user_service_id: &str,
-) -> AppResult<IssuedHandle> {
+) -> AppResult<Option<IssuedHandle>> {
     monitoring_service::configured_base_url(config)?;
+    let Some(reservation) = reserve_issue(
+        actor_id,
+        auth_method,
+        api_key_id,
+        client_id,
+        exact_user_service_id,
+    ) else {
+        return Ok(None);
+    };
     let raw = format!(
         "{HANDLE_PREFIX}{}",
         crate::crypto::token::generate_random_token()
@@ -156,9 +202,46 @@ pub(crate) async fn issue(
     )
     .await
     .map_err(|_| AppError::MonitoringUnavailable)??;
-    Ok(IssuedHandle {
+    reservation.commit();
+    Ok(Some(IssuedHandle {
         handle: raw,
         expires_in: HANDLE_TTL_SECS,
+    }))
+}
+
+fn reserve_issue(
+    actor_id: &str,
+    auth_method: &AuthMethod,
+    api_key_id: Option<&str>,
+    client_id: Option<&str>,
+    exact_user_service_id: &str,
+) -> Option<IssueReservation> {
+    let fingerprint = IssueFingerprint {
+        actor_id: actor_id.to_owned(),
+        auth_method: auth_method_name(auth_method),
+        api_key_id: api_key_id.map(str::to_owned),
+        client_id: client_id.map(str::to_owned),
+        exact_user_service_id: exact_user_service_id.to_owned(),
+    };
+    let now = Instant::now();
+    let mut recent = RECENT_ISSUES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if let Some(previous) = recent.get(&fingerprint) {
+        if now.duration_since(*previous) < DUPLICATE_ISSUE_WINDOW {
+            return None;
+        }
+        recent.remove(&fingerprint);
+    }
+    if recent.len() >= MAX_RECENT_ISSUES {
+        recent.retain(|_, issued_at| now.duration_since(*issued_at) < DUPLICATE_ISSUE_WINDOW);
+        if recent.len() >= MAX_RECENT_ISSUES {
+            return None;
+        }
+    }
+    recent.insert(fingerprint.clone(), now);
+    Some(IssueReservation {
+        fingerprint: Some(fingerprint),
     })
 }
 

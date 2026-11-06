@@ -148,6 +148,11 @@ within 250ms, the original error is returned without a handle. Local input,
 scope, approval, capacity, billing and cancellation errors do not issue handles.
 Transport or broker failures qualify only after execution resolved an exact
 UserService. Responses whose stream already started cannot be decorated.
+Within each server process, repeated eligible failures for the same caller
+identity and exact UserService are suppressed for ten seconds after the first
+handle is issued. Suppressed failures retain their original response without a
+handle and perform no diagnostic database write. The bounded in-memory table
+never stores paths, request data, response data, credentials or raw handles.
 
 REST and LLM failures use these NyxID-owned response headers:
 
