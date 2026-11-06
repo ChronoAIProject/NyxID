@@ -63,6 +63,11 @@ The following paths are relative to that service URL:
 | GET | `/conversations/{id}/voice-requests/{rid}` | Existing task status |
 | POST | `/conversations/{id}/voice-requests/{rid}/cancel` | Explicit task Stop |
 
+`/voice/agents` includes the selected Bot's `name`, `display_name` and
+`description` for device presentation. These are display metadata; the exact
+service and Bot binding still determine access. Older clients can ignore
+`description`, and devices should accept its absence from older servers.
+
 The endpoint requires ordinary `proxy` scope. A supplied Origin must pass the
 existing allowlist; devices may omit Origin. B1 operation-scoped Keys retain
 their existing WebSocket restriction. Bodies are limited to 128 KiB. Notices
