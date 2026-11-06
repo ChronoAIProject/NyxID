@@ -2550,3 +2550,24 @@ it("2072 restores terminal proxy approvals without presenting them as a pending 
   expect(transport.session(id).messages.map((m) => m.id)).toContain("nyxagent-approval:proxy");
   expect(transport.isRunning(id)).toBe(false);
 });
+
+
+it("keeps safe memory reasons through active polling and settled history reload", async () => {
+  let active = true;
+  const activity = { id: "memory", label: "nyxid__remember", status: "error", started_at: start, ended_at: reset, failure: { kind: "tool_error", reason: "note_too_long" } };
+  globalThis.__nyxidAssistantHttpMock = () => {
+    const page = history();
+    return json({ ...page,
+      conversation: { ...page.conversation, active_turn: active ? { turn_id: "turn", started_at: start, activities: [activity], attachments: [] } : null },
+      messages: active ? page.messages.slice(0, 1) : [page.messages[0], { ...page.messages[1], activities: [activity] }],
+    });
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages.at(-1)?.toolCalls?.[0]?.failure?.reason).toBe("note_too_long");
+  active = false;
+  await transport.history(id);
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  expect(reloaded.session(id).messages.at(-1)?.toolCalls?.[0]?.failure?.reason).toBe("note_too_long");
+});

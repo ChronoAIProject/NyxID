@@ -842,7 +842,10 @@ pub(crate) fn description(name: &str) -> &'static str {
         "remember" => {
             "Save a durable fact about the user or your work (preferences, people, goals, how \
             they like things done) so you recall it in every thread and chat app. Never store \
-            secrets. Pass replace_id to update a note."
+            secrets. Each note must contain 1–500 characters; memory holds 50 notes. Pass replace_id to update a note. \
+            On error follow details.reason; only a successful remembered receipt confirms a save. \
+            Later saves do not prove an earlier rejected fact was saved. Report any unresolved facts; \
+            inspect current notes before retrying an unconfirmed storage write."
         }
         "forget" => "Delete one of your memory notes by id.",
         "post_to_chat" => {
@@ -968,6 +971,16 @@ pub fn validate(name: &str, args: &Value) -> AppResult<()> {
         if !object.contains_key(required.as_str().unwrap_or_default()) {
             return Err(invalid());
         }
+    }
+    if name == "remember"
+        && let Some(text) = object.get("text").and_then(Value::as_str)
+    {
+        if text.chars().count() > crate::models::assistant_agent::MAX_MEMORY_NOTE_CHARS {
+            return Err(AppError::MemoryWrite(
+                crate::errors::memory_write::MemoryWriteReason::NoteTooLong,
+            ));
+        }
+        super::assistant_team_service::validate_memory_text(text)?;
     }
     validate_input_rules(name, object, &schema)?;
     for (key, value) in object {

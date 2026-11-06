@@ -1,4 +1,5 @@
 pub mod access_denial;
+pub mod memory_write;
 pub mod refresh;
 pub mod skill_draft;
 pub mod voice_start;
@@ -208,6 +209,9 @@ pub enum AppError {
 
     #[error("Validation error: {0}")]
     ValidationError(String),
+
+    #[error("{0}")]
+    MemoryWrite(memory_write::MemoryWriteReason),
 
     /// Owner selection diagnostics keep the validation_error / 1008 contract.
     #[error("{reason}: {message}")]
@@ -869,6 +873,7 @@ impl AppError {
 
     pub(crate) fn status_code(&self) -> StatusCode {
         match self {
+            Self::MemoryWrite(reason) => reason.legacy_error().status_code(),
             Self::RefreshRefused { source, .. } => source.status_code(),
             Self::VoiceStartFailed(failure) => failure.source.status_code(),
             Self::BadRequest(_)
@@ -1107,6 +1112,8 @@ impl AppError {
 
     pub(crate) fn error_code(&self) -> u32 {
         match self {
+            Self::MemoryWrite(memory_write::MemoryWriteReason::MemoryStorageError) => 1007,
+            Self::MemoryWrite(reason) => reason.legacy_error().error_code(),
             Self::RefreshRefused { source, .. } => source.error_code(),
             Self::VoiceStartFailed(failure) => failure.source.error_code(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
@@ -1390,6 +1397,7 @@ impl AppError {
 
     pub(crate) fn error_key(&self) -> &str {
         match self {
+            Self::MemoryWrite(reason) => reason.error_key(),
             Self::RefreshRefused { source, .. } => source.error_key(),
             Self::VoiceStartFailed(failure) => failure.source.error_key(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
@@ -1675,6 +1683,9 @@ impl AppError {
             _ => None,
         };
         let details = match &self {
+            AppError::MemoryWrite(reason) => {
+                Some(serde_json::json!({"reason": reason, "category": reason.category()}))
+            }
             AppError::ServiceSelectionInvalid { reason, .. } => {
                 Some(serde_json::json!({"reason": reason}))
             }

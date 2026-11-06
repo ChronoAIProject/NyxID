@@ -524,6 +524,7 @@ async fn voice_2083_progress_coalesces_latest_evidence_and_never_tool_errors_as_
             status: "completed".into(),
             machine: None,
             failure: Some(crate::models::assistant_conversation::ToolFailure {
+                reason: None,
                 kind: "upstream".into(),
                 status: Some(403),
             }),
