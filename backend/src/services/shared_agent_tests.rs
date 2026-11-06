@@ -2514,6 +2514,7 @@ async fn shared_agent_crew_projection_keeps_skills_notes_and_rejects_other_surfa
         .update_one(doc! {"_id": &agent.id}, doc! {"$set": {
             "memory": mongodb::bson::to_bson(&vec![note("Owner secret")]).unwrap(),
             "machine_node_ids": ["owner-machine"], "saved_login_ids": ["owner-login"], "grants.account_read": true,
+            "grants.crm": [{"owner_id": &agent.user_id, "object":"company", "capabilities":["read","write"]}],
         }}).await.unwrap();
     sharing::update_memory(
         &f.state.db,
@@ -2575,6 +2576,7 @@ async fn shared_agent_crew_projection_keeps_skills_notes_and_rejects_other_surfa
             && projected.guest_access.is_empty()
     );
     assert!(!projected.grants.account_read);
+    assert!(projected.grants.crm.is_empty());
     let mut session = f.state.db.client().start_session().await.unwrap();
     session.start_transaction().await.unwrap();
     assert!(matches!(

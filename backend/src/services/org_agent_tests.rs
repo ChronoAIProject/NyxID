@@ -220,6 +220,7 @@ impl Fixture {
     }
     pub(crate) fn request(&self, name: &str) -> team::CreateRequest {
         team::CreateRequest {
+            crm: vec![],
             name: name.into(),
             description: "Organization specialist".into(),
             display_name: None,

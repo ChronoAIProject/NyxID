@@ -913,6 +913,7 @@ pub(crate) async fn append_with_hook(
                 .await?;
                 attachments.extend(extra_attachments.clone());
                 let message = GroupMessage {
+                    crm_artifacts: Vec::new(),
                     collaboration: None,
                     activities: Vec::new(),
                     org_group: true,
@@ -993,6 +994,7 @@ async fn dropped_notice(
         doc! {"$inc":{"message_count":1},"$set":{"updated_at":bson::DateTime::now(),"last_message_at":bson::DateTime::now()}})
         .return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await? else { return Ok(()); };
     let message = GroupMessage {
+        crm_artifacts: Vec::new(),
         collaboration: None,
         activities: Vec::new(),
         org_group: true,

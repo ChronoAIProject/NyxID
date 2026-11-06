@@ -977,6 +977,7 @@ async fn org_review_fixture(
         &fixture.owner,
         &org,
         crate::services::assistant_team_service::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "learning-worker".into(),
@@ -1589,6 +1590,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             .db
             .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
             .insert_one(AssistantMessage {
+                crm_artifacts: Vec::new(),
                 automation_work: None,
                 execution_task: None,
                 delegated_images: Default::default(),

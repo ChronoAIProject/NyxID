@@ -106,6 +106,7 @@ fn message(
     recipients: &[String],
 ) -> GroupMessage {
     GroupMessage {
+        crm_artifacts: Vec::new(),
         collaboration: None,
         activities: Vec::new(),
         org_group: false,
@@ -310,7 +311,10 @@ pub async fn recover(db: &Database, group: &AssistantGroup) -> AppResult<()> {
                     group.message_count += 1;
                     let name = roster.iter().find(|a| a.id == dispatch.agent_id).map(|a| a.name.as_str()).unwrap_or("unavailable member");
                     let text = if let Some(error) = error {format!("{name} failed ({error}).")} else if refused.is_empty() {text.into()} else {format!("{text}\nNyxID: handoffs refused by automation/group limits: {}", refused.join(", "))};
-                    let message = message(&group, request_id, if error.is_some() {"notice"} else {"agent"}, Some(&dispatch.agent_id), Some(name), &text, &accepted);
+                    let mut message = message(&group, request_id, if error.is_some() {"notice"} else {"agent"}, Some(&dispatch.agent_id), Some(name), &text, &accepted);
+                    if error.is_none() {
+                        message.crm_artifacts = reply.as_ref().map(|m| m.crm_artifacts.clone()).unwrap_or_default();
+                    }
                     db.collection::<GroupMessage>(MESSAGES).insert_one(message).session(&mut *session).await?;
                     group.followers[fi].automation = Some(request);
                     db.collection::<Document>(GROUPS).update_one(doc! {"_id": id}, doc! {"$set": {"message_count": group.message_count}}).session(&mut *session).await?;

@@ -748,6 +748,26 @@ const assistantMachinesRoute = createRoute({
   component: () => <AssistantPage view="machines" />,
 });
 
+const assistantCrmRoute = createRoute({
+  path: "/assistant/crm",
+  onError: (error) => captureUnexpectedNyxbotError(error, "/assistant/crm"),
+  onCatch: (error) => captureUnexpectedNyxbotError(error, "/assistant/crm"),
+  getParentRoute: () => rootRoute,
+  beforeLoad: standaloneAuthBeforeLoad,
+  validateSearch: withAccountPanelSearch((search: Record<string, unknown>) => {
+    const bounded = (value: unknown) =>
+      typeof value === "string" && value.length <= 128 ? value : undefined;
+    return {
+      owner: bounded(search.owner),
+      record: bounded(search.record),
+      view: bounded(search.view),
+      object: bounded(search.object),
+      surface: bounded(search.surface),
+    };
+  }),
+  component: () => <AssistantPage view="crm" />,
+});
+
 const triggersRoute = createRoute({
   path: "/triggers",
   getParentRoute: () => dashboardLayout,
@@ -1275,6 +1295,7 @@ const routeTree = rootRoute.addChildren([
   assistantApprovalsRoute,
   assistantAutomationsRoute,
   assistantMachinesRoute,
+  assistantCrmRoute,
   automationsRoute,
   machineSetupRoute,
   machinePairRoute,

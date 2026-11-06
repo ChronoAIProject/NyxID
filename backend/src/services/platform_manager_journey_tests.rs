@@ -2858,3 +2858,50 @@ async fn forwarded_quotes_links_and_complete_files_reach_only_the_bound_owner_tu
     assert_eq!(j.egress.0.load(Ordering::SeqCst), 1);
     j.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn crm_managed_personal_delivery_links_are_exact_once_and_flag_gated() {
+    use crate::models::assistant_crm_artifact::{CrmArtifactRole, TurnCrmArtifact};
+    let j = Journey::new().await;
+    j.link().await;
+    let (_, _, mut saved) = j.prepared_reply(1284).await;
+    saved.crm_artifacts = vec![TurnCrmArtifact::Record {
+        id: "record-id".into(),
+        owner_id: j.owner.clone(),
+        object_key: "company".into(),
+        title: "Private company".into(),
+        role: CrmArtifactRole::Created,
+    }];
+    let original = delivery::render_personal(&j.state, &saved, None)
+        .await
+        .unwrap();
+    assert!(!original.contains("record-id"));
+    crate::services::feature_flag_service::set_platform_override(
+        &j.state.db,
+        crate::services::crm::FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::User(j.owner.clone()),
+        true,
+        &j.owner,
+    )
+    .await
+    .unwrap();
+    let expected = format!(
+        "{original}\n\n{}/assistant/crm?owner={}&object=company&record=record-id",
+        j.state.config.frontend_url.trim_end_matches('/'),
+        j.owner
+    );
+    assert_eq!(
+        delivery::render_personal(&j.state, &saved, None)
+            .await
+            .unwrap(),
+        expected
+    );
+    saved.text = expected.clone();
+    assert_eq!(
+        delivery::render_personal(&j.state, &saved, None)
+            .await
+            .unwrap(),
+        expected
+    );
+    j.state.db.drop().await.unwrap();
+}

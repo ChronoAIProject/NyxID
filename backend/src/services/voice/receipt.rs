@@ -66,6 +66,7 @@ pub async fn append(db: &Database, tx: &mut ClientSession, call: &VoiceSession) 
     let id = uuid::Uuid::new_v4().to_string();
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            crm_artifacts: Vec::new(),
             automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),
@@ -228,6 +229,7 @@ mod tests {
         let sources = HashMap::from([(
             "m1".into(),
             AssistantMessage {
+                crm_artifacts: Vec::new(),
                 automation_work: None,
                 execution_task: None,
                 delegated_images: Default::default(),

@@ -200,8 +200,12 @@ fn manager_lane(row: &Delivery) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn render_saved(message: &AssistantMessage, _frontend: &str) -> String {
-    render_saved_text(message)
+pub(crate) fn render_saved(message: &AssistantMessage, frontend: &str) -> String {
+    super::crm::artifacts::append_links(
+        &render_saved_text(message),
+        &message.crm_artifacts,
+        frontend,
+    )
 }
 
 fn render_saved_text(message: &AssistantMessage) -> String {
@@ -364,7 +368,11 @@ fn append_card_notices(
         ));
     }
     rendered.text.push_str(&notices);
-    Ok(render_saved_text(&rendered))
+    Ok(super::crm::artifacts::append_links(
+        &render_saved_text(&rendered),
+        &message.crm_artifacts,
+        frontend,
+    ))
 }
 
 async fn pin_notice_card_ids(
@@ -496,8 +504,14 @@ pub(crate) async fn render_personal(
     };
     let thread = thread.ok_or_else(refused)?;
     let entry = &thread.platform_thread.as_ref().ok_or_else(refused)?.entry;
+    let mut message = message.clone();
+    if !super::crm::artifacts::enabled_for(&state.db, &message.user_id, &message.crm_artifacts)
+        .await?
+    {
+        message.crm_artifacts.clear();
+    }
     append_card_notices(
-        message,
+        &message,
         &state.config.frontend_url,
         &cards,
         &thread.credential_api_key_id,

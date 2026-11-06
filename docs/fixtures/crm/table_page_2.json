@@ -1,0 +1,419 @@
+{
+  "object": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "owner_id": "00000000-0000-4000-8000-000000000002",
+    "key": "company",
+    "label": "Company",
+    "plural_label": "Companies",
+    "schema_revision": 3,
+    "fields": [
+      {
+        "key": "name",
+        "label": "Name",
+        "required": true,
+        "archived": false,
+        "type": "text",
+        "max_length": 200
+      },
+      {
+        "key": "domain",
+        "label": "Domain",
+        "required": false,
+        "archived": false,
+        "type": "text",
+        "max_length": 253
+      },
+      {
+        "key": "industry",
+        "label": "Industry",
+        "required": false,
+        "archived": false,
+        "type": "select",
+        "options": []
+      },
+      {
+        "key": "owner",
+        "label": "Owner",
+        "required": false,
+        "archived": false,
+        "type": "user"
+      },
+      {
+        "key": "is_partner",
+        "label": "Partner",
+        "required": false,
+        "archived": false,
+        "type": "boolean"
+      },
+      {
+        "key": "segment",
+        "label": "Segment",
+        "required": false,
+        "archived": false,
+        "type": "select",
+        "options": [
+          {
+            "value": "group_00",
+            "label": "Group 00",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_01",
+            "label": "Group 01",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_02",
+            "label": "Group 02",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_03",
+            "label": "Group 03",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_04",
+            "label": "Group 04",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_05",
+            "label": "Group 05",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_06",
+            "label": "Group 06",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_07",
+            "label": "Group 07",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_08",
+            "label": "Group 08",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_09",
+            "label": "Group 09",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_10",
+            "label": "Group 10",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_11",
+            "label": "Group 11",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_12",
+            "label": "Group 12",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_13",
+            "label": "Group 13",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_14",
+            "label": "Group 14",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_15",
+            "label": "Group 15",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_16",
+            "label": "Group 16",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_17",
+            "label": "Group 17",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_18",
+            "label": "Group 18",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_19",
+            "label": "Group 19",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_20",
+            "label": "Group 20",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_21",
+            "label": "Group 21",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_22",
+            "label": "Group 22",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_23",
+            "label": "Group 23",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_24",
+            "label": "Group 24",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_25",
+            "label": "Group 25",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_26",
+            "label": "Group 26",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_27",
+            "label": "Group 27",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_28",
+            "label": "Group 28",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_29",
+            "label": "Group 29",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_30",
+            "label": "Group 30",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_31",
+            "label": "Group 31",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_32",
+            "label": "Group 32",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_33",
+            "label": "Group 33",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_34",
+            "label": "Group 34",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_35",
+            "label": "Group 35",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_36",
+            "label": "Group 36",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_37",
+            "label": "Group 37",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_38",
+            "label": "Group 38",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_39",
+            "label": "Group 39",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_40",
+            "label": "Group 40",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_41",
+            "label": "Group 41",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_42",
+            "label": "Group 42",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_43",
+            "label": "Group 43",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_44",
+            "label": "Group 44",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_45",
+            "label": "Group 45",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_46",
+            "label": "Group 46",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_47",
+            "label": "Group 47",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_48",
+            "label": "Group 48",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_49",
+            "label": "Group 49",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_50",
+            "label": "Group 50",
+            "color": null,
+            "archived": false
+          },
+          {
+            "value": "group_51",
+            "label": "Group 51",
+            "color": null,
+            "archived": false
+          }
+        ]
+      }
+    ],
+    "pipeline": null,
+    "default_columns": [
+      "name",
+      "domain",
+      "industry",
+      "owner"
+    ],
+    "seeded": true,
+    "created_at": "2000-01-01T00:00:00.000Z",
+    "updated_at": "2000-01-01T00:00:00.000Z"
+  },
+  "rows": [
+    {
+      "id": "00000000-0000-4000-8000-00000000000c",
+      "owner_id": "00000000-0000-4000-8000-000000000002",
+      "object_key": "company",
+      "revision": 1,
+      "values": {
+        "is_partner": false,
+        "name": "Company 01"
+      },
+      "links": {},
+      "overrides": [],
+      "archived": false,
+      "created_at": "2000-01-01T00:00:00.000Z",
+      "updated_at": "2000-01-01T00:00:00.000Z",
+      "created_by": {
+        "kind": "human",
+        "user_id": "00000000-0000-4000-8000-000000000002",
+        "agent_id": null,
+        "api_key_id": null,
+        "source": null
+      },
+      "updated_by": {
+        "kind": "human",
+        "user_id": "00000000-0000-4000-8000-000000000002",
+        "agent_id": null,
+        "api_key_id": null,
+        "source": null
+      },
+      "field_sources": {
+        "is_partner": "2000-01-01T00:00:00.000Z",
+        "name": "2000-01-01T00:00:00.000Z",
+        "segment": "2000-01-01T00:00:00.000Z"
+      }
+    }
+  ],
+  "next_cursor": "Y3JtLWZpeHR1cmUtY3Vyc29y",
+  "total_count": 52
+}

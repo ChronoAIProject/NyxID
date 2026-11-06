@@ -76,6 +76,8 @@ pub struct GroupAgentRef {
 #[derive(Serialize)]
 pub struct GroupMessageResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
+    crm_artifacts: Option<Vec<crate::models::assistant_crm_artifact::TurnCrmArtifact>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     requester_user_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     execution_mode: Option<crate::models::assistant_group_collaboration::Lane>,
@@ -97,6 +99,7 @@ pub struct GroupMessageResponse {
 pub(crate) fn message_response(
     row: GroupMessage,
     agents: &[AssistantAgent],
+    crm_enabled: bool,
 ) -> GroupMessageResponse {
     let agent = row.agent_id.as_deref().map(|id| {
         let known = agents.iter().find(|agent| agent.id == id);
@@ -111,6 +114,7 @@ pub(crate) fn message_response(
         }
     });
     GroupMessageResponse {
+        crm_artifacts: crm_enabled.then_some(row.crm_artifacts),
         requester_user_id:row.collaboration.as_ref().and_then(|b|b.original_requester_id.clone()),
         execution_mode:row.collaboration.as_ref().and_then(|b|b.execution.as_ref().map(|a|a.lane)),
         feedback: None,
@@ -539,8 +543,12 @@ pub(crate) async fn member_settled(
             return Ok(());
         }
         let agent = team::agent_for_conversation(&state.db, row).await?;
+        let has_artifacts = row
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| !turn.crm_artifacts.is_empty());
         match error_code {
-            None if !text.trim().is_empty() => {
+            None if !text.trim().is_empty() || has_artifacts => {
                 let attachments = match row.active_turn.as_ref() {
                     Some(turn) => {
                         engine::settled_tool_attachments(&state.db, owner, &row.id, &turn.turn_id)
@@ -552,6 +560,10 @@ pub(crate) async fn member_settled(
                     groups::append_member_reply(&state.db, row, "agent", &agent, text, attachments)
                         .await?;
                 Box::pin(crate::services::machine_activity_service::publish_group(
+                    &state.db, row, &message,
+                ))
+                .await?;
+                Box::pin(crate::services::crm::artifacts::publish_group(
                     &state.db, row, &message,
                 ))
                 .await?;
@@ -1292,9 +1304,10 @@ pub async fn list_messages(
     } else {
         pending_actions(&state, &owner, &id).await?
     };
+    let crm_enabled = Box::pin(crate::services::crm::enabled(&state.db, &owner)).await?;
     let mut messages: Vec<_> = rows
         .into_iter()
-        .map(|row| message_response(row, &agents))
+        .map(|row| message_response(row, &agents, crm_enabled))
         .collect();
     let ids: Vec<_> = messages.iter().map(|m| m.id.clone()).collect();
     let feedback =
@@ -1395,7 +1408,7 @@ pub async fn post_message(
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({
-            "message": message_response(message, &agents),
+            "message": message_response(message, &agents, Box::pin(crate::services::crm::enabled(&state.db, &owner)).await?),
             "addressed_agent_ids": addressed,
         })),
     ))

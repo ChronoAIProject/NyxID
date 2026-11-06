@@ -571,6 +571,7 @@ async fn named_specialist(
         &state.encryption_keys,
         OWNER,
         team::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: name.into(),
@@ -2320,6 +2321,79 @@ async fn v2_group_posts_use_sticky_then_lead_recipients_and_bind_summary() {
 }
 
 #[tokio::test]
+async fn v2_group_recovery_preserves_crm_artifact_only_replies_once() {
+    use crate::models::assistant_crm_artifact::{CrmArtifactRole, TurnCrmArtifact};
+    use crate::models::assistant_group::{
+        GroupMessage, MESSAGES_COLLECTION_NAME as GROUP_MESSAGES,
+    };
+    use crate::services::assistant_group_service as groups;
+
+    let (state, _, _, row, server) = root("v2_group_crm_recovery", false).await;
+    let editor = named_specialist(&state, "editor").await;
+    let reviewer = named_specialist(&state, "reviewer").await;
+    let group = groups::create(
+        &state.db,
+        OWNER,
+        "Artifacts",
+        &[editor.id.clone(), reviewer.id.clone()],
+        "user",
+    )
+    .await
+    .unwrap();
+    let (post, _) = work_groups::post(
+        &state.db,
+        &authority(&row),
+        &group,
+        "@editor @reviewer prepare artifacts",
+    )
+    .await
+    .unwrap();
+    assert!(post.crm_artifacts.is_empty());
+    let artifact = TurnCrmArtifact::View {
+        id: "saved-view".into(),
+        owner_id: OWNER.into(),
+        title: "Research".into(),
+        role: CrmArtifactRole::Created,
+    };
+    for (agent, error) in [(&editor, None), (&reviewer, Some("cancelled"))] {
+        let current = groups::get(&state.db, OWNER, &group.id).await.unwrap();
+        let member = group_turn(&state, &current, &agent.id).await;
+        crate::services::crm::artifacts::record(&state.db, &authority(&member), artifact.clone())
+            .await
+            .unwrap();
+        save_reply(&state, &member, "", error).await;
+    }
+    let current = groups::get(&state.db, OWNER, &group.id).await.unwrap();
+    work_groups::recover(&state.db, &current).await.unwrap();
+    work_groups::recover(&state.db, &current).await.unwrap();
+    let messages: Vec<GroupMessage> = state
+        .db
+        .collection::<GroupMessage>(GROUP_MESSAGES)
+        .find(doc! {"group_id": &group.id, "request_id": &post.request_id})
+        .sort(doc! {"seq": 1})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 3);
+    let reply = messages
+        .iter()
+        .find(|m| m.agent_id.as_deref() == Some(editor.id.as_str()))
+        .unwrap();
+    assert_eq!(reply.role, "agent");
+    assert_eq!(reply.text, "");
+    assert_eq!(reply.crm_artifacts, vec![artifact]);
+    let failure = messages
+        .iter()
+        .find(|m| m.agent_id.as_deref() == Some(reviewer.id.as_str()))
+        .unwrap();
+    assert_eq!(failure.role, "notice");
+    assert!(failure.crm_artifacts.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
 async fn v2_delegation_tracks_usable_org_and_shared_specialists_and_shared_group_members() {
     use crate::models::org_membership::OrgRole;
     use crate::services::{feature_flag_service as flags, shared_agent_service as sharing};
@@ -2357,6 +2431,7 @@ async fn v2_delegation_tracks_usable_org_and_shared_specialists_and_shared_group
                 .unwrap();
         }
         let request = team::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: if org {

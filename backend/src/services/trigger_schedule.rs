@@ -1495,6 +1495,7 @@ async fn record_terminal_in_session(
             .await?
         {
             let message = AssistantMessage {
+                crm_artifacts: Vec::new(),
                 automation_work: None,
                 execution_task: None,
                 delegated_images: Default::default(),

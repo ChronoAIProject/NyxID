@@ -34,6 +34,12 @@ import { parseAssistantSearch } from "@/lib/assistant/search";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type { Conversation } from "@/types/assistant";
 
+const CrmPage = lazy(() =>
+  import("@/components/crm/crm-page").then((module) => ({
+    default: module.CrmPage,
+  })),
+);
+
 const MockScenariosAction = import.meta.env.DEV
   ? lazy(() =>
       import("@/components/assistant/mock-scenarios-action").then((module) => ({
@@ -112,6 +118,7 @@ type WorkspaceView =
   | "approvals"
   | "automations"
   | "machines"
+  | "crm"
   | "machine-setup"
   | "machine-pair";
 
@@ -120,6 +127,7 @@ const workspaceTitles: Record<WorkspaceView, string> = {
   approvals: "Approvals",
   automations: "Automations",
   machines: "Machines",
+  crm: "CRM",
   "machine-setup": "Add a machine",
   "machine-pair": "Pair a machine",
 };
@@ -151,6 +159,8 @@ function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
           <AutomationsPage />
         ) : view === "machines" ? (
           <MachinesPage />
+        ) : view === "crm" ? (
+          <CrmPage />
         ) : view === "machine-setup" ? (
           <MachineSetupPage />
         ) : (

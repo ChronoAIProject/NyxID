@@ -464,6 +464,7 @@ async fn specialist_owner_private_home_keeps_its_original_delivery_authority() {
         &f.state.encryption_keys,
         OWNER,
         team::CreateRequest {
+            crm: vec![],
             name: "support".into(),
             description: "Support".into(),
             display_name: None,

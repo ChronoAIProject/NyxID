@@ -50,6 +50,7 @@ async fn lark_model_turns(profile: &str, legacy: bool) {
         &state.encryption_keys,
         OWNER,
         CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "office-agent".into(),

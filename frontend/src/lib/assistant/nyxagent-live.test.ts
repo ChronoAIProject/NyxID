@@ -197,7 +197,7 @@ it("refreshes the open thread on every change but lists only when a turn or coun
   });
   // A resync re-reads everything and forgets what it had seen.
   expect(nyxAgentLiveRefresh("u", { type: "resync" }, seen)).toEqual({
-    now: [["assistant", "nyxagent", "u"]],
+    now: [["assistant", "nyxagent", "u"], ["crm"]],
     lists: [],
   });
   expect(change("t1", 2).lists).toEqual(threadAndAgents);
@@ -209,4 +209,14 @@ it("refreshes titles even when the turn and message count did not change", () =>
   const refresh = nyxAgentLiveRefresh("u", event, seen);
   expect(refresh.lists).toContainEqual(["assistant", "nyxagent", "u", "threads"]);
   expect(refresh.now).toContainEqual(["assistant", "nyxagent", "u", "history", "nyxa-1"]);
+});
+
+it("invalidates only the event owner and resyncs CRM after reconnect", () => {
+  const seen = new Map<string, string>();
+  expect(
+    nyxAgentLiveRefresh("u", { type: "crm", owner_id: "org" }, seen),
+  ).toEqual({ now: [["crm", "org"]], lists: [] });
+  expect(nyxAgentLiveRefresh("u", { type: "ready" }, seen).now).toContainEqual([
+    "crm",
+  ]);
 });

@@ -230,6 +230,9 @@ pub mod billing_benefits;
 pub mod monitoring;
 
 pub mod collaboration_group;
+pub mod crm;
+#[cfg(test)]
+mod crm_fixture_tests;
 
 pub mod cma_sessions;
 pub mod org_specialist_channels;

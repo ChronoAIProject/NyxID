@@ -14,6 +14,7 @@ export const NYXAGENT_LIVE_PATH = "/assistant/nyxagent/live";
 
 const liveEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("ready") }),
+  z.object({ type: z.literal("crm"), owner_id: z.string() }),
   z.object({
     type: z.literal("conversation"),
     id: z.string(),

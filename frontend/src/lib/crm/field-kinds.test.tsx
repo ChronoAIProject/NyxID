@@ -1,0 +1,129 @@
+import { describe, expect, it } from "vitest";
+import {
+  crmFilterOperators,
+  formatCrmFieldInput,
+  isCrmFilterOperatorAllowed,
+  parseCrmFieldInput,
+} from "./field-kinds";
+import type { CrmField } from "@/schemas/crm";
+
+const base = {
+  label: "Value",
+  required: false,
+  archived: false,
+} as const;
+
+describe("CRM field-kind registry", () => {
+  it("round-trips currency as integer minor units", () => {
+    const field: CrmField = {
+      ...base,
+      key: "amount",
+      type: "currency",
+      currency: "USD",
+    };
+    expect(parseCrmFieldInput(field, "1250.00")).toBe(125000);
+    expect(formatCrmFieldInput(field, 125000)).toBe("1250.00");
+    expect(
+      formatCrmFieldInput(field, { amount_minor: -305, currency: "USD" }),
+    ).toBe("-3.05");
+    expect(() => parseCrmFieldInput(field, "12.345")).toThrow(
+      "at most 2 decimal places",
+    );
+    expect(
+      parseCrmFieldInput(field, { amount_minor: 125000, currency: "USD" }),
+    ).toBe(125000);
+    expect(() =>
+      parseCrmFieldInput(field, { amount_minor: 125000, currency: "EUR" }),
+    ).toThrow("Currency must be USD");
+    expect(() =>
+      parseCrmFieldInput(field, Number.MAX_SAFE_INTEGER + 1),
+    ).toThrow();
+  });
+
+  it("round-trips percentages through their stored fraction", () => {
+    const field: CrmField = {
+      ...base,
+      key: "probability",
+      type: "number",
+      format: "percent",
+    };
+    expect(parseCrmFieldInput(field, "25")).toBe(0.25);
+    expect(formatCrmFieldInput(field, 0.25)).toBe("25");
+  });
+
+  it("keeps calendar dates byte-identical without timezone conversion", () => {
+    const field: CrmField = { ...base, key: "due", type: "date" };
+    expect(parseCrmFieldInput(field, "2026-03-29")).toBe("2026-03-29");
+    expect(formatCrmFieldInput(field, "2026-03-29")).toBe("2026-03-29");
+    expect(() => parseCrmFieldInput(field, "2026-02-30")).toThrow(
+      "valid calendar date",
+    );
+  });
+
+  it("uses minute precision only when a datetime is edited", () => {
+    const field: CrmField = { ...base, key: "meeting", type: "datetime" };
+    const editorValue = formatCrmFieldInput(field, "2026-11-04T12:34:56.789Z");
+    expect(editorValue).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
+
+    const parsed = parseCrmFieldInput(field, editorValue);
+    expect(typeof parsed).toBe("string");
+    expect(new Date(String(parsed)).getSeconds()).toBe(0);
+    expect(new Date(String(parsed)).getMilliseconds()).toBe(0);
+  });
+
+  it("exposes only the contract operators for each kind", () => {
+    const text: CrmField = {
+      ...base,
+      key: "name",
+      type: "text",
+      max_length: 1000,
+    };
+    const record: CrmField = {
+      ...base,
+      key: "company",
+      type: "record",
+      target: "company",
+      cardinality: "one",
+    };
+    expect(crmFilterOperators(text)).toEqual([
+      "eq",
+      "neq",
+      "in",
+      "contains",
+      "is_set",
+      "is_unset",
+    ]);
+    expect(crmFilterOperators(record)).toEqual([
+      "eq",
+      "in",
+      "is_set",
+      "is_unset",
+    ]);
+    expect(isCrmFilterOperatorAllowed(record, "contains")).toBe(false);
+  });
+});
+
+it.each(["plain", "percent"] as const)(
+  "rejects nonempty malformed %s input rather than clearing data",
+  (format) => {
+    const field: CrmField = { ...base, key: "number", type: "number", format };
+    for (const invalid of ["abc", "NaN", "Infinity", "-Infinity", "1e999"])
+      expect(() => parseCrmFieldInput(field, invalid)).toThrow();
+    expect(parseCrmFieldInput(field, "")).toBeNull();
+  },
+);
+it("parses supported boundary cents exactly and rejects multiple signs", () => {
+  const field: CrmField = {
+    ...base,
+    key: "amount",
+    type: "currency",
+    currency: "USD",
+  };
+  expect(parseCrmFieldInput(field, "90071992547409.91")).toBe(
+    Number.MAX_SAFE_INTEGER,
+  );
+  expect(parseCrmFieldInput(field, "-90071992547409.91")).toBe(
+    -Number.MAX_SAFE_INTEGER,
+  );
+  expect(() => parseCrmFieldInput(field, "--1")).toThrow();
+});

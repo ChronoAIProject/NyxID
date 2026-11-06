@@ -6,6 +6,21 @@ import { z } from "zod";
 import { machineReceiptSchema } from "./machine-activity";
 import { cmaOperationSchema } from "./cma-operation";
 
+const crmArtifactFields = {
+  id: z.string().min(1),
+  owner_id: z.string().min(1),
+  title: z.string().refine((value) => [...value].length <= 200, "Must be at most 200 characters"),
+  role: z.enum(["created", "presented"]),
+};
+const crmArtifactObjectKey = z.string().regex(/^[a-z][a-z0-9_]{0,47}$/);
+export const turnCrmArtifactSchema = z.discriminatedUnion("kind", [
+  z.object({ ...crmArtifactFields, kind: z.literal("view"), object_key: z.null().optional() }).strict(),
+  z.object({ ...crmArtifactFields, kind: z.literal("record"), object_key: crmArtifactObjectKey }).strict(),
+  z.object({ ...crmArtifactFields, kind: z.literal("object"), object_key: crmArtifactObjectKey }).strict(),
+]);
+export type TurnCrmArtifact = z.infer<typeof turnCrmArtifactSchema>;
+const crmArtifacts = z.array(turnCrmArtifactSchema).max(8).optional();
+
 const conversationId = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 
 export const nyxAgentTitleSchema = z.object({ title: z.string().trim().min(1).max(200) });
@@ -114,6 +129,7 @@ export const nyxAgentConversationSchema = z.object({
       activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
       started_at: z.string(),
       activities: z.array(nyxAgentTurnActivitySchema).default([]),
+      crm_artifacts: crmArtifacts,
       attachments: z.array(nyxAgentAttachmentSchema).default([]),
     })
     .nullable(),
@@ -203,6 +219,7 @@ export const nyxAgentMessageSchema = z.object({
   }).nullable().optional(),
   created_at: z.string(),
   activities: z.array(nyxAgentTurnActivitySchema).default([]),
+  crm_artifacts: crmArtifacts,
   attachments: z.array(nyxAgentAttachmentSchema).default([]),
   activity_total: z.number().int().nonnegative().nullish().transform((value) => value ?? undefined).optional(),
   /** A user message written in a chat app: its platform. */
@@ -351,6 +368,7 @@ export const nyxAgentEventSchema = z.discriminatedUnion("event", [
   base.extend({ event: z.literal("message.completed"), message_id: z.string() }),
   base.extend({
     event: z.literal("turn.completed"),
+    crm_artifacts: crmArtifacts,
     turn_id: z.string(),
     status: z.enum(["completed", "failed", "cancelled"]),
     turn_metadata: turnMetadataSchema.nullish(),
@@ -484,6 +502,14 @@ export const guestReadinessSettingsSchema = guestReadinessSchema.extend({
 });
 
 
+export const assistantCrmGrantSchema = z.object({
+  owner_id: z.string(),
+  object: z.string().regex(/^[a-z][a-z0-9_]{0,47}$/),
+  capabilities: z
+    .array(z.enum(["read", "write", "schema"]))
+    .min(1)
+    .max(3),
+});
 export const assistantAgentSchema = z.object({
   guest_readiness: guestReadinessSchema.nullish(),
   share_role: z.enum(["manager", "user"]).nullable().optional(),
@@ -512,6 +538,7 @@ export const assistantAgentSchema = z.object({
   services: z.array(z.string()).default([]),
   machines: z.array(z.string()).optional(),
   logins: z.array(z.string()).optional(),
+  crm: z.array(assistantCrmGrantSchema).max(16).optional(),
   account_read: z.boolean().default(false),
   /** What guests (other members of the agent's chats) may do with each service. */
   guest_access: z.record(z.string(), assistantGuestAccessSchema.catch("use")).default({}),
@@ -622,6 +649,7 @@ export const assistantAgentCreateSchema = z.object({
   machines: z.array(z.string()).max(64).optional(),
   logins: z.array(z.string()).max(64).optional(),
   services: z.array(z.string()),
+  crm: z.array(assistantCrmGrantSchema).max(16).optional(),
   account_read: z.boolean(),
 });
 export type AssistantAgentCreate = z.infer<typeof assistantAgentCreateSchema>;
@@ -672,6 +700,7 @@ export const assistantAgentGrantsSchema = z.object({
   machines: z.array(z.string()).optional(),
   logins: z.array(z.string()).optional(),
   services: z.array(z.string()),
+  crm: z.array(assistantCrmGrantSchema).max(16).optional(),
   account_read: z.boolean(),
   /** Guest access by service slug; services left out keep their level. */
   guest_access: z.record(z.string(), assistantGuestAccessSchema),
@@ -681,6 +710,7 @@ export const assistantAgentGrantsRequestSchema = z.object({
   machines: z.array(z.string()).optional(),
   logins: z.array(z.string()).optional(),
   services: z.array(z.string()),
+  crm: z.array(assistantCrmGrantSchema).max(16).optional(),
   account_read: z.boolean(),
   guest_access: z.record(z.string(), assistantGuestAccessSchema).optional(),
 });
@@ -870,6 +900,7 @@ export const assistantGroupMessageSchema = z.object({
   feedback: z.object({ vote: z.enum(["up", "down"]), comment: z.string().nullable().optional(), updated_at: z.string().optional() }).nullable().optional(),
   activities: z.array(nyxAgentTurnActivitySchema).optional(),
   author: groupPersonSchema.optional(),
+  crm_artifacts: crmArtifacts,
   attachments: z.array(nyxAgentAttachmentSchema).optional(),
   id: z.string(),
   seq: z.number().int().positive(),

@@ -865,6 +865,7 @@ async fn append_following_bound(
                     if thread.matched_count != 1 { return Err(not_found()); }
                 }
                 let message = GroupMessage {
+                    crm_artifacts: Vec::new(),
                     collaboration: None,
                     activities: Vec::new(),
                     org_group: false,
@@ -979,6 +980,7 @@ pub async fn append_with_recipients(
     ))
     .await?;
     let message = GroupMessage {
+        crm_artifacts: Vec::new(),
         collaboration: None,
         activities: Vec::new(),
         org_group: false,

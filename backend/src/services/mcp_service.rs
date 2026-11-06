@@ -2977,11 +2977,16 @@ pub fn generate_tool_definitions(
 /// for a tool listed by [`generate_tool_definitions`]. OpenAI plugin review
 /// requires all three as explicit booleans on every listed tool.
 ///
+/// Native CRM tools use their declared action class.
 /// Meta-tools use a fixed table. Service tools derive the hints from their
 /// HTTP method; generic proxies accept any method and are therefore treated
 /// as potentially destructive. Unknown names return `None`.
 pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde_json::Value> {
+    let crm_hints = name
+        .strip_prefix("nyxid__")
+        .and_then(super::crm::tools::annotation_hints);
     let (read_only, destructive, open_world) = match name {
+        _ if crm_hints.is_some() => crm_hints?,
         "nyxid__task_status" => (true, false, false),
         "nyx__search_tools"
         | "nyx__discover_services"

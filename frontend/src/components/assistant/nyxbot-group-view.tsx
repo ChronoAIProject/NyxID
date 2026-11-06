@@ -1,3 +1,4 @@
+import { CrmArtifactBlock } from "./blocks/crm-artifact-block";
 import { GroupAgentAccessRequest } from "./group-agent-access";
 import { groupAgentUnavailableReason } from "@/lib/assistant/nyxbot-labels";
 import { CollaborationSettings, CollaborationCards } from "./collaboration-group-controls";
@@ -255,6 +256,7 @@ export function GroupMessageRow({
               }}
             />
           ))}
+          <CrmArtifactBlock artifacts={message.crm_artifacts} />
           <TextBlock text={sanitizeAssistantMessageContent(projection.text)} mentions={projection.mentions} />
           <div className="mt-2 flex max-w-full flex-wrap items-center gap-1">
             <MessageCopyAction text={sanitizeAssistantMessageContent(projection.text)} mentions={projection.mentions} format="markdown" />

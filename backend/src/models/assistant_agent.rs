@@ -35,6 +35,25 @@ pub struct AgentGrants {
     /// Read-only NyxID account tools.
     #[serde(default)]
     pub account_read: bool,
+    /// Owner-scoped CRM tools; never available to guests.
+    #[serde(default)]
+    pub crm: Vec<CrmGrant>,
+}
+
+/// Explicit CRM authority; owner is checked against the specialist's live owner.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CrmGrant {
+    pub owner_id: String,
+    pub object: String,
+    pub capabilities: Vec<CrmCapability>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrmCapability {
+    Read,
+    Write,
+    Schema,
 }
 
 /// What guests may do with one of a specialist's services. Operations the

@@ -372,6 +372,8 @@ pub struct ActiveTurn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_context: Option<ChannelTurnContext>,
     #[serde(default)]
+    pub crm_artifacts: Vec<super::assistant_crm_artifact::TurnCrmArtifact>,
+    #[serde(default)]
     pub business_system_success: bool,
     #[serde(default)]
     pub delegated_images: super::assistant_delegated_image::DelegatedImages,

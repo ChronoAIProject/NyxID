@@ -160,6 +160,12 @@ pub mod assistant_skill_draft_attempt;
 pub mod catalog_skill_revision;
 pub mod channel_delivery;
 pub mod channel_email;
+pub mod crm_activity;
+pub mod crm_link;
+pub mod crm_mutation_receipt;
+pub mod crm_object;
+pub mod crm_record;
+pub mod crm_saved_view;
 pub mod nyxbot_channel;
 pub mod nyxbot_event_binding;
 pub mod nyxbot_gateway_response;
@@ -251,6 +257,7 @@ pub mod discord_gateway;
 
 pub mod assistant_delegated_image;
 
+pub mod assistant_crm_artifact;
 pub mod cma_session_origin;
 pub mod org_channel;
 pub mod voice_responses;

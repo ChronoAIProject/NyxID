@@ -488,6 +488,7 @@ pub(crate) async fn publish_reply(
         }
     }
     let public = GroupMessage {
+        crm_artifacts: Vec::new(),
         collaboration: Some(model::MessageBinding {
             version: model::VERSION,
             original_requester_id: Some(b.original_requester_id.clone()),

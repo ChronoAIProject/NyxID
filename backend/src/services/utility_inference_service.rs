@@ -36,7 +36,29 @@ pub async fn seed(db: &Database) -> AppResult<()> {
     Ok(())
 }
 
+pub enum InferenceRoute {
+    Utility,
+    Crm,
+}
+
+impl InferenceRoute {
+    fn fields(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Utility => ("utility_inference", "utility_inference_admin_modified"),
+            Self::Crm => ("crm_inference", "crm_inference_admin_modified"),
+        }
+    }
+}
+
 pub async fn set(db: &Database, config: Option<UtilityInference>) -> AppResult<()> {
+    set_route(db, config, InferenceRoute::Utility).await
+}
+
+pub async fn set_route(
+    db: &Database,
+    config: Option<UtilityInference>,
+    route: InferenceRoute,
+) -> AppResult<()> {
     if let Some(config) = &config {
         if !super::assistant_oneshot_inference::valid_model_id(&config.model)
             || config.service_slug.is_empty()
@@ -55,9 +77,9 @@ pub async fn set(db: &Database, config: Option<UtilityInference>) -> AppResult<(
             ));
         }
     }
+    let (field, marker) = route.fields();
     db.collection::<PlatformSettings>(COLLECTION_NAME).update_one(doc! {"_id": PLATFORM_SETTINGS_ID},
-        doc! {"$set": {"utility_inference": bson::to_bson(&config).map_err(|_| AppError::Internal("Utility settings serialization failed".into()))?,
-            "utility_inference_admin_modified": true}}).upsert(true).await?;
+        doc! {"$set": {field: bson::to_bson(&config).map_err(|_| AppError::Internal("Utility settings serialization failed".into()))?, marker: true}}).upsert(true).await?;
     Ok(())
 }
 

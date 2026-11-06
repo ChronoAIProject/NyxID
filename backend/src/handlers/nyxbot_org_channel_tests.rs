@@ -340,6 +340,7 @@ async fn org_channel(
         OWNER,
         &org_id,
         team::CreateRequest {
+            crm: Vec::new(),
             name: "org-channel-specialist".into(),
             description: "Organization support".into(),
             display_name: None,

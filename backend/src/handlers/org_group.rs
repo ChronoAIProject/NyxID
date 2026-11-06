@@ -266,7 +266,11 @@ pub(crate) async fn member_settled(
         let request = groups::request(&state.db, &access, id).await?;
         let agent =
             crate::services::assistant_team_service::agent_for_conversation(&state.db, row).await?;
-        if error.is_none() && !text.trim().is_empty() {
+        let has_artifacts = row
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| !turn.crm_artifacts.is_empty());
+        if error.is_none() && (!text.trim().is_empty() || has_artifacts) {
             let attachments = match row.active_turn.as_ref() {
                 Some(turn) => {
                     crate::services::assistant_nyxagent::settled_tool_attachments(
@@ -293,6 +297,10 @@ pub(crate) async fn member_settled(
             )
             .await?;
             Box::pin(crate::services::machine_activity_service::publish_group(
+                &state.db, row, &message,
+            ))
+            .await?;
+            Box::pin(crate::services::crm::artifacts::publish_group(
                 &state.db, row, &message,
             ))
             .await?;

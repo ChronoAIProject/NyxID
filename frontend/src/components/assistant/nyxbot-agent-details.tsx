@@ -29,7 +29,7 @@ import { MachineCapabilities } from "./machine-capabilities";
 import { AgentOperationScopes } from "./agent-operation-scopes";
 import { MachineGrantPicker } from "./machine-grant-picker";
 import { AgentAutomations } from "./automation-preferences";
-import { useEffect, useRef, useState, type ComponentProps } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ComponentProps } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQueryClient } from "@tanstack/react-query";
 import { Trash2, X } from "lucide-react";
@@ -160,6 +160,12 @@ export function accessAuthorityCopy(
     ? `${sandbox} ${direct} Only for work NyxBot assigned, or in a group with NyxBot, do its requests go to NyxBot, which approves or denies them.`
     : `${sandbox} ${direct} Its requests are never routed: only work NyxBot assigned, or work in a group NyxBot is in, reports the missing access to NyxBot instead.`;
 }
+
+const CrmGrantPicker = lazy(() =>
+  import("@/components/crm/grant-picker").then((module) => ({
+    default: module.CrmGrantPicker,
+  })),
+);
 
 const GRANTS_SECTION_ID = "agent-details-grants";
 const SKILLS_SECTION_ID = "agent-details-skills";
@@ -972,6 +978,7 @@ function GrantsForm({
   readonly agent: AssistantAgent;
   readonly requestMode?: "denied" | "routed_to_nyxbot";
 }) {
+  const crmEnabled = useFeature(FEATURE_FLAG.CMS_POC_V1);
   const orgChannels = useFeature(FEATURE_FLAG.ORG_SPECIALIST_CHANNELS);
   const canManageGuests =
     agent.owner_kind !== "org" || (orgChannels && agent.org_role === "admin");
@@ -989,6 +996,7 @@ function GrantsForm({
       services: agent.services,
       machines: agent.machines ?? [],
       logins: agent.logins ?? [],
+      crm: agent.crm ?? [],
       account_read: agent.account_read,
       guest_access: agent.guest_access,
     },
@@ -1014,6 +1022,9 @@ function GrantsForm({
         services: values.services,
         ...(dirtyFields.machines ? { machines: values.machines } : {}),
         ...(dirtyFields.logins ? { logins: values.logins } : {}),
+        ...(crmEnabled && dirtyFields.crm
+          ? { crm: values.crm ?? [], crmEdited: true }
+          : {}),
         account_read: values.account_read,
         ...(Object.keys(changed).length ? { guest_access: changed } : {}),
       });
@@ -1084,6 +1095,24 @@ function GrantsForm({
               )}
             />
           ))}
+          {crmEnabled && (
+            <Suspense fallback={null}>
+              <FormField
+                control={form.control}
+                name="crm"
+                render={({ field }) => (
+                  <FormItem>
+                    <CrmGrantPicker
+                      ownerId={agent.owner_id}
+                      value={field.value ?? []}
+                      onChange={field.onChange}
+                      disabled={readOnly || grants.isPending}
+                    />
+                  </FormItem>
+                )}
+              />
+            </Suspense>
+          )}
           {services.length && canManageGuests ? (
             <FormField
               control={form.control}
@@ -1141,7 +1170,7 @@ function GrantsForm({
           ) : null}
           {readOnly ? null : (
             <GroupedFormActions
-          changes={() => [...describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "services", label: "Services", list: (value) => changeList(value).map(serviceName) }, { key: "machines", label: "Machines", list: (value) => changeList(value).map((id) => nodes.data?.find((node) => node.id === id)?.name ?? id) }, { key: "logins", label: "Saved logins", list: (value) => changeList(value).map((id) => logins.data?.find((login) => login.id === id)?.label ?? id) }, { key: "account_read", label: "Read my account" }]), ...recordChanges(form.formState.defaultValues?.guest_access, form.getValues("guest_access"), (key) => `Guest access · ${serviceName(key)}`, labelValue(GUEST_ACCESS_LABEL, "Use but not change or delete"))]}
+          changes={() => [...describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "services", label: "Services", list: (value) => changeList(value).map(serviceName) }, { key: "machines", label: "Machines", list: (value) => changeList(value).map((id) => nodes.data?.find((node) => node.id === id)?.name ?? id) }, { key: "logins", label: "Saved logins", list: (value) => changeList(value).map((id) => logins.data?.find((login) => login.id === id)?.label ?? id) }, { key: "account_read", label: "Read my account" }, ...(crmEnabled ? [{ key: "crm" as const, label: "CRM access" }] : [])]), ...recordChanges(form.formState.defaultValues?.guest_access, form.getValues("guest_access"), (key) => `Guest access · ${serviceName(key)}`, labelValue(GUEST_ACCESS_LABEL, "Use but not change or delete"))]}
               label="grants"
               dirty={form.formState.isDirty}
               pending={grants.isPending}

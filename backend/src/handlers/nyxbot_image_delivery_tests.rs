@@ -2755,7 +2755,10 @@ async fn nyxbot_multipart_post_delivers_all_text_and_repeated_calls_reuse_receip
         )
         .mount(&server)
         .await;
-    let text = "🦉x".repeat(3000);
+    let text = format!(
+        "{}\nhttps://nyxid.test/assistant/crm?owner=person&view=saved-view",
+        "🦉x".repeat(3000)
+    );
     let result = chats::post_current_turn(&f.state, &chat, &target.id, &text, false)
         .await
         .unwrap();
@@ -3243,6 +3246,7 @@ async fn shared_post_fixture(
         &f.state.encryption_keys,
         &publisher,
         team::CreateRequest {
+            crm: vec![],
             name: "shared-publisher".into(),
             description: "Specialist".into(),
             display_name: None,

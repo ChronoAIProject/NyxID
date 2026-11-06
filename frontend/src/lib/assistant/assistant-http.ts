@@ -196,6 +196,8 @@ async function parseError(
         ? { consent_url: value.consent_url }
         : {}),
       ...(value.details !== undefined ? { details: value.details } : {}),
+      ...(value.current !== undefined ? { current: value.current } : {}),
+      ...(value.errors !== undefined ? { errors: value.errors } : {}),
     };
     return { parsed, raw: value };
   } catch {

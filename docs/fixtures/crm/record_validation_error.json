@@ -1,0 +1,15 @@
+{
+  "error": "crm_validation_failed",
+  "error_code": 13401,
+  "message": "CRM validation failed",
+  "errors": [
+    {
+      "path": "values.email",
+      "message": "must be a string"
+    },
+    {
+      "path": "values.name",
+      "message": "is required"
+    }
+  ]
+}

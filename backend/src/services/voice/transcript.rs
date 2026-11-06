@@ -257,6 +257,7 @@ pub async fn persist(
                 .return_document(mongodb::options::ReturnDocument::After).session(&mut *tx).await?
                 .ok_or_else(||AppError::NotFound("Voice conversation unavailable".into()))?;
             messages.insert_one(AssistantMessage{
+                crm_artifacts: Vec::new(),
             automation_work: None,
                 execution_task: None,delegated_images:Default::default(),
                 media_event_ids: Vec::new(),

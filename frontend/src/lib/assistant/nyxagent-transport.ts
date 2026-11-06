@@ -622,6 +622,7 @@ export class NyxAgentTransport {
       if (cached) return cached;
       const failed = message.status === "failed" && message.error_code !== "cancelled";
       const view: ChatMessage = {
+        crmArtifacts: message.crm_artifacts,
         actionOutcome: message.action_outcome,
         recovery: message.recovery,
         artifactDelivery: message.artifact_delivery && id ? {state: message.artifact_delivery.state,count: message.artifact_delivery.count,rejected: message.artifact_delivery.rejected,recoveryAvailable: message.artifact_delivery.recovery_available,messageSeq: message.seq,conversationId: id,endpoint: `${path(id)}/messages/${encodeURIComponent(message.id)}/artifact-delivery`} : undefined,
@@ -657,7 +658,7 @@ export class NyxAgentTransport {
     const polledTurn = history?.conversation.active_turn;
     const liveActivity =
       polledTurn && (!liveTurnId || polledTurn.turn_id === liveTurnId)
-        ? { ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments), activityTotal: polledTurn.activity_total }
+        ? { crmArtifacts: polledTurn.crm_artifacts, ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments), activityTotal: polledTurn.activity_total }
         : {};
     const settledImages = new Map(
       (history?.messages ?? []).map((message) => [message.id, images(id, message.attachments)]),
@@ -687,6 +688,7 @@ export class NyxAgentTransport {
         const cached = streaming ? undefined : this.liveViews.get(message);
         if (cached && cached.id === id && cached.settled === settled) return cached.view;
         const view: ChatMessage = {
+          crmArtifacts: settled?.crm_artifacts ?? (streaming ? live.state.activeTurn?.crmArtifacts : undefined),
           actionOutcome: settled?.action_outcome,
           recovery: settled?.recovery,
           artifactDelivery: settled?.artifact_delivery && id ? {state: settled.artifact_delivery.state,count: settled.artifact_delivery.count,rejected: settled.artifact_delivery.rejected,recoveryAvailable: settled.artifact_delivery.recovery_available,messageSeq: settled.seq,conversationId: id,endpoint: `${path(id)}/messages/${encodeURIComponent(settled.id)}/artifact-delivery`} : undefined,

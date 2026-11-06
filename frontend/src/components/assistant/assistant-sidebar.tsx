@@ -30,6 +30,7 @@ import {
   Building2,
   ChevronRight,
   ChevronsUpDown,
+  ContactRound,
   FileText,
   MoreHorizontal,
   MessageSquare,
@@ -816,7 +817,8 @@ export function AssistantSidebar({
     | "plugins"
     | "approvals"
     | "automations"
-    | "machines";
+    | "machines"
+    | "crm";
   readonly deletingId?: string;
   readonly notice?: string;
   readonly onNewChat: () => void;
@@ -833,6 +835,7 @@ export function AssistantSidebar({
   const user = useAuthStore((state) => state.user);
   const counts = useAssistantWorkspaceCounts();
   const workspacePreview = useFeature(FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW);
+  const crmEnabled = useFeature(FEATURE_FLAG.CMS_POC_V1);
   const pluginsActive = activeView === "plugins";
   const approvalsActive = activeView === "approvals";
   const [deleteTarget, setDeleteTarget] = useState<Conversation | undefined>();
@@ -975,6 +978,14 @@ export function AssistantSidebar({
               label: "Machines",
               icon: MachinesGlyph,
             },
+            ...(crmEnabled
+              ? [{
+                  view: "crm" as const,
+                  to: "/assistant/crm" as const,
+                  label: "CRM",
+                  icon: ContactRound,
+                }]
+              : []),
           ] as const
         ).map((item) => (
           <Link
@@ -1014,7 +1025,33 @@ export function AssistantSidebar({
           />
           <span className="truncate">Plugins</span>
         </Link>
-        {workspacePreview ? (
+        {crmEnabled ? (
+          <Link
+            to="/assistant/crm"
+            search={{
+              surface: "artifacts",
+              owner: undefined,
+              record: undefined,
+              view: undefined,
+              object: undefined,
+            }}
+            activeOptions={{ includeSearch: true }}
+            activeProps={{
+              "aria-current": "page",
+              className: "bg-overlay-strong font-medium text-foreground",
+            }}
+            inactiveProps={{
+              className: "text-muted-foreground hover:bg-overlay hover:text-foreground",
+            }}
+            className="flex w-full items-center gap-3 rounded-lg px-3 py-1.5 text-13 transition-colors"
+          >
+            <FileText className="h-4 w-4 shrink-0 text-text-tertiary" />
+            <span className="flex-1 truncate">Artifacts</span>
+            <span className="font-mono type-badge text-text-tertiary">
+              {counts.data?.artifacts ?? 0}
+            </span>
+          </Link>
+        ) : workspacePreview ? (
           <ComingSoonItem
             icon={FileText}
             label="Artifacts"
@@ -1233,18 +1270,20 @@ function SidebarRail({
   readonly onNewChat: () => void;
   readonly agents?: SidebarAgents;
   readonly groups?: SidebarGroups;
-  readonly activeView: "chat" | "plugins" | "approvals" | "automations" | "machines";
+  readonly activeView: "chat" | "plugins" | "approvals" | "automations" | "machines" | "crm";
   readonly activeConversationId: string | undefined;
   readonly pendingApprovals: number;
   readonly accountOpen: boolean;
   readonly onSelect: (conversationId: string) => void;
 }) {
   const homeActive = agents ? Boolean(agents.homeActive) : false;
+  const crmEnabled = useFeature(FEATURE_FLAG.CMS_POC_V1);
   const iconClass = (active: boolean) => cn("h-4 w-4", active && "text-nyx-secondary-400");
   const linkClass = (active: boolean) => cn(RAIL_BUTTON, active && "bg-overlay-strong text-foreground");
   const destinations = [
     { view: "automations", to: "/assistant/automations", label: "Automations", icon: AutomationsGlyph },
     { view: "machines", to: "/assistant/machines", label: "Machines", icon: MachinesGlyph },
+    ...(crmEnabled ? [{ view: "crm" as const, to: "/assistant/crm" as const, label: "CRM", icon: ContactRound }] : []),
     { view: "plugins", to: "/assistant/plugins", label: "Plugins", icon: PluginsGlyph },
   ] as const;
   const liveAgents = (agents?.agents ?? []).filter((agent) => agent.status !== "destroyed");

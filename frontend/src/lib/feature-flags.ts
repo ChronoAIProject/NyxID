@@ -54,6 +54,7 @@ export const FEATURE_FLAG = {
   CHANNEL_MEDIA: "assistant:channel-media",
   ATTACHMENT_WRITES: "assistant:attachment-writes",
   AGENT_LEARNING: "assistant:agent-learning",
+  CMS_POC_V1: "cms:poc-v1",
   SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
   NYXBOT_ADAPTERS: "nyxbot:service-adapters",
   NYXBOT_THREAD_FOLLOW: "nyxbot:thread-follow",

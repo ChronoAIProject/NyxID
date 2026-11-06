@@ -2359,6 +2359,7 @@ fn native_activity_names() -> &'static std::collections::HashSet<String> {
                 .iter()
                 .chain(crate::services::assistant_team_tools::TOOL_NAMES)
                 .chain(crate::services::assistant_team_tools::AGENT_TOOL_NAMES)
+                .chain(crate::services::crm::tools::NAMES)
             {
                 names.insert(format!("nyxid__{name}"));
             }
@@ -2789,6 +2790,7 @@ async fn dispatch_tools_call(
             crate::services::assistant_account_tools::TOOL_NAMES.contains(&name)
                 || crate::services::assistant_team_tools::TOOL_NAMES.contains(&name)
                 || crate::services::assistant_team_tools::AGENT_TOOL_NAMES.contains(&name)
+                || crate::services::crm::tools::NAMES.contains(&name)
         });
         let _ = audit_service::log_actor_event(
             state.db.clone(),
@@ -4458,6 +4460,29 @@ async fn handle_account_tool(
             &state.config.frontend_url,
         );
         return tool_result(request_id, &result.value.to_string(), true);
+    }
+    if name
+        .strip_prefix("nyxid__")
+        .is_some_and(|name| crate::services::crm::tools::NAMES.contains(&name))
+    {
+        let Some(chat) = auth.chat.as_ref() else {
+            return tool_result(request_id, "Conversation key required", true);
+        };
+        let identity = request_id.clone().unwrap_or(serde_json::Value::Null);
+        return match Box::pin(crate::services::crm::tools::execute(
+            state, chat, name, args, &identity,
+        ))
+        .await
+        {
+            Ok(value) => {
+                let refused = value.get("error").is_some();
+                tool_result(request_id, &value.to_string(), refused)
+            }
+            Err(error) => {
+                let result = crate::services::assistant_account_tools::error_result(error);
+                tool_result(request_id, &result.value.to_string(), true)
+            }
+        };
     }
     if crate::services::assistant_team_tools::is_team_tool(name) {
         let Some(chat) = auth.chat.as_ref() else {
@@ -11889,6 +11914,10 @@ mod lark_base_tests;
 #[cfg(test)]
 #[path = "mcp_lark_im_tests.rs"]
 mod lark_im_tests;
+
+#[cfg(test)]
+#[path = "mcp_crm_tests.rs"]
+mod crm_tests;
 
 #[cfg(test)]
 mod schedule_retry_identity_tests {

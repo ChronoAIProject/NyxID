@@ -4,6 +4,7 @@ export const ASSISTANT_SHELL_ROUTES = [
   "/assistant/approvals",
   "/assistant/automations",
   "/assistant/machines",
+  "/assistant/crm",
   "/assistant/machines/new",
   "/assistant/machines/pair",
 ] as const;

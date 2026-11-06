@@ -1524,6 +1524,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .delete(handlers::admin_upload_retention::reset),
         )
         .route(
+            "/settings/crm-inference",
+            get(handlers::admin_utility_inference::get_crm)
+                .put(handlers::admin_utility_inference::put_crm),
+        )
+        .route(
             "/settings/utility-inference",
             get(handlers::admin_utility_inference::get).put(handlers::admin_utility_inference::put),
         )
@@ -3425,6 +3430,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::auth_agent_key::approve),
         )
         .route("/auth/agent-key/deny", post(handlers::auth_agent_key::deny))
+        .nest("/assistant/crm", handlers::crm::router())
         .nest("/assistant", assistant_routes)
         .nest("/auth", auth_routes)
         .route(

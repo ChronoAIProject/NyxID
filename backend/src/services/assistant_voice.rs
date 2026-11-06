@@ -250,6 +250,7 @@ pub(crate) async fn enqueue_in_session(
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
+                crm_artifacts: Vec::new(),
                 automation_work: None,
                 execution_task: None,
                 delegated_images: Default::default(),
@@ -428,6 +429,7 @@ pub(crate) async fn publish_result(
                 let text = source.text.clone();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+                        crm_artifacts: source.crm_artifacts.clone(),
             automation_work: None,
                         execution_task: None,
                         delegated_images: Default::default(),
@@ -681,6 +683,7 @@ pub(crate) async fn result_message(
         return Ok(None);
     }
     Ok(Some(AssistantMessage {
+        crm_artifacts: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -923,6 +926,7 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            crm_artifacts: Vec::new(),
             automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),

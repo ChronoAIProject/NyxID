@@ -130,6 +130,7 @@ pub(crate) async fn publish(
         "channel_id":&origin.nyxbot_channel_id,"partition":&origin.partition,"kind":{"$ne":"private"}},
         doc!{"$inc":{"public_message_seq":1_i64}}).return_document(mongodb::options::ReturnDocument::After).session(&mut *tx).await? else {return Ok(())};
     let message = GroupMessage {
+        crm_artifacts: Vec::new(),
         collaboration: None,
         activities: Vec::new(),
         org_group: true,

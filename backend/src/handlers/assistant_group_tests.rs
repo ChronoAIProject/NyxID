@@ -23,6 +23,98 @@ use uuid::Uuid;
 
 const OWNER: &str = "12345678-1234-4123-8123-1234567890cd";
 
+#[test]
+fn crm_group_message_dto_omits_artifacts_for_flag_off_viewers() {
+    let row: GroupMessage = mongodb::bson::from_document(doc! {
+        "_id":"message", "group_id":"group", "user_id":OWNER, "seq":1_i64,
+        "role":"agent", "text":"Created", "created_at":mongodb::bson::DateTime::now(),
+        "crm_artifacts":[{"kind":"object","id":"object","owner_id":OWNER,"object_key":"asset","title":"Assets","role":"created"}],
+    }).unwrap();
+    let off = serde_json::to_value(message_response(row.clone(), &[], false)).unwrap();
+    assert!(off.get("crm_artifacts").is_none());
+    let on = serde_json::to_value(message_response(row, &[], true)).unwrap();
+    assert_eq!(on["crm_artifacts"][0]["object_key"], "asset");
+}
+
+#[tokio::test]
+async fn crm_artifact_only_reply_is_published_in_the_group_transcript() {
+    use crate::models::assistant_crm_artifact::{CrmArtifactRole, TurnCrmArtifact};
+    let f =
+        crate::services::assistant_authority_tests::orchestrator_fixture("crm_group_artifact_only")
+            .await;
+    let group = groups::create(
+        &f.state.db,
+        &f.owner,
+        "Artifacts",
+        std::slice::from_ref(&f.chat.agent_id),
+        "user",
+    )
+    .await
+    .unwrap();
+    let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+        conversation_id: None,
+        text: "Create an artifact for this group".into(),
+        agent_id: Some(f.chat.agent_id.clone()),
+        model: None,
+        access_mode: None,
+    });
+    start.origin = crate::models::assistant_conversation::TurnOrigin::Group;
+    start.group_id = Some(group.id.clone());
+    let row = engine::begin_turn(&f.state.db, &f.owner, &start, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    let chat = acks::for_key(&f.state.db, &f.owner, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let artifact = TurnCrmArtifact::Object {
+        id: Uuid::new_v4().to_string(),
+        owner_id: f.owner.clone(),
+        object_key: "asset".into(),
+        title: "Assets".into(),
+        role: CrmArtifactRole::Created,
+    };
+    crate::services::crm::artifacts::record(&f.state.db, &chat, artifact.clone())
+        .await
+        .unwrap();
+    let row = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+    assert_eq!(
+        groups::member_thread(&f.state.db, &f.owner, &group.id, &chat.agent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        row.id
+    );
+    engine::finish_turn(
+        &f.state.db,
+        &row,
+        &chat.api_key_id,
+        &Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: String::new(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    member_settled(&f.state, &row, "", None).await;
+    let messages = groups::messages(&f.state.db, &f.owner, &group.id, 10, None)
+        .await
+        .unwrap();
+    let reply = messages
+        .iter()
+        .find(|message| message.role == "agent")
+        .expect("artifact-only reply must be visible");
+    assert_eq!(reply.crm_artifacts, vec![artifact]);
+    f.state.db.drop().await.unwrap();
+}
+
 type Calls = Arc<Mutex<Vec<Value>>>;
 
 /// A NyxAgent stand-in that answers as whichever member is speaking.
@@ -116,6 +208,7 @@ async fn specialist_for(state: &AppState, owner: &str, name: &str) -> AssistantA
         OWNER,
         owner,
         CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: name.into(),
@@ -1618,6 +1711,7 @@ async fn shared_researcher(state: &AppState) -> AssistantAgent {
         &state.encryption_keys,
         &publisher,
         CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "researcher".into(),

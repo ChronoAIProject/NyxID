@@ -47,6 +47,8 @@ export function nyxAgentLiveRefresh(
           : [],
       };
     }
+    case "crm":
+      return { now: [["crm", event.owner_id]], lists: [] };
     case "group":
       return { now: [nyxBotGroupKeys.messages(userId, event.id)], lists: [groupList] };
     case "channel_thread":
@@ -60,7 +62,7 @@ export function nyxAgentLiveRefresh(
     case "resync":
       // (Re)connected or events were missed: re-read everything.
       seen.clear();
-      return { now: [nyxBotQueryKeys.root(userId)], lists: [] };
+      return { now: [nyxBotQueryKeys.root(userId), ["crm"]], lists: [] };
   }
 }
 

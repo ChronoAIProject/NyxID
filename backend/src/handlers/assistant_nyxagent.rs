@@ -245,6 +245,8 @@ impl From<crate::models::assistant_conversation::StreamReply> for StreamReplyRes
 #[derive(Serialize)]
 pub struct ActiveTurnResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
+    crm_artifacts: Option<Vec<crate::models::assistant_crm_artifact::TurnCrmArtifact>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     reply: Option<StreamReplyResponse>,
     /// Waiting for one of the owner's running slots; also reported through
     /// the capacity-wait fields for clients that predate it.
@@ -394,6 +396,7 @@ impl From<AssistantConversation> for ConversationResponse {
                 .cloned()
                 .map(ActivityResponse::from)
                 .collect(),
+            crm_artifacts: None,
             attachments: turn
                 .attachments
                 .iter()
@@ -655,6 +658,8 @@ impl ActionOutcomeResponse {
 #[derive(Serialize)]
 pub struct MessageResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
+    crm_artifacts: Option<Vec<crate::models::assistant_crm_artifact::TurnCrmArtifact>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     artifact_delivery: Option<ArtifactDeliveryResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     action_outcome: Option<ActionOutcomeResponse>,
@@ -747,6 +752,7 @@ impl From<AssistantMessage> for MessageResponse {
                 .into_iter()
                 .map(ActivityResponse::from)
                 .collect(),
+            crm_artifacts: (!row.crm_artifacts.is_empty()).then_some(row.crm_artifacts),
             attachments: row
                 .attachments
                 .into_iter()
@@ -1173,11 +1179,18 @@ pub async fn history(
         .active_turn
         .as_mut()
         .and_then(|turn| turn.reply.take());
+    let crm_enabled = crate::services::crm::enabled(&state.db, &user_id).await?;
+    let crm_artifacts = conversation
+        .active_turn
+        .as_ref()
+        .map(|t| t.crm_artifacts.clone())
+        .unwrap_or_default();
     let mut conversation = ConversationResponse::from(conversation)
         .with_agent(agent_id.as_deref(), &agents)
         .with_chat(&chats);
     if let Some(turn) = conversation.active_turn.as_mut() {
         turn.reply = reply.map(Into::into);
+        turn.crm_artifacts = crm_enabled.then_some(crm_artifacts);
     }
     conversation.pending_acknowledgements = acknowledgements
         .iter()
@@ -1243,6 +1256,14 @@ pub async fn history(
         attachments.extend(turn.attachments.iter_mut());
     }
     Box::pin(mark_expired_attachments(&state.db, &user_id, attachments)).await?;
+    if !crm_enabled {
+        for message in &mut messages {
+            message.crm_artifacts = None;
+        }
+        if let Some(turn) = conversation.active_turn.as_mut() {
+            turn.crm_artifacts = None;
+        }
+    }
     let approval_history: Vec<ChatApprovalResponse> =
         approvals.into_iter().map(Into::into).collect();
     Ok(Json(HistoryResponse {
@@ -2607,6 +2628,11 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
                     if !eligible {continue;}
                     ("group", json!({"type":"group","id":id}))
                 }
+                Ok(LiveEvent::Crm { owner_id, user_id: recipient }) if recipient == user_id => {
+                    if !crate::services::org_service::resolve_owner_access(&state.db,&user_id,&owner_id).await.is_ok_and(|access|access.can_read()) {continue;}
+                    if !crate::services::feature_flag_service::personal_flag_enabled(&state.db,&user_id,crate::services::crm::FLAG_KEY).await.unwrap_or(false) {continue;}
+                    ("crm",json!({"type":"crm","owner_id":owner_id}))
+                }
                 Ok(LiveEvent::Group { id, user_id: owner }) if owner == user_id => {
                     ("group", json!({"type": "group", "id": id}))
                 }
@@ -2632,7 +2658,7 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
 pub(crate) async fn run_turn(
     state: AppState,
     auth: AuthUser,
-    row: AssistantConversation,
+    mut row: AssistantConversation,
     text: String,
     credential: AssistantCredential,
     policy: Option<BillingRoutePolicy>,
@@ -2664,6 +2690,9 @@ pub(crate) async fn run_turn(
     )
     .await;
     if let Some(settled) = settled {
+        if let Some(turn) = row.active_turn.as_mut() {
+            turn.crm_artifacts = settled.crm_artifacts;
+        }
         tracing::debug!(conversation_id = %row.id, message_id = %settled.message_id, "Assistant reply settled");
         if settled.error.is_none()
             && row.message_count == 1

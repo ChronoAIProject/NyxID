@@ -63,6 +63,7 @@ fn stream_timeout_is_the_earlier_of_transport_idle_and_no_progress() {
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {
+        crm_artifacts: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -1562,6 +1563,138 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
 }
 
 #[tokio::test]
+async fn crm_live_stream_rechecks_flag_before_delivering_queued_events() {
+    use crate::services::assistant_live::LiveEvent;
+    use crate::services::feature_flag_service::{self, FlagTarget};
+    use http_body_util::BodyExt;
+    let f = crate::services::assistant_authority_tests::orchestrator_fixture("crm_live_flag").await;
+    f.state.assistant_live.set_open_for_tests(true);
+    let mut body = live(State(f.state.clone()), test_auth_user(&f.owner))
+        .await
+        .unwrap()
+        .into_body();
+    let ready = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(
+        std::str::from_utf8(&ready)
+            .unwrap()
+            .contains("event: ready")
+    );
+    for enabled in [false, true, false] {
+        f.state.assistant_live.publish(LiveEvent::Crm {
+            owner_id: f.owner.clone(),
+            user_id: f.owner.clone(),
+        });
+        f.state.assistant_live.publish(LiveEvent::ChannelBot {
+            id: "channel".into(),
+            user_id: f.owner.clone(),
+            active: true,
+        });
+        feature_flag_service::set_platform_override(
+            &f.state.db,
+            crate::services::crm::FLAG_KEY,
+            &FlagTarget::User(f.owner.clone()),
+            enabled,
+            &f.owner,
+        )
+        .await
+        .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let frame = std::str::from_utf8(&frame).unwrap();
+        if enabled {
+            assert!(frame.contains("event: crm"), "{frame}");
+            let frame = body.frame().await.unwrap().unwrap().into_data().unwrap();
+            assert!(
+                std::str::from_utf8(&frame)
+                    .unwrap()
+                    .contains("event: channels")
+            );
+        } else {
+            assert!(frame.contains("event: channels"), "{frame}");
+            assert!(!frame.contains("event: crm"));
+        }
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn crm_history_masks_active_and_settled_artifacts_when_flag_is_off() {
+    use crate::models::assistant_crm_artifact::{CrmArtifactRole, TurnCrmArtifact};
+    use crate::services::feature_flag_service::{self, FlagTarget};
+    let f =
+        crate::services::assistant_authority_tests::orchestrator_fixture("crm_history_flag").await;
+    let artifact = TurnCrmArtifact::Object {
+        id: Uuid::new_v4().to_string(),
+        owner_id: f.owner.clone(),
+        object_key: "asset".into(),
+        title: "Assets".into(),
+        role: CrmArtifactRole::Created,
+    };
+    crate::services::crm::artifacts::record(&f.state.db, &f.chat, artifact.clone())
+        .await
+        .unwrap();
+    for settled in [false, true] {
+        if settled {
+            engine::finish_turn(
+                &f.state.db,
+                &f.row,
+                &f.chat.api_key_id,
+                &Uuid::new_v4().to_string(),
+                &TurnResult {
+                    text: "Created".into(),
+                    session_id: None,
+                    response_id: None,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        for enabled in [false, true] {
+            feature_flag_service::set_platform_override(
+                &f.state.db,
+                crate::services::crm::FLAG_KEY,
+                &FlagTarget::User(f.owner.clone()),
+                enabled,
+                &f.owner,
+            )
+            .await
+            .unwrap();
+            let Json(page) = history(
+                State(f.state.clone()),
+                test_auth_user(&f.owner),
+                Path(f.row.id.clone()),
+                Query(HistoryQuery::default()),
+            )
+            .await
+            .unwrap();
+            let value = serde_json::to_value(page).unwrap();
+            let row = if settled {
+                value["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|m| m["role"] == "assistant")
+                    .unwrap()
+            } else {
+                &value["conversation"]["active_turn"]
+            };
+            if enabled {
+                assert_eq!(row["crm_artifacts"], json!([artifact]));
+            } else {
+                assert!(row.get("crm_artifacts").is_none());
+            }
+        }
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn stale_fences_are_hidden_in_index_and_history_dtos() {
     let (state, _, server) = setup(None, Duration::ZERO).await;
     let row = engine::begin_turn(
@@ -1802,7 +1935,7 @@ async fn panicking_turn_execution_settles_without_sweep_and_keeps_diagnostics_co
 }
 
 #[tokio::test]
-async fn settlement_recovers_the_actual_saved_reply_after_an_ambiguous_finish() {
+async fn crm_settlement_recovers_saved_reply_and_artifacts_after_an_ambiguous_finish() {
     let (state, _, server) = setup(None, Duration::ZERO).await;
     let row = engine::begin_turn(
         &state.db,
@@ -1837,6 +1970,21 @@ async fn settlement_recovers_the_actual_saved_reply_after_an_ambiguous_finish() 
     )
     .await
     .unwrap();
+    let artifact = crate::models::assistant_crm_artifact::TurnCrmArtifact::View {
+        id: "saved-view".into(),
+        owner_id: OWNER.into(),
+        title: "Saved view".into(),
+        role: crate::models::assistant_crm_artifact::CrmArtifactRole::Created,
+    };
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&saved_id},
+            doc! {"$set":{"crm_artifacts":bson::to_bson(&vec![artifact.clone()]).unwrap()}},
+        )
+        .await
+        .unwrap();
     let permit = state.direct_chat_limiter.try_acquire(OWNER).await.unwrap();
     let (sender, _receiver) = broadcast::channel(256);
     let settled = complete_turn(
@@ -1858,7 +2006,7 @@ async fn settlement_recovers_the_actual_saved_reply_after_an_ambiguous_finish() 
     )
     .await;
     assert!(
-        matches!(settled, SettledExecution::Saved { message_id, error: None } if message_id == saved_id)
+        matches!(settled, SettledExecution::Saved { message_id, error: None, crm_artifacts } if message_id == saved_id && crm_artifacts == vec![artifact])
     );
     server.abort();
     state.db.drop().await.unwrap();
@@ -4303,6 +4451,7 @@ async fn http_turns_inherit_specialist_model_and_preserve_explicit_and_existing_
         &state.encryption_keys,
         OWNER,
         team::CreateRequest {
+            crm: vec![],
             machines: None,
             logins: None,
             name: "faq".into(),

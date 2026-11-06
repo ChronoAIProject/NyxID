@@ -400,7 +400,7 @@ struct OwnerTurnSettled {
 impl crate::services::assistant_nyxagent_runtime::OwnerTurnSettledHook for OwnerTurnSettled {
     async fn settled(
         &self,
-        row: AssistantConversation,
+        mut row: AssistantConversation,
         reply: crate::services::platform_manager_contract::ReplyRef,
     ) {
         if row.id != reply.turn.conversation_id
@@ -436,6 +436,9 @@ impl crate::services::assistant_nyxagent_runtime::OwnerTurnSettledHook for Owner
                         error_code = error.error_code(),
                         "Saved personal reply delivery deferred or refused"
                     );
+                }
+                if let Some(turn) = row.active_turn.as_mut() {
+                    turn.crm_artifacts = message.crm_artifacts;
                 }
                 let error = message.error_code.as_deref().map(TurnError::new);
                 after_turn_boxed(self.state.clone(), row, message.text, error).await;
@@ -482,13 +485,15 @@ pub(crate) async fn after_turn(
             super::nyxbot::late_delivery::process(state, source).await;
         }
     }
+    let channel_text = channel_artifact_text(state, row, text).await;
     let owner = row.user_id.as_str();
     if let Some(run_id) = turn.trigger_run_id.as_deref()
         && !crate::services::async_service_operation::pending_run(&state.db, run_id)
             .await
             .unwrap_or(true)
     {
-        super::trigger_scheduler::settled(state, row, run_id, text, error.map(|e| e.code)).await;
+        super::trigger_scheduler::settled(state, row, run_id, &channel_text, error.map(|e| e.code))
+            .await;
     }
     // Every reply of a hidden group member thread belongs to the group,
     // including event turns (a finished link, a confirmed action).
@@ -571,7 +576,12 @@ pub(crate) async fn after_turn(
                 state,
                 row,
                 origin,
-                "I couldn't finish answering that question. Please ask again.",
+                &channel_artifact_text(
+                    state,
+                    row,
+                    "I couldn't finish answering that question. Please ask again.",
+                )
+                .await,
                 None,
             )
             .await;
@@ -592,10 +602,11 @@ pub(crate) async fn after_turn(
     match engine::answer_routing(row, turn).primary {
         engine::PrimaryDestination::ChatUpdate { origins } => {
             if origins.len() == 1 && origins[0].thread.is_none() {
-                super::nyxbot::deliver_update(state, row, text, Some(&plan)).await;
+                super::nyxbot::deliver_update(state, row, &channel_text, Some(&plan)).await;
             } else {
                 for origin in origins {
-                    super::nyxbot::deliver_to(state, row, &origin, text, Some(&plan)).await;
+                    super::nyxbot::deliver_to(state, row, &origin, &channel_text, Some(&plan))
+                        .await;
                 }
             }
         }
@@ -605,9 +616,32 @@ pub(crate) async fn after_turn(
         | engine::PrimaryDestination::Trigger { .. } => {}
     }
     for origin in &also {
-        super::nyxbot::deliver_to(state, row, origin, text, Some(&plan)).await;
+        super::nyxbot::deliver_to(state, row, origin, &channel_text, Some(&plan)).await;
     }
     let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
+}
+
+/// Settled references are copied from the already loaded message by the owner hook.
+/// These links feed async chat updates, duplicate recipients and trigger deliveries.
+pub(crate) async fn channel_artifact_text(
+    state: &AppState,
+    row: &AssistantConversation,
+    text: &str,
+) -> String {
+    let artifacts = row
+        .active_turn
+        .as_ref()
+        .map(|turn| turn.crm_artifacts.as_slice())
+        .unwrap_or_default();
+    if row.guest_turn
+        || row.collaboration.is_some()
+        || !crate::services::crm::artifacts::enabled_for(&state.db, &row.user_id, artifacts)
+            .await
+            .unwrap_or(false)
+    {
+        return text.to_owned();
+    }
+    crate::services::crm::artifacts::append_links(text, artifacts, &state.config.frontend_url)
 }
 
 /// Falls back to the turn when no reply row exists (a lost turn swept
@@ -1276,7 +1310,17 @@ pub(crate) async fn execute_tool(
             "Only NyxBot manages agents and channel bots. Report what you need in your reply.",
         );
     }
-    execute_authorized_tool(state, chat, tool_name, args).await
+    let crm_enabled = crate::services::crm::enabled(&state.db, &chat.user_id)
+        .await
+        .unwrap_or(false);
+    if !crm_enabled && args.get("crm").is_some() {
+        return refusal("not_found", "CRM resource not found");
+    }
+    let (mut result, error) = execute_authorized_tool(state, chat, tool_name, args).await;
+    if !crm_enabled {
+        crate::services::crm::hide_fields(&mut result);
+    }
+    (result, error)
 }
 
 fn execute_authorized_tool<'a>(
@@ -1685,6 +1729,8 @@ async fn dispatch_specialists(
             ))
             .await?;
             let request = team::CreateRequest {
+                crm: serde_json::from_value(args.get("crm").cloned().unwrap_or(json!([])))
+                    .map_err(|_| AppError::BadRequest("Invalid CRM grants".into()))?,
                 machines: args.get("machines").map(|_| string_list(args, "machines")),
                 logins: args.get("logins").map(|_| string_list(args, "logins")),
                 name: text_arg(args, "name").to_owned(),
@@ -1735,7 +1781,7 @@ async fn dispatch_specialists(
                     };
                     (
                         json!({"subagent": {"id": agent.id, "name": agent.name,
-                            "services": targets.slugs, "machines": agent.machine_node_ids, "logins": agent.saved_login_ids, "account_read": agent.grants.account_read},
+                            "services": targets.slugs, "machines": agent.machine_node_ids, "logins": agent.saved_login_ids, "account_read": agent.grants.account_read, "crm": agent.grants.crm},
                             "task": task}),
                         false,
                     )
@@ -1827,6 +1873,7 @@ async fn dispatch_specialists(
                 && targets.service_ids.is_empty()
                 && targets.platform_service_ids.is_empty()
                 && args.get("account_read").is_none()
+                && args.get("crm").is_none()
             {
                 return Ok((
                     json!({"error": unchanged, "subagent": agent.name, unchanged: refused}),
@@ -1834,6 +1881,8 @@ async fn dispatch_specialists(
                 ));
             }
             let targets = AgentGrants {
+                crm: serde_json::from_value(args.get("crm").cloned().unwrap_or(json!([])))
+                    .map_err(|_| AppError::ValidationError("Invalid CRM grants".into()))?,
                 service_ids: targets.service_ids,
                 platform_service_ids: targets.platform_service_ids,
                 account_read: args["account_read"].as_bool().unwrap_or(false),
@@ -1871,7 +1920,7 @@ async fn dispatch_specialists(
                 .find(|summary| summary.id == agent.id);
             let mut result = json!({"subagent": agent.name,
                 "services": summary.as_ref().map(|s| s.services.clone()),
-                "account_read": agent.grants.account_read, "machines": agent.machine_node_ids, "logins": agent.saved_login_ids});
+                "account_read": agent.grants.account_read, "crm": agent.grants.crm, "machines": agent.machine_node_ids, "logins": agent.saved_login_ids});
             if !refused.is_empty() {
                 result[unchanged] = json!(refused);
             }
@@ -3212,6 +3261,8 @@ pub async fn list_agents(
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentRequest {
     #[serde(default)]
+    crm: Vec<crate::models::assistant_agent::CrmGrant>,
+    #[serde(default)]
     org: Option<String>,
     #[serde(default)]
     machines: Option<Vec<String>>,
@@ -3237,6 +3288,9 @@ pub async fn create_agent(
 ) -> AppResult<(StatusCode, Json<Value>)> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if !body.crm.is_empty() {
+        crate::services::crm::require_enabled(&state.db, &owner).await?;
+    }
     let resource_owner = match body.org.as_deref() {
         Some(org) => {
             crate::services::org_agent_service::resolve_org(&state.db, &owner, org).await?
@@ -3252,6 +3306,7 @@ pub async fn create_agent(
     ))
     .await?;
     let request = team::CreateRequest {
+        crm: body.crm,
         machines: body.machines,
         logins: body.logins,
         name: body.name,
@@ -3459,6 +3514,8 @@ pub struct GrantsRequest {
     logins: Option<Vec<String>>,
     services: Vec<String>,
     account_read: bool,
+    #[serde(default)]
+    crm: Option<Vec<crate::models::assistant_agent::CrmGrant>>,
     /// What guests may do with each of `services` (by the same name or ID);
     /// services left out keep their current level.
     #[serde(default)]
@@ -3476,6 +3533,9 @@ pub async fn set_agent_grants(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
+    if body.crm.is_some() {
+        crate::services::crm::require_enabled(&state.db, &owner).await?;
+    }
     let current = team::maintained_agent(&state.db, &owner, &id).await?;
     let targets = Box::pin(team::resolve_targets(
         &state.db,
@@ -3505,15 +3565,21 @@ pub async fn set_agent_grants(
                 service_ids: targets.service_ids,
                 platform_service_ids: targets.platform_service_ids,
                 account_read: body.account_read,
+                ..Default::default()
             },
+            crm: body.crm,
             guests: guest_access,
         },
         team::MachineGrantMode::Replace,
     ))
     .await?;
     let agent = Box::pin(team::set_grants(&state.db, &owner, &id, change)).await?;
-    Ok(Json(json!({"id": agent.id, "services": targets.slugs,
-        "account_read": agent.grants.account_read})))
+    let mut result = json!({"id": agent.id, "services": targets.slugs,
+        "account_read": agent.grants.account_read, "crm": agent.grants.crm});
+    if !crate::services::crm::enabled(&state.db, &owner).await? {
+        crate::services::crm::hide_fields(&mut result);
+    }
+    Ok(Json(result))
 }
 
 pub async fn destroy_agent_route(

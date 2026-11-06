@@ -188,6 +188,7 @@ async fn org_channel_members_cannot_clear_guest_restrictions_but_can_maintain_gr
         &f.org.admin,
         &f.agent.id,
         GrantChange::Replace {
+            crm: None,
             grants: grants.clone(),
             guests: BTreeMap::from([(service.clone(), GuestAccess::Read)]),
         },
@@ -208,6 +209,7 @@ async fn org_channel_members_cannot_clear_guest_restrictions_but_can_maintain_gr
     for change in [
         GrantChange::Guests(BTreeMap::from([(service.clone(), GuestAccess::Use)])),
         GrantChange::Replace {
+            crm: None,
             grants: grants.clone(),
             guests: BTreeMap::from([(service.clone(), GuestAccess::Use)]),
         },
@@ -226,6 +228,7 @@ async fn org_channel_members_cannot_clear_guest_restrictions_but_can_maintain_gr
         &f.org.member,
         &f.agent.id,
         GrantChange::Replace {
+            crm: None,
             grants,
             guests: BTreeMap::from([(service.clone(), GuestAccess::Read)]),
         },

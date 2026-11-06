@@ -215,6 +215,13 @@ const ASSISTANT_WORKSPACE_PREVIEW_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const CMS_POC_V1_FLAG_KEY: &str = "cms:poc-v1";
+const CMS_POC_V1_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: CMS_POC_V1_FLAG_KEY,
+    description: "Enables the CMS proof of concept: CRM records, custom objects, saved views, and chat artifacts for the acting person.",
+    default_enabled: false,
+};
+
 pub const NYXAGENT_ENGINE_FLAG_KEY: &str = "assistant:nyxagent-engine";
 const NYXAGENT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: NYXAGENT_ENGINE_FLAG_KEY,
@@ -444,6 +451,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
+    CMS_POC_V1_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
@@ -498,6 +506,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     NYXAGENT_ENGINE_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
+    CMS_POC_V1_FLAG,
     SKILL_PIN_DISABLE_FLAG,
     NYXBOT_THREAD_FOLLOW_FLAG,
     NYXBOT_RELAY_RESPONSE_RECOVERY_FLAG,
@@ -3124,6 +3133,7 @@ mod tests {
                 "assistant:nyxagent-engine",
                 "assistant:model-controls",
                 "assistant:workspace-preview",
+                "cms:poc-v1",
                 "assistant:skill-pin-disable",
                 "nyxbot:thread-follow",
                 "nyxbot:relay-response-recovery",

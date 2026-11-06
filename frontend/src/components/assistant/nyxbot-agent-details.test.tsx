@@ -33,6 +33,7 @@ let agent: Record<string, unknown>;
 let memory: { id: string; text: string; created_at: string; updated_at: string }[];
 let readinessReads: number;
 let writes: { method: string; endpoint: string; body: unknown }[];
+let grantRequestBodies: string[];
 let client: QueryClient;
 let requestMode: "denied" | "routed_to_nyxbot";
 
@@ -61,6 +62,20 @@ function agentRow(fields: Record<string, unknown>) {
   };
 }
 
+function enableCrm() {
+  const current = useAuthStore.getState().user!;
+  useAuthStore.getState().setUser({
+    ...current,
+    capabilities: {
+      ...current.capabilities,
+      enabled_features: [
+        ...(current.capabilities?.enabled_features ?? []),
+        "cms:poc-v1",
+      ],
+    },
+  });
+}
+
 beforeEach(() => {
   useAuthStore.getState().setUser({
     id: "owner",
@@ -87,6 +102,7 @@ beforeEach(() => {
     return new Response(JSON.stringify(fixtures[path]));
   }));
   writes = [];
+  grantRequestBodies = [];
   availableBots = [];
   readinessReads = 0;
   requestMode = "denied";
@@ -116,7 +132,31 @@ beforeEach(() => {
     if (endpoint === `/assistant/nyxagent/agents/${id}/skills`) {
       return new Response(JSON.stringify({ revision: 0, skills: [], metadata: {} }));
     }
+    if (endpoint === "/assistant/crm/objects") {
+      return new Response(
+        JSON.stringify({
+          objects: [
+            {
+              id: "company-object",
+              owner_id: "owner",
+              key: "company",
+              label: "Company",
+              plural_label: "Companies",
+              schema_revision: 1,
+              fields: [],
+              pipeline: null,
+              default_columns: [],
+              seeded: true,
+              access: "work",
+              created_at: at,
+              updated_at: at,
+            },
+          ],
+        }),
+      );
+    }
     if (endpoint === `/assistant/nyxagent/agents/${id}/grants`) {
+      grantRequestBodies.push(String(init.body));
       agent = { ...agent, ...(body as object) };
       return new Response(JSON.stringify({ id, ...(body as object) }));
     }
@@ -244,6 +284,9 @@ it("replaces a specialist's grants with a dirty-gated save even when a granted n
       body: { services: ["github", "slack"], account_read: true },
     }),
   );
+  expect(grantRequestBodies).toEqual([
+    '{"services":["github","slack"],"account_read":true}',
+  ]);
 });
 
 it("lets the owner choose what others in the agent's chats may do with each service", async () => {
@@ -266,6 +309,93 @@ it("lets the owner choose what others in the agent's chats may do with each serv
       body: { services: ["github"], account_read: false, guest_access: { github: "all" } },
     }),
   );
+});
+
+it("hides CRM grant controls and omits stored grants from a flag-off save", async () => {
+  agent = agentRow({
+    crm: [{ owner_id: "owner", object: "company", capabilities: ["read"] }],
+  });
+  const { user } = renderSheet({ tab: "grants" });
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  const grants = await within(sheet).findByLabelText("Grants", { selector: "form" });
+  expect(
+    within(grants).queryByRole("group", { name: "CRM access" }),
+  ).not.toBeInTheDocument();
+  await user.click(within(grants).getByRole("checkbox", { name: /Slack/ }));
+  await user.click(screen.getByText("Save changes", { selector: "button" }));
+  await confirmChanges();
+  await waitFor(() =>
+    expect(grantRequestBodies).toEqual([
+      '{"services":["github","slack"],"account_read":false}',
+    ]),
+  );
+  expect(client.getQueryCache().findAll({ queryKey: ["crm"] })).toHaveLength(0);
+});
+
+it("preserves CRM grants when a flag-on save changes only other grants", async () => {
+  enableCrm();
+  agent = agentRow({
+    crm: [
+      {
+        owner_id: "owner",
+        object: "company",
+        capabilities: ["read"],
+      },
+    ],
+  });
+  const { user } = renderSheet({ tab: "grants" });
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  const grants = await within(sheet).findByLabelText("Grants", { selector: "form" });
+  const crm = await within(grants).findByRole("group", { name: "CRM access" });
+  expect(within(crm).getByRole("checkbox", { name: "Read" })).toBeChecked();
+
+  await user.click(within(grants).getByRole("checkbox", { name: /Slack/ }));
+  await user.click(screen.getByText("Save changes", { selector: "button" }));
+  await confirmChanges();
+
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PUT",
+      endpoint: "/assistant/nyxagent/agents/agent-researcher/grants",
+      body: { services: ["github", "slack"], account_read: false },
+    }),
+  );
+  expect(grantRequestBodies).toEqual([
+    '{"services":["github","slack"],"account_read":false}',
+  ]);
+});
+
+it("sends CRM grants only after an explicit flag-on CRM edit", async () => {
+  enableCrm();
+  const { user } = renderSheet({ tab: "grants" });
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  const grants = await within(sheet).findByLabelText("Grants", { selector: "form" });
+  const crm = await within(grants).findByRole("group", { name: "CRM access" });
+
+  await user.click(within(crm).getByRole("checkbox", { name: "Read" }));
+  await user.click(screen.getByText("Save changes", { selector: "button" }));
+  await confirmChanges();
+
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PUT",
+      endpoint: "/assistant/nyxagent/agents/agent-researcher/grants",
+      body: {
+        services: ["github"],
+        crm: [
+          {
+            owner_id: "owner",
+            object: "company",
+            capabilities: ["read"],
+          },
+        ],
+        account_read: false,
+      },
+    }),
+  );
+  expect(grantRequestBodies).toEqual([
+    '{"services":["github"],"crm":[{"owner_id":"owner","object":"company","capabilities":["read"]}],"account_read":false}',
+  ]);
 });
 
 it("edits the role and destroys only after confirmation", async () => {

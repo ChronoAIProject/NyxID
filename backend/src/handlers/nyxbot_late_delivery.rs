@@ -487,6 +487,21 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     )
     .await;
     let text = super::images::append_failure(&text, &report);
+    let text = if crate::services::crm::artifacts::enabled_for(
+        &state.db,
+        &message.user_id,
+        &message.crm_artifacts,
+    )
+    .await?
+    {
+        crate::services::crm::artifacts::append_links(
+            &text,
+            &message.crm_artifacts,
+            &state.config.frontend_url,
+        )
+    } else {
+        text
+    };
     let result = if text.trim().is_empty() {
         // Image-only output has already been dispatched through its own claims.
         Ok(report.unknown == 0 && report.failed == 0)
@@ -578,7 +593,12 @@ pub(super) async fn stream_images(
             "user_id": crate::services::org_channel_service::event_actor(&event), "conversation_id": conversation_id, "turn_id": turn_id, "role":"assistant",
         }).await? else { return Ok(bounded_reply(text)); };
         let report = event_images(state, &event, delivery, &channel, &thread, &conversation, &message, Some(deadline)).await;
-        Ok(super::images::append_failure(&bounded_reply(text), &report))
+        let text = super::images::append_failure(&bounded_reply(text), &report);
+        Ok(if crate::services::crm::artifacts::enabled_for(&state.db, &message.user_id, &message.crm_artifacts).await? {
+            crate::services::crm::artifacts::append_links(&text, &message.crm_artifacts, &state.config.frontend_url)
+        } else {
+            text
+        })
     }.await;
     match result {
         Ok(text) => text,
@@ -902,6 +922,7 @@ async fn dispatch(
 fn successful_silence(message: &AssistantMessage) -> bool {
     message.status == "completed"
         && message.error_code.is_none()
+        && message.crm_artifacts.is_empty()
         && message.text.trim().is_empty()
         && !message.attachments.iter().any(engine::chat_tool_image)
 }

@@ -1,0 +1,21 @@
+{
+  "points": [
+    {
+      "key": false,
+      "label": "False",
+      "value": 26,
+      "archived": false
+    },
+    {
+      "key": true,
+      "label": "True",
+      "value": 26,
+      "archived": false
+    }
+  ],
+  "unit": {
+    "format": "count"
+  },
+  "total": 52,
+  "truncated": false
+}

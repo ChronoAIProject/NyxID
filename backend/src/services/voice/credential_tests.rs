@@ -1064,6 +1064,7 @@ async fn shared_transports_voice_provider_revocation_and_actor_billing() {
             &f.state.encryption_keys,
             &publisher,
             team::CreateRequest {
+                crm: vec![],
                 name: "shared-voice".into(),
                 description: "Voice specialist".into(),
                 display_name: None,

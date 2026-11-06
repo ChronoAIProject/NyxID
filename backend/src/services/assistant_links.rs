@@ -5,6 +5,19 @@ pub const AGENT_DETAILS_SKILLS: &str = "skills";
 
 #[derive(Clone, Copy)]
 pub enum AssistantPage<'a> {
+    CrmView {
+        owner: &'a str,
+        id: &'a str,
+    },
+    CrmRecord {
+        owner: &'a str,
+        object: &'a str,
+        id: &'a str,
+    },
+    CrmObject {
+        owner: &'a str,
+        object: &'a str,
+    },
     Group {
         group: &'a str,
     },
@@ -56,6 +69,23 @@ impl AssistantPage<'_> {
     pub fn path(self) -> String {
         let mut query = url::form_urlencoded::Serializer::new(String::new());
         let path = match self {
+            Self::CrmView { owner, id } => {
+                query.append_pair("owner", owner).append_pair("view", id);
+                "/assistant/crm".into()
+            }
+            Self::CrmRecord { owner, object, id } => {
+                query
+                    .append_pair("owner", owner)
+                    .append_pair("object", object)
+                    .append_pair("record", id);
+                "/assistant/crm".into()
+            }
+            Self::CrmObject { owner, object } => {
+                query
+                    .append_pair("owner", owner)
+                    .append_pair("object", object);
+                "/assistant/crm".into()
+            }
             Self::Group { group } => {
                 query.append_pair("c", group);
                 "/assistant".into()
@@ -161,6 +191,28 @@ mod tests {
     #[test]
     fn browser_links_use_assistant_workspace_and_encode_parameters() {
         for (page, path) in [
+            (
+                CrmView {
+                    owner: "a+&",
+                    id: "v/",
+                },
+                "/assistant/crm?owner=a%2B%26&view=v%2F",
+            ),
+            (
+                CrmRecord {
+                    owner: "a+&",
+                    object: "thing",
+                    id: "r/",
+                },
+                "/assistant/crm?owner=a%2B%26&object=thing&record=r%2F",
+            ),
+            (
+                CrmObject {
+                    owner: "a+&",
+                    object: "thing",
+                },
+                "/assistant/crm?owner=a%2B%26&object=thing",
+            ),
             (
                 MachineDesktop {
                     node: "a/b+% 中文",
