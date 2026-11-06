@@ -136,6 +136,7 @@ async fn fixture(trailing: bool) -> (Fixture, String, String) {
     service.auth_method = "bearer".into();
     service.service_category = "internal".into();
     service.platform_key = Some(PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: PlatformKeyAudience::Restricted,
         allowed_owner_ids: vec![f.owner.clone()],

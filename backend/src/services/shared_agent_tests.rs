@@ -2189,6 +2189,7 @@ async fn shared_agent_catalog_connections_exclude_internal_and_preserve_account_
     catalog_row.auth_method = "bearer".into();
     catalog_row.credential_encrypted = vec![1];
     catalog_row.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: crate::models::downstream_service::PlatformKeyAudience::Public,
         allowed_owner_ids: Vec::new(),

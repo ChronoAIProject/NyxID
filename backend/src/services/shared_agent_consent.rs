@@ -70,9 +70,11 @@ pub async fn prompt(
     )
 }
 
-/// Read-only observation for the dispatch coordinator. Once still needs its own
-/// claim; it is never turned into reusable execution authority.
-pub(crate) async fn always_covers(
+/// Read-only observation for the dispatch coordinator: an approved legacy
+/// decision needs no second review at rollout. It supplies no execution permit;
+/// the ordinary shared gate still checks live authority and claims Once before
+/// egress. A consumed, expired, skipped or differently bound row never matches.
+pub(crate) async fn has_approved_consent(
     db: &Database,
     chat: &ChatAuthority,
     access: &RequestAccess,
@@ -91,7 +93,7 @@ pub(crate) async fn always_covers(
     "conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id,
     "connection_id":&service.id,"policy_revision":access.revision(),
     "behavior_digest":behavior(access),"authority_digest":binding,
-    "operation_digest":super::mcp_service::canonical_sha256(operation),"decision":"always",
+    "operation_digest":super::mcp_service::canonical_sha256(operation),"decision":{"$in":["always","once"]},
     "$or":[{"expires_at":null},{"expires_at":{"$gt":bson::DateTime::now()}}]};
     Ok(db
         .collection::<bson::Document>(CONSENTS_COLLECTION_NAME)

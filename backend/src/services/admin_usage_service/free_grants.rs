@@ -18,6 +18,7 @@ use utoipa::{IntoParams, ToSchema};
 const PER_PAGE: u64 = 50;
 
 #[derive(Default, Deserialize, IntoParams)]
+#[cfg_attr(test, derive(Clone))]
 #[into_params(parameter_in = Query)]
 #[serde(deny_unknown_fields)]
 pub struct Query {
@@ -215,6 +216,22 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    /// CI runs MongoDB with `minSnapshotHistoryWindowInSeconds=0`, so this
+    /// report's snapshot read can transiently fail (e.g. SnapshotTooOld) while
+    /// parallel tests write. Retry only database errors, a bounded number of
+    /// times; validation and timeout outcomes are returned unchanged.
+    async fn report_retrying(db: &Database, q: Query, now: DateTime<Utc>) -> AppResult<Response> {
+        for _ in 0..20 {
+            match report(db, q.clone(), now).await {
+                Err(AppError::DatabaseError(_)) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await
+                }
+                other => return other,
+            }
+        }
+        report(db, q, now).await
+    }
+
     #[test]
     fn free_grants_amount_reads_decimal128_and_whole_credit_integers() {
         let exact: Credits = "55.500000000053".parse().unwrap();
@@ -277,8 +294,8 @@ mod tests {
             owners,
             ..Default::default()
         };
-        let first = report(&db, query(1, None), now).await.unwrap();
-        let second = report(&db, query(2, None), now).await.unwrap();
+        let first = report_retrying(&db, query(1, None), now).await.unwrap();
+        let second = report_retrying(&db, query(2, None), now).await.unwrap();
         assert_eq!(first.issued.to_string(), "55.500000000053");
         assert_eq!(second.issued, first.issued);
         assert_eq!(first.used.to_string(), "100");
@@ -291,13 +308,15 @@ mod tests {
                 .iter()
                 .any(|a| second.accounts.iter().any(|b| a.owner_id == b.owner_id))
         );
-        let p = report(&db, query(1, Some(person.clone())), now)
+        let p = report_retrying(&db, query(1, Some(person.clone())), now)
             .await
             .unwrap();
         assert_eq!(p.issued.to_string(), "3.500000000001");
         assert_eq!(p.used.to_string(), "100");
         assert_eq!(p.accounts[0].account_kind, "person");
-        let o = report(&db, query(1, Some(org)), now).await.unwrap();
+        let o = report_retrying(&db, query(1, Some(org)), now)
+            .await
+            .unwrap();
         assert_eq!(o.issued, c);
         assert_eq!(o.accounts[0].account_kind, "org");
         assert!(report(&db, query(0, None), now).await.is_err());
@@ -436,8 +455,8 @@ mod tests {
             owners,
             ..Default::default()
         };
-        let first = report(&db, query(1, 1, None), to).await.unwrap();
-        let second = report(&db, query(2, 2, None), to).await.unwrap();
+        let first = report_retrying(&db, query(1, 1, None), to).await.unwrap();
+        let second = report_retrying(&db, query(2, 2, None), to).await.unwrap();
         assert_eq!(first.issued.to_string(), "3.750000000001");
         assert_eq!(first.used.to_string(), "67.625000000054");
         assert_eq!(
@@ -505,7 +524,7 @@ mod tests {
                 .to_string(),
             "3.125000000002"
         );
-        let repeated = report(&db, query(1, 1, None), to).await.unwrap();
+        let repeated = report_retrying(&db, query(1, 1, None), to).await.unwrap();
         assert_eq!(
             first
                 .accounts
@@ -518,7 +537,7 @@ mod tests {
                 .map(|a| &a.owner_id)
                 .collect::<Vec<_>>()
         );
-        let p = report(&db, query(1, 2, Some(person.clone())), to)
+        let p = report_retrying(&db, query(1, 2, Some(person.clone())), to)
             .await
             .unwrap();
         assert_eq!((p.total_accounts, p.total_services), (1, 3));
@@ -528,10 +547,10 @@ mod tests {
         assert_eq!(p.accounts[0].account_kind, "person");
         let mut late = query(1, 1, Some(person));
         late.from = Some(later.to_rfc3339());
-        let late = report(&db, late, to).await.unwrap();
+        let late = report_retrying(&db, late, to).await.unwrap();
         assert_eq!(late.issued, Credits::ZERO);
         assert_eq!(late.used, p.used);
-        let empty = report(&db, query(1, 1, Some(Uuid::new_v4().to_string())), to)
+        let empty = report_retrying(&db, query(1, 1, Some(Uuid::new_v4().to_string())), to)
             .await
             .unwrap();
         assert_eq!(

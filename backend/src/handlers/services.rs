@@ -1117,6 +1117,13 @@ pub async fn list_services(
         filter.insert("service_category", category.as_str());
     }
 
+    let can_inspect = super::services_helpers::is_admin(&state, &auth_user).await?;
+    if !can_inspect || super::login_client_context::require_first_party_human(&auth_user).is_err() {
+        filter.insert(
+            "platform_key.purpose",
+            doc! {"$nin":["model_route","model_offering"]},
+        );
+    }
     filter.extend(crate::services::retired_service_service::exclusion_filter());
     let services: Vec<DownstreamService> = state
         .db
@@ -1133,7 +1140,6 @@ pub async fn list_services(
     let catalog_ids: Vec<&str> = services.iter().map(|s| s.id.as_str()).collect();
     let mut viewer_routing = compute_viewer_routing(&state.db, &user_id_str, &catalog_ids).await?;
 
-    let can_inspect = super::services_helpers::is_admin(&state, &auth_user).await?;
     let inspection_keys = can_inspect.then_some(state.encryption_keys.as_ref());
     let eligible =
         crate::services::tools_manager_service::eligible_manager_tool_ids(&state.db, &services)
@@ -1293,6 +1299,7 @@ async fn create_service_inner(
         body.service_category = Some("internal".into());
         body.service_type = Some("http".into());
         body.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: crate::models::downstream_service::PlatformKeyAudience::Restricted,
             allowed_owner_ids: Vec::new(),
@@ -1972,6 +1979,7 @@ async fn create_service_inner(
     };
     crate::services::tool_topics::validate_tool_service(&new_service)?;
     crate::services::telnyx_platform_service::validate_catalog(&new_service)?;
+    crate::services::platform_key_service::validate_model_purpose(&new_service)?;
     crate::services::retired_service_service::require_available(&new_service)?;
     anonymous_endpoint_service::validate_anonymous_service_runtime_safety(&new_service)?;
 
@@ -2242,8 +2250,20 @@ pub async fn get_service(
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     let viewer_id = auth_user.user_id.to_string();
-    crate::services::catalog_service::enforce_catalog_read_access(&state.db, &viewer_id, &service)
+    if crate::services::platform_key_service::model_only(&service) {
+        super::login_client_context::require_first_party_human(&auth_user)?;
+        super::admin_helpers::require_admin_or_operator(
+            &state,
+            &auth_user,
+            "admin.platform_models.credential_metadata",
+        )
         .await?;
+    } else {
+        crate::services::catalog_service::enforce_catalog_read_access(
+            &state.db, &viewer_id, &service,
+        )
+        .await?;
+    }
     // Issue #416: surface the viewer's own routing for this catalog row
     // so /services/$id can render the editable Routing section.
     let mut viewer_routing =
@@ -2338,6 +2358,10 @@ pub(crate) async fn update_service_inner(
     );
     let service = fetch_service(&state, &service_id).await?;
     let ingress_admin = super::services_helpers::is_admin(&state, &auth_user).await?;
+    if crate::services::platform_key_service::model_only(&service) {
+        super::login_client_context::require_first_party_human(&auth_user)?;
+        require_admin(&state, &auth_user).await?;
+    }
     let row_authority = super::catalog_authority::require_service_update_authority(
         &state, &auth_user, &service, &body,
     )
@@ -2461,6 +2485,16 @@ pub(crate) async fn update_service_inner(
             service.provider_config_id.as_deref(),
         )
         .await?;
+    }
+    if crate::services::platform_key_service::model_only(&service)
+        && body.platform_key.as_ref().is_some_and(|next| {
+            service
+                .platform_key
+                .as_ref()
+                .is_some_and(|old| old.purpose != next.purpose)
+        })
+    {
+        return Err(AppError::ValidationError("Model-only credential purpose cannot be changed; create a separate ordinary catalog record".into()));
     }
     let mut lane_price_changed = false;
     let mut platform_price_changed = false;
@@ -3327,6 +3361,7 @@ pub(crate) async fn update_service_inner(
     let managed_proposed: DownstreamService =
         bson::from_document(managed_proposed).map_err(|e| AppError::Internal(e.to_string()))?;
     crate::services::telnyx_platform_service::validate_catalog(&managed_proposed)?;
+    crate::services::platform_key_service::validate_model_purpose(&managed_proposed)?;
 
     let identity_fields = identity_update_fields(&body);
     let identity_changed = !identity_fields.is_empty();
@@ -3380,6 +3415,25 @@ pub(crate) async fn update_service_inner(
     // Always unset the legacy api_spec_url alias to prevent duplicate-field
     // deserialization errors on documents created before the field was renamed.
     let mut catalog_filter = doc! { "_id": &service_id };
+    if body.platform_key.is_some() {
+        // Fence a stale ordinary update against a concurrent route-only cutover.
+        let purpose = service
+            .platform_key
+            .as_ref()
+            .map(|c| c.purpose)
+            .unwrap_or_default();
+        catalog_filter.insert(
+            "platform_key.purpose",
+            if purpose == crate::models::downstream_service::PlatformKeyPurpose::Ordinary {
+                bson::Bson::Document(
+                    doc! {"$in":[bson::Bson::Null,bson::Bson::String("ordinary".into())]},
+                )
+            } else {
+                bson::to_bson(&purpose)
+                    .map_err(|_| AppError::Internal("Invalid credential purpose".into()))?
+            },
+        );
+    }
     if let Some(filter) = header_source_filter {
         catalog_filter.extend(filter);
     }
@@ -3856,6 +3910,8 @@ pub async fn get_oidc_credentials(
             "Service is not an OIDC service".to_string(),
         ));
     }
+
+    crate::services::platform_key_service::require_ordinary_use(&service)?;
 
     let oauth_client_id = service
         .oauth_client_id
@@ -4488,6 +4544,7 @@ mod tests {
         assert_eq!(
             stored_staged.platform_key,
             Some(crate::models::downstream_service::PlatformKeyConfig {
+                purpose: Default::default(),
                 enabled: false,
                 audience: crate::models::downstream_service::PlatformKeyAudience::Restricted,
                 allowed_owner_ids: vec![],
@@ -6187,6 +6244,7 @@ mod tests {
         );
         body.auth_method = Some("bearer".into());
         body.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             ..Default::default()
         });

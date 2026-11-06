@@ -1,0 +1,359 @@
+//! Admin-only private configuration and an allowlisted public metadata view.
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+};
+use serde::{Deserialize, Serialize};
+
+use super::admin_helpers::{require_admin, require_admin_or_operator};
+use crate::{
+    AppState,
+    errors::AppResult,
+    models::platform_model::*,
+    mw::auth::{AuthMethod, AuthUser},
+    services::{audit_service::AuditActor, platform_model_service as registry},
+};
+
+#[derive(Serialize)]
+pub struct PublicModel {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub capabilities: Capabilities,
+    pub availability: &'static str,
+}
+impl From<&PlatformModel> for PublicModel {
+    fn from(row: &PlatformModel) -> Self {
+        Self {
+            id: row.public_id.clone(),
+            display_name: row.display_name.clone(),
+            description: row.description.clone(),
+            capabilities: row.capabilities.clone(),
+            availability: "unavailable",
+        }
+    }
+}
+#[derive(Serialize)]
+pub struct AdminModel {
+    pub id: String,
+    pub public_id: String,
+    pub display_name: String,
+    pub description: String,
+    pub family: ModelFamily,
+    pub capabilities: Capabilities,
+    pub lifecycle: Lifecycle,
+    pub enabled: bool,
+    pub revision: i64,
+    pub authorization_revision: i64,
+    pub billing_service_id: Option<String>,
+    pub entitlements: Entitlements,
+    pub routing_revision_id: Option<String>,
+    pub routes: Vec<ModelRoute>,
+    pub execution_ready: bool,
+    pub blocking_reason: &'static str,
+    pub required_readiness: Vec<&'static str>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+async fn admin_view(state: &AppState, row: PlatformModel) -> AppResult<AdminModel> {
+    let routing = registry::routing(&state.db, &row).await?;
+    Ok(AdminModel {
+        id: row.id,
+        public_id: row.public_id,
+        display_name: row.display_name,
+        description: row.description,
+        family: row.family,
+        capabilities: row.capabilities,
+        lifecycle: row.lifecycle,
+        enabled: row.enabled,
+        revision: row.revision,
+        authorization_revision: row.authorization_revision,
+        billing_service_id: row.billing_service_id,
+        entitlements: row.entitlements,
+        routing_revision_id: row.routing_revision_id,
+        routes: routing.map_or_else(Vec::new, |r| r.routes),
+        execution_ready: false,
+        blocking_reason: "execution_and_billing_not_implemented",
+        required_readiness: vec![
+            registry::REGISTRY_READINESS,
+            registry::EXECUTION_READINESS,
+            registry::BILLING_READINESS,
+            registry::ASSISTANT_READINESS,
+        ],
+        created_at: row.created_at.to_rfc3339(),
+        updated_at: row.updated_at.to_rfc3339(),
+    })
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListQuery {
+    pub after: Option<String>,
+    pub limit: Option<u32>,
+}
+#[derive(Serialize)]
+pub struct PublicList {
+    pub models: Vec<PublicModel>,
+    pub next_after: Option<String>,
+}
+#[derive(Serialize)]
+pub struct AdminList {
+    pub models: Vec<AdminModel>,
+    pub next_after: Option<String>,
+}
+
+pub async fn admin_list(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<ListQuery>,
+) -> AppResult<Json<AdminList>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    require_admin_or_operator(&state, &auth, "admin.platform_models.list").await?;
+    let limit = query.limit.unwrap_or(50);
+    let rows = registry::list(&state.db, query.after.as_deref(), limit).await?;
+    let next_after = (rows.len() == limit as usize).then(|| rows.last().unwrap().public_id.clone());
+    let mut models = Vec::with_capacity(rows.len());
+    for row in rows {
+        models.push(admin_view(&state, row).await?);
+    }
+    Ok(Json(AdminList { models, next_after }))
+}
+pub async fn admin_get(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<AdminModel>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    require_admin_or_operator(&state, &auth, "admin.platform_models.get").await?;
+    Ok(Json(
+        admin_view(&state, registry::get(&state.db, &id).await?).await?,
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateRequest {
+    pub public_id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub description: String,
+    pub family: ModelFamily,
+    #[serde(default)]
+    pub capabilities: Capabilities,
+}
+pub async fn create(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<CreateRequest>,
+) -> AppResult<Json<AdminModel>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    require_admin(&state, &auth).await?;
+    let model = registry::create(
+        &state.db,
+        &AuditActor::from_auth_user(&auth),
+        registry::NewModel {
+            public_id: body.public_id,
+            display_name: body.display_name,
+            description: body.description,
+            family: body.family,
+            capabilities: body.capabilities,
+        },
+    )
+    .await?;
+    Ok(Json(admin_view(&state, model).await?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateRequest {
+    pub expected_revision: i64,
+    pub display_name: String,
+    pub description: String,
+    pub capabilities: Capabilities,
+    pub lifecycle: Lifecycle,
+    pub enabled: bool,
+    pub billing_service_id: Option<String>,
+}
+pub async fn update(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateRequest>,
+) -> AppResult<Json<AdminModel>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    require_admin(&state, &auth).await?;
+    let model = registry::update(
+        &state.db,
+        &AuditActor::from_auth_user(&auth),
+        &id,
+        registry::ModelUpdate {
+            expected_revision: body.expected_revision,
+            display_name: body.display_name,
+            description: body.description,
+            capabilities: body.capabilities,
+            lifecycle: body.lifecycle,
+            enabled: body.enabled,
+            billing_service_id: body.billing_service_id,
+        },
+    )
+    .await?;
+    Ok(Json(admin_view(&state, model).await?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntitlementRequest {
+    pub expected_revision: i64,
+    pub entitlements: Entitlements,
+}
+pub async fn entitlements(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<EntitlementRequest>,
+) -> AppResult<Json<AdminModel>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    require_admin(&state, &auth).await?;
+    let model = registry::set_entitlements(
+        &state.db,
+        &AuditActor::from_auth_user(&auth),
+        &id,
+        body.expected_revision,
+        body.entitlements,
+    )
+    .await?;
+    Ok(Json(admin_view(&state, model).await?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutesRequest {
+    pub expected_revision: i64,
+    pub routes: Vec<ModelRoute>,
+}
+pub async fn routes(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<RoutesRequest>,
+) -> AppResult<Json<AdminModel>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    require_admin(&state, &auth).await?;
+    let model = registry::set_routes(
+        &state.db,
+        &AuditActor::from_auth_user(&auth),
+        &id,
+        body.expected_revision,
+        body.routes,
+    )
+    .await?;
+    Ok(Json(admin_view(&state, model).await?))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExplainQuery {
+    pub user_id: String,
+}
+#[derive(Serialize)]
+pub struct AccessExplanation {
+    pub model_id: String,
+    pub user_id: String,
+    pub revision: i64,
+    pub policy_reason: &'static str,
+    pub model_reason: &'static str,
+    pub flag_enabled: bool,
+    pub executable: bool,
+    pub route_count: Option<usize>,
+    pub route_revision_checked: Option<i64>,
+}
+pub async fn explain(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Query(query): Query<ExplainQuery>,
+) -> AppResult<Json<AccessExplanation>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    require_admin_or_operator(&state, &auth, "admin.platform_models.explain").await?;
+    let model = registry::get(&state.db, &id).await?;
+    let snapshot = registry::EntitlementSnapshot::load(&state.db, &query.user_id).await?;
+    let flag_enabled = crate::services::feature_flag_service::personal_flag_enabled(
+        &state.db,
+        &query.user_id,
+        registry::FLAG,
+    )
+    .await?;
+    let plan = if flag_enabled && snapshot.reason(&model) == "allowed" {
+        match registry::resolve_route_metadata(&state.db, &query.user_id, &model.public_id, None)
+            .await
+        {
+            Ok(plan) => Some(plan),
+            Err(crate::errors::AppError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    Ok(Json(AccessExplanation {
+        route_count: plan.as_ref().map(|p| p.route_count()),
+        route_revision_checked: plan.as_ref().map(|p| p.model_revision()),
+        model_id: model.id.clone(),
+        user_id: query.user_id,
+        revision: model.revision,
+        policy_reason: snapshot.policy_reason(&model.entitlements),
+        model_reason: snapshot.reason(&model),
+        flag_enabled,
+        executable: false,
+    }))
+}
+
+pub async fn public_list(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Query(query): Query<ListQuery>,
+) -> AppResult<Json<PublicList>> {
+    auth.ensure_llm_proxy_access()?;
+    // PR 5 supplies the paired actor-bound contract for internal consumers;
+    // a synthetic service-account/relay identity is never a person entitlement.
+    if !matches!(
+        auth.auth_method,
+        AuthMethod::Session | AuthMethod::AccessToken | AuthMethod::ApiKey
+    ) {
+        return Err(registry::unavailable());
+    }
+    let person = auth.user_id.to_string();
+    if !crate::services::feature_flag_service::personal_flag_enabled(
+        &state.db,
+        &person,
+        registry::FLAG,
+    )
+    .await?
+    {
+        return Ok(Json(PublicList {
+            models: vec![],
+            next_after: None,
+        }));
+    }
+    let snapshot = registry::EntitlementSnapshot::load(&state.db, &person).await?;
+    let limit = query.limit.unwrap_or(50);
+    let catalog_scope = registry::authorized_catalog_scope(
+        &state.db,
+        &snapshot,
+        auth.allow_all_services,
+        &auth.allowed_service_ids,
+        &auth.assistant_operation_scopes,
+    )
+    .await?;
+    let mut rows = registry::list_authorized(
+        &state.db,
+        &snapshot,
+        catalog_scope.as_ref(),
+        query.after.as_deref(),
+        limit,
+    )
+    .await?;
+    let more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    let next_after = more.then(|| rows.last().unwrap().public_id.clone());
+    Ok(Json(PublicList {
+        models: rows.iter().map(PublicModel::from).collect(),
+        next_after,
+    }))
+}
+
+#[cfg(test)]
+mod tests;

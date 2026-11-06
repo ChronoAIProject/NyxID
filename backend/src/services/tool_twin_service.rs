@@ -29,6 +29,7 @@ pub(crate) async fn prepare_create_for_actor(
         .await?
         .ok_or_else(|| AppError::NotFound("Twin source service not found".into()))?;
     super::retired_service_service::require_available(&source)?;
+    super::platform_key_service::require_ordinary_use(&source)?;
     if manager.is_some_and(|id| {
         source.visibility == "private"
             && source

@@ -147,6 +147,7 @@ async fn actual_job_launch_detached_gateway_and_revocation_preserve_personal_pla
             catalog.auth_method = "bearer".into();
             catalog.auth_key_name = "Authorization".into();
             catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+                purpose: Default::default(),
                 enabled: true,
                 audience: crate::models::downstream_service::PlatformKeyAudience::Public,
                 allowed_owner_ids: vec![],

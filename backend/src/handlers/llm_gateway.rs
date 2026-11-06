@@ -1170,6 +1170,12 @@ async fn gateway_request_inner(
             AppError::ValidationError("'model' field is required in request body".to_string())
         })?;
 
+    // Reserved platform IDs must never fall through to provider-name heuristics.
+    // PR 1 has no executable platform adapter or tariff admission yet.
+    if model.starts_with("nyxid/") {
+        return Err(crate::services::platform_model_service::unavailable());
+    }
+
     if let Some(pool_slug) = model.strip_prefix("pool:") {
         if pool_slug.is_empty() || pool_slug.contains('/') {
             return Err(AppError::BadRequest("Invalid pool model alias".into()));
@@ -3193,6 +3199,7 @@ mod tests {
         catalog.is_active = true;
         catalog.provider_config_id = Some(providers[0].id.clone());
         catalog.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Restricted,
             allowed_owner_ids: vec![org.clone()],

@@ -449,6 +449,7 @@ pub struct NodeCapabilitiesFlags {
     pub credential_ack_correlation: bool,
     pub credential_target_update_v1: bool,
     pub remote_credential_crypto_v1: bool,
+    pub machine_execution_approval_v1: bool,
     pub proxy_max_body_size: Option<usize>,
 }
 
@@ -1140,6 +1141,8 @@ pub struct NodeCapabilitiesMsg {
     pub credential_target_update_v1: bool,
     #[serde(default)]
     pub remote_credential_crypto_v1: bool,
+    #[serde(default)]
+    pub machine_execution_approval_v1: bool,
     /// Maximum raw HTTP request body that fits through this node's control WS.
     #[serde(default)]
     pub proxy_max_body_size: Option<usize>,
@@ -2980,6 +2983,7 @@ impl NodeWsManager {
             flags.credential_ack_correlation = caps.credential_ack_correlation;
             flags.credential_target_update_v1 = caps.credential_target_update_v1;
             flags.remote_credential_crypto_v1 = caps.remote_credential_crypto_v1;
+            flags.machine_execution_approval_v1 = caps.machine_execution_approval_v1;
             flags.proxy_max_body_size = caps.proxy_max_body_size;
         }
     }
@@ -6154,6 +6158,7 @@ mod tests {
                 credential_ack_correlation: true,
                 credential_target_update_v1: false,
                 remote_credential_crypto_v1: true,
+                machine_execution_approval_v1: false,
                 proxy_max_body_size: None,
             },
         );
@@ -6182,6 +6187,7 @@ mod tests {
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
+                machine_execution_approval_v1: false,
                 ..NodeCapabilitiesMsg::default()
             },
         );
@@ -6523,5 +6529,43 @@ mod response_debug_tests {
         ] {
             assert!(!debug.contains(secret));
         }
+    }
+}
+
+#[cfg(test)]
+mod machine_approval_wire_tests {
+    use super::*;
+    // Exact main-era capability struct shape, frozen at c3c9445ee.
+    #[derive(serde::Deserialize)]
+    #[allow(dead_code)]
+    struct MainCapabilities {
+        #[serde(default)]
+        machine: Option<nyxid_machine::MachineProfile>,
+        #[serde(default)]
+        http_cancellation: bool,
+        #[serde(default)]
+        http_signature_v2: bool,
+        #[serde(default)]
+        proxy_upload_v1: bool,
+        #[serde(default)]
+        credential_ack_correlation: bool,
+        #[serde(default)]
+        credential_target_update_v1: bool,
+        #[serde(default)]
+        remote_credential_crypto_v1: bool,
+        #[serde(default)]
+        proxy_max_body_size: Option<usize>,
+    }
+    #[test]
+    fn old_server_accepts_machine_approval_capability_and_new_reader_defaults_off() {
+        let value =
+            serde_json::json!({"http_signature_v2":true,"machine_execution_approval_v1":true});
+        let old: MainCapabilities = serde_json::from_value(value.clone()).unwrap();
+        assert!(old.http_signature_v2);
+        let new: NodeCapabilitiesMsg = serde_json::from_value(value).unwrap();
+        assert!(new.machine_execution_approval_v1);
+        let absent: NodeCapabilitiesMsg =
+            serde_json::from_value(serde_json::json!({"http_signature_v2":true})).unwrap();
+        assert!(!absent.machine_execution_approval_v1);
     }
 }

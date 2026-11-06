@@ -4172,6 +4172,7 @@ mod tests {
             .unwrap();
         let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
         catalog.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Public,
             allowed_owner_ids: vec![],
@@ -4253,6 +4254,7 @@ mod tests {
         public_catalog.id = uuid::Uuid::new_v4().to_string();
         public_catalog.slug = "cleanup-public".to_string();
         public_catalog.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Public,
             allowed_owner_ids: vec![],
@@ -4269,6 +4271,7 @@ mod tests {
         restricted_catalog.id = uuid::Uuid::new_v4().to_string();
         restricted_catalog.slug = "cleanup-restricted".to_string();
         restricted_catalog.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Restricted,
             allowed_owner_ids: vec![org_id.clone()],

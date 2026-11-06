@@ -155,6 +155,11 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Metered(BillingIngress::LlmProvider),
     },
     BillingRouteSpec {
+        handler: "handlers::platform_models::public_list",
+        route: "/api/v1/llm/models",
+        policy: BillingRoutePolicy::Exempt("Platform model metadata; no downstream request"),
+    },
+    BillingRouteSpec {
         handler: "handlers::llm_gateway::pool_aliases",
         route: "/api/v1/llm/pools",
         policy: BillingRoutePolicy::Exempt("AI pool alias discovery; no downstream request"),

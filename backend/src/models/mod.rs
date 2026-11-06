@@ -256,3 +256,5 @@ pub mod org_channel;
 pub mod voice_responses;
 
 pub mod generated_artifact;
+
+pub mod platform_model;

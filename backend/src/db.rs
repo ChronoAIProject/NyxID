@@ -381,6 +381,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     crate::services::platform_public_credential_service::ensure_indexes(db).await?;
     crate::services::platform_provisioning_service::ensure_indexes(db).await?;
     crate::services::platform_inference_service::ensure_indexes(db).await?;
+    crate::services::platform_model_service::ensure_indexes(db).await?;
     crate::services::platform_native_receipt_service::ensure_indexes(db).await?;
 
     // ── assistant_wire_logs ──
