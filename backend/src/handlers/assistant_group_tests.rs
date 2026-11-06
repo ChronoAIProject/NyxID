@@ -51,6 +51,25 @@ async fn crm_artifact_only_reply_is_published_in_the_group_transcript() {
     )
     .await
     .unwrap();
+    let mut start = engine::TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+        conversation_id: None,
+        text: "Create an artifact for this group".into(),
+        agent_id: Some(f.chat.agent_id.clone()),
+        model: None,
+        access_mode: None,
+    });
+    start.origin = crate::models::assistant_conversation::TurnOrigin::Group;
+    start.group_id = Some(group.id.clone());
+    let row = engine::begin_turn(&f.state.db, &f.owner, &start, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    let chat = acks::for_key(&f.state.db, &f.owner, Some(&row.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
     let artifact = TurnCrmArtifact::Object {
         id: Uuid::new_v4().to_string(),
         owner_id: f.owner.clone(),
@@ -58,13 +77,22 @@ async fn crm_artifact_only_reply_is_published_in_the_group_transcript() {
         title: "Assets".into(),
         role: CrmArtifactRole::Created,
     };
-    crate::services::crm::artifacts::record(&f.state.db, &f.chat, artifact.clone())
+    crate::services::crm::artifacts::record(&f.state.db, &chat, artifact.clone())
         .await
         .unwrap();
+    let row = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+    assert_eq!(
+        groups::member_thread(&f.state.db, &f.owner, &group.id, &chat.agent_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        row.id
+    );
     engine::finish_turn(
         &f.state.db,
-        &f.row,
-        &f.chat.api_key_id,
+        &row,
+        &chat.api_key_id,
         &Uuid::new_v4().to_string(),
         &engine::TurnResult {
             text: String::new(),
@@ -75,9 +103,6 @@ async fn crm_artifact_only_reply_is_published_in_the_group_transcript() {
     )
     .await
     .unwrap();
-    let mut row = f.row.clone();
-    row.active_turn.as_mut().unwrap().crm_artifacts = vec![artifact.clone()];
-    row.group_id = Some(group.id.clone());
     member_settled(&f.state, &row, "", None).await;
     let messages = groups::messages(&f.state.db, &f.owner, &group.id, 10, None)
         .await
