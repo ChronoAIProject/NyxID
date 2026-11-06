@@ -623,6 +623,16 @@ async fn server_main() {
         .await
         .expect("Failed to seed default services");
 
+    if services::voice::catalog::seed(&db, &config.base_url)
+        .await
+        .is_err()
+    {
+        tracing::error!(
+            slug = services::voice::access::SERVICE_SLUG,
+            "Failed to seed NyxBot Voice catalog service; continuing startup"
+        );
+    }
+
     services::inference_service::backfill(&db)
         .await
         .expect("Failed to backfill inference metadata");
