@@ -122,6 +122,7 @@ pub mod exact_service_approval_service;
 pub mod execution_authority;
 pub mod execution_permission;
 pub mod execution_permission_dispatch;
+pub(crate) mod execution_permission_enrollment;
 pub mod feature_flag_admin_service;
 pub mod feature_flag_service;
 pub mod gcp_sa_service;
@@ -320,6 +321,7 @@ pub mod assistant_team_tools;
 pub mod channel_image_audience;
 pub mod channel_image_delivery;
 pub mod channel_retry_ingress;
+pub(crate) mod channel_turn_context;
 pub mod channel_turn_delivery;
 pub mod collaboration_group_service;
 pub mod provider_link_service;
@@ -541,6 +543,8 @@ pub(crate) mod nyxbot_gateway_release_service;
 
 pub mod discord_gateway;
 pub mod domain_alias_service;
+
+pub mod assistant_feedback_thread;
 #[cfg(test)]
 mod shared_agent_tests;
 
@@ -555,3 +559,5 @@ pub mod assistant_delegated_images;
 
 pub mod cma_session_origin;
 pub mod org_channel_service;
+
+pub mod generated_artifacts;

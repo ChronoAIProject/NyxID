@@ -418,6 +418,13 @@ pub(crate) async fn enqueue_in_session(
             return Ok(false);
         }
         pending.source_event_ids.push(source.clone());
+        pending.channel_contexts.extend(
+            event
+                .channel_contexts
+                .iter()
+                .filter(|context| context.source_event_id == source)
+                .cloned(),
+        );
     } else {
         if row.pending_events.len() >= engine::MAX_PENDING_EVENTS {
             return Ok(false);
@@ -843,7 +850,7 @@ async fn target_in_session(
             }
             Err(e) => return Err(e),
         };
-        if access.check_conversation(row).is_err() {
+        if access.check_source_conversation(row).is_err() {
             return Ok(None);
         }
         let channel = access.channel().clone();

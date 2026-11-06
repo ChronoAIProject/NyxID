@@ -682,9 +682,12 @@ pub enum OwnerInstructionSource {
 
 #[derive(Clone)]
 pub struct TurnStart {
+    pub(crate) automation_work: Option<crate::models::trigger_run::AutomationWork>,
+    pub(crate) automation_parent: Option<super::trigger_schedule::direct::Parent>,
     /// Copied from a verified person's already-loaded enrollment. Not a client field.
     pub(crate) execution_enrollment: bool,
     pub(crate) execution_parent: Option<super::execution_permission_dispatch::tasks::Parent>,
+    pub channel_context: Option<crate::models::assistant_conversation::ChannelTurnContext>,
     pub owner_instruction_source: Option<OwnerInstructionSource>,
     pub media_event_ids: Vec<String>,
     pub channel_uploads: Vec<super::assistant_upload_service::PreparedChannelUpload>,
@@ -857,6 +860,8 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            automation_work: None,
+            automation_parent: None,
             execution_enrollment: false,
             execution_parent: None,
             media_event_ids: Vec::new(),
@@ -873,6 +878,7 @@ impl From<&TurnRequest> for TurnStart {
             conversation_id: request.conversation_id.clone(),
             text: request.text.clone(),
             model: request.model.clone(),
+            channel_context: None,
             owner_instruction_source: None,
             origin: TurnOrigin::User,
             channel: None,
@@ -893,7 +899,16 @@ impl From<&TurnRequest> for TurnStart {
 /// Render queued events as the event turn's message. NyxID-authored, bounded.
 pub fn events_text(events: &[AgentEvent]) -> String {
     let mut text = String::from(
-        "NyxID events (authored by NyxID; only a quoted owner message is a request from the user; continuation lines are indented):",
+        if events.iter().any(|event| {
+            event
+                .channel_contexts
+                .iter()
+                .any(|source| source.org_origin.is_some())
+        }) {
+            "NyxID events (authored by NyxID; only a quoted verified sender message is a request from that sender; continuation lines are indented):"
+        } else {
+            "NyxID events (authored by NyxID; only a quoted owner message is a request from the user; continuation lines are indented):"
+        },
     );
     for event in events {
         text.push_str("\n- ");
@@ -912,7 +927,12 @@ fn event_turn_text(events: &[AgentEvent], shared_group_context: Option<&str>) ->
 }
 
 pub(crate) fn event_notice_text(event: &AgentEvent) -> String {
-    excerpt(&event.text, event_text_limit(event)).replace('\n', "\n  ")
+    let text = excerpt(&event.text, event_text_limit(event)).replace('\n', "\n  ");
+    if event.channel_contexts.is_empty() {
+        text
+    } else {
+        format!("event_id {}: {text}", event.id)
+    }
 }
 
 /// Queued owner messages keep more text than status notices.
@@ -1005,12 +1025,15 @@ pub fn parse_turn(bytes: &[u8]) -> AppResult<TurnRequest> {
 }
 
 pub async fn require_enabled(db: &Database, user_id: &str) -> AppResult<()> {
-    if feature_flag_service::resolve_personal_features(db, user_id)
-        .await?
+    require_enabled_features(db, user_id).await.map(|_| ())
+}
+pub async fn require_enabled_features(db: &Database, user_id: &str) -> AppResult<Vec<String>> {
+    let features = feature_flag_service::resolve_personal_features(db, user_id).await?;
+    if features
         .iter()
         .any(|key| key == feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY)
     {
-        Ok(())
+        Ok(features)
     } else {
         Err(AppError::NotFound("Assistant route not found.".into()))
     }
@@ -1157,6 +1180,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     super::channel_media_events::ensure_indexes(db).await?;
     super::assistant_channel_media::ensure_indexes(db).await?;
     super::async_service_operation::ensure_indexes(db).await?;
+    super::generated_artifacts::ensure_indexes(db).await?;
     super::assistant_resource_service::ensure_indexes(db).await?;
     let credentials =
         db.collection::<bson::Document>(crate::models::assistant_agent_credential::COLLECTION_NAME);
@@ -2099,7 +2123,11 @@ pub async fn begin_turn(
 }
 
 /// IDs allocated before entering the transaction retry driver.
+#[derive(Clone)]
 pub(crate) struct OwnerTurnIds {
+    pub artifact_budget: std::sync::Arc<
+        std::sync::OnceLock<super::assistant_upload_service::byte_budget::ByteReservation>,
+    >,
     pub conversation_id: String,
     pub turn_id: String,
     pub message_id: String,
@@ -2178,6 +2206,8 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            automation_v2: false,
+            artifact_head: None,
             collaboration: None,
             owner_model_route: None,
             invocation_controlled: false,
@@ -2378,11 +2408,13 @@ pub(crate) async fn begin_owner_turn_in_session(
             return Err(AppError::NotFound("Queued group request not found".into()));
         }
     }
+    let mut automation_work = start.automation_work.clone();
     if let Some(claim) = &start.trigger {
         if start.origin != TurnOrigin::Trigger || start.guest {
             return Err(AppError::Forbidden("Invalid trigger turn".into()));
         }
-        super::trigger_schedule::admit_turn(db, user_id, claim, &id, &turn_id, session).await?;
+        automation_work =
+            super::trigger_schedule::admit_turn(db, user_id, claim, &id, &turn_id, session).await?;
     }
     let voice_request = if let Some(request_id) = &voice_request_id {
         if start.origin != TurnOrigin::User || start.guest {
@@ -2468,7 +2500,15 @@ pub(crate) async fn begin_owner_turn_in_session(
         .pending_events
         .iter()
         .any(|event| !event.media_event_ids.is_empty());
-    let events = if let Some(binding) = row.collaboration.as_ref() {
+    let events = if let Some(work) = automation_work.as_ref()
+        && start.trigger.is_some()
+    {
+        let (selected, rest) = std::mem::take(&mut row.pending_events)
+            .into_iter()
+            .partition(|e| e.automation_work.as_ref() == Some(work));
+        row.pending_events = rest;
+        selected
+    } else if let Some(binding) = row.collaboration.as_ref() {
         // Only the canonical permission receipt for this exact requester/root
         // may enter a collaboration continuation. Ordinary queue events remain
         // excluded from hidden threads.
@@ -2769,6 +2809,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
         row.message_count += 1;
         let message = AssistantMessage {
+            automation_work: lost.automation_work.clone(),
             execution_task: lost.execution_task.clone(),
             delegated_images: Default::default(),
             media_event_ids: Vec::new(),
@@ -2973,11 +3014,26 @@ pub(crate) async fn begin_owner_turn_in_session(
         (None, Some(retry)) => Some(retry.note.clone()),
         (None, None) => None,
     };
+    if automation_work.is_none() && start.origin == TurnOrigin::Event {
+        automation_work = events.first().and_then(|e| e.automation_work.clone());
+        if let Some(work) = automation_work.as_ref() {
+            super::trigger_schedule::direct::resume_in_session(
+                db, user_id, &id, turn_id, work, session,
+            )
+            .await?;
+        }
+    }
+    if automation_work.is_some() {
+        row.automation_v2 = true;
+    }
     if start.invocation_id.is_some() || events.iter().any(|event| event.invocation_id.is_some()) {
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        automation_work: automation_work.clone(),
+        artifact_watch_id: None,
         execution_task: retry.as_ref().and_then(|r| r.execution_task.clone()),
+        channel_context: start.channel_context.clone(),
         business_system_success: false,
         delegated_images: Default::default(),
         timing: Default::default(),
@@ -3071,10 +3127,25 @@ pub(crate) async fn begin_owner_turn_in_session(
             .flatten(),
         also_deliver: Vec::new(),
     });
+    if let Some(work) = row
+        .active_turn
+        .as_ref()
+        .and_then(|t| t.automation_work.clone())
+        .filter(|w| w.role == "group")
+    {
+        super::trigger_schedule::group::admit(db, &row, &work, turn_id, session).await?;
+    }
     Box::pin(super::assistant_delegated_images::assign_in_session(
         db, session, &mut row,
     ))
     .await?;
+    if let Some(parent) = start.automation_parent.as_ref() {
+        super::trigger_schedule::direct::register_in_session(
+            db, session, user_id, parent, &mut row,
+        )
+        .await?;
+    }
+
     if row
         .active_turn
         .as_ref()
@@ -3169,7 +3240,11 @@ pub(crate) async fn begin_owner_turn_in_session(
         }
     }
     Box::pin(super::async_service_operation::bind_in_session(
-        db, &mut row, session,
+        db,
+        keys,
+        &mut row,
+        session,
+        ids.artifact_budget.get(),
     ))
     .await?;
     Box::pin(super::assistant_invocation_service::bind_in_session(
@@ -3187,6 +3262,17 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
         if let Some(card) = card.as_ref() {
             row.active_turn.as_mut().expect("turn").execution_task = card.execution_task.clone();
+            if let Some(work) = card.automation_work.as_ref() {
+                row.automation_v2 = true;
+                row.active_turn.as_mut().expect("turn").automation_work = Some(work.clone());
+                super::trigger_schedule::direct::resume_in_session(
+                    db, user_id, &id, turn_id, work, session,
+                )
+                .await?;
+                if work.role == "group" {
+                    super::trigger_schedule::group::admit(db, &row, work, turn_id, session).await?;
+                }
+            }
         }
         if card.is_none() {
             return Err(AppError::BadRequest(
@@ -3194,10 +3280,17 @@ pub(crate) async fn begin_owner_turn_in_session(
             ));
         }
     }
-    Box::pin(super::execution_permission_dispatch::tasks::admit(
-        db, session, &mut row, start, ids,
-    ))
-    .await?;
+    super::trigger_schedule::direct::adopt_lineage(db, &mut row, session).await?;
+    if row
+        .active_turn
+        .as_ref()
+        .is_none_or(|t| t.automation_work.is_none())
+    {
+        Box::pin(super::execution_permission_dispatch::tasks::admit(
+            db, session, &mut row, start, ids,
+        ))
+        .await?;
+    }
     // Chats whose queued messages this turn answers get its reply
     // too, unless it already goes there.
     let answered_here = match start.origin {
@@ -3248,6 +3341,14 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
     } else {
         collection.insert_one(&row).session(&mut *session).await?;
+    }
+    // Fresh group member threads must exist before taking their child fence.
+    if let Some(work) = row
+        .active_turn
+        .as_ref()
+        .and_then(|t| t.automation_work.as_ref())
+    {
+        super::trigger_schedule::continuation::fence_work(db, user_id, &id, work, session).await?;
     }
     // Private credential work is complete. The final shared write conflicts
     // with unlink/manager stop before this event admission can commit.
@@ -3374,6 +3475,10 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
     }
     let message = AssistantMessage {
+        automation_work: row
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.automation_work.clone()),
         execution_task: row
             .active_turn
             .as_ref()
@@ -3385,6 +3490,11 @@ pub(crate) async fn begin_owner_turn_in_session(
         media_bound: None,
         turn_metadata: row.active_turn.as_ref().map(|turn| {
             crate::models::assistant_message::TurnMetadata {
+                artifact_recovery_target: row
+                    .artifact_head
+                    .as_ref()
+                    .map(|head| head.message_id.clone()),
+                artifact_delivery: None,
                 work: Some(super::assistant_real_work::evidence(&row, turn, None)),
                 ..Default::default()
             }
@@ -3480,6 +3590,7 @@ pub async fn begin_turn_with_voice(
         .or_else(|| start.new_id.clone().filter(|id| valid_id(id)))
         .unwrap_or_else(|| format!("nyxa-{}", Uuid::new_v4().simple()));
     let ids = OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: id,
         turn_id: Uuid::new_v4().to_string(),
         message_id: Uuid::new_v4().to_string(),
@@ -3542,31 +3653,57 @@ pub async fn begin_turn_with_voice(
     let start = start.clone();
     let audit_db = db.clone();
     let audit_user = user_id.clone();
-    let claim = session
-        .start_transaction()
-        .and_run2(async move |session| {
-            let db = &db;
-            let user_id = user_id.as_str();
-            let start = &start;
-            // MongoDB's retry driver stores and polls this callback through
-            // several frames. Keep the turn/message/upload transaction on the heap.
-            let operation: AppResult<_> = Box::pin(begin_owner_turn_in_session(
-                db,
-                session,
-                &keys,
-                user_id,
-                start,
-                &ids,
-                &new_agent,
-                learning_epoch,
-                None,
-                voice_request_id.as_deref(),
-            ))
-            .await;
-            transactions::transaction_result(operation)
-        })
-        .await
-        .map_err(transactions::map_transaction_error)?;
+    let budget = ids.artifact_budget.clone();
+    let claim = loop {
+        let (db, user_id, keys, start, ids, new_agent, voice_request_id) = (
+            db.clone(),
+            user_id.clone(),
+            keys.clone(),
+            start.clone(),
+            ids.clone(),
+            new_agent.clone(),
+            voice_request_id.clone(),
+        );
+        let outcome = session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let db = &db;
+                let user_id = user_id.as_str();
+                let start = &start;
+                // MongoDB's retry driver stores and polls this callback through
+                // several frames. Keep the turn/message/upload transaction on the heap.
+                let operation: AppResult<_> = Box::pin(begin_owner_turn_in_session(
+                    db,
+                    session,
+                    &keys,
+                    user_id,
+                    start,
+                    &ids,
+                    &new_agent,
+                    learning_epoch,
+                    None,
+                    voice_request_id.as_deref(),
+                ))
+                .await;
+                transactions::transaction_result(operation)
+            })
+            .await
+            .map_err(transactions::map_transaction_error);
+        match outcome {
+            Err(AppError::Conflict(reason))
+                if reason == super::generated_artifacts::PREPARE_BUDGET
+                    && budget.get().is_none() =>
+            {
+                let reservation = super::assistant_upload_service::byte_budget::reserve(
+                    super::generated_artifacts::sandbox::RESERVATION,
+                )
+                .await?;
+                let _ = budget.set(reservation);
+            }
+            outcome => break outcome?,
+        }
+    };
+
     let claim = claim.into_started()?;
     claim.log_reclaimed();
     super::assistant_agent_credential_service::audit_provision(
@@ -3668,15 +3805,25 @@ pub async fn append_events_in_session(
             continue;
         }
         if row.pending_events.len() >= MAX_PENDING_EVENTS {
+            let protected_automation = row
+                .pending_events
+                .iter()
+                .any(|e| e.automation_work.is_some());
             if event.invocation_id.is_some()
-                || row.pending_events.iter().any(|e| e.invocation_id.is_some())
+                || event.automation_work.is_some()
+                || (!protected_automation
+                    && row.pending_events.iter().any(|e| e.invocation_id.is_some()))
             {
                 return Err(AppError::Conflict("Assistant event queue is full".into()));
             }
             let index = row
                 .pending_events
                 .iter()
-                .position(|e| e.source_event_ids.is_empty())
+                .position(|e| {
+                    e.source_event_ids.is_empty()
+                        && e.automation_work.is_none()
+                        && e.invocation_id.is_none()
+                })
                 .ok_or_else(|| AppError::Conflict("Assistant event queue is full".into()))?;
             row.pending_events.remove(index);
         }
@@ -3780,24 +3927,58 @@ pub async fn request_stop(db: &Database, user_id: &str, id: &str) -> AppResult<(
     request_stop_row(db, &existing).await
 }
 
+pub enum StopTarget {
+    Legacy,
+    Scoped(Option<Box<AssistantConversation>>),
+}
+
+/// Reuse the existing read and return only a successfully stopped turn. Losing
+/// the exact-turn fence must not cancel transports of a now-waiting run.
+pub async fn request_stop_target(db: &Database, owner: &str, id: &str) -> AppResult<StopTarget> {
+    let row = get(db, owner, id).await?;
+    let stopped = request_stop_row_target(db, &row).await?;
+    Ok(if row.automation_v2 {
+        StopTarget::Scoped(stopped.map(Box::new))
+    } else {
+        StopTarget::Legacy
+    })
+}
+
 /// Internal lifecycle callers have already authorized their parent resource.
 /// They must still be able to retire a member whose agent/org access was lost.
 pub(crate) async fn request_stop_row(
     db: &Database,
     existing: &AssistantConversation,
 ) -> AppResult<()> {
+    request_stop_row_target(db, existing).await.map(|_| ())
+}
+
+pub(crate) async fn request_stop_row_target(
+    db: &Database,
+    existing: &AssistantConversation,
+) -> AppResult<Option<AssistantConversation>> {
     let user_id = existing.user_id.as_str();
     let id = existing.id.as_str();
     let now = Utc::now();
     let stale_before = now - chrono::Duration::seconds(ACTIVE_TURN_HEARTBEAT_STALE_SECS);
     let Some(existing_turn) = existing.active_turn.as_ref() else {
-        return super::async_service_operation::cancel(db, user_id, id).await;
+        if existing.automation_v2 {
+            super::async_service_operation::cancel_unrelated(db, user_id, id, None).await?;
+            return Ok(None);
+        }
+        super::async_service_operation::cancel(db, user_id, id).await?;
+        return Ok(None);
     };
     // Rows written before heartbeat support retain the old lease boundary: an
     // already-expired legacy fence is reclaimed by the next send instead.
     super::execution_permission_dispatch::tasks::stop(db, existing).await?;
     if existing_turn.heartbeat_at.is_none() && live_turn(existing, now).is_none() {
-        return super::async_service_operation::cancel(db, user_id, id).await;
+        if existing.automation_v2 {
+            super::async_service_operation::cancel_unrelated(db, user_id, id, None).await?;
+            return Ok(None);
+        }
+        super::async_service_operation::cancel(db, user_id, id).await?;
+        return Ok(None);
     }
     let expected_turn_id = existing_turn.turn_id.clone();
     let row = db
@@ -3814,19 +3995,46 @@ pub(crate) async fn request_stop_row(
         .await?;
     // Fence new submissions before cancelling existing watches. A reserve
     // racing this update writes the same conversation inside its transaction.
-    super::async_service_operation::cancel(db, user_id, id).await?;
+    if !existing.automation_v2 {
+        super::async_service_operation::cancel(db, user_id, id).await?;
+    }
     let Some(row) = row else {
         // A concurrent settlement, delete, or new turn won the exact fence.
-        return Ok(());
+        if existing.automation_v2 {
+            super::async_service_operation::cancel_unrelated(db, user_id, id, None).await?;
+        }
+        return Ok(None);
     };
     let Some(turn) = row.active_turn.as_ref() else {
-        return Ok(());
+        return Ok(None);
     };
+    if existing.automation_v2 {
+        super::async_service_operation::cancel_unrelated(
+            db,
+            user_id,
+            id,
+            turn.automation_work.as_ref().map(|w| w.run_id.as_str()),
+        )
+        .await?;
+        if let Some(work) = turn
+            .automation_work
+            .as_ref()
+            .filter(|w| w.role == "coordinator")
+        {
+            super::trigger_schedule::continuation::stop_root(
+                db,
+                user_id,
+                &work.run_id,
+                &turn.turn_id,
+            )
+            .await?;
+        }
+    }
     // A legacy row has no worker liveness signal. Keep its historical Stop
     // behavior: the worker may observe the durable flag, while an absent worker
     // is reclaimed only by the existing lease/TTL path.
     let Some(heartbeat) = turn.heartbeat_at else {
-        return Ok(());
+        return Ok(Some(row));
     };
     let turn_id = turn.turn_id.clone();
     let delay = if heartbeat <= stale_before {
@@ -3845,7 +4053,7 @@ pub(crate) async fn request_stop_row(
             tracing::debug!(conversation_id = %id, turn_id = %turn_id, %error, "Forced assistant stop deferred");
         }
     });
-    Ok(())
+    Ok(Some(row))
 }
 
 /// Record that a claimed turn waits for one of its owner's running slots,
@@ -4020,6 +4228,8 @@ async fn finish_turn_inner(
                             .and_then(|code| TurnError::new(code).upstream_code);
                         if let Some(detail) = saved.error_detail.as_ref() {
                             error.metadata = Some(Box::new(crate::models::assistant_message::TurnMetadata {
+artifact_recovery_target: None,
+                                artifact_delivery: None,
                                 work: saved.turn_metadata.as_ref().and_then(|data| data.work.clone()),
                                 failure_reason: saved.turn_metadata.as_ref().and_then(|data| data.failure_reason.clone()),
                                 timing: saved.turn_metadata.as_ref().and_then(|data| data.timing.clone()),
@@ -4069,11 +4279,14 @@ async fn finish_turn_inner(
                     || error.clone(),
                     |turn| super::assistant_model_observer::attribute(&error, turn, Utc::now()),
                 ));
+                super::generated_artifacts::prepare_settlement_in_session(&db, &mut current, session).await?;
+                let artifact_outcome = super::generated_artifacts::settled_outcome_in_session(&db, &current, session).await?;
                 let turn = current.active_turn.as_ref().expect("matched turn");
                 let settled_at = current.context_reset_at.map_or_else(Utc::now, |reset_at| {
                     Utc::now().max(reset_at + chrono::Duration::milliseconds(1))
                 });
                 let mut turn_metadata = super::assistant_turn_observability::metadata(turn, settled_at);
+                turn_metadata.artifact_delivery = artifact_outcome;
                 turn_metadata.work = Some(super::assistant_real_work::evidence(&current, turn, Some(settled_at)));
                 turn_metadata.failure_reason = error.as_ref().and_then(|error|
                     super::assistant_model_observer::failure_reason(error, turn, Utc::now()));
@@ -4148,6 +4361,7 @@ async fn finish_turn_inner(
                     .as_ref()
                     .map(|turn| turn.also_deliver.clone())
                     .unwrap_or_default();
+                super::generated_artifacts::associate_in_session(&db, &mut current, &message_id, session).await?;
                 super::async_service_operation::delivered_in_session(&db, &current, session).await?;
                 if let Some(request_id) = current.active_turn.as_ref().and_then(|t| t.voice_request_id.as_ref()) {
                     let async_pending = super::async_service_operation::pending_voice_in_session(&db, request_id, session).await?;
@@ -4207,6 +4421,7 @@ async fn finish_turn_inner(
                     current.credential_api_key_id = credential_id.clone();
                 }
                 let mut message = AssistantMessage {
+                    automation_work: settled_turn.as_ref().and_then(|t| t.automation_work.clone()),
                     execution_task: settled_turn.as_ref().and_then(|t| t.execution_task.clone()),
                     delegated_images: crate::models::assistant_delegated_image::DelegatedImages {
                         assignment: settled_turn.as_ref().and_then(|t| t.delegated_images.assignment.clone()),
@@ -4455,7 +4670,8 @@ async fn chat_approvals(
     let scope = doc! {
         "$or":[
             {"execution_proposal":null,"requester_type":"user", "requester_id":user_id,"requester_label":&key.name,"$or":[{"user_id":user_id},{"notify_user_ids":user_id}]},
-            {"user_id":user_id,"execution_proposal.v1.key_id":credential_api_key_id}
+            {"user_id":user_id,"execution_proposal.v1.key_id":credential_api_key_id},
+            {"user_id":user_id,"execution_proposal.v2.key_id":credential_api_key_id}
         ],
     };
     let now = Utc::now();
@@ -4524,7 +4740,7 @@ pub(crate) async fn include_execution_card(
     if rows.iter().any(|row| row.id == id) {
         return Ok(());
     }
-    if let Some(row)=db.collection::<crate::models::approval_request::ApprovalRequest>("approval_requests").find_one(doc!{"_id":id,"user_id":actor,"execution_proposal.v1.conversation_id":&conversation.id,"execution_proposal.v1.key_id":&conversation.credential_api_key_id}).await? {
+    if let Some(row)=db.collection::<crate::models::approval_request::ApprovalRequest>("approval_requests").find_one(doc!{"_id":id,"user_id":actor,"$or":[{"execution_proposal.v1.conversation_id":&conversation.id,"execution_proposal.v1.key_id":&conversation.credential_api_key_id},{"execution_proposal.v2.conversation_id":&conversation.id,"execution_proposal.v2.key_id":&conversation.credential_api_key_id}]}).await? {
         rows.push(chat_approval(row,""));
     }
     Ok(())
@@ -4667,6 +4883,7 @@ pub async fn attach_routed_image(
         assistant_conversation::TurnAttachment,
     };
     let meta = TurnAttachment {
+        artifact: Default::default(),
         chat_delivery: Some(chat_delivery),
         image_input: None,
         image_input_reason: None,
@@ -4711,6 +4928,7 @@ pub async fn attach_routed_image(
     );
     let stored = async {
         let mut attachment = AssistantAttachment {
+            artifact: Default::default(),
             secret_context_versions: Default::default(),
             origin: "tool".into(),
             id: meta.id.clone(),
@@ -4769,6 +4987,7 @@ pub(crate) async fn attach_resource_image(
         assistant_resource::{AssistantResource, COLLECTION_NAME as RESOURCES},
     };
     let meta = media.map(|media| TurnAttachment {
+        artifact: Default::default(),
         id: resource.attachment_id.clone(),
         label: resource
             .source
@@ -4791,6 +5010,7 @@ pub(crate) async fn attach_resource_image(
     let attachment = if let Some(media) = media {
         let meta = meta.as_ref().ok_or_else(resources::missing)?;
         let mut row = AssistantAttachment {
+            artifact: Default::default(),
             secret_context_versions: Default::default(),
             id: meta.id.clone(),
             origin: "tool".into(),
@@ -5027,6 +5247,10 @@ pub async fn read_group_tool_attachment(
 }
 
 /// Decrypt an attachment for its owner. Other owners and conversations are not found.
+pub enum AttachmentRead {
+    Legacy(String, Vec<u8>),
+    Generated(super::generated_artifacts::GeneratedRead),
+}
 pub async fn read_attachment(
     db: &Database,
     keys: &crate::crypto::aes::EncryptionKeys,
@@ -5034,17 +5258,42 @@ pub async fn read_attachment(
     conversation_id: &str,
     attachment_id: &str,
 ) -> AppResult<(String, Vec<u8>)> {
+    match read_attachment_for_caller(db, keys, user_id, conversation_id, attachment_id, None)
+        .await?
+    {
+        AttachmentRead::Legacy(kind, bytes) => Ok((kind, bytes)),
+        AttachmentRead::Generated(mut read) => {
+            Ok((read.content_type.clone(), std::mem::take(&mut *read.bytes)))
+        }
+    }
+}
+pub async fn read_attachment_for_caller(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    user_id: &str,
+    conversation_id: &str,
+    attachment_id: &str,
+    bound_conversation: Option<&str>,
+) -> AppResult<AttachmentRead> {
     use crate::models::assistant_attachment::{
         AssistantAttachment, COLLECTION_NAME as ATTACHMENTS,
     };
     get(db, user_id, conversation_id).await?;
-    Box::pin(super::assistant_upload_retention::require_available(
+    let metadata = Box::pin(super::assistant_upload_retention::available_row(
         db,
         doc! {
             "_id":attachment_id,"user_id":user_id,"conversation_id":conversation_id,
         },
     ))
     .await?;
+    if metadata.get_str("origin").ok() == Some("generated_artifact") {
+        if bound_conversation.is_some_and(|bound| bound != conversation_id) {
+            return Err(not_found());
+        }
+        return super::generated_artifacts::read(db, keys, user_id, conversation_id, attachment_id)
+            .await
+            .map(AttachmentRead::Generated);
+    }
     if db
         .collection::<bson::Document>(ATTACHMENTS)
         .find_one(doc! {"_id": attachment_id, "origin": "user_upload"})
@@ -5059,7 +5308,8 @@ pub async fn read_attachment(
             conversation_id,
             attachment_id,
         )
-        .await;
+        .await
+        .map(|(kind, bytes)| AttachmentRead::Legacy(kind, bytes));
     }
     let filter = doc! {
         "_id": attachment_id, "user_id": user_id, "conversation_id": conversation_id,
@@ -5081,7 +5331,7 @@ pub async fn read_attachment(
         db, filter,
     ))
     .await?;
-    Ok((row.content_type, bytes))
+    Ok(AttachmentRead::Legacy(row.content_type, bytes))
 }
 
 pub const MAX_TURN_ACTIVITIES: i64 = 40;
@@ -5936,6 +6186,9 @@ pub(crate) async fn delete_in_session(
             .session(&mut *session)
             .await?;
         }
+        super::trigger_schedule::continuation::delete_coordinator_in_session(db, row, session)
+            .await?;
+        super::trigger_schedule::direct::delete_thread_in_session(db, user_id, id, session).await?;
         super::assistant_invocation_service::deleted_in_session(db, session, user_id, id).await?;
         // A member's app turn can clear a former channel reply preference;
         // transport-owned replay must still be purged with that member home.
@@ -5982,6 +6235,9 @@ pub(crate) async fn delete_in_session(
         }
         for collection in [
             crate::models::async_service_operation::COLLECTION_NAME,
+            crate::models::generated_artifact::COLLECTION_NAME,
+            crate::models::generated_artifact::DELIVERIES,
+            crate::models::generated_artifact::SERIES,
             crate::models::cma_session_origin::COLLECTION_NAME,
             crate::models::assistant_voice::REQUESTS,
             crate::models::assistant_voice_session::COLLECTION_NAME,

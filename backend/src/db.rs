@@ -314,6 +314,7 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     crate::services::cma_session_origin::ensure_indexes(db).await?;
     crate::services::assistant_invocation_service::ensure_indexes(db).await?;
     crate::services::assistant_agent_learning::ensure_indexes(db).await?;
+    crate::services::execution_permission_enrollment::jobs::ensure_indexes(db).await?;
     crate::services::assistant_voice::ensure_indexes(db).await?;
     crate::services::channel_image_delivery::ensure_indexes(db).await?;
     crate::services::voice::session::ensure_indexes(db).await?;
@@ -1523,6 +1524,23 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         )
         .await?;
 
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"execution_proposal.v2.locator":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("execution_proposal_locator_v2".to_owned())
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! {"execution_proposal.v2.locator":{"$type":"string"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    approval_requests.create_index(IndexModel::builder().keys(doc!{"execution_proposal.version":1,"execution_proposal.v2.state":1,"execution_proposal.v2.maintenance_at":1,"created_at":1}).build()).await?;
     // ── approval_grants ──
     let approval_grants = db.collection::<mongodb::bson::Document>("approval_grants");
     approval_grants
@@ -2407,6 +2425,20 @@ async fn ensure_feature_flag_indexes(db: &Database) -> Result<(), mongodb::error
             IndexModel::builder()
                 .keys(doc! { "org_user_id": 1, "flag_key": 1, "definition_id": 1, "target_kind": 1, "target_key": 1 })
                 .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // Single-flag enrollment snapshot/live reads must not scan every flag.
+    feature_flag_overrides
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"flag_key":1,"definition_id":1,"org_user_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("feature_flag_single_scope".to_owned())
+                        .build(),
+                )
                 .build(),
         )
         .await?;
@@ -3613,6 +3645,14 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         )
         .await?;
     ensure_billing_ledger_dedupe_index(&billing_ledger).await?;
+    for keys in [
+        doc! { "event_type": 1, "created_at": 1, "owner_id": 1 },
+        doc! { "movement": 1, "created_at": 1, "owner_id": 1 },
+    ] {
+        billing_ledger
+            .create_index(IndexModel::builder().keys(keys).build())
+            .await?;
+    }
     billing_ledger
         .create_index(
             IndexModel::builder()

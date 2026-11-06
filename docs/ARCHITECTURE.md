@@ -67,6 +67,18 @@ Settlement reuses admitted billing meters and retains pending provider evidence
 until cleanup completes. The default-off rollout requires all API replicas to
 understand adapter-origin tool authority before activation.
 
+Automation coordinator completion adds per-run provenance to existing turns,
+events, confirmation cards, async operations and group followers. The scheduler
+owns admission and final settlement; direct assignments use the metadata-only
+`assistant_direct_handoffs` collection, indexed by owner/run and both conversation
+roles, with absolute TTL at the run's retention boundary. Result enqueue and
+receipt/follower retirement commit transactionally. Child lifecycle fences write
+their own conversation, while cancellation retires the run and its descendants.
+Personal erasure removes receipts by exact owner; conversation deletion removes
+both parent and child roles after publishing any pending child failure. The
+feature is default-off and requires fleet readiness only for new enrollment;
+persisted work continues to drain after disabling it. See [NyxBot schedules](NYXBOT_SCHEDULES.md).
+
 ## Table of Contents
 
 - [System Overview](#system-overview)
@@ -2154,6 +2166,20 @@ read and commits validated bytes through the existing encrypted attachment
 transaction. An exact approved continuation receives a fresh current-turn ref
 only after rechecking the original pending intent and expiry. See
 [Source resources](chat/10-source-resources.md).
+
+Generated Sandbox delivery is a separate, default-off owner Web lane. Its
+async watch retains main's background execution authority and cancellation
+fences. `generated_artifacts` verifies bounded responses and file containers on
+blocking CPU workers, then materializes encrypted assistant attachments with
+memory reservations acquired before transactions. The new
+`async_service_operation_artifacts`, `assistant_artifact_deliveries` and
+`generated_artifact_content_series` collections hold pending bytes, original
+reply associations and content revisions. Each has a `purge_after` TTL index and
+joins conversation deletion and personal erasure. Live retention can shorten,
+but never extend, an attachment's immutable expiry cap. The encrypted-record
+registry includes pending bytes and generated attachment AAD; its changed digest
+requires a new generation for existing operator walks. See the
+[encrypted field inventory](security/ENCRYPTED_FIELD_INVENTORY.md).
 
 See [Uploads](chat/10-uploads.md) and [NyxAgent engine](chat/08-nyxagent-engine.md).
 

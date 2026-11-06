@@ -13,6 +13,8 @@ pub enum MessageAuthor {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_work: Option<super::trigger_run::AutomationWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(default)]
     pub delegated_images: super::assistant_delegated_image::DelegatedImages,
@@ -164,6 +166,10 @@ pub struct Steering {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_recovery_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_delivery: Option<super::generated_artifact::SavedOutcome>,
     /// Server-observed business-system success; missing legacy rows are not evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<WorkEvidence>,

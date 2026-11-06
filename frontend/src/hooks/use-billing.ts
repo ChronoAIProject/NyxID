@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useAuthStore } from "@/stores/auth-store";
 import { api } from "@/lib/api-client";
 import {
   type BillingWalletResponse,
@@ -49,18 +50,22 @@ export function billingUsagePath(
 }
 
 export function useBillingWallet(ownerId?: string) {
+  const userId = useAuthStore((state) => state.user?.id);
   return useQuery({
-    queryKey: ownerKey(BILLING_WALLET_KEY, ownerId),
+    queryKey: ownerKey([...BILLING_WALLET_KEY, userId], ownerId),
     queryFn: async (): Promise<BillingWalletResponse | null> => {
       const response = await api.get<unknown>(billingOwnerPath("/billing/wallet", ownerId));
       const wallet = billingWalletResponseSchema.nullable().parse(response);
       return wallet === null ? null : checkedOwner(wallet, ownerId);
     },
     retry: false,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
   });
 }
 
 export function useProvisionBillingWallet() {
+  const userId = useAuthStore((state) => state.user?.id);
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (
@@ -70,7 +75,7 @@ export function useProvisionBillingWallet() {
       return checkedOwner(billingWalletResponseSchema.parse(response), body.owner_id);
     },
     onSuccess: (wallet, body) => {
-      queryClient.setQueryData(ownerKey(BILLING_WALLET_KEY, body?.owner_id), wallet);
+      queryClient.setQueryData(ownerKey([...BILLING_WALLET_KEY, userId], body?.owner_id), wallet);
       void queryClient.invalidateQueries({ queryKey: BILLING_USAGE_KEY });
       void queryClient.invalidateQueries({ queryKey: BILLING_BILL_KEY });
       void queryClient.invalidateQueries({ queryKey: BILLING_INVOICES_KEY });

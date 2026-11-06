@@ -584,6 +584,7 @@ async fn run_inner(
         return Err(AppError::Forbidden("Shared setup refused".into()));
     }
     let ids = engine::OwnerTurnIds {
+        artifact_budget: Default::default(),
         conversation_id: row.id.clone(),
         turn_id: uuid::Uuid::new_v4().to_string(),
         message_id: uuid::Uuid::new_v4().to_string(),
@@ -828,6 +829,8 @@ pub(crate) async fn failure(
     if let Some(reason) = reason.filter(|s| failure_code(s)) {
         error = error.with_model_route_reason(Some(&reason));
         error.metadata = Some(Box::new(TurnMetadata {
+            artifact_recovery_target: None,
+            artifact_delivery: None,
             failure_reason: Some(Box::new(TurnFailureReason {
                 source: "nyxid".into(),
                 stage: "guest_setup".into(),
@@ -916,6 +919,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let ids = engine::OwnerTurnIds {
+            artifact_budget: Default::default(),
             conversation_id: row.id.clone(),
             turn_id: Uuid::new_v4().to_string(),
             message_id: Uuid::new_v4().to_string(),

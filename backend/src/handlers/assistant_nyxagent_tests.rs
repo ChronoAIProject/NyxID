@@ -63,6 +63,7 @@ fn stream_timeout_is_the_earlier_of_transport_idle_and_no_progress() {
 fn failed_message_response_serializes_error_detail_as_rfc3339() {
     let occurred_at = Utc::now();
     let response = MessageResponse::from(AssistantMessage {
+        automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
         media_event_ids: Vec::new(),
@@ -2739,6 +2740,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        automation_work: None,
         execution_task: None,
         connect_own: None,
         activity_id: None,
@@ -6183,3 +6185,23 @@ async fn channel_start_retry_does_not_shorten_a_later_continuation() {
 
 #[path = "assistant_nyxagent_model_image_tests.rs"]
 mod model_image_tests;
+
+#[test]
+fn generated_active_turn_fields_are_hidden_when_disabled_in_all_conversation_responses() {
+    let row: AssistantConversation = bson::from_document(doc!{
+        "_id":"nyxa-view","user_id":OWNER,"title":"view","model":"nyxagent/chat","credential_api_key_id":"key","message_count":1,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+        "active_turn":{"turn_id":"view-turn","origin":"event","started_at":bson::DateTime::now(),"attachments":[
+            {"id":"legacy","origin":"tool","content_type":"image/png","size":8_i64,"label":"tool"},
+            {"id":"generated","origin":"generated_artifact","content_type":"video/mp4","size":8_i64,"label":"result","filename":"private.mp4","preview_kind":"video"}
+        ]}
+    }).unwrap();
+    for enabled in [false, true] {
+        let response =
+            serde_json::to_value(ConversationResponse::from(row.clone()).with_artifacts(enabled))
+                .unwrap();
+        let files = response["active_turn"]["attachments"].as_array().unwrap();
+        assert_eq!(files.len(), if enabled { 2 } else { 1 });
+        assert_eq!(files[0]["origin"], "tool");
+        assert!(files[0].get("filename").is_none());
+    }
+}

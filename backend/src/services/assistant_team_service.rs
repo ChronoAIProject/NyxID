@@ -131,7 +131,9 @@ pub async fn in_progress(
 /// An unbound event: it proves nothing about NyxBot involvement.
 pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
+        automation_work: None,
         execution_task: None,
+        channel_contexts: Vec::new(),
         delegated_result: None,
         media_event_ids: Vec::new(),
         media_declared: None,
@@ -766,6 +768,8 @@ async fn create_thread_with_kind(
     super::erasure_admission::fence_in_session(db, actor, session).await?;
     let now = Utc::now();
     let mut row = AssistantConversation {
+        automation_v2: false,
+        artifact_head: None,
         collaboration: collaboration.clone(),
         owner_model_route: None,
         invocation_controlled: false,
@@ -984,10 +988,11 @@ pub struct GrantTargets {
 pub async fn resolve_targets(
     db: &Database,
     node_manager: &NodeWsManager,
+    actor: &str,
     owner: &str,
     targets: &[String],
 ) -> AppResult<GrantTargets> {
-    let (resolved, refused) = resolve_each_target(db, node_manager, owner, targets).await?;
+    let (resolved, refused) = resolve_each_target(db, node_manager, actor, owner, targets).await?;
     match refused.into_iter().next() {
         Some(refused) => Err(AppError::ValidationError(refused.reason)),
         None => Ok(resolved),
@@ -1006,6 +1011,7 @@ pub struct Refused {
 pub async fn resolve_each_target(
     db: &Database,
     node_manager: &NodeWsManager,
+    actor: &str,
     owner: &str,
     targets: &[String],
 ) -> AppResult<(GrantTargets, Vec<Refused>)> {
@@ -1023,14 +1029,16 @@ pub async fn resolve_each_target(
         .iter()
         .map(|target| target.trim().to_string())
         .collect();
-    let catalog = mcp_service::load_operation_catalog(
-        db,
-        node_manager,
-        owner,
-        mcp_service::NodeScope::Unrestricted,
-        mcp_service::ServiceScope::Preferring(&trimmed_targets),
-    )
-    .await?;
+    // Scope the authorization view to the actual maintaining person before
+    // diagnosing any resource. The transactional write still rechecks these ACLs.
+    let access = super::org_agent_service::resolve_key_access(db, actor, Some(owner)).await?;
+    let scope = match access.as_deref() {
+        Some(access) => mcp_service::ServiceScope::Organization { access },
+        None => mcp_service::ServiceScope::Preferring(&trimmed_targets),
+    };
+    let catalog =
+        mcp_service::load_authorization_catalog(db, node_manager, actor, scope, &trimmed_targets)
+            .await?;
     for target in &trimmed_targets {
         let target = target.as_str();
         let refuse = |reason: String| Refused {
@@ -1054,11 +1062,9 @@ pub async fn resolve_each_target(
             .iter()
             .find(|service| service.service_slug == target || service.service_id == target)
         else {
-            refused.push(refuse(format!(
-                "Unknown or unavailable service: {}. Use a slug or ID from \
-                nyx__list_connected_services",
-                identifier(target)
-            )));
+            refused.push(refuse(
+                grant_target_refusal(db, actor, owner, target, access.as_deref()).await?,
+            ));
             continue;
         };
         let (list, id) = match &service.source {
@@ -1085,6 +1091,61 @@ pub async fn resolve_each_target(
         }
     }
     Ok((resolved, refused))
+}
+
+/// Missing and inaccessible IDs deliberately share a refusal. Diagnose disabled
+/// rows only after the same ownership, role-scope and admin-only checks.
+async fn grant_target_refusal(
+    db: &Database,
+    actor: &str,
+    owner: &str,
+    target: &str,
+    org_access: Option<&super::org_agent_service::RequestAccess>,
+) -> AppResult<String> {
+    use crate::models::user_service::{COLLECTION_NAME, UserService};
+    // Keep slug diagnostics within the actor's owner set; a common slug must
+    // never scan every user's connections just to explain a failed grant.
+    let owners = if org_access.is_some() {
+        vec![owner.to_string()]
+    } else {
+        let mut owners = vec![actor.to_string()];
+        owners.extend(
+            super::org_service::list_memberships_for_member(db, actor, false)
+                .await?
+                .into_iter()
+                .filter(|membership| membership.role.can_proxy())
+                .map(|membership| membership.org_user_id),
+        );
+        owners
+    };
+    let rows: Vec<UserService> = super::service_history::collection(db, COLLECTION_NAME)
+        .find(doc! {"user_id": {"$in": owners}, "$or": [{"_id": target}, {"slug": target}]})
+        .await?
+        .try_collect()
+        .await?;
+    for row in rows {
+        if row.deleted_at.is_some() {
+            continue;
+        }
+        let allowed = if let Some(access) = org_access {
+            row.user_id == owner && access.allows_service(&row)
+        } else {
+            let access = super::org_service::resolve_owner_access(db, actor, &row.user_id).await?;
+            super::org_agent_service::can_use(&access)
+                && access.allows_resource(&row.id)
+                && (!row.admin_only || access.can_write())
+        };
+        if allowed && !row.is_active {
+            return Ok(format!(
+                "Service disabled: {}. Enable it before granting access",
+                identifier(target)
+            ));
+        }
+    }
+    Ok(format!(
+        "Unknown service or no access: {}",
+        identifier(target)
+    ))
 }
 
 // ---------------------------------------------------------------------------

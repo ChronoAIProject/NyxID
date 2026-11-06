@@ -325,7 +325,7 @@ pub(super) async fn begin_ready(
                 if row.collaboration.as_ref().is_some_and(|old|old.request_id!=request) {
                     let waiting=db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME).find_one(doc! {"conversation_id":id,"kind":"action","status":{"$in":["pending","allowed"]},"expires_at":{"$gt":bson::DateTime::now()}}).session(&mut *session).await?.is_some()
                         || db.collection::<bson::Document>(crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME).find_one(doc! {"conversation_id":id,"decision":{"$in":["pending","once"]},"expires_at":{"$gt":bson::DateTime::now()}}).session(&mut *session).await?.is_some();
-                    let approval_waiting=db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME).find_one(doc! {"assistant_group.conversation_id":id,"$or":[{"status":"pending","expires_at":{"$gt":bson::DateTime::now()}},{"execution_proposal.v1.state":{"$in":["queued","preparing","dispatched","waiting"]},"execution_proposal.v1.task.hard_deadline":{"$gt":bson::DateTime::now()}}]}).session(&mut *session).await?.is_some();
+                    let approval_waiting=db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME).find_one(doc! {"assistant_group.conversation_id":id,"$or":[{"status":"pending","expires_at":{"$gt":bson::DateTime::now()}},{"execution_proposal.v1.state":{"$in":["queued","preparing","dispatched","waiting"]},"execution_proposal.v1.task.hard_deadline":{"$gt":bson::DateTime::now()}},{"execution_proposal.v2.state":{"$in":["queued","preparing","dispatched","waiting"]},"execution_proposal.v2.task.hard_deadline":{"$gt":bson::DateTime::now()}}]}).session(&mut *session).await?.is_some();
                     if waiting || approval_waiting {return Err(AppError::AssistantTurnActive);}
                     db.collection::<bson::Document>(crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME).update_many(doc! {"conversation_id":id,"decision":"skip"},doc! {"$set":{"decision":"revoked","updated_at":bson::DateTime::now()}}).session(&mut *session).await?;
                     // Completed request cards cannot authorize a different chain.
@@ -378,7 +378,8 @@ pub(super) async fn begin_ready(
             if !decisions.is_empty() {start.text.push_str(&format!("\nAction card decisions (retry only the exact action, using its acknowledgement_id): {:?}",decisions));}
 
             start.note=Some(format!("Answer only in this group. Do not include private memory, notes, other chats or account details. {} Handoffs retain that requester. Agents: {roster}. Address people and agents only by the exact @handle shown above, never by account or agent IDs. For handoffs, copy the agent handle exactly. Recheck requested consent and action-card decisions before resuming an interrupted operation.",people::context(&participants,actor)));
-            let ids = engine::OwnerTurnIds {conversation_id:row.id.clone(),turn_id:turn_id.clone(),message_id:message_id.clone()};
+            let ids = engine::OwnerTurnIds {
+ artifact_budget: Default::default(),conversation_id:row.id.clone(),turn_id:turn_id.clone(),message_id:message_id.clone()};
             let claim = engine::begin_owner_turn_in_session(db,session,keys,execution_user,&start,&ids,&raw_agent,None,None,None).await?.into_started()?;
             row=claim.conversation.clone();
             bind_key(db,&row,session).await?;

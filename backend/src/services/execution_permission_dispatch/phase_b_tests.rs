@@ -27,6 +27,48 @@ pub(crate) async fn enroll(db: &Database, actor: &str) {
     .unwrap();
 }
 
+/// Exercise the same Phase B contracts without a materialized person marker.
+pub(crate) async fn enroll_global(db: &Database, actor: &str) {
+    super::super::security_readiness_service::ready_test_replica(db).await;
+    super::super::feature_flag_admin_service::mutate(
+        db,
+        super::super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
+        super::super::feature_flag_admin_service::Mutation::Override {
+            kind: crate::models::feature_flag_override::FlagTargetKind::Global,
+            target_id: None,
+            enabled: Some(true),
+        },
+        &super::super::audit_service::AuditActor {
+            user_id: actor.into(),
+            api_key_id: None,
+            api_key_name: None,
+            ip_address: None,
+            user_agent: None,
+        },
+    )
+    .await
+    .unwrap();
+    super::super::execution_permission_enrollment::snapshot::Cache::for_database(db)
+        .refresh(db)
+        .await
+        .unwrap();
+    assert!(
+        db.collection::<Document>("users")
+            .find_one(doc! {"_id":actor,"execution_permission_enrollment":null})
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+pub(crate) async fn enroll_cohort(db: &Database, actor: &str, global: bool) {
+    if global {
+        enroll_global(db, actor).await;
+    } else {
+        enroll(db, actor).await;
+    }
+}
+
 /// Keep legacy gap tests bounded while preserving the actual approval path.
 pub(crate) async fn legacy_review(state: &crate::AppState, actor: &str) {
     super::super::assistant_settings_service::update(
@@ -166,70 +208,72 @@ pub(crate) async fn grant(
 
 #[tokio::test]
 async fn phase_b_voice_task_covered_gap_and_prohibition_keep_chat_proposals_out() {
-    use super::tests::proposal_tests::assistant;
-    for outcome in ["covered", "gap", "prohibited"] {
-        let (f, row) = assistant("phase_b_voice").await;
-        if outcome == "gap" {
-            legacy_review(&f.state, &f.owner).await;
-        }
-        let request = Uuid::new_v4().to_string();
-        f.state
-            .db
-            .collection::<Document>("assistant_conversations")
-            .update_one(
-                doc! {"_id":&row.id},
-                doc! {"$set":{"active_turn.voice_request_id":&request}},
-            )
-            .await
-            .unwrap();
-        let auth = f.auth().await;
-        assert!(auth.assistant_chat.as_ref().unwrap().execution_voice_task);
-        assert!(!proposals::supported_chat(
-            auth.assistant_chat.as_ref().unwrap()
-        ));
-        if outcome != "gap" {
-            let mut g = grant(&f.state, &auth, &f.connection, "GET", "/status").await;
-            if outcome == "prohibited" {
-                g.execution.as_mut().unwrap().version = 99;
+    for global in [false, true] {
+        use super::tests::proposal_tests::assistant_for_cohort;
+        for outcome in ["covered", "gap", "prohibited"] {
+            let (f, row) = assistant_for_cohort("phase_b_voice", global).await;
+            if outcome == "gap" {
+                legacy_review(&f.state, &f.owner).await;
             }
-            f.store(&g).await;
-        }
-        let (status, text) = f.call("/proxy/s/execution-fixture/status").await;
-        if outcome == "covered" {
-            assert_eq!(status, axum::http::StatusCode::OK, "{text}");
-            f.no_prompts().await;
-        } else {
-            assert!(!status.is_success(), "{text}");
-        }
-        assert_eq!(
-            f.server.received_requests().await.unwrap().len(),
-            usize::from(outcome == "covered")
-        );
-        assert_eq!(
+            let request = Uuid::new_v4().to_string();
             f.state
                 .db
-                .collection::<Document>("approval_requests")
-                .count_documents(doc! {"execution_proposal":{"$ne":null}})
+                .collection::<Document>("assistant_conversations")
+                .update_one(
+                    doc! {"_id":&row.id},
+                    doc! {"$set":{"active_turn.voice_request_id":&request}},
+                )
                 .await
-                .unwrap(),
-            0
-        );
-        if outcome == "prohibited" {
-            f.no_prompts().await;
-        }
-        if outcome == "gap" {
-            assert!(
+                .unwrap();
+            let auth = f.auth().await;
+            assert!(auth.assistant_chat.as_ref().unwrap().execution_voice_task);
+            assert!(!proposals::supported_chat(
+                auth.assistant_chat.as_ref().unwrap()
+            ));
+            if outcome != "gap" {
+                let mut g = grant(&f.state, &auth, &f.connection, "GET", "/status").await;
+                if outcome == "prohibited" {
+                    g.execution.as_mut().unwrap().version = 99;
+                }
+                f.store(&g).await;
+            }
+            let (status, text) = f.call("/proxy/s/execution-fixture/status").await;
+            if outcome == "covered" {
+                assert_eq!(status, axum::http::StatusCode::OK, "{text}");
+                f.no_prompts().await;
+            } else {
+                assert!(!status.is_success(), "{text}");
+            }
+            assert_eq!(
+                f.server.received_requests().await.unwrap().len(),
+                usize::from(outcome == "covered")
+            );
+            assert_eq!(
                 f.state
                     .db
                     .collection::<Document>("approval_requests")
-                    .count_documents(doc! {})
+                    .count_documents(doc! {"execution_proposal":{"$ne":null}})
                     .await
-                    .unwrap()
-                    > 0,
-                "voice gap retains its legacy service review"
+                    .unwrap(),
+                0
             );
+            if outcome == "prohibited" {
+                f.no_prompts().await;
+            }
+            if outcome == "gap" {
+                assert!(
+                    f.state
+                        .db
+                        .collection::<Document>("approval_requests")
+                        .count_documents(doc! {})
+                        .await
+                        .unwrap()
+                        > 0,
+                    "voice gap retains its legacy service review"
+                );
+            }
+            f.cleanup().await;
         }
-        f.cleanup().await;
     }
 }
 

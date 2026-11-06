@@ -45,7 +45,7 @@ function UsedGauge({
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={percent}
-        aria-valuetext={`${formatted}% used${reserved > 0 ? `; ${number(reserved)} reserved` : ""}`}
+        aria-valuetext={`${formatted}% used${reserved > 0 ? `; ${number(reserved)} held` : ""}`}
       >
         <span
           className="allowance-consumed"
@@ -107,7 +107,7 @@ function AllowanceGroupDetails({ rows }: { rows: UserAllowanceBalance[] }) {
           </span>
           <span>
             <i className="allowance-reserved" />
-            Reserved
+            Held
           </span>
           <span>
             <i className="allowance-available" />
@@ -122,15 +122,15 @@ function AllowanceGroupDetails({ rows }: { rows: UserAllowanceBalance[] }) {
               <strong>Allowance {first + index + 1}</strong>
               <UsedGauge
                 used={row.consumed_quantity}
-                reserved={row.reserved_quantity}
-                limit={row.allowance.quantity}
+                reserved={row.held_quantity ?? row.reserved_quantity}
+                limit={row.total_quantity ?? row.allowance.quantity}
                 label={`${billingMetricLabel(row.allowance.metric)} allowance ${first + index + 1}`}
               />
             </header>
             <dl>
               <div>
                 <dt>Limit</dt>
-                <dd>{number(row.allowance.quantity)}</dd>
+                <dd>{number(row.total_quantity ?? row.allowance.quantity)}</dd>
               </div>
               <div className="allowance-remaining">
                 <dt>Remaining</dt>
@@ -141,8 +141,8 @@ function AllowanceGroupDetails({ rows }: { rows: UserAllowanceBalance[] }) {
                 <dd>{number(row.consumed_quantity)}</dd>
               </div>
               <div>
-                <dt>Reserved</dt>
-                <dd>{number(row.reserved_quantity)}</dd>
+                <dt>Held</dt>
+                <dd>{number(row.held_quantity ?? row.reserved_quantity)}</dd>
               </div>
             </dl>
           </article>
@@ -195,7 +195,9 @@ export function BillingAllowanceDetails({
         options={groups.map(([key, rows]) => {
           const balance = rows[0]!;
           const exhausted = rows.filter(
-            (row) => row.consumed_quantity >= row.allowance.quantity,
+            (row) =>
+              row.consumed_quantity >=
+              (row.total_quantity ?? row.allowance.quantity),
           ).length;
           const recurrence = balance.allowance.recurrence.replaceAll("_", " ");
           const label = billingMetricLabel(balance.allowance.metric);
@@ -227,8 +229,8 @@ export function BillingAllowanceDetails({
         )}
       </div>
       <p className="fine-print mt-3">
-        Each allowance has its own limit. Percentages show consumed usage;
-        reserved units are listed separately.
+        Each allowance has its own limit. Percentages show consumed usage; held
+        units are listed separately.
       </p>
     </div>
   );

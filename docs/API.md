@@ -8943,6 +8943,30 @@ Changing a trigger's `delivery` through `PATCH` intentionally mints a replacemen
 
 The CLI adds `nyxid trigger deliveries <id>`, `nyxid trigger redeliver <id> <event_id>`, and `nyxid trigger rotate-delivery-secret <id>` alongside the existing management commands; use `--org` for org-owned triggers.
 
+#### Automation coordinator completion
+
+When coordinator completion is enabled and every serving replica advertises
+`automation:coordinator-completion-v2`, newly admitted assistant runs track
+specialist assignments and group handoffs through the coordinator's final reply.
+Existing runs retain their admission protocol. See [schedules and rollout](NYXBOT_SCHEDULES.md)
+for the default-off configuration, bounds and downgrade procedure.
+
+Run-history responses from `GET /api/v1/triggers/{id}/runs` add
+`coordinator_deadline` (RFC 3339), `wait_kind` and `can_cancel` for enrolled runs;
+legacy runs omit these fields. `wait_kind: "coordinator"` means delegated work is
+pending. The hard deadline terminates the run with `reason: "coordinator_timeout"`.
+
+`POST /api/v1/triggers/{id}/runs/{run_id}/cancel` returns the owner's updated run
+metadata with HTTP 200. It cancels an enrolled run and fences its delegated work;
+already completed external actions remain completed. This route requires a
+first-party human session and rejects API keys, delegated tokens, service-account
+tokens and relay tokens. An unrelated waiting run survives ordinary chat Stop.
+
+`GET /api/v1/admin/automation-continuations/readiness` requires admin or operator
+access and returns `configured`, fleet `readiness`, `rollback_safe` and
+`drain_blockers`. It reads bounded, indexed metadata only; it neither changes
+rollout state nor returns instructions, transcripts, result bodies or credentials.
+
 #### Public ingress
 
 ```http
@@ -9131,6 +9155,24 @@ immediately while the server drains forwarded audio within a bounded deadline
 and settles provider-confirmed input duration. See the
 [transport and accounting contract](chat/11-voice.md#bounded-transcription-transport-and-accounting)
 for limits, exact duration handling and recovery.
+
+## Generated Sandbox attachments
+
+The default-off `assistant:generated-artifacts` flag enables private generated
+files on owner Web conversations. History adds optional attachment metadata and
+`artifact_delivery` state only while enabled. Existing attachment values remain
+unchanged. See [generated files](chat/10-uploads.md#generated-sandbox-files) for
+limits, retention, rollout order and recovery semantics.
+
+| Endpoint | Contract |
+| --- | --- |
+| `GET /api/v1/assistant/nyxagent/conversations/{id}/attachments/{attachment_id}` | Existing authenticated owner attachment route. Generated rows additionally bind conversation keys to their own conversation and return a complete HTTP 200 response with safe download/preview headers; Range is ignored. Retained owner reads remain available while the flag is off, until live expiry. |
+| `POST /api/v1/assistant/nyxagent/conversations/{id}/messages/{message_id}/artifact-delivery` | First-party human owner only, enabled feature and no active turn. Requires an empty body. Recovers saved bytes onto the original associated reply without another Sandbox execution; returns `{ "status": "materialized" }`. Disabled routes return 404; active turns return 409; expired attachments return 410. |
+
+Eligible owner NyxAgent chat keys also receive `nyx__artifact_delivery`, accepting
+an empty object. The server freezes its original-reply target and preflights
+recoverability before auditing or requesting an owner confirmation. Disabled or
+ineligible callers retain the ordinary unknown-tool response.
 
 ## Assistant skill review and image input
 

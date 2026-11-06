@@ -75,7 +75,9 @@ for (const theme of ["light", "dark"] as const)
         await page.addInitScript(() => {
           const scope = window as Window & { displayErrors: string[] };
           scope.displayErrors = [];
-          window.addEventListener("error", (event) => scope.displayErrors.push(event.message));
+          window.addEventListener("error", (event) =>
+            scope.displayErrors.push(event.message),
+          );
         });
         const readings: unknown[] = [];
         for (const path of ["/billing", "/assistant"]) {
@@ -99,18 +101,32 @@ for (const theme of ["light", "dark"] as const)
           const action = await role(breakdown, 14, "500", scale);
           for (const target of [
             breakdown,
-            wallet.getByRole("button", { name: "About wallet" }),
+            wallet.getByRole("button", { name: "Add credits", exact: true }),
           ])
             await targetBounds(target, wallet, width);
+          await breakdown.click();
+          await expect(
+            wallet.getByText("-8.180326 credits").first(),
+          ).toBeVisible();
+          await expect(wallet.locator('p[title="0"]')).toBeVisible();
+          await wallet
+            .getByRole("button", { name: "Hide breakdown", exact: true })
+            .click();
           const analytics = page.getByRole("region", {
             name: "Analytics fixture",
           });
           // Panels intentionally defer rendering until their viewport sentinel
           // enters. Enlarged wallet/filter content can put this panel offscreen.
-          const traffic = analytics.getByRole("article", { name: "Request traffic" });
+          const traffic = analytics.getByRole("article", {
+            name: "Request traffic",
+          });
           // Align the heading, rather than accepting a partially visible card:
           // layout measurement can move the lazy panel just below the viewport.
-          await traffic.getByRole("heading", { name: "Request traffic" }).evaluate(element => element.scrollIntoView({ block: "center", behavior: "instant" }));
+          await traffic
+            .getByRole("heading", { name: "Request traffic" })
+            .evaluate((element) =>
+              element.scrollIntoView({ block: "center", behavior: "instant" }),
+            );
           await expect(traffic).toBeInViewport({ ratio: 0.1 });
           const metrics = analytics.locator(".font-display.type-metric");
           await expect(metrics).toHaveCount(5);
@@ -126,7 +142,9 @@ for (const theme of ["light", "dark"] as const)
             analytics,
             width,
           );
-          const analyticsTicks = analytics.locator(".recharts-xAxis-tick-labels .recharts-cartesian-axis-tick-value");
+          const analyticsTicks = analytics.locator(
+            ".recharts-xAxis-tick-labels .recharts-cartesian-axis-tick-value",
+          );
           await expect(analyticsTicks.first()).toBeVisible();
           const analyticsBox = (await analytics.boundingBox())!;
           let previousRight = analyticsBox.x;
@@ -134,7 +152,9 @@ for (const theme of ["light", "dark"] as const)
             await role(tick, 13, "400", scale);
             const box = (await tick.boundingBox())!;
             expect(box.x).toBeGreaterThanOrEqual(previousRight - 1);
-            expect(box.x + box.width).toBeLessThanOrEqual(analyticsBox.x + analyticsBox.width + 1);
+            expect(box.x + box.width).toBeLessThanOrEqual(
+              analyticsBox.x + analyticsBox.width + 1,
+            );
             previousRight = box.x + box.width;
           }
           const services = page.getByRole("region", {
@@ -241,7 +261,12 @@ for (const theme of ["light", "dark"] as const)
               ),
               fullPage: true,
             });
-          expect(await page.evaluate(() => (window as Window & { displayErrors: string[] }).displayErrors)).toEqual([]);
+          expect(
+            await page.evaluate(
+              () =>
+                (window as Window & { displayErrors: string[] }).displayErrors,
+            ),
+          ).toEqual([]);
           readings.push({ path, action, providers: await providers.count() });
         }
         await test.info().attach("custom-role-measurements.json", {

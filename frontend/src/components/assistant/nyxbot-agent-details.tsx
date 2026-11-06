@@ -225,6 +225,7 @@ function AgentDetailsSheetContent({
   agentId,
   agents,
   proposalId,
+  connectionId,
   tab,
   open,
   onOpenChange,
@@ -233,6 +234,7 @@ function AgentDetailsSheetContent({
   readonly agentId: string | undefined;
   readonly agents: readonly AssistantAgent[];
   readonly proposalId?: string;
+  readonly connectionId?: string;
   readonly tab?: AgentDetailsTab;
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
@@ -354,6 +356,7 @@ function AgentDetailsSheetContent({
             agent={agent}
             agents={agents}
             proposalId={proposalId}
+            connectionId={connectionId}
             tab={tab}
             requestMode={requestMode}
             memory={detail.data?.memory ?? []}
@@ -385,6 +388,7 @@ function AgentDetailsContent({
   agent,
   agents,
   proposalId,
+  connectionId,
   tab,
   requestMode,
   memory,
@@ -395,6 +399,7 @@ function AgentDetailsContent({
   readonly agent: AssistantAgent;
   readonly agents: readonly AssistantAgent[];
   readonly proposalId?: string;
+  readonly connectionId?: string;
   readonly tab?: AgentDetailsTab;
   readonly requestMode?: "denied" | "routed_to_nyxbot";
   readonly searchHost: HTMLElement | null;
@@ -441,18 +446,20 @@ function AgentDetailsContent({
   }
   useEffect(() => {
     setQuery("");
+    if (connectionId && incoming === "channels") return;
     const focusPanel = () => panels.current
       ?.querySelector<HTMLElement>("[data-panel]:not([hidden]) h2")
       ?.focus({ preventScroll: true });
     focusPanel();
     const frame = requestAnimationFrame(focusPanel);
     return () => cancelAnimationFrame(frame);
-  }, [incoming, setQuery]);
+  }, [incoming, setQuery, connectionId]);
   useEffect(() => {
+    if (connectionId && selected === "channels") return;
     panels.current
       ?.querySelector<HTMLElement>("[data-panel]:not([hidden]) [data-panel-scroll]")
       ?.scrollTo?.({ top: 0 });
-  }, [selected]);
+  }, [selected, connectionId]);
   return (
     <DrawerSectionInfoContext value={true}><DrawerSearchProvider query={query}>
     <GroupedFormScope viewport>
@@ -627,7 +634,7 @@ function AgentDetailsContent({
                       <MemoryList agent={agent} memory={memory} />
                     )
                   ) : (
-                    <ChannelBotsManager agents={agents} agent={agent} />
+                    <ChannelBotsManager agents={agents} agent={agent} connectionId={selected === "channels" ? connectionId : undefined} />
                   )}
                 </CompactScroll>
                 <GroupedFormBar />

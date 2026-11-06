@@ -36,6 +36,13 @@ pub(crate) struct RequestContext {
     pub(crate) principal: Principal,
     pub(crate) operation_id: String,
     voice_task: bool,
+    ingress: OnceLock<crate::models::execution_proposal::PreparedAdapter>,
+    idempotency: OnceLock<String>,
+    async_requested: std::sync::atomic::AtomicBool,
+    cancellation: OnceLock<tokio_util::sync::CancellationToken>,
+    connected_resume: OnceLock<Arc<proposals::Resume>>,
+    connected_snapshot: OnceCell<Vec<ApprovalGrant>>,
+    wait_guard: OnceLock<Arc<proposals::v2::blocking::WaitGuard>>,
     native: Option<Arc<native::Native>>,
     descendant: Option<Arc<descendants::Descendant>>,
     authoring: std::sync::atomic::AtomicBool,
@@ -44,6 +51,7 @@ pub(crate) struct RequestContext {
     drain: OnceLock<Drain>,
     authenticated_key: OnceLock<String>,
     source_credential: OnceLock<String>,
+    admission: OnceCell<bool>,
     snapshot: OnceCell<Vec<ApprovalGrant>>,
     authority: OnceCell<Arc<authority::Snapshot>>,
     policies: tokio::sync::Mutex<Vec<(String, PolicyDecision)>>,
@@ -73,16 +81,29 @@ impl RequestContext {
         let _ = self.generated_correlation.set(value.to_owned());
     }
     pub(crate) fn enable_authoring(&self) {
-        if self.native.is_some() || self.descendant.is_some() || self.voice_task {
+        if matches!(
+            self.descendant.as_deref(),
+            Some(descendants::Descendant::Job(_))
+        ) {
             return;
         }
         self.authoring
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
+    fn authoring_allowed(&self) -> bool {
+        self.authoring.load(std::sync::atomic::Ordering::Relaxed)
+            && !matches!(
+                self.ingress.get(),
+                Some(crate::models::execution_proposal::PreparedAdapter::Unsupported)
+            )
+    }
     pub(crate) fn for_resume(
         auth: &mut crate::mw::auth::AuthUser,
         resume: proposals::Resume,
     ) -> AppResult<()> {
+        if resume.version == 2 {
+            return proposals::v2::attach_resume(auth, resume);
+        }
         let chat = auth
             .assistant_chat
             .as_deref()
@@ -112,6 +133,86 @@ impl RequestContext {
         Ok(())
     }
 
+    /// The hint only opts into this bounded live read. A fresh false result is
+    /// legacy; persisted task/proposal/child work must drain instead.
+    async fn admit_candidate(
+        &self,
+        db: &Database,
+        chat: Option<&acks::ChatAuthority>,
+    ) -> AppResult<bool> {
+        let enabled = *self
+            .admission
+            .get_or_try_init(|| async {
+                super::execution_permission_enrollment::live_enabled(db, &self.actor, None).await
+            })
+            .await?;
+        if !enabled
+            && (self.resume().is_some()
+                || self.descendant.is_some()
+                || self.participating()
+                || chat.is_some_and(|c| c.execution_task.is_some()))
+        {
+            return Err(refused());
+        }
+        Ok(enabled)
+    }
+
+    pub(crate) fn retain_adapter(
+        &self,
+        adapter: crate::models::execution_proposal::PreparedAdapter,
+        headers: &axum::http::HeaderMap,
+    ) {
+        self.capture_idempotency(headers);
+        if self.resume().is_none() {
+            let _ = self.ingress.set(adapter);
+        }
+        self.enable_authoring();
+    }
+    pub(crate) fn bind_cancellation(&self, token: tokio_util::sync::CancellationToken) {
+        let _ = self.cancellation.set(token);
+    }
+    fn resume(&self) -> Option<&Arc<proposals::Resume>> {
+        self.resume.as_ref().or_else(|| self.connected_resume.get())
+    }
+    pub(crate) fn capture_idempotency(&self, headers: &axum::http::HeaderMap) {
+        // Downstream Idempotency-Key and Prefer semantics never opt into
+        // background effects. Preserve the ingress choice across prepared MCP
+        // headers, which deliberately omit NyxID control headers.
+        if headers.get_all("x-nyxid-approval-mode").iter().count() == 1
+            && headers
+                .get("x-nyxid-approval-mode")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case("async"))
+        {
+            self.async_requested
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if !self
+            .async_requested
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        if let Some(value) = headers
+            .get("idempotency-key")
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| {
+                !v.is_empty()
+                    && v.len() <= 128
+                    && headers.get_all("idempotency-key").iter().count() == 1
+            })
+        {
+            let _ = self.idempotency.set(value.to_owned());
+        } else if headers.contains_key("idempotency-key") && self.resume().is_none() {
+            let _ = self
+                .ingress
+                .set(crate::models::execution_proposal::PreparedAdapter::Unsupported);
+            tracing::info!(
+                reason = "idempotency_not_retainable",
+                "Execution proposal uses legacy prompts"
+            );
+        }
+    }
     pub(crate) fn participating(&self) -> bool {
         self.drain.get().is_some()
     }
@@ -176,6 +277,13 @@ impl RequestContext {
                 |c| Principal::Agent(c.agent_id.clone()),
             ),
             operation_id: Uuid::new_v4().to_string(),
+            ingress: OnceLock::new(),
+            idempotency: OnceLock::new(),
+            async_requested: std::sync::atomic::AtomicBool::new(false),
+            cancellation: OnceLock::new(),
+            connected_resume: OnceLock::new(),
+            connected_snapshot: OnceCell::new(),
+            wait_guard: OnceLock::new(),
             voice_task: chat.is_some_and(|c| c.execution_voice_task),
             native: None,
             descendant: None,
@@ -185,6 +293,7 @@ impl RequestContext {
             drain: OnceLock::new(),
             authenticated_key: OnceLock::new(),
             source_credential: OnceLock::new(),
+            admission: OnceCell::new(),
             snapshot: OnceCell::new(),
             authority: OnceCell::new(),
             policies: tokio::sync::Mutex::new(Vec::new()),
@@ -230,6 +339,21 @@ impl RequestContext {
     }
 
     async fn candidates(&self, db: &Database, connection: &str) -> AppResult<&Vec<ApprovalGrant>> {
+        if let Some(resume) = self.connected_resume.get() {
+            return self
+                .connected_snapshot
+                .get_or_try_init(|| async {
+                    require_enrolled(db, &self.actor, None).await?;
+                    let row = db
+                        .collection::<ApprovalGrant>("approval_grants")
+                        .find_one(doc! {"_id": &resume.grant_id, "user_id": &self.actor,
+                        "execution.v1.binding.connection_id": connection})
+                        .await?
+                        .ok_or_else(refused)?;
+                    Ok(vec![row])
+                })
+                .await;
+        }
         self.snapshot.get_or_try_init(|| async {
             require_enrolled(db, &self.actor, None).await?;
             super::security_readiness_service::require(db, READINESS).await?;
@@ -313,24 +437,26 @@ async fn require_enrolled(
     actor: &str,
     session: Option<&mut ClientSession>,
 ) -> AppResult<()> {
-    let filter = doc! {"_id":actor,"is_active":true,"user_type":"person","execution_permission_enrollment":1_i32};
-    // A write serializes disabling enrollment against a provider dispatch barrier.
-    let matched = if let Some(session) = session {
-        db.collection::<Document>("users")
+    let mut session = session;
+    if !super::execution_permission_enrollment::live_enabled(db, actor, session.as_deref_mut())
+        .await?
+    {
+        return Err(refused());
+    }
+    // Keep the existing account-disable fence, not a flag-change fence. The
+    // rollout flag can race dispatch; exact permission/claim fences cannot.
+    if let Some(session) = session {
+        let filter = doc! {"_id":actor,"is_active":true,"user_type":"person","platform_personal_deleting":{"$ne":true}};
+        if db
+            .collection::<Document>("users")
             .update_one(filter, doc! {"$inc":{"execution_dispatch_fence":1_i64}})
             .session(session)
             .await?
             .matched_count
-            == 1
-    } else {
-        db.collection::<Document>("users")
-            .find_one(filter)
-            .projection(doc! {"_id":1})
-            .await?
-            .is_some()
-    };
-    if !matched {
-        return Err(refused());
+            != 1
+        {
+            return Err(refused());
+        }
     }
     Ok(())
 }
@@ -515,8 +641,7 @@ async fn binding(
 }
 
 pub(crate) fn prepare<'a>(
-    db: &'a Database,
-    keys: &'a Arc<EncryptionKeys>,
+    state: &'a crate::AppState,
     context: Option<&'a Arc<RequestContext>>,
     chat: Option<&'a acks::ChatAuthority>,
     key: &'a str,
@@ -526,6 +651,11 @@ pub(crate) fn prepare<'a>(
         let Some(context) = context else {
             return Ok(None);
         };
+        let db = &state.db;
+        let keys = &state.encryption_keys;
+        if !context.admit_candidate(db, chat).await? {
+            return Ok(None);
+        }
         if let Some(native) = &context.native {
             native.require_effect(&effect)?;
         }
@@ -612,13 +742,35 @@ pub(crate) fn prepare<'a>(
         "query":effect.query,"body":effect.body,"headers":scope_headers,"endpoint":effect.endpoint,
         "target":target_digest(effect.target),"subject":subject,"binding":binding,"audience":audience}),
         );
-        if context.resume.is_none()
-            && context.authoring.load(std::sync::atomic::Ordering::Relaxed)
+        if context.resume().is_none()
+            && context.authoring_allowed()
+            && context.descendant.is_none()
+            && context.native.is_none()
             && let Some(chat) = chat.filter(|c| proposals::supported_chat(c))
         {
-            proposals::existing_effect(db, chat, effect.connection, &digest).await?;
+            proposals::existing_effect(
+                db,
+                chat,
+                effect.connection,
+                &digest,
+                &state.config.frontend_url,
+            )
+            .await?;
         }
-        let mut candidates: Vec<_> = rows.iter().collect();
+        if context.resume().is_none() && proposals::v2::eligible(context, chat) {
+            proposals::v2::existing(state, context, chat, &effect, &digest, &authority).await?;
+        }
+        // A completed one-operation permission belongs to its occurrence, not
+        // to the next status poll or external request. Still evaluate unknown
+        // versions and revocations of reusable/current-occurrence permissions.
+        let mut candidates: Vec<_> = rows.iter().filter(|grant| {
+            !(context.resume().is_none() && proposals::v2::eligible(context, chat)
+                && grant.execution.as_ref().is_some_and(|permission| {
+                    permission.version == VERSION && permission.v1.as_ref().is_some_and(|contract| {
+                        matches!(&contract.validity, Validity::Operation { operation_id, .. } if operation_id != &context.operation_id)
+                    })
+                }))
+        }).collect();
         candidates.sort_by_key(|row| {
             match row
                 .execution
@@ -633,14 +785,14 @@ pub(crate) fn prepare<'a>(
             }
         });
         let mut prohibited = None;
-        let mut gap = rows.is_empty();
+        let mut gap = candidates.is_empty();
         let mut gaps = Vec::new();
-        if rows.is_empty() {
+        if candidates.is_empty() {
             gaps.push(contract::Gap::MissingPermission);
         }
         let mut failure = None;
         for grant in candidates {
-            if let Some(resume) = &context.resume {
+            if let Some(resume) = context.resume() {
                 if grant.id != resume.grant_id {
                     continue;
                 }
@@ -749,7 +901,7 @@ pub(crate) fn prepare<'a>(
                         source_credential: context.source_credential.get().cloned(),
                         claim_id: Uuid::new_v4().to_string(),
                         authority,
-                        resume: context.resume.clone(),
+                        resume: context.resume().cloned(),
                         generated_correlation: context.generated_correlation.get().cloned(),
                         native: context.native.clone(),
                         descendant: context.descendant.clone(),
@@ -788,13 +940,24 @@ pub(crate) fn prepare<'a>(
         if !gap && prohibited.is_some() {
             return Err(refused());
         }
-        if context.resume.is_some() {
+        if context.resume().is_some() {
             return Err(refused());
         }
-        if context.authoring.load(std::sync::atomic::Ordering::Relaxed)
+        if context.authoring_allowed()
+            && context.descendant.is_none()
+            && context.native.is_none()
             && let Some(chat) = chat
             && let Some(request) = proposals::create(
-                db, keys, context, chat, &effect, subject, binding, audience, digest, &authority,
+                db,
+                keys,
+                context,
+                chat,
+                &effect,
+                subject.clone(),
+                binding.clone(),
+                audience.clone(),
+                digest.clone(),
+                &authority,
                 &gaps,
             )
             .await?
@@ -805,9 +968,19 @@ pub(crate) fn prepare<'a>(
                         request_id: request.id,
                     }
                 } else {
-                    AppError::ApprovalFailed { request_id: request.id, reason: "This operation already has a terminal or saved decision; it will not be repeated".into(), approve_url: "/assistant/approvals".into() }
+                    AppError::ApprovalFailed { request_id: request.id, reason: "This operation already has a terminal or saved decision; it will not be repeated".into(), approve_url: proposals::approve_url(&state.config.frontend_url) }
                 },
             );
+        }
+        if let Some(request) = proposals::v2::create(
+            state, context, chat, &effect, subject, binding, audience, digest, &authority, &gaps,
+        )
+        .await?
+        {
+            if proposals::v2::blocking::wait(state, context, &request).await? {
+                return prepare(state, Some(context), chat, key, effect).await;
+            }
+            return Err(proposals::v2::pending(&request, &state.config.frontend_url));
         }
         let _ = context.decision.set(Resolution::Gap);
         Ok(None)
@@ -861,6 +1034,13 @@ impl Permit {
                 actor: self.subject.actor_user_id.clone(),
                 principal: self.subject.principal.clone(),
                 operation_id: self.operation_id.clone(),
+                ingress: OnceLock::new(),
+                idempotency: OnceLock::new(),
+                async_requested: std::sync::atomic::AtomicBool::new(false),
+                cancellation: OnceLock::new(),
+                connected_resume: OnceLock::new(),
+                connected_snapshot: OnceCell::new(),
+                wait_guard: OnceLock::new(),
                 voice_task: self.chat.as_ref().is_some_and(|c| c.execution_voice_task),
                 native: None,
                 descendant: None,
@@ -870,6 +1050,7 @@ impl Permit {
                 drain: OnceLock::new(),
                 authenticated_key: OnceLock::new(),
                 source_credential: OnceLock::new(),
+                admission: OnceCell::new(),
                 snapshot: OnceCell::new(),
                 authority: OnceCell::new(),
                 policies: tokio::sync::Mutex::new(Vec::new()),
@@ -1035,7 +1216,11 @@ impl Permit {
                 })
                 .await
                 .map_err(super::api_key_mutation_service::map_transaction_error)?;
-            self.after_barrier().await
+            self.after_barrier().await?;
+            if let Some(guard) = self.resume.as_ref().and_then(|r| r.connected_wait.as_ref()) {
+                guard.disarm();
+            }
+            Ok(())
         })
     }
 
@@ -1301,7 +1486,13 @@ impl Permit {
         } else {
             ExecutionUseState::Unknown
         })
-        .await
+        .await?;
+        if let Some(resume) = &self.resume
+            && resume.connected_wait.is_some()
+        {
+            proposals::v2::blocking::complete(&self.db, resume, received).await?;
+        }
+        Ok(())
     }
 
     async fn finish(&self, state: ExecutionUseState) -> AppResult<()> {
@@ -1374,6 +1565,14 @@ pub(crate) fn admit_http<'a>(
         {
             return Ok(());
         }
+        if !context
+            .admit_candidate(&state.db, auth.assistant_chat.as_deref())
+            .await?
+        {
+            return Ok(());
+        }
+        context.enable_authoring();
+        context.capture_idempotency(headers);
         let mut drain_chat = auth.assistant_chat.as_deref().cloned();
         if let Some(chat) = drain_chat.as_mut() {
             chat.execution_permission = None;
@@ -1513,7 +1712,7 @@ pub(crate) fn admit_http<'a>(
                 }
             }
         }
-        if let Some(resume) = &context.resume {
+        if let Some(resume) = context.resume() {
             let grant = context
                 .candidates(&state.db, connection)
                 .await?
@@ -1536,17 +1735,17 @@ pub(crate) fn admit_http<'a>(
             native.check(&state.db, None).await?;
         }
         if floors.is_empty()
-            && !(context.authoring.load(std::sync::atomic::Ordering::Relaxed)
+            && !(context.authoring_allowed()
                 && auth
                     .assistant_chat
                     .as_deref()
-                    .is_some_and(proposals::supported_chat))
+                    .is_some_and(proposals::supported_chat)
+                || proposals::v2::eligible(context, auth.assistant_chat.as_deref()))
         {
             return Ok(());
         }
         let endpoint = context
-            .resume
-            .as_ref()
+            .resume()
             .and_then(|r| r.effect.endpoint.as_deref())
             .or(endpoint);
         let semantic_headers = if endpoint.is_some() {
@@ -1561,8 +1760,7 @@ pub(crate) fn admit_http<'a>(
             )
         };
         let permit = prepare(
-            &state.db,
-            &state.encryption_keys,
+            state,
             Some(context),
             auth.assistant_chat.as_deref(),
             auth.api_key_id.as_deref().ok_or_else(refused)?,

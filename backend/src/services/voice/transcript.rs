@@ -257,6 +257,7 @@ pub async fn persist(
                 .return_document(mongodb::options::ReturnDocument::After).session(&mut *tx).await?
                 .ok_or_else(||AppError::NotFound("Voice conversation unavailable".into()))?;
             messages.insert_one(AssistantMessage{
+            automation_work: None,
                 execution_task: None,delegated_images:Default::default(),
                 media_event_ids: Vec::new(),
                 media_queue_notice_id: None,
@@ -333,8 +334,14 @@ async fn admit_task(
     Box::pin(super::client_key::revalidate(db, call)).await?;
     super::super::assistant_voice::require_enabled(db, &call.user_id).await?;
     super::super::assistant_voice::thread(db, &call.user_id, &call.conversation_id).await?;
+    // A session hint is not a marked task. Resolve before first queue admission;
+    // continuation requests retain their durable enrollment and drain normally.
+    let execution_enrolled = call.execution_enrolled
+        && call.client_key.is_none()
+        && crate::services::execution_permission_enrollment::live_enabled(db, &call.user_id, None)
+            .await?;
     let request = VoiceRequest {
-        execution_enrolled: call.execution_enrolled && call.client_key.is_none(),
+        execution_enrolled,
         model_task,
         progress: None,
         timing: Default::default(),

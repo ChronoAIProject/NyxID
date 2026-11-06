@@ -1938,6 +1938,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         gcp_kms_key_name: None,
         gcp_kms_key_name_previous: None,
         instance_name: "test-backend".to_string(),
+        automation_continuation_v2_enabled: false,
         security_rollout: Default::default(),
         internal_bind_addr: "127.0.0.1:3002".to_string(),
         internal_advertise_url: "http://127.0.0.1:3002".to_string(),
@@ -2196,6 +2197,8 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         std::time::Duration::from_secs(config.cluster_slot_renew_secs),
     );
 
+    let execution_enrollment =
+        crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
     AppState {
         local_machine_platform: None,
         db: db.clone(),
@@ -2409,6 +2412,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         billing,
         audit_event_types: Arc::default(),
         assistant_live: Arc::default(),
+        execution_enrollment,
         telemetry: None,
     }
 }
@@ -3202,6 +3206,41 @@ pub(crate) async fn create_api_key_with_id(
     .insert_one(&api_key)
     .await?;
     Ok(api_key)
+}
+
+/// One-shot, per-database admission gate for cancellation-safety regression tests.
+#[derive(Clone)]
+pub struct AdmissionPause {
+    pub entered: std::sync::Arc<tokio::sync::Notify>,
+    pub resume: std::sync::Arc<tokio::sync::Notify>,
+}
+
+fn admission_pauses() -> &'static std::sync::Mutex<std::collections::HashMap<String, AdmissionPause>>
+{
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, AdmissionPause>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(Default::default)
+}
+
+pub fn install_admission_pause(db: &mongodb::Database) -> AdmissionPause {
+    let pause = AdmissionPause {
+        entered: Default::default(),
+        resume: Default::default(),
+    };
+    admission_pauses()
+        .lock()
+        .unwrap()
+        .insert(db.name().into(), pause.clone());
+    pause
+}
+
+pub async fn pause_committed_admission(db: &mongodb::Database) {
+    let pause = { admission_pauses().lock().unwrap().remove(db.name()) };
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        pause.resume.notified().await;
+    }
 }
 
 #[cfg(test)]

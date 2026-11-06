@@ -11,6 +11,7 @@ use zeroize::Zeroizing;
 
 mod lifecycle;
 mod resume;
+pub(crate) mod v2;
 pub(crate) use lifecycle::{cancel_in_session, sweep};
 pub(crate) use resume::{Resume, result_for_human, resume_turn};
 pub(crate) const READINESS: &str = "permissions:execution-authoring-v1";
@@ -424,6 +425,7 @@ pub(super) async fn create(
     .await?;
     let request = ApprovalRequest {
         execution_proposal: Some(ExecutionProposal {
+            v2: None,
             version: VERSION,
             v1: Some(p),
         }),
@@ -549,9 +551,16 @@ pub(crate) async fn decide(
     let row = state
         .db
         .collection::<ApprovalRequest>(REQUESTS)
-        .find_one(doc! {"_id":id,"user_id":actor,"execution_proposal.version":VERSION as i32})
+        .find_one(doc! {"_id":id,"user_id":actor,"execution_proposal.version":{"$in":[1,2]}})
         .await?
         .ok_or_else(missing)?;
+    if row
+        .execution_proposal
+        .as_ref()
+        .is_some_and(|p| p.version == 2)
+    {
+        return v2::decide(state, actor, id, input).await;
+    }
     let p = proposal(&row)?;
     if row.status != "pending" {
         return replay(&row, input);
@@ -616,7 +625,7 @@ pub(crate) async fn decide(
                 db.collection::<ApprovalGrant>("approval_grants").insert_one(grant).session(&mut *session).await?;
                 updated.grant_id=Some((*grant_id).clone());updated.selected_choice=input.choice_id.clone();updated.selected_choice_digest=input.choice_digest.clone();updated.state="queued".into();updated.wake_at=Some(now);
             }else{updated.state="denied".into();updated.payload=None;}
-            row.status=if input.approved{"approved"}else{"rejected"}.into();row.decided_at=Some(now);row.decision_channel=Some("web".into());row.decision_idempotency_key=Some(input.idempotency_key.clone());row.execution_proposal=Some(ExecutionProposal{version:VERSION,v1:Some(updated)});
+            row.status=if input.approved{"approved"}else{"rejected"}.into();row.decided_at=Some(now);row.decision_channel=Some("web".into());row.decision_idempotency_key=Some(input.idempotency_key.clone());row.execution_proposal=Some(ExecutionProposal { v2: None, version:VERSION,v1:Some(updated)});
             if collection.replace_one(doc!{"_id":&row.id,"status":"pending","execution_proposal.v1.revision":p.revision},&row).session(&mut *session).await?.matched_count!=1{return Err(conflict());}
             let mut event=super::super::assistant_team_service::event("permission_decided",if input.approved{"An execution permission was saved. NyxID will execute the retained operation and report its result; do not reconstruct or repeat it."}else{"The person denied the execution permission. Nothing was sent; do not repeat this request."}.into(),None).bound_to(p.report_to.as_deref()).for_invocation(p.invocation_id.as_deref());
             event.execution_task=Some(p.task.clone());event.id=format!("execution-decision:{}",row.id);
@@ -633,6 +642,8 @@ pub(crate) async fn decide(
 /// Dedicated safe DTO, never serialize the persisted envelope.
 #[derive(Clone, Debug, Serialize)]
 pub struct ProposalView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     pub version: u32,
     pub supported: bool,
     pub revision: i64,
@@ -654,8 +665,12 @@ pub struct ChoiceView {
 }
 pub(crate) fn view(row: &ApprovalRequest) -> Option<ProposalView> {
     let envelope = row.execution_proposal.as_ref()?;
+    if envelope.version == 2 {
+        return Some(v2::view(row));
+    }
     let p = proposal(row).ok();
     Some(ProposalView {
+        source: None,
         result_text: None,
         version: envelope.version,
         supported: p.is_some(),
@@ -816,6 +831,14 @@ fn replay(row: &ApprovalRequest, input: &Decision) -> AppResult<ApprovalRequest>
     }
 }
 
+pub(super) fn approve_url(frontend_url: &str) -> String {
+    format!(
+        "{}{}",
+        frontend_url.trim_end_matches('/'),
+        super::super::assistant_links::AssistantPage::Approvals.path()
+    )
+}
+
 /// Matching model retries are receipt lookups, including under a reusable grant.
 /// Pending/denied/uncertain effects remain task-bound. A completed receipt can
 /// authorize a new occurrence only in a different server-admitted turn after
@@ -825,6 +848,7 @@ pub(super) async fn existing_effect(
     chat: &acks::ChatAuthority,
     connection: &str,
     digest: &str,
+    frontend_url: &str,
 ) -> AppResult<()> {
     let task = chat.execution_task.as_ref().ok_or_else(refused)?;
     if let Some(row)=db.collection::<ApprovalRequest>(REQUESTS).find_one(doc!{
@@ -838,7 +862,7 @@ pub(super) async fn existing_effect(
             {"execution_proposal.v1.resume_turn_id":&chat.turn_id}]
     }).await? {
         return Err(if row.status=="pending"&&row.expires_at>Utc::now(){AppError::ApprovalRequired{request_id:row.id}}else{
-            AppError::ApprovalFailed{request_id:row.id,reason:"This task already has a decision for this operation. Its retained effect will not be repeated; review its status.".into(),approve_url:super::super::assistant_links::AssistantPage::Approvals.path()}
+            AppError::ApprovalFailed{request_id:row.id,reason:"This task already has a decision for this operation. Its retained effect will not be repeated; review its status.".into(),approve_url:approve_url(frontend_url)}
         });
     }
     Ok(())

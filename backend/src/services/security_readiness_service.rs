@@ -37,6 +37,7 @@ use crate::{
 
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
+    "assistant:generated-artifacts",
     "assistant:org-agents",
     super::org_channel_service::FLAG,
     "assistant:shared-agents",
@@ -52,6 +53,8 @@ pub const CAPABILITIES: &[&str] = &[
     super::feature_flag_service::EXECUTION_PERMISSIONS_FLAG_KEY,
     "permissions:execution-dispatch-v1",
     "permissions:execution-authoring-v1",
+    super::execution_permission_enrollment::READINESS,
+    "permissions:execution-authoring-v2",
     super::feature_flag_service::HOSTED_CONNECT_INTENT_FLAG_KEY,
     "approval:required-web-v1",
     // Older transport writers do not wait for relay sockets before remote setup.
@@ -59,6 +62,7 @@ pub const CAPABILITIES: &[&str] = &[
     super::nyxbot_gateway_source::READINESS,
     super::nyxbot_response_recovery::RELAY_READINESS,
 ];
+pub const AUTOMATION_COMPLETION: &str = "automation:coordinator-completion-v2";
 const MAX_AGE_SECS: i64 = 45;
 
 pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
@@ -113,11 +117,44 @@ impl RolloutConfig {
     }
 }
 
+#[cfg(test)]
 pub async fn observe(
     db: &Database,
     identity: &ReplicaIdentity,
     config: &RolloutConfig,
     platform_policy_required: bool,
+) -> AppResult<()> {
+    observe_with_automation(db, identity, config, platform_policy_required, false).await
+}
+
+/// Optional writer capability: disabled replicas retain the main heartbeat payload.
+pub async fn observe_with_automation(
+    db: &Database,
+    identity: &ReplicaIdentity,
+    config: &RolloutConfig,
+    platform_policy_required: bool,
+    automation_enabled: bool,
+) -> AppResult<()> {
+    let mut capabilities = CAPABILITIES.to_vec();
+    if automation_enabled {
+        capabilities.push(AUTOMATION_COMPLETION);
+    }
+    observe_with_capabilities(
+        db,
+        identity,
+        config,
+        platform_policy_required,
+        &capabilities,
+    )
+    .await
+}
+
+async fn observe_with_capabilities(
+    db: &Database,
+    identity: &ReplicaIdentity,
+    config: &RolloutConfig,
+    platform_policy_required: bool,
+    capabilities: &[&str],
 ) -> AppResult<()> {
     if platform_policy_required {
         db.collection::<bson::Document>(ROLLOUTS)
@@ -133,7 +170,7 @@ pub async fn observe(
         instance_name: identity.instance_name.clone(),
         generation_id: identity.generation_id.clone(),
         protocol: 1,
-        capabilities: CAPABILITIES.iter().map(|s| (*s).to_owned()).collect(),
+        capabilities: capabilities.iter().map(|s| (*s).to_owned()).collect(),
         expected_replicas: config.expected_replicas.clone(),
         drained: config.drained,
         platform_policy_required,
@@ -291,7 +328,9 @@ async fn report_for(db: &Database, local: &Runtime, capability: &str) -> AppResu
 }
 
 pub async fn require(db: &Database, capability: &str) -> AppResult<()> {
-    if CAPABILITIES.contains(&capability) && !report(db, capability).await?.ready {
+    if (CAPABILITIES.contains(&capability) || capability == AUTOMATION_COMPLETION)
+        && !report(db, capability).await?.ready
+    {
         return Err(AppError::SecurityReadinessUnavailable);
     }
     Ok(())
@@ -312,6 +351,16 @@ pub async fn require_platform(db: &Database, local_required: bool) -> AppResult<
 
 #[cfg(test)]
 pub(crate) async fn ready_test_replica(db: &Database) {
+    ready_test_replica_inner(db, false).await;
+}
+
+#[cfg(test)]
+pub(crate) async fn ready_automation_test_replica(db: &Database) {
+    ready_test_replica_inner(db, true).await;
+}
+
+#[cfg(test)]
+async fn ready_test_replica_inner(db: &Database, automation_enabled: bool) {
     let local = Runtime {
         identity: ReplicaIdentity {
             instance_name: "test-backend".into(),
@@ -327,7 +376,7 @@ pub(crate) async fn ready_test_replica(db: &Database) {
     RUNTIME.get_or_init(|| local);
     let db = db.clone();
     let heartbeat = || async {
-        observe(
+        observe_with_automation(
             &db,
             &ReplicaIdentity {
                 instance_name: "test-backend".into(),
@@ -339,6 +388,7 @@ pub(crate) async fn ready_test_replica(db: &Database) {
                 drained: true,
             },
             false,
+            automation_enabled,
         )
         .await
         .expect("test replica observation");
@@ -347,7 +397,7 @@ pub(crate) async fn ready_test_replica(db: &Database) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            observe(
+            observe_with_automation(
                 &db,
                 &ReplicaIdentity {
                     instance_name: "test-backend".into(),
@@ -359,6 +409,7 @@ pub(crate) async fn ready_test_replica(db: &Database) {
                     drained: true,
                 },
                 false,
+                automation_enabled,
             )
             .await
             .expect("test replica heartbeat");

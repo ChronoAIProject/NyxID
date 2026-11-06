@@ -1,3 +1,4 @@
+import { ApiError } from "@/lib/api-client";
 import { Label } from "@/components/ui/label";
 import { useMemo, useState } from "react";
 import {
@@ -7,7 +8,10 @@ import {
   ThumbsDown,
   ThumbsUp,
 } from "lucide-react";
-import { useAssistantFeedbackAdmin } from "@/hooks/use-assistant-feedback-admin";
+import {
+  useAssistantFeedbackAdmin,
+  useFeedbackThread,
+} from "@/hooks/use-assistant-feedback-admin";
 import type { FeedbackReplyContext } from "@/schemas/assistant-feedback-admin";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -61,6 +65,9 @@ function ReplyContext({
 }
 
 export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
+  return <FeedbackList key={range?.toString() ?? ""} range={range} />;
+}
+function FeedbackList({ range }: { range?: URLSearchParams }) {
   const [vote, setVote] = useState("all");
   const [model, setModel] = useState("");
   const [agentKind, setAgentKind] = useState("all");
@@ -76,7 +83,13 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
     return next;
   }, [rangeKey, vote, model, agentKind, cursors, page]);
   const query = useAssistantFeedbackAdmin(params);
-  const data = query.data;
+  const denied =
+    query.error instanceof ApiError && [403, 404].includes(query.error.status);
+  const data = denied ? undefined : query.data;
+  const counts = data?.counts.reduce(
+    (sum, day) => ({ up: sum.up + day.up, down: sum.down + day.down }),
+    { up: 0, down: 0 },
+  );
   function resetPage() {
     setCursors([undefined]);
     setPage(0);
@@ -93,6 +106,28 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
             Read what users found helpful and what needs attention.
           </p>
         </div>
+        {counts && (
+          <div
+            className="flex flex-wrap gap-4 text-12"
+            aria-label="Matching feedback totals"
+          >
+            <span>
+              <strong className="tabular-nums">
+                {counts.up.toLocaleString()}
+              </strong>{" "}
+              helpful
+            </span>
+            <span>
+              <strong className="tabular-nums">
+                {counts.down.toLocaleString()}
+              </strong>{" "}
+              not helpful
+            </span>
+            <span className="text-text-tertiary">
+              All matching ratings in this period, across every page
+            </span>
+          </div>
+        )}
         <div className="flex flex-wrap items-end gap-3">
           <Label className="w-36 space-y-1 text-muted-foreground">
             Vote
@@ -170,8 +205,8 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
           )}
         </div>
         <p className="text-13 text-text-tertiary">
-          These filters apply to the feedback list. Charts above show all
-          feedback in the selected period.
+          These filters apply to the feedback list. Charts show all feedback in
+          the selected period.
         </p>
       </div>
       <div aria-busy={query.isFetching}>
@@ -185,7 +220,11 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
             role="alert"
             className="flex items-center justify-between gap-3 p-4 text-14"
           >
-            <span>Unable to load assistant feedback.</span>
+            <span>
+              {data
+                ? "Unable to load assistant feedback. Matching totals are from the previous successful refresh."
+                : "Unable to load assistant feedback."}
+            </span>
             <Button variant="outline" onClick={() => void query.refetch()}>
               Retry
             </Button>
@@ -200,7 +239,10 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
             {data.recent.map((row) => {
               const Icon = row.vote === "up" ? ThumbsUp : ThumbsDown;
               return (
-                <li key={`${row.message_id}-${row.created_at}`} className="p-4">
+                <li
+                  key={row.id ?? `${row.message_id}-${row.created_at}`}
+                  className="p-4"
+                >
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <Badge
                       variant={row.vote === "up" ? "success" : "destructive"}
@@ -221,6 +263,19 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
                     {row.comment || "No comment provided"}
                   </p>
                   <ReplyContext context={row.context} />
+                  {data.can_preview_threads && row.id && (
+                    <FeedbackThread
+                      key={`${row.id}-${row.updated_at}`}
+                      id={row.id}
+                      revision={row.updated_at}
+                      disabled={query.isPlaceholderData}
+                    />
+                  )}
+                  {!data.can_preview_threads && (
+                    <p className="mt-2 text-13 text-text-tertiary">
+                      Thread previews require Admin or Operator access.
+                    </p>
+                  )}
                   <details className="mt-2 text-13 text-text-tertiary">
                     <summary className="w-fit cursor-pointer">
                       Reply details
@@ -274,7 +329,7 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
       {(page > 0 || data?.next_cursor) && (
         <div className="flex items-center justify-between border-t border-border/50 px-4 py-3">
           <span className="text-13 text-text-tertiary">
-            Page {page + 1} · up to 100 replies per page
+            Page {page + 1} · up to 100 ratings per page
           </span>
           <div className="flex gap-2">
             <Button
@@ -303,5 +358,126 @@ export function AssistantFeedbackPanel({ range }: { range?: URLSearchParams }) {
         </div>
       )}
     </Card>
+  );
+}
+
+function FeedbackThread({
+  id,
+  revision,
+  disabled,
+}: {
+  id: string;
+  revision: string;
+  disabled: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-3">
+      <Button
+        variant="outline"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => setOpen(!open)}
+      >
+        {open ? "Hide message thread" : "Preview message thread"}
+      </Button>
+      {open && <ThreadMessages id={id} revision={revision} />}
+    </div>
+  );
+}
+function ThreadMessages({ id, revision }: { id: string; revision: string }) {
+  const query = useFeedbackThread(id, revision, true);
+  const inaccessible =
+    query.error instanceof ApiError && [403, 404].includes(query.error.status);
+  const unavailable =
+    inaccessible || query.data?.pages.some((page) => page.unavailable);
+  const messages = [...(query.data?.pages ?? [])]
+    .reverse()
+    .flatMap((page) => page.messages);
+  const unique = messages.filter(
+    (m, i) => messages.findIndex((other) => other.id === m.id) === i,
+  );
+  if (unavailable)
+    return (
+      <p role="status" className="mt-3 text-12 text-muted-foreground">
+        This message thread is no longer available.
+      </p>
+    );
+  return (
+    <section
+      className="mt-3 space-y-3 rounded-lg border border-border/50 p-3"
+      aria-label="Feedback message thread"
+      aria-busy={query.isFetching}
+    >
+      <p className="type-secondary text-text-tertiary">
+        Conversation through the rated reply. Text excerpts only. Known secret
+        formats are redacted.
+      </p>
+      {query.isPending && (
+        <Skeleton aria-label="Loading message thread" className="h-24" />
+      )}
+      {query.isError && (
+        <div role="alert" className="text-12">
+          <p>
+            Could not load message context.
+            {unique.length
+              ? " Previously loaded excerpts may be out of date."
+              : ""}
+          </p>
+          <Button
+            variant="outline"
+            onClick={() =>
+              void (query.isFetchNextPageError
+                ? query.fetchNextPage()
+                : query.refetch())
+            }
+          >
+            Retry context
+          </Button>
+        </div>
+      )}
+      {query.hasNextPage && (
+        <Button
+          variant="outline"
+          disabled={query.isFetching}
+          onClick={() => void query.fetchNextPage()}
+        >
+          {query.isFetchingNextPage
+            ? "Loading previous messages…"
+            : "Load previous messages"}
+        </Button>
+      )}
+      <ol className="space-y-3">
+        {unique.map((message) => (
+          <li
+            key={message.id}
+            className={`rounded-lg p-3 ${message.rated ? "border border-hairline-strong bg-overlay" : "border border-border/50"}`}
+          >
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2 type-secondary text-text-tertiary">
+              <strong className="text-foreground">
+                {message.role === "user" ? "User" : "Assistant"}
+                {message.rated ? " · Rated reply" : ""}
+              </strong>
+              <time dateTime={message.created_at}>
+                {new Date(message.created_at).toLocaleString()}
+              </time>
+            </div>
+            <p className="whitespace-pre-wrap break-words type-body">
+              {message.text || "No text available."}
+            </p>
+            {message.truncated && (
+              <p className="mt-1 type-secondary text-text-tertiary">
+                Message excerpt truncated.
+              </p>
+            )}
+          </li>
+        ))}
+      </ol>
+      {query.isSuccess && !unique.length && (
+        <p className="text-12 text-muted-foreground">
+          No retained messages available.
+        </p>
+      )}
+    </section>
   );
 }

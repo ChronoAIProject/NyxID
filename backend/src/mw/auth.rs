@@ -532,6 +532,15 @@ async fn ensure_catalog_editor_route(
     ))
 }
 
+fn permission_key_execution_readback(api_key: &ApiKey, method: &Method, path: &str) -> bool {
+    api_key.purpose == ApiKeyPurpose::PermissionBound
+        && *method == Method::GET
+        && path
+            .strip_prefix("/api/v1/approvals/requests/")
+            .and_then(|value| value.strip_suffix("/status"))
+            .is_some_and(|id| Uuid::parse_str(id).is_ok())
+}
+
 pub(crate) fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Result<(), AppError> {
     // Public activation remains unavailable; no generic route, scope, child
     // or feature flag may turn this purpose into ordinary execution authority.
@@ -699,6 +708,10 @@ fn delegated_read_denied_path(path: &str) -> bool {
     if matches!(
         segments.as_slice(),
         ["channel-relay", "messages", _, "attachments", _]
+            // V2 status may carry a retained provider result. Legacy native
+            // polling keeps its rule above; the handler requires exact API-key
+            // identity for v2 and refuses delegated principals.
+            | ["approvals", "requests", _, "status"]
             | ["nyxbot", "responses", _]
             | ["nyxbot", "responses", _, "events"]
             | ["users", "me", "oauth-consent-requests", _]
@@ -995,7 +1008,10 @@ async fn api_key_auth_user_inner(
                         | crate::models::api_key::ApiKeyPurpose::PermissionBound
                 )
         })
-        .and_then(|u| u.execution_permission_enrollment);
+        .filter(|u| {
+            crate::services::execution_permission_enrollment::snapshot::candidate(db, u, &[])
+        })
+        .map(|_| 1);
     let execution_permission =
         crate::services::execution_permission_dispatch::RequestContext::enrolled(
             marker.or_else(|| {
@@ -1223,11 +1239,15 @@ impl FromRequestParts<AppState> for AuthUser {
                                 .await
                             {
                                 Ok((_api_user_id_str, api_key, credential_id)) => {
-                                    ensure_api_key_purpose_route(&api_key, request_path)?;
+                                    let permission_readback = permission_key_execution_readback(&api_key, &parts.method, request_path);
+                                    if !permission_readback {ensure_api_key_purpose_route(&api_key, request_path)?;}
                                     let auth_user = api_key_auth_user(
                                         &state.db, &api_key, credential_id,
                                         request_ip.clone(), request_ua.clone(),
                                     ).await?;
+                                    if permission_readback && auth_user.execution_permission.is_none() {
+                                        return Err(AppError::NotFound("Execution request unavailable".into()));
+                                    }
                                     auth_user
                                         .ensure_conversation_key_route_if_enabled(
                                             &state.db,
@@ -1540,7 +1560,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     };
                     let oauth_lineage = jwt::authority_lineage(&claims);
                     return Ok(AuthUser {
-                        execution_enrolled: first_party_session && user.execution_permission_enrollment == Some(1),
+                        execution_enrolled: first_party_session && state.execution_enrollment.candidate(&user, &[]),
                         execution_permission: None,
                         mfa_assured,
                         mfa_enabled: (first_party_session
@@ -1631,7 +1651,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                 // those scopes. Session users can retrieve RBAC
                                 // data via the /oauth/userinfo endpoint instead.
                                 return Ok(AuthUser {
-                                    execution_enrolled: u.execution_permission_enrollment == Some(1),
+                                    execution_enrolled: state.execution_enrollment.candidate(&u, &[]),
                                     execution_permission: None,
                                     mfa_assured: sess.mfa_assured == Some(true),
                                     mfa_enabled: (u.user_type == crate::models::user::UserType::Person)
@@ -1700,11 +1720,15 @@ impl FromRequestParts<AppState> for AuthUser {
 
                 let (_user_id_str, key, credential_id) =
                     crate::services::key_service::validate_api_key(&state.db, api_key).await?;
-                ensure_api_key_purpose_route(&key, request_path)?;
+                let permission_readback = permission_key_execution_readback(&key, &parts.method, request_path);
+                if !permission_readback {ensure_api_key_purpose_route(&key, request_path)?;}
 
                 let auth_user = api_key_auth_user(
                     &state.db, &key, credential_id, request_ip, request_ua,
                 ).await?;
+                if permission_readback && auth_user.execution_permission.is_none() {
+                    return Err(AppError::NotFound("Execution request unavailable".into()));
+                }
                 auth_user
                     .ensure_conversation_key_route_if_enabled(&state.db, request_path)
                     .await?;
@@ -4885,6 +4909,30 @@ mod tests {
         ] {
             assert!(ensure_api_key_purpose_route(&key, path).is_err());
         }
+    }
+
+    #[test]
+    fn native_permission_readback_is_exact_get_only() {
+        let mut key = delegated_fixture_api_key("key", "owner", "hash");
+        key.purpose = ApiKeyPurpose::PermissionBound;
+        let path = format!("/api/v1/approvals/requests/{}/status", Uuid::new_v4());
+        assert!(permission_key_execution_readback(&key, &Method::GET, &path));
+        assert!(!permission_key_execution_readback(
+            &key,
+            &Method::POST,
+            &path
+        ));
+        assert!(!permission_key_execution_readback(
+            &key,
+            &Method::GET,
+            &format!("{path}/extra")
+        ));
+        assert!(!permission_key_execution_readback(
+            &key,
+            &Method::GET,
+            "/api/v1/approvals/requests/no-id/status"
+        ));
+        assert!(ensure_api_key_purpose_route(&key, &path).is_err());
     }
 
     // -- approval_requester_type --

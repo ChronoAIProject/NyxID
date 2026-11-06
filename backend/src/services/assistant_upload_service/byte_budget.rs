@@ -50,6 +50,11 @@ pub fn initial_channel_limit(declared: Option<u64>, maximum: usize) -> usize {
 }
 
 #[cfg(test)]
+pub(crate) fn available_for_tests() -> usize {
+    BUDGET.available_permits()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     #[tokio::test]

@@ -17,6 +17,9 @@ pub struct AssistantAttachment {
     pub conversation_id: String,
     pub turn_id: String,
     pub content_type: String,
+    #[serde(default, flatten)]
+    pub artifact: super::generated_artifact::Metadata,
+
     pub size: i64,
     #[serde(with = "super::bson_bytes::required")]
     pub data_encrypted: Vec<u8>,

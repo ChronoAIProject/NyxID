@@ -647,6 +647,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     assert!(key.allowed_service_ids.is_empty());
     assert!(key.allowed_platform_service_ids.is_empty());
     let chat = ChatAuthority {
+        automation_work: None,
         execution_group_id: None,
         execution_unsupported: false,
         execution_voice_task: false,
@@ -685,6 +686,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     .await;
     assert!(refused);
     let guest = ChatAuthority {
+        automation_work: None,
         execution_group_id: None,
         execution_unsupported: false,
         execution_voice_task: false,
@@ -1120,6 +1122,7 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .unwrap()
         .unwrap();
     let claim = schedules::TurnClaim {
+        enroll_v2: false,
         run_id: run.id.clone(),
         fence: job.get_str("fence").unwrap().into(),
         trigger_updated_at: trigger.updated_at,
@@ -1143,6 +1146,7 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .db
         .collection::<AssistantAcknowledgement>(ACKS)
         .insert_one(AssistantAcknowledgement {
+            automation_work: None,
             execution_task: None,
             connect_own: None,
             activity_id: None,
@@ -1896,6 +1900,7 @@ async fn schedule_queue_one_busy_grace_and_edit_fence() {
     .await
     .unwrap();
     let claim = schedules::TurnClaim {
+        enroll_v2: false,
         run_id: pending.id,
         fence: job.get_str("fence").unwrap().into(),
         trigger_updated_at: current.updated_at,
@@ -3900,3 +3905,6 @@ async fn invocation_mounted_routes_enforce_credentials_flags_and_recover_lost_re
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     server.abort();
 }
+
+#[path = "trigger_coordinator_tests.rs"]
+mod coordinator_tests;

@@ -407,3 +407,19 @@ fn protected_org_and_hosted_intent_writes_require_every_replica_capability_and_d
         assert!(!assess(&undrained, &a, capability, false, now).ready);
     }
 }
+
+#[test]
+fn automation_capability_requires_every_replica_to_opt_in() {
+    let now = Utc::now();
+    let a = local("a", "a1", &["a", "b"], false);
+    let b = local("b", "b1", &["a", "b"], false);
+    let mut rows = vec![row(&a, now), row(&b, now)];
+    assert!(!CAPABILITIES.contains(&AUTOMATION_COMPLETION));
+    assert!(!assess(&rows, &a, AUTOMATION_COMPLETION, false, now).ready);
+    rows[0].capabilities.push(AUTOMATION_COMPLETION.into());
+    assert!(!assess(&rows, &a, AUTOMATION_COMPLETION, false, now).ready);
+    rows[1].capabilities.push(AUTOMATION_COMPLETION.into());
+    assert!(assess(&rows, &a, AUTOMATION_COMPLETION, false, now).ready);
+    rows[1].drained = false;
+    assert!(!assess(&rows, &a, AUTOMATION_COMPLETION, false, now).ready);
+}

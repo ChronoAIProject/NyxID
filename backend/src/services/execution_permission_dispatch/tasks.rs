@@ -67,7 +67,23 @@ pub(crate) fn admit<'a>(
         if !start.execution_enrollment && inherited.is_none() {
             return Ok(());
         }
-        require_enrolled(db, &row.user_id, Some(session)).await?;
+        // Queue roots and voice requests already carry durable enrollment.
+        // Only a genuinely fresh human turn may choose legacy on a stale hint.
+        let marked = inherited.is_some()
+            || turn.voice_request_id.is_some()
+            || row.group_request_id.is_some()
+            || row.collaboration.is_some();
+        if marked {
+            require_enrolled(db, &row.user_id, Some(session)).await?;
+        } else if !super::super::execution_permission_enrollment::live_enabled(
+            db,
+            &row.user_id,
+            Some(session),
+        )
+        .await?
+        {
+            return Ok(());
+        }
         if let Some(request) = turn.voice_request_id.as_deref() {
             let voice = voice_task(db, session, row, request).await?;
             if inherited.as_ref().is_some_and(|t| !same_task(t, &voice)) {
@@ -319,6 +335,7 @@ pub(crate) async fn fence(
     session: &mut ClientSession,
     task: &TaskAdmission,
 ) -> AppResult<()> {
+    require_enrolled(db, &task.actor_user_id, Some(session)).await?;
     let filter = live_filter(task)?;
     if db
         .collection::<Document>(collection(&task.task))
@@ -357,6 +374,14 @@ pub(crate) fn settle<'a>(
                 "execution_proposal.v1.state":{"$in":["completed","not_sent","unknown","denied","expired","cancelled"]}},
                 doc!{"$set":{"execution_proposal.v1.delivered_turn_id":&turn.turn_id}}).session(&mut *session).await?;
         }
+        let v2_receipts: Vec<_> = turn
+            .events
+            .iter()
+            .filter_map(|e| e.id.strip_prefix("execution-decision-v2:"))
+            .collect();
+        if !v2_receipts.is_empty() && message.status == "completed" {
+            db.collection::<Document>("approval_requests").update_many(doc!{"_id":{"$in":v2_receipts},"user_id":&row.user_id,"execution_proposal.v2.state":{"$in":["completed","not_sent","unknown","denied","expired","cancelled"]}},doc!{"$set":{"execution_proposal.v2.delivered_turn_id":&turn.turn_id}}).session(&mut *session).await?;
+        }
         if task.task.root_kind != TaskRootKind::Message
             || message.status != "completed"
             || turn.report_to.is_some()
@@ -379,9 +404,11 @@ pub(crate) fn settle<'a>(
             .await?
             .is_some();
         let pending_effect = db.collection::<Document>("approval_requests").find_one(doc! {
-            "user_id":&row.user_id,"execution_proposal.v1.task.task":&reference,
+            "user_id":&row.user_id,"$or":[{"execution_proposal.v1.task.task":&reference,
             "execution_proposal.v1.state":{"$in":["pending","queued","preparing","dispatched","waiting"]},
-            "execution_proposal.v1.task.hard_deadline":{"$gt":bson::DateTime::now()}
+            "execution_proposal.v1.task.hard_deadline":{"$gt":bson::DateTime::now()}},{"execution_proposal.v2.task.task":&reference,
+            "execution_proposal.v2.state":{"$in":["pending","queued","preparing","dispatched","waiting"]},
+            "execution_proposal.v2.task.hard_deadline":{"$gt":bson::DateTime::now()}}]
         }).session(&mut *session).await?.is_some();
         let mut background = false;
         for (collection, states) in [

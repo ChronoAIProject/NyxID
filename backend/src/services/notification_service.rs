@@ -1022,6 +1022,21 @@ pub async fn send_silent_push_to_user(
     Ok(())
 }
 
+const NEW_CHANNEL_APPROVAL_TIMEOUT_SECS: u32 = 300;
+
+/// Resolve the legacy wait timeout without creating a channel after an
+/// execution proposal has captured its authority snapshot. Missing fields on
+/// existing rows still use NotificationChannel's legacy serde default.
+pub(crate) async fn approval_timeout_secs(db: &Database, user_id: &str) -> AppResult<u32> {
+    Ok(db
+        .collection::<NotificationChannel>(COLLECTION_NAME)
+        .find_one(doc! { "user_id": user_id })
+        .await?
+        .map_or(NEW_CHANNEL_APPROVAL_TIMEOUT_SECS, |channel| {
+            channel.approval_timeout_secs
+        }))
+}
+
 /// Get the user's notification channel settings, creating defaults if none exist.
 pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<NotificationChannel> {
     let collection = db.collection::<NotificationChannel>(COLLECTION_NAME);
@@ -1039,7 +1054,7 @@ pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<No
         telegram_enabled: false,
         telegram_link_code: None,
         telegram_link_code_expires_at: None,
-        approval_timeout_secs: 300,
+        approval_timeout_secs: NEW_CHANNEL_APPROVAL_TIMEOUT_SECS,
         grant_expiry_days: 30,
         approval_required: None,
         group_mentions_enabled: true,

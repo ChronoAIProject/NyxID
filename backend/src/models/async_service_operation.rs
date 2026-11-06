@@ -58,6 +58,8 @@ pub struct CmaOperation {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DeliveryBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation_work: Option<super::trigger_run::AutomationWork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     #[serde(default)]
     pub platform_reply: Option<super::assistant_conversation::PlatformReplyRouting>,
@@ -89,6 +91,16 @@ pub struct AsyncServiceOperation {
     pub shared_execution: Option<super::assistant_sharing::SharedExecution>,
     #[serde(default)]
     pub instruction_receipt_version: u32,
+    /// Producer identity verified at generated-artifact admission. Missing legacy
+    /// snapshots cannot gain fresh acquisition authority from endpoint shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_catalog_service_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_result: Option<super::generated_artifact::ResultManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_event_turn_id: Option<String>,
     #[serde(default)]
     pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     #[serde(default)]

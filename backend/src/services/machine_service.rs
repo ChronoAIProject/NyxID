@@ -247,6 +247,7 @@ pub fn issue_job_with_id<'a>(
             None
         };
         let job = MachineJob {
+            automation_run_id: chat.automation_work.as_ref().map(|w| w.run_id.clone()),
             execution_task: super::execution_permission_dispatch::tasks::child(chat),
             id,
             user_id: chat.user_id.clone(),
@@ -713,6 +714,148 @@ pub(crate) async fn cancel_conversation(state: &AppState, user: &str, id: &str) 
     Ok(())
 }
 
+/// Keep main's cleanup of background jobs from earlier ordinary turns, while
+/// preserving jobs owned by other live runs sharing this conversation.
+pub(crate) async fn cancel_unrelated(
+    state: &AppState,
+    user: &str,
+    id: &str,
+    stopped: Option<&AssistantConversation>,
+) -> AppResult<()> {
+    let turn = stopped.and_then(|r| r.active_turn.as_ref());
+    let target = turn
+        .and_then(|t| t.automation_work.as_ref())
+        .map(|w| w.run_id.as_str());
+    let ctx = (
+        state.db.clone(),
+        user.to_owned(),
+        id.to_owned(),
+        target.map(str::to_owned),
+    );
+    let (jobs, protected) = super::transaction_service::run_db_only(&state.db, &ctx, |session, (db, user, id, target)| Box::pin(async move {
+        db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id": id, "user_id": user}, doc! {"$inc": {"automation_handoff_version": 1_i64}}).session(&mut *session).await?;
+        let protected = super::trigger_schedule::continuation::stop_protected_runs_in_session(db, user, target.as_deref(), session).await?;
+        let filter = doc! {"conversation_id": id, "user_id": user, "state": "running", "automation_run_id": {"$nin": &protected}};
+        let mut cursor = db.collection::<MachineJob>(JOBS).find(filter.clone()).session(&mut *session).await?;
+        let jobs: Vec<MachineJob> = cursor.stream(&mut *session).try_collect().await?;
+        db.collection::<MachineJob>(JOBS).update_many(filter, doc! {"$set": {"state": "finished", "finished_at": bson::DateTime::now()}}).session(session).await?;
+        Ok((jobs, protected))
+    })).await?;
+    let mut nodes: std::collections::HashSet<String> = turn
+        .map(|t| t.machine_node_ids.iter().cloned().collect())
+        .unwrap_or_default();
+    nodes.extend(jobs.iter().map(|j| j.node_id.clone()));
+    for node_id in nodes {
+        if protected.is_empty() {
+            send_cancel(state, &node_id, json!({"conversation_id": id, "turn_id": turn.map(|t| t.turn_id.as_str()).unwrap_or_default()})).await;
+        } else {
+            send_cancel_exact(
+                state,
+                &node_id,
+                id,
+                turn.map(|t| t.turn_id.as_str()).unwrap_or_default(),
+                jobs.iter()
+                    .filter(|j| j.node_id == node_id)
+                    .map(|j| j.id.clone())
+                    .collect(),
+            )
+            .await;
+        }
+    }
+    Ok(())
+}
+
+async fn send_cancel_exact(
+    state: &AppState,
+    node_id: &str,
+    thread: &str,
+    turn: &str,
+    jobs: Vec<String>,
+) {
+    let work = async {
+        if let Some(node) = state
+            .db
+            .collection::<Node>(NODES)
+            .find_one(doc! {"_id": node_id})
+            .await?
+        {
+            if node.machine.as_ref().is_some_and(|p| p.exact_cancel) {
+                dispatch(
+                    state,
+                    &node,
+                    nyxid_machine::Operation::CancelExact,
+                    json!({"conversation_id": thread, "turn_id": turn, "job_ids": jobs}),
+                )
+                .await?;
+            } else {
+                // Old nodes' Cancel preempts every job in the conversation.
+                // Individual job cancellation preserves other live runs.
+                for job in jobs {
+                    dispatch(
+                        state,
+                        &node,
+                        nyxid_machine::Operation::JobCancel,
+                        json!({"job_id": job, "conversation_id": thread, "turn_id": turn}),
+                    )
+                    .await?;
+                }
+            }
+        }
+        AppResult::Ok(())
+    };
+    if !tokio::time::timeout(std::time::Duration::from_millis(800), work)
+        .await
+        .is_ok_and(|r| r.is_ok())
+    {
+        tracing::warn!(
+            node_id,
+            "Scoped machine stop delivery pending or node offline"
+        );
+    }
+}
+
+/// Scope transport cancellation to the captured turn, including after it settled.
+pub(crate) async fn cancel_turn(
+    state: &AppState,
+    user: &str,
+    id: &str,
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+) -> AppResult<()> {
+    let filter = doc! {"conversation_id": id, "user_id": user, "issuing_turn_id": &turn.turn_id, "state": "running"};
+    let mut nodes: std::collections::HashSet<String> =
+        turn.machine_node_ids.iter().cloned().collect();
+    let mut job_ids = std::collections::HashMap::<String, Vec<String>>::new();
+    let mut jobs = state
+        .db
+        .collection::<MachineJob>(JOBS)
+        .find(filter.clone())
+        .await?;
+    while let Some(job) = jobs.next().await {
+        let job = job?;
+        nodes.insert(job.node_id.clone());
+        job_ids.entry(job.node_id).or_default().push(job.id);
+    }
+    state
+        .db
+        .collection::<MachineJob>(JOBS)
+        .update_many(
+            filter,
+            doc! {"$set": {"state": "finished", "finished_at": bson::DateTime::now()}},
+        )
+        .await?;
+    for node in nodes {
+        send_cancel_exact(
+            state,
+            &node,
+            id,
+            &turn.turn_id,
+            job_ids.remove(&node).unwrap_or_default(),
+        )
+        .await;
+    }
+    Ok(())
+}
+
 pub(crate) async fn send_cancel(state: &AppState, id: &str, args: serde_json::Value) {
     let work = async {
         if let Some(node) = state
@@ -739,6 +882,53 @@ pub(crate) async fn send_cancel(state: &AppState, id: &str, args: serde_json::Va
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn scoped_cancel_never_sends_conversation_cancel_to_legacy_or_exact_nodes() {
+        use crate::services::{
+            assistant_authority_tests::orchestrator_fixture,
+            machine_integration_tests::{node, peer},
+        };
+        for exact in [false, true] {
+            let f = orchestrator_fixture("automation_scoped_cancel_transport").await;
+            let mut node = node(&f, &f.owner).await;
+            node.machine.as_mut().unwrap().exact_cancel = exact;
+            f.state
+                .db
+                .collection::<Node>(NODES)
+                .replace_one(doc! {"_id": &node.id}, &node)
+                .await
+                .unwrap();
+            let (task, mut requests) = peer(&f, &node, json!({"ok": true})).await;
+            send_cancel_exact(
+                &f.state,
+                &node.id,
+                "shared-thread",
+                "ordinary-turn",
+                vec!["old-job".into(), "current-job".into()],
+            )
+            .await;
+            if exact {
+                let request = requests.try_recv().unwrap();
+                assert_eq!(request.operation, Operation::CancelExact);
+                assert_eq!(
+                    request.parameters,
+                    json!({"conversation_id": "shared-thread", "turn_id": "ordinary-turn", "job_ids": ["old-job", "current-job"]})
+                );
+            } else {
+                for job in ["old-job", "current-job"] {
+                    let request = requests.try_recv().unwrap();
+                    assert_eq!(request.operation, Operation::JobCancel);
+                    assert_eq!(request.parameters["job_id"], job);
+                    assert_eq!(request.parameters["conversation_id"], "shared-thread");
+                    assert_eq!(request.parameters["turn_id"], "ordinary-turn");
+                }
+            }
+            assert!(requests.try_recv().is_err());
+            task.abort();
+        }
+    }
+
     #[test]
     fn changes_confirm_all_commands_and_only_mutating_computer_tools() {
         for op in [

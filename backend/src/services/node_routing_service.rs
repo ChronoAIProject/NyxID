@@ -18,7 +18,7 @@ pub struct NodeRoute {
     pub fallback_node_ids: Vec<String>,
 }
 
-fn is_node_dispatchable(node: &Node, ws_manager: &NodeWsManager) -> bool {
+pub(crate) fn is_node_dispatchable(node: &Node, ws_manager: &NodeWsManager) -> bool {
     node.is_active
         && node.status == NodeStatus::Online
         && crate::services::node_owner_service::is_connected_somewhere(

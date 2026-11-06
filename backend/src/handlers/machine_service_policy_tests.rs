@@ -422,170 +422,176 @@ async fn job_plan_concurrent_claim_has_one_winner_and_fresh_identical_invocation
 
 #[tokio::test]
 async fn execution_permission_machine_actual_http_has_one_send_and_fences_original_actor_task() {
-    use crate::services::execution_permission_dispatch::phase_b_tests as permissions;
-    for outcome in ["covered", "gap", "prohibited"] {
-        let f = orchestrator_fixture("phase_b_machine").await;
-        permissions::enroll(&f.state.db, &f.owner).await;
-        let root = permissions::task(&f.state.db, &f.row).await;
-        permissions::legacy_review(&f.state, &f.owner).await;
-        let n = node(&f, &f.owner).await;
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200))
-            .mount(&server)
-            .await;
-        let connection = connected(&f.state.db, &f.owner, "phase-b", &server.uri()).await;
-        let chat = acks::for_key(&f.state.db, &f.owner, Some(&f.chat.api_key_id))
-            .await
-            .unwrap()
-            .unwrap();
-        let (peer, mut requests) = peer(&f, &n, json!({"status":"running"})).await;
-        let mut args = json!({"machine":n.id,"command":"consume service","services":[connection],"timeout_secs":120});
-        let mut result = crate::handlers::machine_tools::call(
-            &f.state,
-            &chat,
-            "nyx__machine_exec",
-            args.clone(),
-        )
-        .await
-        .unwrap();
-        if let Some(card) = result["acknowledgement_id"].as_str() {
-            acks::decide(&f.state.db, &f.owner, &f.row.id, card, true)
+    for global in [false, true] {
+        use crate::services::execution_permission_dispatch::phase_b_tests as permissions;
+        for outcome in ["covered", "gap", "prohibited"] {
+            let f = orchestrator_fixture("phase_b_machine").await;
+            permissions::enroll_cohort(&f.state.db, &f.owner, global).await;
+            let root = permissions::task(&f.state.db, &f.row).await;
+            permissions::legacy_review(&f.state, &f.owner).await;
+            let n = node(&f, &f.owner).await;
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200))
+                .mount(&server)
+                .await;
+            let connection = connected(&f.state.db, &f.owner, "phase-b", &server.uri()).await;
+            let chat = acks::for_key(&f.state.db, &f.owner, Some(&f.chat.api_key_id))
                 .await
+                .unwrap()
                 .unwrap();
-            args["acknowledgement_id"] = json!(card);
-            result =
-                crate::handlers::machine_tools::call(&f.state, &chat, "nyx__machine_exec", args)
-                    .await
-                    .unwrap();
-        }
-        assert_eq!(result["status"], "running", "{result}");
-        let issued = requests.recv().await.unwrap();
-        let id = issued.parameters["job_id"].as_str().unwrap();
-        let job = f
-            .state
-            .db
-            .collection::<crate::models::machine_job::MachineJob>(JOBS)
-            .find_one(doc! {"_id":id})
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(job.execution_task.as_ref().unwrap().task, root.task);
-        // Source turn has settled: no synthetic live turn is needed by service HTTP.
-        engine::finish_turn(
-            &f.state.db,
-            &f.row,
-            &f.row.credential_api_key_id,
-            &uuid::Uuid::new_v4().to_string(),
-            &engine::TurnResult {
-                text: "The job is running".into(),
-                session_id: None,
-                response_id: None,
-                error: None,
-            },
-        )
-        .await
-        .unwrap();
-        f.state.db.collection::<Document>("service_approval_configs").insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.owner,"service_id":&connection,"service_name":"Phase B","approval_required":true,"approval_mode":"per_request","rules":[],"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
-        let channel =
-            crate::services::notification_service::get_or_create_channel(&f.state.db, &f.owner)
-                .await
-                .unwrap();
-        f.state
-            .db
-            .collection::<Document>("notification_channels")
-            .update_one(
-                doc! {"_id":channel.id},
-                doc! {"$set":{"approval_timeout_secs":1}},
+            let (peer, mut requests) = peer(&f, &n, json!({"status":"running"})).await;
+            let mut args = json!({"machine":n.id,"command":"consume service","services":[connection],"timeout_secs":120});
+            let mut result = crate::handlers::machine_tools::call(
+                &f.state,
+                &chat,
+                "nyx__machine_exec",
+                args.clone(),
             )
             .await
             .unwrap();
-        let auth = crate::services::machine_gateway_service::job_auth(&f.state.db, &job)
-            .await
-            .unwrap();
-        if outcome != "gap" {
-            let mut grant =
-                permissions::grant(&f.state, &auth, &connection, "POST", "/upload").await;
-            grant
-                .execution
-                .as_mut()
-                .unwrap()
-                .v1
-                .as_mut()
-                .unwrap()
-                .operations
-                .operations[0]
-                .inputs = Some(nyxid_permissions::values::InputRules {
-                body: Some(nyxid_permissions::google::JsonShape::Exact {
-                    value: json!({"message":"hello"}),
-                }),
-                ..Default::default()
-            });
-            if outcome == "prohibited" {
-                grant.execution.as_mut().unwrap().version = 99;
-            }
-            f.state
-                .db
-                .collection("approval_grants")
-                .insert_one(grant)
+            if let Some(card) = result["acknowledgement_id"].as_str() {
+                acks::decide(&f.state.db, &f.owner, &f.row.id, card, true)
+                    .await
+                    .unwrap();
+                args["acknowledgement_id"] = json!(card);
+                result = crate::handlers::machine_tools::call(
+                    &f.state,
+                    &chat,
+                    "nyx__machine_exec",
+                    args,
+                )
                 .await
                 .unwrap();
-        }
-        let response = signed_call_body(&f, &n, id, "phase-b", true).await;
-        if outcome == "covered" {
-            assert!(
-                response.as_ref().is_ok_and(|r| r.status().is_success()),
-                "{response:?}"
-            );
-        } else {
-            assert!(
-                response.is_err() || response.as_ref().is_ok_and(|r| !r.status().is_success()),
-                "{response:?}"
-            );
-        }
-        assert_eq!(
-            server.received_requests().await.unwrap().len(),
-            usize::from(outcome == "covered")
-        );
-        assert_eq!(
+            }
+            assert_eq!(result["status"], "running", "{result}");
+            let issued = requests.recv().await.unwrap();
+            let id = issued.parameters["job_id"].as_str().unwrap();
+            let job = f
+                .state
+                .db
+                .collection::<crate::models::machine_job::MachineJob>(JOBS)
+                .find_one(doc! {"_id":id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(job.execution_task.as_ref().unwrap().task, root.task);
+            // Source turn has settled: no synthetic live turn is needed by service HTTP.
+            engine::finish_turn(
+                &f.state.db,
+                &f.row,
+                &f.row.credential_api_key_id,
+                &uuid::Uuid::new_v4().to_string(),
+                &engine::TurnResult {
+                    text: "The job is running".into(),
+                    session_id: None,
+                    response_id: None,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap();
+            f.state.db.collection::<Document>("service_approval_configs").insert_one(doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&f.owner,"service_id":&connection,"service_name":"Phase B","approval_required":true,"approval_mode":"per_request","rules":[],"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+            let channel =
+                crate::services::notification_service::get_or_create_channel(&f.state.db, &f.owner)
+                    .await
+                    .unwrap();
             f.state
                 .db
-                .collection::<Document>("approval_requests")
-                .count_documents(doc! {"execution_proposal":{"$ne":null}})
+                .collection::<Document>("notification_channels")
+                .update_one(
+                    doc! {"_id":channel.id},
+                    doc! {"$set":{"approval_timeout_secs":1}},
+                )
                 .await
-                .unwrap(),
-            0
-        );
-        if outcome == "covered" {
+                .unwrap();
+            let auth = crate::services::machine_gateway_service::job_auth(&f.state.db, &job)
+                .await
+                .unwrap();
+            if outcome != "gap" {
+                let mut grant =
+                    permissions::grant(&f.state, &auth, &connection, "POST", "/upload").await;
+                grant
+                    .execution
+                    .as_mut()
+                    .unwrap()
+                    .v1
+                    .as_mut()
+                    .unwrap()
+                    .operations
+                    .operations[0]
+                    .inputs = Some(nyxid_permissions::values::InputRules {
+                    body: Some(nyxid_permissions::google::JsonShape::Exact {
+                        value: json!({"message":"hello"}),
+                    }),
+                    ..Default::default()
+                });
+                if outcome == "prohibited" {
+                    grant.execution.as_mut().unwrap().version = 99;
+                }
+                f.state
+                    .db
+                    .collection("approval_grants")
+                    .insert_one(grant)
+                    .await
+                    .unwrap();
+            }
+            let response = signed_call_body(&f, &n, id, "phase-b", true).await;
+            if outcome == "covered" {
+                assert!(
+                    response.as_ref().is_ok_and(|r| r.status().is_success()),
+                    "{response:?}"
+                );
+            } else {
+                assert!(
+                    response.is_err() || response.as_ref().is_ok_and(|r| !r.status().is_success()),
+                    "{response:?}"
+                );
+            }
+            assert_eq!(
+                server.received_requests().await.unwrap().len(),
+                usize::from(outcome == "covered")
+            );
             assert_eq!(
                 f.state
                     .db
                     .collection::<Document>("approval_requests")
-                    .count_documents(doc! {})
+                    .count_documents(doc! {"execution_proposal":{"$ne":null}})
                     .await
                     .unwrap(),
                 0
             );
-            let mut foreign = job.clone();
-            foreign.user_id = uuid::Uuid::new_v4().to_string();
-            assert!(
-                crate::services::machine_gateway_service::job_auth(&f.state.db, &foreign)
+            if outcome == "covered" {
+                assert_eq!(
+                    f.state
+                        .db
+                        .collection::<Document>("approval_requests")
+                        .count_documents(doc! {})
+                        .await
+                        .unwrap(),
+                    0
+                );
+                let mut foreign = job.clone();
+                foreign.user_id = uuid::Uuid::new_v4().to_string();
+                assert!(
+                    crate::services::machine_gateway_service::job_auth(&f.state.db, &foreign)
+                        .await
+                        .is_err()
+                );
+                f.state
+                    .db
+                    .collection::<Document>("assistant_messages")
+                    .update_one(
+                        doc! {"_id":root.task.root_id},
+                        doc! {"$set":{"execution_task.cancelled":true}},
+                    )
                     .await
-                    .is_err()
-            );
-            f.state
-                .db
-                .collection::<Document>("assistant_messages")
-                .update_one(
-                    doc! {"_id":root.task.root_id},
-                    doc! {"$set":{"execution_task.cancelled":true}},
-                )
-                .await
-                .unwrap();
-            assert!(signed_call_body(&f, &n, id, "phase-b", true).await.is_err());
-            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+                    .unwrap();
+                assert!(signed_call_body(&f, &n, id, "phase-b", true).await.is_err());
+                assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            }
+            peer.abort();
+            f.state.db.drop().await.unwrap();
         }
-        peer.abort();
-        f.state.db.drop().await.unwrap();
     }
 }
