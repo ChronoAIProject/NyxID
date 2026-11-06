@@ -51,7 +51,7 @@ for (const mode of ["light", "dark"] as const) {
       );
       assert.equal(
         gradient.props.style[1]?.opacity,
-        state === "idle" ? 0.5 : undefined,
+        state === "idle" && mode === "dark" ? 0.5 : undefined,
       );
       assert.equal(
         row.props.children[0]?.type === "Spinner",
@@ -59,9 +59,7 @@ for (const mode of ["light", "dark"] as const) {
       );
       assert.equal(
         row.props.children[1].props.style[1].color,
-        state === "idle" && mode === "light"
-          ? colors.textPrimary
-          : colors.onPrimary,
+        colors.onPrimary,
       );
       assert.equal(
         edge.props.style[2].borderColor,

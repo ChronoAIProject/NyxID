@@ -53,11 +53,13 @@ test("auth primary submit labels meet AA across full, pressed, pending and half-
       for (const pressed of [false, true]) {
         const start = rgb(pressed && !idle ? c.gradientStartPressed : c.gradientStart);
         const end = rgb(pressed && !idle ? c.gradientEndPressed : c.gradientEnd);
-        const label = rgb(idle && c === lightColors ? c.textPrimary : c.onPrimary);
+        const label = rgb(c.onPrimary);
+        // Light idle submits keep the full gradient; only dark mode dims it.
+        const dimmed = idle && c === darkColors;
         for (let i = 0; i <= 20; i++) {
           const fill = start.map((v, channel) => {
             const gradient = v * (1 - i / 20) + end[channel]! * i / 20;
-            return idle ? (gradient + rgb(c.bg)[channel]!) / 2 : gradient;
+            return dimmed ? (gradient + rgb(c.bg)[channel]!) / 2 : gradient;
           }) as Rgb;
           assert.ok(ratio(label, fill) >= 4.5, `${c.bg} idle=${idle}, pressed=${pressed}, stop=${i}`);
         }

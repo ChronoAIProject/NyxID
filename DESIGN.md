@@ -1053,7 +1053,7 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   with the effective agent override shown read-only. Chat and agent settings use
   the server default without a native selector or per-turn override. Voice automatically uses an available server default, without a source selector. This is the user's deliberate native scope (2026-10-28).
   Voice, conversation mode and completion notices are chosen in Settings › Voice;
-  the call screen has no voice/source pickers. The expanded composer visibly names the saved voice and tariff while connecting and throughout the call; Hold to talk and Hands-free share the same controls.
+  the call screen has no voice/source pickers. Voice composers never show pricing or tariffs, including connection, idle, minimized and help-popover states (user decision 2026-11-06, superseding V1). Pricing belongs in Settings › Voice. Hold to talk and Hands-free remain selectable through the compact header radio toggle: phone and radio glyphs, inactive icon only, active icon plus a one-line label, and 44pt minimum targets. The status/timer has its own full-width line; labels shrink within the header at enlarged text sizes. xAI shows only the forced Hold to talk option and cannot switch modes. Changes still save the existing voice preference (user decision 2026-11-06, U11). Hold to talk keeps a press-and-hold microphone, release-to-send instruction and halo in both expanded and minimized layouts; tapping the minimized row opens the mode switch. Resizing releases an existing hold without changing modes.
 - Native Automations is display-only: configured tasks, source/schedule, target,
   confirmation policy, read-only status and paged run history with exact thread
   links. It issues GET requests only. Creation, changes and execution belong to
@@ -1105,9 +1105,11 @@ on-tint violet, a two-line lead, provider rows as 52pt soft filled pills
 (mark and label centred, pressing in slightly), "or continue with email",
 52pt rounded fields with leading mail and lock icons and a show/hide password
 toggle, and Sign in, which always uses the primary gradient (user decision
-2026-11-06). Empty/blocked forms dim only the gradient to 0.5 opacity, keep an
-opaque legible label and primary boundary, disable press-in and announce disabled
-to assistive technology. Ready uses full primary; pending keeps full primary
+2026-11-06) with a white label (user decision 2026-11-06). In light mode
+empty/blocked forms keep the full gradient, since a dimmed gradient over white
+drops the white label to ~2:1; they drop the glow and press-in and announce
+disabled to assistive technology. In dark mode they dim only the gradient to 0.5
+opacity behind the same white label. Ready uses full primary; pending keeps full primary
 with a spinner and a busy/disabled state. MFA, device-login and Agent Key primary
 submit buttons share this rule. One-time login codes sit centred in their own panel (mono
 30pt, letter-spaced) with Copy, a live "Expires in m:ss · works once" line and
@@ -1124,11 +1126,9 @@ links, stays on screen and usable during the call. The voice composer uses the
 composer frame wrapped in an animated pastel aura (soft blush and mint glows
 and a thin gradient edge) that brightens and swells with the agent's voice,
 follows yours while listening and breathes while thinking (still under Reduce
-Motion). Expanded content scrolls within the available height while reserving
-space for the transcript. Its header shows the agent name, status and call
-timer, with speaker and ⋯ (call notes, No sound? Resume audio) controls. Only
-unsealed, unsent live captions appear in the voice panel; sent speech, completed
-replies, task receipts and approval cards belong in the transcript. Tapping the
+Motion). Expanded voice is content-sized, with no reserved caption height or text-entry row (user decision 2026-11-06). It scrolls only when its content reaches the current window cap, reserving space for the transcript on phones, iPad and split windows. Its header shows the agent name, status and call
+timer, with the mode toggle and a 44pt “?” help control. Speaker mute sits beside the microphone controls. The compact anchored help popover explains the selected listening mode and echo/headphones guidance, has explicit close, outside-tap and accessibility escape dismissal, and contains secondary “Resume audio”. The media bridge exposes playback watermarks and loudness but no recoverable blocked/stalled signal: silence alone cannot distinguish a stalled player from a silent agent, so recovery stays in help (user decision 2026-11-06, U10). Only
+unsealed user speech appears prominently in the voice panel, at 18/26pt in primary ink. Agent captions do not share this space. Sent speech, completed replies, task receipts and approval cards belong in the transcript (user decision 2026-11-06). Tapping the
 voice entry starts the connection immediately using the saved voice and mode.
 The timer shows “-” until connected, then counts from 00:00 in both modes.
 Private voice requires both the verified active control snapshot and provider
@@ -1139,9 +1139,7 @@ lifts a soft halo (still under Reduce Motion).
 
 Touching or scrolling the transcript minimizes voice to a single composer row.
 The minimized expand control has a minimum 44×44pt touch target in both modes.
-Tapping that row or focusing/typing in its text field expands it without
-replacing the media engine or ending the session. Text sends through the same
-chat sender and retains its draft when voice closes. Closing voice or leaving
+Voice is speech-only in both sizes: there is no typing field or text-send control (user decision 2026-11-06). Only tapping the minimized row expands it, without replacing the media engine or ending the session. Ending voice restores the normal composer with its existing draft intact. The minimized row uses the normal composer’s 4pt frame insets and single-line content height (one text line with 12/10pt field padding and its 44pt toolbar; crew includes its 36pt-or-text-scaled recipient strip and 6pt gap), with waveform, a mono timer and a 44pt End target centered vertically. Live words use one readable line in the expand target. The same 3pt-bar dictation waveform appears in ordinary dictation and both private/crew voice sizes, driven by native mic levels and private playback levels. Reduce Motion shows a still dotted line and keeps the aura still. Closing voice or leaving
 the chat ends audio; accepted agent tasks keep running. The aura is decorative
 and hidden from VoiceOver (see the 2026-11-04 decision).
 
@@ -1154,7 +1152,7 @@ and reads new agent replies with native speech synthesis. Each utterance binds
 to the recipients displayed when capture starts. Opening the recipient picker
 discards capture before presenting the picker; capture resumes after the
 selection settles. It releases the
-recognizer during playback, pauses on typed drafts or an unavailable crew, and
+recognizer during playback, pauses for an unavailable crew, and
 ends on backgrounding or leaving the chat. Uncertain delivery retains the
 existing review-before-resend fence. This mode starts on entry and supports the
 same voice shell, header, central microphone, End control and minimized row.
@@ -1163,6 +1161,12 @@ an explicit microphone pause stays paused. Reply speech uses prose and link labe
 with code omitted.
 Ordinary composer dictation continues to insert words into the draft for
 explicit review and sending.
+
+Mobile onboarding entry points are temporarily commented out by user decision 2026-11-06 (U12), on iOS and Android. The home makes no onboarding requests and exposes no auto intro, Replay/Retry intro or onboarding-sourced “Suggested for you”. Restore the tagged `TODO(onboarding)` blocks together. The completed implementation and its unit tests remain for later work; the following describes that retained implementation, which is currently unreachable from the app.
+
+The retained onboarding uses a native live replay of the same portable fixture timeline as the web intro (`shared/onboardingReplay.ts`). Real mobile chat turns, Markdown replies, agent avatars, confirmation cards and composer controls render at the current text size and theme; no desktop image is scaled into a phone. The replay fills the measured readable column, bounded at 100% with no intrinsic image width. Its transcript scrolls within min(380pt, 44% of the current window height), keeping the header and preview composer visible on phone, iPad and split windows. Native text reflows at its actual size instead of inheriting a recording aspect ratio. Timelines loop after a 3.5s pause, stop in the background and on unmount, and show the finished scene under Reduce Motion. No native dependency or WebView is added. The three obsolete GIFs are removed (user decision 2026-11-06).
+
+The first-run page sheet constrains its safe-area host and scroll content to the actual sheet width, with a centered 680pt maximum readable column. “Not now” is deliberately aligned at the top-right in that same column, separate from the scrolling footer. Progress uses five equal 4pt-high segments with 6pt gaps across the column, clearly marks the selected step in primary ink, and retains labelled tab semantics. A 20pt hit extension above and below supplies 44pt targets without introducing visual gaps. Content scrolls vertically at large text sizes; the replay and sheet never expand horizontally (user decision 2026-11-06, U8/U9).
 
 The native Machines drawer supports personal machines and organization machines
 the signed-in person administers. It includes inventory, read-only local

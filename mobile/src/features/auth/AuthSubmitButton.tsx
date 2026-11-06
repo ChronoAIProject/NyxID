@@ -27,9 +27,12 @@ export function AuthSubmitButton({
 }) {
   const { colors, mode } = useAuthTheme();
   const blocked = disabled || loading;
-  const dimmed = disabled && !loading;
-  const foreground =
-    dimmed && mode === "light" ? colors.textPrimary : colors.onPrimary;
+  const idle = disabled && !loading;
+  // Light mode keeps idle submits at full primary so white labels stay AA
+  // (a half-opacity gradient over white measured ~2:1); idle reads as inactive
+  // through the missing glow and press feedback. Dark mode dims the gradient.
+  const dimmed = idle && mode === "dark";
+  const foreground = colors.onPrimary;
   return (
     <Pressable
       accessibilityRole="button"
@@ -42,7 +45,7 @@ export function AuthSubmitButton({
         {
           backgroundColor: colors.bg,
           shadowColor: colors.primary,
-          shadowOpacity: dimmed ? 0 : 0.3,
+          shadowOpacity: idle ? 0 : 0.3,
         },
         style,
         pressed && !blocked && styles.pressed,
@@ -66,7 +69,7 @@ export function AuthSubmitButton({
             style={[
               StyleSheet.absoluteFillObject,
               styles.edge,
-              { borderColor: dimmed ? colors.primary : "transparent" },
+              { borderColor: idle ? colors.primary : "transparent" },
             ]}
           />
           <View style={styles.content}>
