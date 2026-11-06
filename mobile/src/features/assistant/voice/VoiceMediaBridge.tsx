@@ -105,6 +105,18 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
         "loopback_sender_ice",
         "loopback_receiver_ice",
         "loopback_receiver_track",
+        "input_track",
+        "input_source",
+        "openai_peer",
+        "openai_ice",
+        "openai_datachannel",
+        "openai_context",
+        "openai_play",
+        "openai_playback",
+        "openai_stats",
+        "openai_rtp_outbound",
+        "openai_rtp_inbound",
+        "openai_audio_source",
       ]);
       const names = new Set([
         "pending",
@@ -128,6 +140,13 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
         "completed",
         "failed",
         "closed",
+        "open",
+        "closing",
+        "running",
+        "suspended",
+        "interrupted",
+        "unavailable",
+        "ended",
       ]);
       if (
         typeof event.stage === "string" &&
@@ -151,19 +170,67 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
           "opaque_location_origin",
           "document_visible",
         ];
+        const metricLimits: Record<
+          string,
+          { max: number; fractional?: boolean }
+        > = {
+          audio_tracks: { max: 16 },
+          enabled_tracks: { max: 16 },
+          live_tracks: { max: 16 },
+          muted_tracks: { max: 16 },
+          input_requested: { max: 1 },
+          mock_capture: { max: 1 },
+          audio_reports: { max: 16 },
+          sample: { max: 1_000_000 },
+          bytes: { max: Number.MAX_SAFE_INTEGER },
+          packets: { max: Number.MAX_SAFE_INTEGER },
+          total_audio_energy: { max: 1e9, fractional: true },
+          total_samples_duration: { max: 1e9, fractional: true },
+          audio_level: { max: 1, fractional: true },
+          paused: { max: 1 },
+          muted: { max: 1 },
+          volume: { max: 1, fractional: true },
+          ready_state: { max: 4 },
+          current_time_ms: { max: 1_830_000 },
+        };
         if (event.counts && typeof event.counts === "object") {
           for (const [key, value] of Object.entries(event.counts)) {
+            const limit: { max: number; fractional?: boolean } | undefined =
+              allowedCounts.includes(key)
+                ? { max: 256 }
+                : Object.prototype.hasOwnProperty.call(metricLimits, key)
+                  ? metricLimits[key]
+                  : undefined;
             if (
-              allowedCounts.includes(key) &&
-              Number.isSafeInteger(value) &&
-              (value as number) >= 0 &&
-              (value as number) <= 256
+              limit &&
+              typeof value === "number" &&
+              Number.isFinite(value) &&
+              value >= 0 &&
+              value <= limit.max &&
+              (limit.fractional || Number.isSafeInteger(value))
             )
-              counts[key] = value as number;
+              counts[key] = value;
           }
         }
+        // Low-frequency snapshots retain their latest value without evicting
+        // startup/playback failures merely because a call remains connected.
+        const snapshots = new Set([
+          "input_track",
+          "openai_peer",
+          "openai_ice",
+          "openai_datachannel",
+          "openai_context",
+          "openai_playback",
+          "openai_stats",
+          "openai_rtp_outbound",
+          "openai_rtp_inbound",
+          "openai_audio_source",
+        ]);
+        const previous = snapshots.has(event.stage)
+          ? this.diagnostics.filter((row) => row.stage !== event.stage)
+          : this.diagnostics;
         this.diagnostics = [
-          ...this.diagnostics.slice(-31),
+          ...previous.slice(-31),
           {
             stage: event.stage,
             name: event.name,
@@ -181,6 +248,8 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
       else request.resolve(event.result);
     } else if (event.type === "provider-ready") {
       this.emit({ type: "provider-ready" });
+    } else if (event.type === "playback-blocked") {
+      this.emit({ type: "playback-blocked" });
     } else if (event.type === "pcm") {
       try {
         if (
@@ -228,6 +297,8 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
         "Voice playback could not be verified.",
         "WebRTC negotiation failed.",
         "Voice ended when the app left the foreground.",
+        "Microphone access ended. Start a new call when it is available.",
+        "The iOS Simulator uses a test microphone. Use a physical device to test voice calls.",
       ]);
       this.unavailable(
         typeof event.message === "string" && allowed.has(event.message)

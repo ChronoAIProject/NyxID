@@ -1,5 +1,12 @@
 # iPad adaptation validation report
 
+**Latest voice status — 2026-11-06:** Marin startup is not a successful spoken
+conversation. The production call received the provider's idle-warning audio
+and assistant caption but no user transcript. WebKit enables mock capture on
+iOS Simulator; the media bridge now rejects its four known test microphones
+before preparing a provider session. Real-device speech recognition, audible
+reply, interruption and PTT remain unaccepted. See the final follow-up below.
+
 Date: 2026-11-05. Related issue: #2226. Pull request: #2233.
 
 This report records the implemented iPad behavior and the evidence available for this revision. The full App was exercised on an iPad Pro13-inch (M5) Simulator running iOS26.3 using a signed universal Debug build and an isolated QA account/backend. The App loaded its complete `mobile/index.ts` entry point. Earlier component fixtures are recorded separately and do not replace full-App validation.
@@ -188,6 +195,81 @@ functional diff preserves the existing layout instead of reformatting the
 whole component. No reliable affected mobile typecheck exists; full frontend
 suite/typecheck/build is delegated to GitHub CI. The earlier green CI result at
 `99d023c6c` predates this voice follow-up and does not verify these changes.
+
+## Reopened voice input investigation — 2026-11-06
+
+The user's next attempt still produced no spoken conversation. Reproduction
+used the complete signed native App, production authentication, the same Marin
+source and hands-free mode. Safe diagnostics showed one enabled/live/unmuted
+input track, connected ICE/peer, an open provider data channel, a running audio
+context and accepted playback. Outbound RTP grew from37,480 to167,422 bytes
+between samples9 and26. Inbound packets also advanced, but their audio energy
+remained near zero and no user caption was persisted. These counters establish
+transport activity only, not intelligible microphone input.
+
+The media-source audio level repeatedly equalled0.1000091555528428. Official
+WebKit source provides a concrete explanation to test:
+
+- [Mock capture defaults on for iOS Simulator](https://github.com/WebKit/WebKit/blob/febeda30215e0030c6279cc8a6fdbddd81ec8d31/Source/WTF/Scripts/Preferences/UnifiedWebPreferences.yaml#L4344-L4357).
+- [The four built-in test microphone names](https://github.com/WebKit/WebKit/blob/febeda30215e0030c6279cc8a6fdbddd81ec8d31/Source/WebCore/platform/mock/MockRealtimeMediaSourceCenter.cpp#L64-L70)
+  are `Mock audio device 1` through `Mock audio device 4`.
+- [The Cocoa test capture implementation](https://github.com/WebKit/WebKit/blob/febeda30215e0030c6279cc8a6fdbddd81ec8d31/Source/WebCore/platform/mediastream/cocoa/MockAudioCaptureUnit.mm#L66-L82)
+  generates a0.1-amplitude150Hz hum and periodic tones rather than the person's
+  microphone input.
+
+At the end of the reproduction, the provider generated its Chinese idle
+warning, the App persisted one assistant caption, output level reached0.86
+and decoded inbound energy increased to0.253989. The call quiet-ended at3:02.
+This proves that assistant speech media and text can return; physical speaker
+audibility and a response to an actual user utterance were not established.
+
+The follow-up changes:
+
+- Match only those four exact mock microphone names after capture, emit a
+  bounded `mock_capture` boolean, stop all acquired tracks and refuse the
+  offer/session. No raw device label or identifier enters diagnostics. The
+  fixed user message explains that Simulator has a test microphone and asks
+  for a physical device. A non-match does not certify real microphone input.
+- Keep the App connecting until provider-ready, authoritative active controls
+  and the open control socket all agree. Mute/PTT state does not prevent the
+  connection from becoming ready.
+- Report playback rejection as a recoverable Resume-audio prompt. A retry can
+  restore playback without terminating the call or misreporting microphone
+  permission. An ended microphone track terminates and cleans up media.
+- Add bounded track/state/RTP diagnostics with generation fencing and a
+  non-overlapping two-second sampler. Missing statistics remain unknown;
+  cumulative packet counters do not by themselves prove speech.
+
+No physical iPad or iPhone was connected in the device inventory. This change
+does not replace a real microphone with a fabricated utterance or claim
+real-device voice acceptance. Full iPad acceptance gaps recorded above remain
+open. The transient authenticated503/code12900 observed earlier recovered
+before the RTP call and is tracked separately from this capture limitation.
+
+After cold-loading the final source, Start in the original production chat
+returned `input_source: ready, mock_capture: 1`. The full App visibly displayed
+`Unable to start` and the exact Simulator/physical-device message. A temporary
+development observer counted **zero calls to the voice-session creation API**;
+the client closed locally. This confirms the known mock source in the current
+runtime and the guard's actual UI/creation boundary. No new call receipt or
+provider session was created by this attempt.
+
+Focused checks from `mobile/`:
+
+```sh
+pnpm exec tsx --test src/features/assistant/voice/AssistantVoiceClient.test.ts src/features/assistant/voice/useNativeVoice.test.ts
+# 115 passed, 0 failed
+pnpm exec tsx --test src/features/assistant/voice/voiceMediaDocument.test.ts
+# 35 passed, 0 failed
+../frontend/node_modules/.bin/prettier --check src/features/assistant/voice/AssistantVoiceClient.ts src/features/assistant/voice/AssistantVoiceClient.test.ts src/features/assistant/voice/useNativeVoice.ts src/features/assistant/voice/useNativeVoice.test.ts src/features/assistant/voice/VoiceMediaBridge.tsx src/features/assistant/voice/voiceMediaDocument.ts src/features/assistant/voice/voiceMediaDocument.test.ts
+```
+
+The150 focused tests cover readiness ordering, late/obsolete callbacks,
+playback failure and recovery, input-track termination, known mock capture,
+no provider creation on local failure, bounded diagnostics and stale RTP
+sampling cleanup. No reliable affected typecheck is available. Full frontend
+suite/typecheck/build is delegated to GitHub CI; no result for this new
+revision is claimed.
 
 The backend's targeted test command was attempted from the repository root:
 

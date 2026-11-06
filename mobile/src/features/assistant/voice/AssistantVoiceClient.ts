@@ -22,6 +22,7 @@ import {
 
 export type VoiceMediaEvent =
   | { type: "provider-ready" }
+  | { type: "playback-blocked" }
   | { type: "pcm"; bytes: ArrayBuffer }
   /** Mic and playback loudness, 0..1, about 20 Hz while either changes. */
   | { type: "level"; input: number; output: number }
@@ -87,6 +88,8 @@ export interface AssistantVoiceClientOptions {
   api: AssistantVoiceApi;
   createSocket(path: string, signal: AbortSignal): Promise<VoiceControlSocket>;
   onSnapshot(snapshot: VoiceSnapshot): void;
+  /** Provider and authoritative controls are ready, independently of mic mode. */
+  onReady?(): void;
   onError(message: string, recovery?: VoiceStartRecovery): void;
   onClosed?(): void;
   onConflict?(session: VoiceSession | null): void;
@@ -103,6 +106,9 @@ const defaultClock: VoiceClientClock = {
     clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
+const simulatorMicrophoneMessage =
+  "The iOS Simulator uses a test microphone. Use a physical device to test voice calls.";
+
 /** One explicit call attempt. It never retries a POST or silently restarts audio. */
 export class AssistantVoiceClient {
   private readonly abort = new AbortController();
@@ -113,6 +119,7 @@ export class AssistantVoiceClient {
   private attempted = false;
   private started = false;
   private ready = false;
+  private readyNotified = false;
   private held = false;
   private inputEnabled = false;
   private speakerMuted = false;
@@ -224,7 +231,11 @@ export class AssistantVoiceClient {
         this.fail(
           conflict
             ? "Another voice call is active. End it before starting a new call."
-            : voiceStartError(error, step),
+            : step === "microphone" &&
+                error instanceof Error &&
+                error.message === simulatorMicrophoneMessage
+              ? simulatorMicrophoneMessage
+              : voiceStartError(error, step),
           conflict ? undefined : voiceStartRecovery(error, step),
         );
       }
@@ -254,6 +265,11 @@ export class AssistantVoiceClient {
     }
     this.socket = socket;
     socket.binaryType = "arraybuffer";
+    socket.onopen = () => {
+      if (this.closed || this.socket !== socket) return;
+      this.updateInput();
+      this.notifyReady();
+    };
     socket.onmessage = ({ data }) => {
       if (this.closed || this.socket !== socket) return;
       this.onMessage(data);
@@ -275,13 +291,16 @@ export class AssistantVoiceClient {
     if (this.closed) return;
     if (event.type === "provider-ready") {
       this.started = true;
-      if (this.ready && this.session?.state === "active")
-        this.clearReadinessTimeout();
       this.updateInput();
+      this.notifyReady();
+    } else if (event.type === "playback-blocked") {
+      this.options.onError("Tap Resume audio to hear the assistant.");
     } else if (event.type === "error") {
       // Media exception strings may include device/provider details. Keep UI bounded.
       this.fail(
-        "Voice media stopped. Check microphone permission and start a new call.",
+        event.message === simulatorMicrophoneMessage
+          ? simulatorMicrophoneMessage
+          : "Voice media stopped. Check microphone permission and start a new call.",
       );
     } else if (
       event.type === "pcm" &&
@@ -385,10 +404,9 @@ export class AssistantVoiceClient {
         this.releaseHeldInput();
       this.session = snapshot.session;
       this.ready = true;
-      if (this.started && snapshot.session.state === "active")
-        this.clearReadinessTimeout();
       this.updateInput();
       this.options.onSnapshot(snapshot);
+      this.notifyReady();
       if (
         snapshot.session.state === "closed" ||
         snapshot.session.state === "failed"
@@ -412,6 +430,22 @@ export class AssistantVoiceClient {
       session.muted ||
       session.input_muted
     );
+  }
+
+  private notifyReady() {
+    if (
+      this.closed ||
+      this.readyNotified ||
+      !this.started ||
+      !this.ready ||
+      this.session?.state !== "active" ||
+      this.session.end_requested ||
+      this.socket?.readyState !== 1
+    )
+      return;
+    this.readyNotified = true;
+    this.clearReadinessTimeout();
+    this.options.onReady?.();
   }
 
   /** Revoked input permission cannot keep a previous physical press latched. */
@@ -638,6 +672,7 @@ export class AssistantVoiceClient {
     this.options.media.setInput(false);
     this.options.media.close();
     if (this.socket) {
+      this.socket.onopen = null;
       this.socket.onmessage = null;
       this.socket.onclose = null;
       this.socket.onerror = null;

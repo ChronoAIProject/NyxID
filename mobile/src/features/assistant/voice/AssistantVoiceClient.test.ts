@@ -127,6 +127,7 @@ class Socket implements VoiceControlSocket {
   readyState = 1;
   bufferedAmount = 0;
   binaryType = "";
+  onopen: VoiceControlSocket["onopen"] = null;
   onmessage: VoiceControlSocket["onmessage"] = null;
   onclose: VoiceControlSocket["onclose"] = null;
   onerror: VoiceControlSocket["onerror"] = null;
@@ -204,6 +205,7 @@ function setup() {
   const snapshots: VoiceSnapshot[] = [];
   const paths: string[] = [];
   let closed = 0;
+  let ready = 0;
   let activeCalls = 0;
   let nextId = 0;
   const responses = {
@@ -245,6 +247,9 @@ function setup() {
       return responses.socket();
     },
     onSnapshot: (value) => snapshots.push(value),
+    onReady: () => {
+      ready++;
+    },
     onError: (value, recovery) => {
       errors.push(value);
       recoveries.push(recovery);
@@ -287,7 +292,7 @@ function setup() {
     responses,
     snapshot,
     open,
-    count: () => ({ closed, activeCalls }),
+    count: () => ({ closed, ready, activeCalls }),
   };
 }
 
@@ -327,6 +332,101 @@ test("automatic mode starts only when provider, authoritative session and input 
   assert.equal(e.media.input, false);
   await e.client.end();
 });
+
+for (const order of ["provider-first", "snapshot-first"] as const) {
+  test(`connected readiness waits for both signals with ${order} delivery`, async () => {
+    const e = setup();
+    await e.client.start(preferences);
+    if (order === "provider-first") e.media.emit({ type: "provider-ready" });
+    else e.snapshot();
+    assert.equal(e.count().ready, 0);
+    assert.equal(e.clock.timeouts.size, 1);
+    if (order === "provider-first") e.snapshot();
+    else e.media.emit({ type: "provider-ready" });
+    assert.equal(e.count().ready, 1);
+    assert.equal(e.clock.timeouts.size, 0);
+    assert.equal(e.media.input, false, "PTT need not be held to be connected");
+    e.snapshot();
+    e.media.emit({ type: "provider-ready" });
+    assert.equal(e.count().ready, 1);
+    await e.client.end();
+  });
+}
+
+test("provider readiness before control socket creation is retained until an active snapshot", async () => {
+  const e = setup();
+  e.responses.socket = async () => {
+    e.media.emit({ type: "provider-ready" });
+    return e.socket;
+  };
+  await e.client.start(preferences);
+  assert.equal(e.count().ready, 0);
+  e.snapshot({ state: "starting" });
+  assert.equal(e.count().ready, 0);
+  e.snapshot();
+  assert.equal(e.count().ready, 1);
+  assert.equal(e.clock.timeouts.size, 0);
+  await e.client.end();
+});
+
+test("readiness and its timeout also wait for the control socket to be open", async () => {
+  const e = setup();
+  e.socket.readyState = 0;
+  await e.client.start({ ...preferences, input_mode: "automatic" });
+  e.media.emit({ type: "provider-ready" });
+  e.snapshot();
+  assert.equal(e.count().ready, 0);
+  assert.equal(e.media.input, false);
+  assert.equal(e.clock.timeouts.size, 1);
+  e.socket.readyState = 1;
+  e.socket.onopen!();
+  assert.equal(e.count().ready, 1);
+  assert.equal(e.media.input, true);
+  assert.equal(e.clock.timeouts.size, 0);
+  await e.client.end();
+});
+
+test("muted input is independent of connected readiness", async () => {
+  for (const changes of [{ muted: true }, { input_muted: true }]) {
+    const e = setup();
+    await e.client.start({ ...preferences, input_mode: "automatic" });
+    e.media.emit({ type: "provider-ready" });
+    e.snapshot(changes);
+    assert.equal(e.count().ready, 1);
+    assert.equal(e.media.input, false);
+    assert.equal(e.clock.timeouts.size, 0);
+    await e.client.end();
+  }
+});
+
+for (const reason of ["timeout", "close"] as const) {
+  test(`late media, snapshot and socket callbacks cannot report readiness after ${reason}`, async () => {
+    const e = setup();
+    await e.client.start(preferences);
+    const lateMedia = [...e.media.listeners][0]!;
+    const lateSnapshot = e.socket.onmessage!;
+    const lateOpen = e.socket.onopen!;
+    e.snapshot();
+    if (reason === "timeout") e.clock.expire();
+    else e.socket.onclose!();
+    lateMedia({ type: "provider-ready" });
+    e.socket.readyState = 1;
+    lateOpen();
+    lateSnapshot({
+      data: JSON.stringify({
+        type: "snapshot",
+        session: session(),
+        captions: [],
+        tasks: [],
+      }),
+    });
+    assert.equal(e.client.isClosed, true);
+    assert.equal(e.count().ready, 0);
+    assert.equal(e.media.inputs.includes(true), false);
+    assert.equal(e.clock.timeouts.size, 0);
+    assert.equal(e.socket.onopen, null);
+  });
+}
 
 test("Grok PTT begins before PCM and release commits once while restoring output", async () => {
   const e = setup();
@@ -402,6 +502,72 @@ test("a denied microphone is diagnosed before any server session is created", as
   assert.deepEqual(e.errors, ["Microphone permission was denied"]);
   assert.equal(e.starts.length, 0);
   assert.equal(e.count().activeCalls, 0);
+});
+
+for (const first of ["media event", "prepare rejection"] as const) {
+  test(`the simulator microphone stops preparation once when ${first} arrives first`, async () => {
+    const message =
+      "The iOS Simulator uses a test microphone. Use a physical device to test voice calls.";
+    const e = setup();
+    const waiting = deferred<string>();
+    e.media.prepareResult = waiting.promise;
+    const lateMedia = [...e.media.listeners][0]!;
+    const starting = e.client.start(preferences);
+    if (first === "media event") e.media.emit({ type: "error", message });
+    waiting.reject(new Error(message));
+    await starting;
+    lateMedia({ type: "error", message });
+    lateMedia({ type: "provider-ready" });
+    await e.client.start(preferences);
+
+    assert.deepEqual(e.errors, [message]);
+    assert.deepEqual(e.recoveries, [undefined]);
+    assert.deepEqual(e.starts, []);
+    assert.deepEqual(e.controls, []);
+    assert.deepEqual(e.paths, []);
+    assert.deepEqual(e.snapshots, []);
+    assert.deepEqual(e.conflicts, []);
+    assert.deepEqual(e.count(), { closed: 1, ready: 0, activeCalls: 0 });
+    assert.equal(
+      e.media.inputs.every((enabled) => !enabled),
+      true,
+    );
+    assert.equal(e.client.isClosed, true);
+  });
+}
+
+test("simulator diagnostics allow only the exact fixed message without exposing appended device details", async () => {
+  const message =
+    "The iOS Simulator uses a test microphone. Use a physical device to test voice calls.";
+  for (const detail of [
+    `${message} private microphone identifier`,
+    `private microphone identifier ${message}`,
+    message.slice(0, -1),
+  ]) {
+    const rejected = setup();
+    rejected.media.prepareResult = Promise.reject(new Error(detail));
+    await rejected.client.start(preferences);
+    assert.deepEqual(rejected.errors, ["Microphone could not be opened"]);
+    assert.deepEqual(rejected.starts, []);
+
+    const event = setup();
+    const waiting = deferred<string>();
+    event.media.prepareResult = waiting.promise;
+    const starting = event.client.start(preferences);
+    event.media.emit({ type: "error", message: detail });
+    waiting.reject(new Error(detail));
+    await starting;
+    assert.deepEqual(event.errors, [
+      "Voice media stopped. Check microphone permission and start a new call.",
+    ]);
+    assert.deepEqual(event.starts, []);
+  }
+
+  const object = setup();
+  object.media.prepareResult = Promise.reject({ message });
+  await object.client.start(preferences);
+  assert.deepEqual(object.errors, ["Microphone could not be opened"]);
+  assert.deepEqual(object.starts, []);
 });
 
 test("HTTP startup rejection reports safe provider diagnostics without retrying creation", async () => {
@@ -922,6 +1088,31 @@ test("speaker mute and audio resume remain local and never send server mute or t
   assert.deepEqual(e.controls, []);
   assert.deepEqual(e.cancels, []);
   await e.client.end();
+});
+
+test("blocked playback offers local resume without ending or recreating the connected call", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  const lateMedia = [...e.media.listeners][0]!;
+  e.media.emit({ type: "playback-blocked" });
+  assert.deepEqual(e.errors, ["Tap Resume audio to hear the assistant."]);
+  assert.equal(e.client.isClosed, false);
+  assert.equal(e.media.input, true);
+  assert.equal(e.count().ready, 1);
+  e.media.resumeResult = Promise.reject(new Error("private device detail"));
+  await e.client.resumeAudio();
+  assert.equal(e.errors.at(-1), "Tap Resume audio to hear the assistant.");
+  assert.equal(e.client.isClosed, false);
+  e.media.resumeResult = Promise.resolve();
+  await e.client.resumeAudio();
+  assert.equal(e.media.resumed, 2);
+  assert.equal(e.starts.length, 1);
+  assert.deepEqual(e.controls, []);
+  assert.deepEqual(e.cancels, []);
+  await e.client.end();
+  const errorCount = e.errors.length;
+  lateMedia({ type: "playback-blocked" });
+  assert.equal(e.errors.length, errorCount);
 });
 
 test("malformed state and media errors are sanitized and fail closed", async () => {
