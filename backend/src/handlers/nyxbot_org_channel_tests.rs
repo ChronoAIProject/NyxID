@@ -940,3 +940,6 @@ async fn org_channel_signed_relay_uses_verified_actor_and_deduplicates() {
     server.abort();
     state.db.drop().await.unwrap();
 }
+
+#[path = "nyxbot_org_access_tests.rs"]
+mod access_tests;

@@ -121,6 +121,12 @@ export function AssistantEngineSidebar({
   const agentsModel: SidebarAgents | undefined = nyxagentEnabled
     ? {
         agents: agents.data?.agents ?? [],
+        destroyedTruncated: agents.data?.destroyed_truncated,
+        loading: agents.isPending || agents.isFetching,
+        loadError: agents.error
+          ? (agents.data ? "Could not refresh agents." : "Could not load agents.")
+          : undefined,
+        onRetry: () => { void agents.refetch(); },
         selectedAgentId: selectedAgent?.id,
         threads: nyx.conversations,
         threadsLoading: Boolean(selectedAgent) && !nyx.threadsLoaded,
@@ -155,9 +161,7 @@ export function AssistantEngineSidebar({
       : `Could not load ${what}. ${error.message}`;
   const loadError = !online
     ? undefined
-    : agents.error
-      ? loadFailure("agents", agents.error)
-      : groups.error
+    : groups.error
         ? loadFailure("crews", groups.error)
         : undefined;
 

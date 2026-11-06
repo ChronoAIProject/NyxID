@@ -547,6 +547,7 @@ export type AssistantAgent = z.infer<typeof assistantAgentSchema>;
 
 export const assistantAgentListSchema = z.object({
   agents: z.array(assistantAgentSchema),
+  destroyed_truncated: z.boolean().optional(),
   limits: nyxAgentSettingsSchema,
 });
 export type AssistantAgentList = z.infer<typeof assistantAgentListSchema>;
