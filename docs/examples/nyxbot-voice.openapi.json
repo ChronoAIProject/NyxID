@@ -283,7 +283,7 @@
     },
     "/voice/sessions/{sid}/announcements": {
       "post": {
-        "summary": "Queue a spoken notification in an active owned call; never admits user work",
+        "summary": "Queue a spoken notification or a natural Bot greeting in an active owned call; never admits user work",
         "operationId": "nyxbot_voice_announce",
         "parameters": [
           {
@@ -304,8 +304,7 @@
                 "type": "object",
                 "additionalProperties": false,
                 "required": [
-                  "request_id",
-                  "text"
+                  "request_id"
                 ],
                 "properties": {
                   "request_id": {
@@ -315,8 +314,27 @@
                   "text": {
                     "type": "string",
                     "maxLength": 300
+                  },
+                  "greeting": {
+                    "type": "boolean",
+                    "enum": [
+                      true
+                    ],
+                    "description": "Generate a brief greeting from the selected Bot identity, persona and call language. Do not provide text."
                   }
-                }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "text"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "greeting"
+                    ]
+                  }
+                ]
               }
             }
           }

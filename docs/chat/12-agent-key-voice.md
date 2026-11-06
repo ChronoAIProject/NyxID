@@ -58,7 +58,7 @@ The following paths are relative to that service URL:
 | GET | `/voice/sessions/{sid}` | Exact caller's call state |
 | POST | `/voice/sessions/{sid}/control` | Existing revision/command controls |
 | GET | `/voice/sessions/{sid}/stream` | Existing authenticated control WebSocket |
-| POST | `/voice/sessions/{sid}/announcements` | Bounded, idempotent speech notification |
+| POST | `/voice/sessions/{sid}/announcements` | Bounded, idempotent speech notification or generated Bot greeting |
 | GET | `/conversations/{id}/voice-sessions/active` | Active call for this Bot conversation |
 | GET | `/conversations/{id}/voice-requests/{rid}` | Existing task status |
 | POST | `/conversations/{id}/voice-requests/{rid}/cancel` | Explicit task Stop |
@@ -68,6 +68,22 @@ existing allowlist; devices may omit Origin. B1 operation-scoped Keys retain
 their existing WebSocket restriction. Bodies are limited to 128 KiB. Notices
 retain their existing 300-byte text bound and 30-second pending lifetime.
 Provider acknowledgement does not prove audible playback.
+
+The existing notification body remains `{"request_id":"UUID","text":"..."}`.
+For an optional call-opening greeting, use `{"request_id":"UUID","greeting":true}`
+without text. This is a server-authored call event: the selected Bot generates a
+brief greeting using the call's identity, persona and language, then listens.
+It is never a user utterance, tool request or permission. It uses the same queue,
+limits, request-ID deduplication and live exact-Key/service authorization;
+reusing an ID across notification and greeting content conflicts.
+Authorized Bot discovery advertises `greetings:true`. Upgrade API and Voice
+workers before enabling clients' generated greetings. Existing notification
+requests and stored rows retain their meaning; absent stored `greeting` means
+false. No browser greeting is enabled automatically.
+
+Voice startup uses the same bounded display-name/persona renderer as ordinary
+Bot conversations, alongside the existing role, language preference and recent
+thread context. Persona shapes style only and never changes tool authority.
 
 The service directly invokes the Voice application. It performs no HTTP request
 to itself, forwards no caller Bearer, and adds no outer proxy usage charge.

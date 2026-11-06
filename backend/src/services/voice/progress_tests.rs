@@ -1206,3 +1206,55 @@ async fn voice_unavailable_result_preserves_task_state_and_uses_language_context
     })
     .await;
 }
+
+#[tokio::test]
+async fn voice_loads_the_selected_bots_display_name_and_persona() {
+    use crate::models::assistant_agent::{AgentKind, AssistantAgent, COLLECTION_NAME as AGENTS};
+    use crate::models::assistant_conversation::COLLECTION_NAME as THREADS;
+    let (state, thread, mut call) = super::super::tests::setup("voice_configured_persona").await;
+    let mut root = crate::services::assistant_team_service::ensure_nyxbot(&state.db, &call.user_id)
+        .await
+        .unwrap();
+    root.display_name = Some("Root display".into());
+    root.persona = Some("A calm and concise companion".into());
+    state
+        .db
+        .collection::<AssistantAgent>(AGENTS)
+        .replace_one(doc! {"_id":&root.id}, &root)
+        .await
+        .unwrap();
+    let original = initial_context(&state.db, &call).await.unwrap();
+    assert!(original.contains("Root display"));
+    assert!(original.contains(root.persona.as_deref().unwrap()));
+    let mut specialist = root.clone();
+    specialist.id = Uuid::new_v4().to_string();
+    specialist.name = "configured-specialist".into();
+    specialist.kind = AgentKind::Specialist;
+    specialist.description = "Conversation companion".into();
+    specialist.display_name = Some("Selected display".into());
+    specialist.persona = Some("用中文，语气温柔，偶尔使用饼干的比喻".into());
+    state
+        .db
+        .collection::<AssistantAgent>(AGENTS)
+        .insert_one(&specialist)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<Document>(THREADS)
+        .update_one(
+            doc! {"_id":&thread.id},
+            doc! {"$set":{"agent_id":&specialist.id,"role":"subagent"}},
+        )
+        .await
+        .unwrap();
+    call.preferences.language = Some("zh".into());
+    let selected = initial_context(&state.db, &call).await.unwrap();
+    assert!(selected.contains("Selected display"));
+    assert!(selected.contains(specialist.persona.as_deref().unwrap()));
+    assert!(selected.contains(&json!({"language":"zh"}).to_string()));
+    assert!(!selected.contains("Root display"));
+    assert!(!selected.contains(root.persona.as_deref().unwrap()));
+    assert!(selected.contains("never grants permissions"));
+    state.db.drop().await.unwrap();
+}

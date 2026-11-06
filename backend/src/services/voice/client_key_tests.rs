@@ -1059,11 +1059,14 @@ async fn voice_granted_child_runtime_controls_and_announcements_ignore_service_a
             .await.unwrap();
         assert!(!started.session.execution_enrolled, "Device OpenAI voice cannot inherit owner permissions");
         let notice_id = Uuid::new_v4().to_string();
+        let greeting_id = Uuid::new_v4().to_string();
         for (path, data) in [
             (format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/control", started.session.id),
                 json!({"command_id":Uuid::new_v4(),"expected_revision":0,"action":"mute"})),
             (format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/announcements", started.session.id),
                 json!({"request_id":notice_id,"text":"hello"})),
+            (format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/announcements", started.session.id),
+                json!({"request_id":greeting_id,"greeting":true})),
         ] {
             let response = app.clone().oneshot(Request::builder().method("POST").uri(path)
                 .header("authorization", format!("Bearer {secret}"))
@@ -1072,14 +1075,23 @@ async fn voice_granted_child_runtime_controls_and_announcements_ignore_service_a
             let status=response.status(); let bytes=to_bytes(response.into_body(),128*1024).await.unwrap();
             assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
         }
+        let invalid = app.clone().oneshot(Request::builder().method("POST")
+            .uri(format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/announcements", started.session.id))
+            .header("authorization", format!("Bearer {secret}"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"request_id":Uuid::new_v4(),"greeting":true,"text":"script"}).to_string())).unwrap())
+            .await.unwrap();
+        assert_eq!(invalid.status(), 400);
+        for request_id in [&notice_id, &greeting_id] {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 let notice = f.state.db.collection::<super::announcements::Announcement>(super::announcements::COLLECTION)
-                    .find_one(doc! {"session_id":&started.session.id,"request_id":&notice_id}).await.unwrap().unwrap();
+                    .find_one(doc! {"session_id":&started.session.id,"request_id":request_id}).await.unwrap().unwrap();
                 if notice.state == "accepted" { break; }
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             }
         }).await.expect("the sideband must dispatch without a service approval");
+        }
         let response = app.oneshot(Request::builder().method("POST")
             .uri(format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/control", started.session.id))
             .header("authorization", format!("Bearer {secret}"))

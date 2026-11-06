@@ -319,16 +319,10 @@ pub(super) async fn initial_context(
             .agent()
             .clone(),
         )
-    } else if let Some(agent_id) = &conversation.agent_id {
-        db.collection::<crate::models::assistant_agent::AssistantAgent>(
-            crate::models::assistant_agent::COLLECTION_NAME,
-        )
-        .find_one(doc! {"_id":agent_id,"user_id":&call.user_id})
-        .await?
     } else {
-        None
+        Some(super::super::assistant_team_service::agent_for_conversation(db, &conversation).await?)
     };
-    let identity = match conversation.role {
+    let mut identity = match conversation.role {
         crate::models::assistant_conversation::AgentRole::Orchestrator => {
             "You are NyxBot, the owner's chief of staff. NyxBot can use the owner's connected services, automations, machines and specialists through NyxID."
                 .to_string()
@@ -348,6 +342,9 @@ pub(super) async fn initial_context(
             )
         }
     };
+    if let Some(agent) = &agent {
+        super::super::assistant_nyxagent::append_profile(&mut identity, agent);
+    }
     let rows: Vec<AssistantMessage> = db
         .collection(MESSAGES)
         .find(doc! {"user_id":&call.user_id,"conversation_id":&call.conversation_id})
