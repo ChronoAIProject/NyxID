@@ -845,7 +845,21 @@ async fn target_in_session(
         .await
         {
             Ok(access) => access,
-            Err(AppError::Forbidden(_)) => return Ok(None),
+            Err(AppError::Forbidden(_)) => {
+                // Management keeps its flag-off 403. A saved delivery must use
+                // the transport classification before treating it as terminal.
+                if let Some(channel) = db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .find_one(doc! {"_id": &origin.nyxbot_channel_id, "status": "active"})
+                    .session(&mut *session)
+                    .await?
+                    && super::org_channel_service::transport_access(db, &channel).await?
+                        == super::org_channel_service::OrgAccess::Unavailable
+                {
+                    return Err(AppError::SecurityReadinessUnavailable);
+                }
+                return Ok(None);
+            }
             Err(e) => return Err(e),
         };
         if access.check_source_conversation(row).is_err() {

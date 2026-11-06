@@ -1153,7 +1153,7 @@ fn action_summary(name: &str, args: &Value) -> String {
         "disconnect_channel_bot" => "Disconnect a channel bot",
         "retry_channel_gateway" => "Retry native Discord gateway activation",
         "update_channel_chat" => "Change who may talk in a channel chat",
-        "update_channel_access" => "Change private chat access and posting defaults",
+        "update_channel_access" => "Change bot audience, guest access and posting defaults",
         "stop_following_thread" => "Stop following a channel thread",
         "machine_pair" => "Pair a machine",
         "remember" => "Save a memory note",
@@ -1186,6 +1186,26 @@ fn action_summary(name: &str, args: &Value) -> String {
         }
     }
     if name == "update_channel_access" {
+        if let Some(guests) = args["org_guests"].as_object() {
+            if let Some(enabled) = guests.get("enabled").and_then(Value::as_bool) {
+                details.push(format!(
+                    "organization guests {}",
+                    if enabled { "on" } else { "off" }
+                ));
+            }
+            if let Some(budget) = guests.get("daily_credits").and_then(Value::as_str) {
+                details.push(format!(
+                    "daily organization guest budget {} credits",
+                    crate::services::assistant_nyxagent::identifier(budget)
+                ));
+            }
+            if let Some(services) = guests.get("service_ids").and_then(Value::as_array) {
+                details.push(format!(
+                    "{} delegated organization services",
+                    services.len()
+                ));
+            }
+        }
         if let Some(posts) = args["private_chat_posts"].as_bool() {
             details.push(format!(
                 "new private chat posts {}",
@@ -2968,6 +2988,24 @@ async fn dispatch_channels(
                     owner,
                     text_arg(args, "chat_id"),
                     &settings,
+                ))
+                .await?,
+                false,
+            )
+        }
+        "update_channel_access" if args.get("org_guests").is_some() => {
+            if ["private_chats", "private_chat_posts", "apply_to_existing"]
+                .iter()
+                .any(|key| args.get(*key).is_some())
+            {
+                return Err(AppError::ValidationError("Change organization guest settings separately from posting or private-chat settings".into()));
+            }
+            (
+                Box::pin(super::org_specialist_channels::update_tool(
+                    state,
+                    owner,
+                    text_arg(args, "channel_agent_id"),
+                    &args["org_guests"],
                 ))
                 .await?,
                 false,

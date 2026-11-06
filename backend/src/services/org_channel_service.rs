@@ -33,8 +33,7 @@ pub(crate) fn denied() -> AppError {
 
 pub(crate) async fn enabled(db: &Database, admin: &str) -> AppResult<()> {
     if !super::feature_flag_service::personal_flag_enabled(db, admin, FLAG).await? {
-        // Rollout suspension is retryable, not a revocation of saved authority.
-        return Err(AppError::SecurityReadinessUnavailable);
+        return Err(denied());
     }
     super::security_readiness_service::require(db, FLAG).await
 }
@@ -241,6 +240,15 @@ pub(crate) fn sender_hash(channel: &str, sender: &str) -> String {
     crate::crypto::token::hash_token(&format!("org-channel-sender:{channel}:{sender}"))
 }
 
+pub(crate) fn sender_identity(channel: &NyxbotChannel, sender: &str) -> String {
+    let namespace = channel
+        .org_specialist
+        .as_ref()
+        .and_then(|binding| binding.guests.continuity_channel_id.as_deref())
+        .unwrap_or(&channel.id);
+    sender_hash(namespace, sender)
+}
+
 pub(crate) async fn sender(
     db: &Database,
     row: &NyxbotChannel,
@@ -249,7 +257,7 @@ pub(crate) async fn sender(
     agent_id: &str,
 ) -> AppResult<(Execution, bool)> {
     let binding = row.org_specialist.as_ref().ok_or_else(denied)?;
-    let hash = sender_hash(&row.id, sender);
+    let hash = sender_identity(row, sender);
     let link = db
         .collection::<SenderLink>(LINKS)
         .find_one(doc! {"channel_id":&row.id,"sender_hash":&hash})
@@ -273,7 +281,19 @@ pub(crate) async fn sender(
                 false,
             )
         }
-        None if binding.guests.enabled => (binding.org_id.clone(), None, None, false, true),
+        None if binding.guests.enabled => {
+            // Rebuilds require fresh verification, but a previously claimed or
+            // erased member identity must not become an organization-paid guest.
+            if db
+                .collection::<Document>(LINKS)
+                .find_one(doc! {"org_id":&binding.org_id,"sender_hash":&hash})
+                .await?
+                .is_some()
+            {
+                return Err(denied());
+            }
+            (binding.org_id.clone(), None, None, false, true)
+        }
         None => return Err(denied()),
     };
     Ok((
@@ -450,7 +470,7 @@ pub(crate) async fn validate_in_session(
         // A claimed member identity must never be converted into guest authority.
         if db
             .collection::<Document>(LINKS)
-            .find_one(doc! {"channel_id":&channel.id,"sender_hash":&execution.sender_hash})
+            .find_one(doc! {"org_id":&execution.org_id,"sender_hash":&execution.sender_hash})
             .session(&mut *session)
             .await?
             .is_some()
@@ -643,6 +663,13 @@ pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> 
             )
             .await?;
     }
+    db.collection::<Document>(LINKS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"org_id":1,"sender_hash":1})
+                .build(),
+        )
+        .await?;
     db.collection::<Document>(MESSAGES)
         .create_index(
             IndexModel::builder()
@@ -709,7 +736,10 @@ pub(crate) async fn transport_access(db: &Database, row: &NyxbotChannel) -> AppR
     }
     match enabled(db, &row.user_id).await {
         Ok(()) => Ok(OrgAccess::Holds),
-        Err(AppError::SecurityReadinessUnavailable) => Ok(OrgAccess::Unavailable),
+        // Flag-off refuses management with 403, but only suspends a saved transport.
+        Err(AppError::Forbidden(_) | AppError::SecurityReadinessUnavailable) => {
+            Ok(OrgAccess::Unavailable)
+        }
         Err(error) => Err(error),
     }
 }

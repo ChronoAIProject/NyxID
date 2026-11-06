@@ -137,6 +137,7 @@ impl Fixture {
             &self.org.admin,
             &self.channel,
             management::GuestSettings {
+                expected_revision: None,
                 enabled: true,
                 service_ids: ids,
                 daily_credits: Credits::from_whole(1),
@@ -432,6 +433,7 @@ async fn exact_guest_billing_lane_preserves_ordinary_platform_key_payers() {
             &f.org.admin,
             &f.channel,
             management::GuestSettings {
+                expected_revision: None,
                 enabled: true,
                 service_ids: vec![],
                 daily_credits: Credits::from_whole(1)
@@ -546,6 +548,7 @@ async fn guest_delegation_requires_admin_and_live_agent_policy_intersection() {
                 actor,
                 &f.channel,
                 management::GuestSettings {
+                    expected_revision: None,
                     enabled: true,
                     service_ids: vec![id.clone()],
                     daily_credits: Credits::from_whole(1)
@@ -753,6 +756,7 @@ async fn guest_budget_reserves_fractional_tax_upward_at_the_exact_cap() {
             &f.org.admin,
             &f.channel,
             management::GuestSettings {
+                expected_revision: None,
                 enabled: true,
                 service_ids: vec![],
                 daily_credits: Credits::from_pico(cap).unwrap(),
@@ -1266,6 +1270,7 @@ async fn org_channel_rotated_guest_key_keeps_typed_lane_and_is_revoked_with_expo
         &f.org.admin,
         &f.channel,
         management::GuestSettings {
+            expected_revision: None,
             enabled: false,
             service_ids: vec![],
             daily_credits: Credits::from_whole(1),
@@ -1705,6 +1710,7 @@ async fn narrowing_guest_exposure_stops_guest_and_setup_keys_but_preserves_membe
         &f.org.admin,
         &f.channel,
         management::GuestSettings {
+            expected_revision: None,
             enabled: false,
             service_ids: vec![],
             daily_credits: Credits::from_whole(1),
@@ -2181,3 +2187,6 @@ async fn org_access_2283_enabled_guest_does_not_revoke_transport_admin() {
     }
     f.org.state.db.drop().await.unwrap();
 }
+
+#[path = "guest_settings_tests.rs"]
+mod guest_settings;

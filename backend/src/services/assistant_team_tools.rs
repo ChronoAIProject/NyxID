@@ -475,6 +475,12 @@ pub fn schema(name: &str) -> Value {
         ),
         "update_channel_access" => (
             json!({"channel_agent_id": string(64),
+                "org_guests":{"type":"object","additionalProperties":false,
+                    "description":"Organization-specialist guest settings, admins only. Read guest_revision from list_channel_agents and pass it as expected_revision. Omitted budget/services keep their saved values; first enable defaults to one credit per UTC day. Enabling guests also admits private guest chats; groups retain their own permissions. Cannot be combined with private_chats or posting fields.",
+                    "properties":{"enabled":{"type":"boolean"},"daily_credits":string(64),
+                        "service_ids":{"type":"array","maxItems":100,"items":string(64)},
+                        "expected_revision":{"type":"string","maxLength":64}},
+                    "required":["expected_revision"]},
                 "private_chats": {"type": "string", "enum": ["owner", "everyone"],
                     "description": "Who may talk to the agent in private chats with the bot: \
                     only the user (owner), or anyone (everyone, each as a guest in their own \
@@ -880,7 +886,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             specialist when its members need a service."
         }
         "update_channel_access" => {
-            "Set who may talk to the agent in private chats with a channel bot: only the user \
+            "Change who can talk to a bot. For organization specialists, use org_guests with the current guest_revision from list_channel_agents: only organization admins may enable guests, set the daily organization-paid budget or delegate currently granted services. Verified members use their own permissions and billing. For personal bindings, guests use the owner's billing and the specialist's per-service guest access controls their services. Set who may talk in private chats: only the user \
             (default) or anyone, each in their own thread as a guest (no account actions and \
             nothing private to the user; NyxBot uses no tools for them). Also set private_chat_posts to allow new private customer chats to receive agent-initiated posts, optionally apply_to_existing. This does not open the audience or change group/channel/topic permissions."
         }

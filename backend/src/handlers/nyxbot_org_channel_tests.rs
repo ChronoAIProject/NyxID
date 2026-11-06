@@ -474,6 +474,7 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
         OWNER,
         &row,
         org::management::GuestSettings {
+            expected_revision: None,
             enabled: true,
             service_ids: vec![],
             daily_credits: Credits::from_whole(1),

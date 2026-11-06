@@ -346,6 +346,7 @@ fn gateway_create_refused(response: &GatewayResponse) -> bool {
 pub struct ChannelAgentResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     org_specialist: Option<serde_json::Value>,
+    guest_access_description: &'static str,
     guest_readiness: Option<crate::services::assistant_service_execution::GuestReadiness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gateway_source: Option<crate::models::nyxbot_channel::GatewaySource>,
@@ -396,7 +397,13 @@ impl From<&NyxbotChannel> for ChannelAgentResponse {
     fn from(row: &NyxbotChannel) -> Self {
         Self {
             org_specialist: row.org_specialist.as_ref().map(|b|json!({"org_id":b.org_id,"guest_enabled":b.guests.enabled,
-                "delegated_service_ids":b.guests.service_ids,"daily_credits":b.guests.daily_credits})),
+                "delegated_service_ids":b.guests.service_ids,"daily_credits":b.guests.daily_credits,
+                "guest_revision":b.guests.revision,"default_daily_credits":crate::services::org_channel_service::management::default_daily_credits().to_string()})),
+            guest_access_description: if row.org_specialist.is_some() {
+                crate::services::org_channel_service::management::ORG_GUEST_EXPLANATION
+            } else {
+                crate::services::org_channel_service::management::PERSONAL_GUEST_EXPLANATION
+            },
             guest_readiness: None,
             gateway_source: row.gateway_source.clone(),
             gateway_native_phase: row.gateway_native_phase.clone(),
@@ -870,6 +877,10 @@ async fn connect_inner(
                         &inserted.user_id,
                     )
                     .await?;
+                    crate::services::org_channel_service::management::restore_in_session(
+                        &db, session, &inserted,
+                    )
+                    .await?;
                 }
                 Ok(())
             }
@@ -885,6 +896,11 @@ async fn connect_inner(
         }
         return Err(error);
     }
+    let row = if org_binding.is_some() {
+        load_channel(state, owner, &id).await?
+    } else {
+        row
+    };
     let mut outcome = if gateway {
         connect_gateway(
             state,
@@ -2063,7 +2079,7 @@ pub async fn list(state: &AppState, owner: &str) -> AppResult<Vec<NyxbotChannel>
 fn link_json(row: &NyxbotChannel, link: &LinkInstructions) -> Value {
     if row.org_specialist.is_some() {
         return json!({"code":"","url":null,"expires_at":link.expires_at,
-            "instructions":"Each organization member must open this bot in NyxID, request their own verification code, send it in a private chat with the bot, then confirm that account in their own NyxID session. Guests are off until an organization admin enables a budget."});
+            "instructions":"Each organization member must open this bot in NyxID, request their own verification code, send it in a private chat with the bot, then confirm that account in their own NyxID session. Guest access and budget are shown in Who can talk to this bot; only organization admins can change them."});
     }
     json!({
         "code": link.code.as_str(),
