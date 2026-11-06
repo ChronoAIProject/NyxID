@@ -832,6 +832,11 @@ impl Runtime {
             gateway.disconnect().await;
         }
     }
+    pub fn negotiate_execution_approval(&self, enabled: bool) {
+        if let Some(gateway) = self.gateway.get() {
+            gateway.negotiate_execution_approval(enabled);
+        }
+    }
     pub async fn gateway_response(&self, id: &str, value: Value) {
         if let Some(gateway) = self.gateway.get() {
             gateway.response(id, value).await;

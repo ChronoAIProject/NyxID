@@ -248,6 +248,7 @@ async fn move_to_direct(state: &AppState, row: &NyxbotChannel) -> Result<(), &'s
     if row.gateway_source.is_some() {
         set.insert("gateway_native_activation", "relay_draining");
         set.insert("gateway_native_activation_detail", bson::Bson::Null);
+        set.insert("gateway_native_activation_operation", bson::Bson::Null);
     }
     let update = doc! {"$set": set,
     "$unset": {"agent_api_key_id": "", "agent_key_ciphertext": "", "gateway_channel_id": "",

@@ -889,7 +889,7 @@ async fn native_discord_follow_reuses_members_expiry_stop_and_other_mentions_imp
     upstream.abort();
 }
 
-async fn native_flag(state: &AppState, enabled: bool) {
+pub(super) async fn native_flag(state: &AppState, enabled: bool) {
     state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {
         "_id":Uuid::new_v4().to_string(),"org_user_id":bson::Bson::Null,
         "flag_key":"nyxbot:gateway-discord","target_kind":"user","target_key":OWNER,"enabled":enabled,
@@ -985,7 +985,11 @@ async fn native_enrollment_both_paths_gate_preparation_and_preserve_source_on_re
             None
         );
         let writes = calls.lock().await;
-        for (_, _, body) in writes.iter().filter(|c| c.0 == "POST" || c.0 == "PUT") {
+        for (_, _, body) in writes
+            .iter()
+            .filter(|c| (c.0 == "POST" || c.0 == "PUT") && !c.1.ends_with("/routing"))
+        {
+            assert!(body.get("routing").is_none());
             assert_eq!(body["sources"].as_array().unwrap().len(), 1);
             assert_eq!(body["sources"][0]["type"], "discord");
             assert_eq!(body["sources"][0]["bot_id"], "100");
@@ -1522,7 +1526,7 @@ async fn native_gateway_problem_code_is_bounded_persisted_surfaced_and_attempt_f
         status: 400,
         body: json!({"code":"discord.invalid_intents-v1", "detail":"private token https://private.example"}),
     };
-    record_gateway_rejection(&state, &row, "attempt", &response)
+    record_gateway_rejection(&state, &row, "attempt", &response, "create")
         .await
         .unwrap();
     let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
@@ -1553,6 +1557,7 @@ async fn native_gateway_problem_code_is_bounded_persisted_surfaced_and_attempt_f
             status: 400,
             body: json!({"code":"stale"}),
         },
+        "channel_update",
     )
     .await
     .unwrap();
@@ -1595,6 +1600,7 @@ async fn native_gateway_problem_code_is_bounded_persisted_surfaced_and_attempt_f
                 status: 400,
                 body: json!({"code":code,"detail":"private token"}),
             },
+            "create",
         )
         .await
         .unwrap();

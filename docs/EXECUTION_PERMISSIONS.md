@@ -539,8 +539,10 @@ B1 adds a v2 proposal envelope alongside unchanged assistant-chat v1 proposals.
 An enrolled personal API key can request a consolidated permission through the
 ordinary UUID/slug/selected-pool proxy or supported MCP HTTP operations, either
 standalone LLM gateway, native personal Google/Drive REST/MCP, an admitted async
-watch operation, or a human-origin voice task. Machine service HTTP remains on
-its legacy gap path until Part B2 and a negotiated node release. Device-key voice,
+watch operation, or a human-origin voice task. Assistant Machine service HTTP also participates when the node and server
+negotiated `machine_execution_approval_v1` and all replicas meet
+`permissions:execution-authoring-machine-v1` readiness. Old nodes keep their
+legacy gap path indefinitely. Device-key voice,
 delegated/OAuth-client/service-account principals, guests and live sessions are
 excluded. Enrollment uses #2246's effective person/org/global flag resolution:
 a process-local single-flag snapshot and already-loaded person hints select
@@ -645,6 +647,53 @@ on upgraded replicas before rollback. The existing `expires_at` TTL and
 persistent-grant sentinel are unchanged; there is no backfill or new environment
 variable.
 
+
+### Machine service HTTP proposals (Part B2)
+
+The original Assistant job's signed node/runtime, context revision and authority
+lease bind one bounded HTTP effect. Approval resumes only that service request;
+it never reruns the command, launches/restarts a job, renews a lease or lends the
+job creator's permission to an external Machine principal. Original actor/task,
+service declarations, machine ceilings, independent confirmations and org
+instruction receipts remain mandatory at dispatch. Lost job/source authority
+blocks both unsent work and result delivery.
+
+Connected waiting remains the default, capped by the original gateway's 120-second
+header deadline, the person's approval timeout, job/task and key expiry. Upload
+and preparation consume that window. If fewer than 15 seconds remain when a gap
+is found, NyxID returns the legacy `ApprovalFailed` timeout-shaped error with an
+absolute approval URL and writes no card or proposal. Disconnect/timeout while
+waiting makes the occurrence permanently unsent and undecidable. Approval returns
+the real provider response on the same connection. A failed final source or
+cancellation check before provider handoff records `not_sent`. A failure after
+handoff may be uncertain and is never replayed automatically.
+
+Only negotiated `X-NyxID-Approval-Mode: async` opts into background approval.
+`Prefer: respond-async` and `Idempotency-Key` retain their downstream meaning and
+never opt in by themselves. An async caller may use Idempotency-Key to join the
+same occurrence under the exact job/actor/runtime/lease/effect binding. Connected
+retries receive new occurrences. The NyxID mode header is not sent downstream.
+
+The local job gateway exposes `GET /_nyxid/approvals/{opaque_id}/status` after
+negotiation. The node signs every readback; only that live job/runtime/lease and
+original actor may retrieve the retained result. The handle is not bearer
+authority, polling never dispatches, and no assistant key is sent to the node.
+Readback stops when the job finishes, is cancelled or loses authority.
+
+Result delivery checks live authority once before headers and then at most once
+per second or per 1 MiB released, whichever comes first. The periodic check is an
+indexed aggregation, not a transaction per chunk. Local cancellation is immediate;
+already delivered bytes cannot be recalled. Legacy/non-B2 response delivery adds
+no database commands. Retained requests still have the 256 KiB envelope cap;
+raw, multipart, oversized, git and unrecoverable effects stay on legacy prompts.
+
+The server change is inert for nodes that do not advertise the capability. CLI
+support ships separately when the owner releases the node binary; no forced node
+upgrade or version bump accompanies server deployment. All API/worker readers
+must support the new closed Machine source/adapter variants before readiness
+allows authoring. Keep existing B1 sources available during that rollout. Before
+rolling back to B1-only binaries, drain/remove every Machine-variant proposal row,
+including terminal rows, since old typed readers cannot deserialize that variant.
 
 ## Legacy mapping and admission diagnostics (#2196a)
 

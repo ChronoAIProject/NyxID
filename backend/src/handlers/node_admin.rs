@@ -468,6 +468,7 @@ fn node_session_info(
                 credential_ack_correlation: owner.credential_ack_correlation,
                 credential_target_update_v1: owner.credential_target_update_v1,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
+                machine_execution_approval_v1: owner.machine_execution_approval_v1,
                 proxy_max_body_size: owner.proxy_max_body_size,
             },
         }
@@ -3173,6 +3174,7 @@ mod tests {
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
+                machine_execution_approval_v1: false,
                 ..NodeCapabilitiesMsg::default()
             },
         );
@@ -3580,6 +3582,7 @@ mod tests {
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
+                machine_execution_approval_v1: false,
                 ..NodeCapabilitiesMsg::default()
             },
         );
@@ -3863,6 +3866,7 @@ mod tests {
                             proxy_upload_v1: false,
                             http_cancellation: false,
                             remote_credential_crypto_v1: true,
+                            machine_execution_approval_v1: false,
                             ..NodeCapabilitiesMsg::default()
                         },
                     );
@@ -5828,6 +5832,7 @@ mod tests {
                 credential_ack_correlation: true,
                 credential_target_update_v1: false,
                 remote_credential_crypto_v1: true,
+                machine_execution_approval_v1: false,
                 proxy_max_body_size: Some(100 * 1024 * 1024),
             },
             capabilities_resolved: true,

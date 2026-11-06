@@ -71,6 +71,9 @@ pub struct NyxbotChannel {
     /// Bounded gateway problem code only; never upstream error prose.
     #[serde(default)]
     pub gateway_native_activation_detail: Option<String>,
+    /// Fixed management operation that failed; never an upstream path or body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_native_activation_operation: Option<String>,
     #[serde(default)]
     pub gateway_native_delivery: Option<String>,
     #[serde(default)]

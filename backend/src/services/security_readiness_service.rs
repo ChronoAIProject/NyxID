@@ -55,6 +55,7 @@ pub const CAPABILITIES: &[&str] = &[
     "permissions:execution-authoring-v1",
     super::execution_permission_enrollment::READINESS,
     "permissions:execution-authoring-v2",
+    super::execution_permission_dispatch::machine::READINESS,
     super::feature_flag_service::HOSTED_CONNECT_INTENT_FLAG_KEY,
     "approval:required-web-v1",
     // Older transport writers do not wait for relay sockets before remote setup.

@@ -27,7 +27,7 @@ fn audit_key() -> AppResult<&'static [u8]> {
     super::super::audit_service::audit_chain_hmac_key()
         .ok_or_else(|| AppError::Internal("Audit chain unavailable".into()))
 }
-fn fingerprint(value: &impl Serialize) -> AppResult<String> {
+pub(super) fn fingerprint(value: &impl Serialize) -> AppResult<String> {
     super::super::audit_service::keyed_fingerprint(
         Some(audit_key()?),
         b"execution-proposal-v1",

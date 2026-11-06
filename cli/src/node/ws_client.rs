@@ -989,6 +989,9 @@ async fn connect_and_serve(
         }) => response.map_err(|_| Error::AuthFailed("Timed out waiting for auth response".to_string()))??,
         _ = wait_for_shutdown(&mut shutdown) => return Ok(None),
     };
+    let machine_execution_approval = parsed["capabilities"]["machine_execution_approval_v1"]
+        .as_bool()
+        .unwrap_or(false);
     let (use_binary_proxy_chunks, server_heartbeat_interval_secs) = match parsed["type"].as_str() {
         Some("auth_ok") => {
             if let Some(binding) = &config.managed_runtime {
@@ -1141,6 +1144,10 @@ async fn connect_and_serve(
     // advertise the matching flag. Fire-and-forget — if the channel
     // is full we'll retry on the next status_update / reconnect.
     let mut capabilities = serde_json::Map::new();
+    capabilities.insert(
+        "machine_execution_approval_v1".into(),
+        machine_execution_approval.into(),
+    );
     capabilities.insert("http_signature_v2".to_string(), true.into());
     capabilities.insert("proxy_upload_v1".to_string(), true.into());
     capabilities.insert("http_cancellation".to_string(), true.into());
@@ -1165,6 +1172,7 @@ async fn connect_and_serve(
         if machine.connect(tx.clone(), &bytes).await.is_err() {
             tracing::warn!("Machine gateway could not start");
         }
+        machine.negotiate_execution_approval(machine_execution_approval);
     }
     let mut caps_msg = serde_json::json!({
         "type": "status_update",
@@ -6736,5 +6744,31 @@ mod ws_proxy_header_tests {
         assert_eq!(headers["x-custom"].as_bytes(), b"exact-default");
         assert_eq!(headers["x-auth"].as_bytes(), b"exact-credential");
         assert!(headers.values().all(|value| value.is_sensitive()));
+    }
+}
+
+#[cfg(test)]
+mod machine_approval_compatibility_tests {
+    #[test]
+    fn old_node_auth_ok_parser_tolerates_machine_capability_and_old_server_defaults_legacy() {
+        // Main's auth_ok parser uses Value and reads these exact entries.
+        let old:serde_json::Value=serde_json::from_str(r#"{"type":"auth_ok","capabilities":{"proxy_binary_chunks":true,"machine_execution_approval_v1":true},"heartbeat_interval_secs":15}"#).unwrap();
+        assert_eq!(old["type"].as_str(), Some("auth_ok"));
+        assert!(
+            old["capabilities"]["proxy_binary_chunks"]
+                .as_bool()
+                .unwrap_or(false)
+        );
+        assert_eq!(
+            old["heartbeat_interval_secs"].as_u64().filter(|v| *v > 0),
+            Some(15)
+        );
+        let legacy =
+            serde_json::json!({"type":"auth_ok","capabilities":{"proxy_binary_chunks":true}});
+        assert!(
+            !legacy["capabilities"]["machine_execution_approval_v1"]
+                .as_bool()
+                .unwrap_or(false)
+        );
     }
 }
