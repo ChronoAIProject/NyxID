@@ -620,12 +620,11 @@ pub(super) async fn eligible(
         };
         target
     };
-    if event.expires_at <= Utc::now()
-        || channel.transport != d.transport
-        || !org_access_holds(state, &channel).await?
-    {
+    if event.expires_at <= Utc::now() || channel.transport != d.transport {
         return Ok(None);
     }
+    // An unavailable rollout/dependency leaves pending delivery retryable.
+    require_org_access(state, &channel).await?;
     if state
         .db
         .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)

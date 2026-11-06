@@ -1762,9 +1762,7 @@ pub(crate) async fn validate_post(
             "Posting is off for this chat; the owner can allow it".into(),
         ));
     }
-    if !org_access_holds(state, &row).await? {
-        return Err(AppError::Forbidden("org_access_lost".into()));
-    }
+    require_org_access(state, &row).await?;
     if chat.platform_chat_id.is_none() {
         return Err(AppError::ValidationError(
             "Chat has no known address".into(),
@@ -2084,10 +2082,7 @@ pub(super) async fn prepare_post(
             .route_id
             .clone()
             .ok_or_else(|| AppError::Conflict("The channel bot has no route".into()))?;
-        if !org_access_holds(state, &row).await? {
-            release_org_channel(state, &row).await?;
-            return Err(AppError::Forbidden("org_access_lost".into()));
-        }
+        require_org_access(state, &row).await?;
         let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
         if !bot.is_active || bot.status == "suspended" {
             return Err(AppError::ChannelBotInactive(

@@ -2,14 +2,18 @@
 use super::*;
 
 pub(super) async fn authority(state: &AppState, row: &NyxbotChannel) -> Result<(), &'static str> {
-    if !org_access_holds(state, row)
+    match org_access(state, row)
         .await
         .map_err(|_| "storage_unavailable")?
     {
-        Box::pin(release_org_channel(state, row))
-            .await
-            .map_err(|_| "storage_unavailable")?;
-        return Err("org_access_lost");
+        OrgAccess::Holds => {}
+        OrgAccess::Lost => {
+            Box::pin(release_org_channel(state, row))
+                .await
+                .map_err(|_| "storage_unavailable")?;
+            return Err("org_access_lost");
+        }
+        OrgAccess::Unavailable => return Err("org_access_unavailable"),
     }
     Ok(())
 }
@@ -144,7 +148,10 @@ pub(super) async fn reconcile(state: &AppState) -> AppResult<()> {
         Ok(()) => Box::pin(move_to_gateway(state, &row)).await,
         Err(code) => Err(code),
     };
-    if matches!(outcome, Err("answering" | "flag_changed")) {
+    if matches!(
+        outcome,
+        Err("answering" | "flag_changed" | "org_access_unavailable" | "storage_unavailable")
+    ) {
         channels.update_one(doc! {"_id": &row.id, "transport": "direct"},
             doc! {"$set": {"gateway_attempted_at": bson::DateTime::from_chrono(
                 now - ChronoDuration::hours(GATEWAY_RETRY_HOURS) + ChronoDuration::minutes(MOVE_RECHECK_MINUTES))}}).await?;

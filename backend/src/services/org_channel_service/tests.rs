@@ -312,7 +312,10 @@ async fn same_org_admin_only_linking_and_default_off() {
             .to_string()
             .contains("disabled for this account")
     );
-    assert!(!transport_holds(db, &f.channel).await.unwrap());
+    assert_eq!(
+        transport_access(db, &f.channel).await.unwrap(),
+        OrgAccess::Unavailable
+    );
     db.drop().await.unwrap();
 }
 
@@ -2129,4 +2132,52 @@ async fn setup_guidance_keeps_readiness_and_expiry_checks_closed() {
         Err(AppError::SecurityReadinessUnavailable)
     ));
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_access_2283_enabled_guest_does_not_revoke_transport_admin() {
+    let mut f = Fixture::new("org_access_2283_guest").await;
+    f.wallet().await;
+    f.guests(vec![]).await;
+    let origin = f.guest("unverified-visitor").await;
+    assert!(origin.org_execution.as_ref().unwrap().guest);
+    assert_eq!(
+        crate::handlers::nyxbot::org_access(&f.org.state, &f.channel)
+            .await
+            .unwrap(),
+        OrgAccess::Holds
+    );
+    crate::handlers::nyxbot::route_key_auth(&f.org.state, &f.channel)
+        .await
+        .unwrap();
+    let current = f
+        .org
+        .state
+        .db
+        .collection::<NyxbotChannel>("nyxbot_channels")
+        .find_one(doc! {"_id":&f.channel.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.status, "active");
+    assert_eq!(current.last_error, None);
+    for (collection, id) in [
+        ("api_keys", &f.channel.route_api_key_id),
+        (
+            "channel_conversations",
+            f.channel.route_id.as_ref().unwrap(),
+        ),
+    ] {
+        assert!(
+            f.org
+                .state
+                .db
+                .collection::<Document>(collection)
+                .find_one(doc! {"_id":id,"is_active":true})
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    f.org.state.db.drop().await.unwrap();
 }
