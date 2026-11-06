@@ -33,15 +33,19 @@ const MODES = [
 ] as const;
 
 const message = (error: unknown) =>
-  error instanceof Error ? error.message : "Voice settings could not be loaded.";
+  error instanceof Error
+    ? error.message
+    : "Voice settings could not be loaded.";
 
 /**
  * Settings › Voice: how live voice conversations sound and listen, and the
- * composer's dictation language. The voice source is chosen automatically, as
- * in a call; only what the person can really change is offered. Accounts
+ * composer's dictation language. Calls preserve the saved voice source; only
+ * what the person can really change is offered. Accounts
  * without live voice see only Dictation.
  */
-export function VoiceSettingsScreen({ route }: SheetScreenProps<"VoiceSettings">) {
+export function VoiceSettingsScreen({
+  route,
+}: SheetScreenProps<"VoiceSettings">) {
   const { colors } = useTheme();
   const voiceEnabled = route?.params?.voice ?? true;
   const language = useDictationLanguage(true);
@@ -72,12 +76,21 @@ export function VoiceSettingsScreen({ route }: SheetScreenProps<"VoiceSettings">
       environment!.api.savePreferences(preferences),
     onSuccess: (data) => queryClient.setQueryData(settingsKey, data),
   });
+  const selectionReady = options.isSuccess && settings.isSuccess;
   const view =
-    options.data && settings.data
+    selectionReady && options.data && settings.data
       ? voiceSettingsView(options.data.options, settings.data.voice)
       : null;
+  const controlsDisabled =
+    !selectionReady || !environment || !isConnected || save.isPending;
   const update = (change: Partial<VoicePreferences>) => {
-    if (!view || save.isPending) return;
+    if (!voiceEnabled || !view || controlsDisabled) return;
+    if (
+      change.voice !== undefined &&
+      !view.option.voice.voices.some((row) => row.id === change.voice)
+    )
+      return;
+    if (view.missingVoice && change.voice === undefined) return;
     save.mutate({ ...view.preferences, ...change });
   };
   const loading =
@@ -90,7 +103,11 @@ export function VoiceSettingsScreen({ route }: SheetScreenProps<"VoiceSettings">
         <Notice message="You're offline. Reconnect to change voice settings." />
       )}
       {!voiceEnabled ? null : loading ? (
-        <SkeletonRows rows={3} title accessibilityLabel="Loading voice settings" />
+        <SkeletonRows
+          rows={3}
+          title
+          accessibilityLabel="Loading voice settings"
+        />
       ) : error || !environment ? (
         <>
           <Notice tone="error" message={message(error)} />
@@ -113,9 +130,18 @@ export function VoiceSettingsScreen({ route }: SheetScreenProps<"VoiceSettings">
           <SettingsMenuRow
             icon={AudioLines}
             label="Voice"
+            detail={
+              view.missingVoice
+                ? `Your saved voice (${view.missingVoice}) is no longer available. Choose a voice to continue.`
+                : undefined
+            }
             value={view.preferences.voice ?? ""}
             options={voices.map((row) => ({ value: row.id, label: row.label }))}
-            disabled={save.isPending || voices.length < 2}
+            disabled={
+              controlsDisabled ||
+              !voices.length ||
+              (voices.length < 2 && !view.missingVoice)
+            }
             onChange={(voice) => update({ voice })}
           />
           <SettingsMenuRow
@@ -128,7 +154,7 @@ export function VoiceSettingsScreen({ route }: SheetScreenProps<"VoiceSettings">
             }
             value={view.preferences.input_mode}
             options={MODES}
-            disabled={save.isPending || view.holdOnly}
+            disabled={controlsDisabled || !!view.missingVoice || view.holdOnly}
             onChange={(input_mode) => update({ input_mode })}
           />
           <SettingsRow
@@ -139,7 +165,7 @@ export function VoiceSettingsScreen({ route }: SheetScreenProps<"VoiceSettings">
               <Switch
                 accessibilityLabel="Notify when tasks finish"
                 value={view.preferences.notify_on_completion}
-                disabled={save.isPending}
+                disabled={controlsDisabled || !!view.missingVoice}
                 onValueChange={(notify_on_completion) =>
                   update({ notify_on_completion })
                 }

@@ -121,3 +121,83 @@ At merge head `baea79688`, GitHub Mobile CI passed all **1,709 tests** and nativ
 - Full-App iPad mini: **NOT RUN**. The complete App is installed, but the current Simulator menu/screenshot control session is blocked. Earlier mini component fixtures are not accepted as full-App evidence. This section must be updated only after a real complete-App mini run.
 
 The current evidence supports the implemented source changes and the specific observed Pro action boundaries. Complete iPad acceptance remains open for the items above.
+
+## Production voice startup follow-up — 2026-11-06
+
+The user's manual production test revealed OpenAI `provider_create:403:forbidden`
+(NyxID code12501) with the saved voice `aube`. Read-only metadata from the
+running App showed a single available platform OpenAI / `gpt-live-1` option.
+Using the actual iPad Settings and call controls, a same-source, same-model
+comparison connected successfully with `marin` and visibly reached `Listening`;
+the ended test receipt recorded0:48. Selecting Aube again reproduced the same
+403 at provider creation. This establishes the failure for Aube on the current
+platform source, without attributing the generic upstream error to a particular
+account policy or claiming it affects every OpenAI account.
+
+The current official [Live create reference](https://developers.openai.com/api/reference/resources/live/methods/create)
+lists31 built-in voices, omits `aube` and spells `shida` rather than the historical
+seed's `shitan`. The corrected default list follows that contract. Startup
+backfill repairs only an exact historical voice array on a non-admin-modified
+OpenAI catalog row; the atomic predicate and voices-only update preserve admin
+edits, custom arrays, models, delegation, pricing and other metadata. This code
+requires backend deployment; the production catalog has not been edited here.
+
+Native calls and Voice Settings now retain the exact saved service, connection,
+key source and model. They wait for both options and settings before enabling
+startup or saving. If a saved voice disappears from the live catalog, the App
+shows the old voice and asks for an explicit replacement in Settings; it cannot
+start or overwrite other preferences until a valid voice is chosen. The voice
+picker remains usable even when only one replacement voice exists.
+
+The account is left on Marin for continued manual testing. The source-selection
+bug was discovered during investigation but did not cause this account's
+original failure because it had only one available source. Session creation,
+connection readiness and End are distinct from acoustic verification: spoken
+input/output, voice task delegation, interruption and all other voices have not
+been accepted by this comparison. Earlier incomplete iPad acceptance items
+remain open.
+
+After cold-loading the final mobile source in the full native App, the original
+production chat displayed `Marin voice`, started successfully, and visibly
+reached `Listening 0:09`. End returned to the normal composer and produced a
+`0:25` receipt. The App remains signed in with Marin selected, with no active
+call. This second successful startup used the final source; it still does not
+establish spoken input/output or interruption behavior.
+
+Focused voice validation from `mobile/` passed **51/51**, with no failures or
+skips:
+
+```sh
+pnpm exec tsx --test src/features/account/VoiceSettingsScreen.test.ts src/features/account/voiceSettingsModel.test.ts src/features/assistant/voice/AssistantVoiceConversation.test.ts src/features/assistant/voice/voiceSelection.test.ts
+```
+
+Changed-file checks passed:
+
+```sh
+# From mobile/: seven files passed.
+../frontend/node_modules/.bin/prettier --check src/features/account/VoiceSettingsScreen.tsx src/features/account/VoiceSettingsScreen.test.ts src/features/account/voiceSettingsModel.ts src/features/account/voiceSettingsModel.test.ts src/features/assistant/voice/AssistantVoiceConversation.test.ts src/features/assistant/voice/voiceSelection.ts src/features/assistant/voice/voiceSelection.test.ts
+
+# From repository root: passed.
+rustfmt --edition 2024 --check backend/src/services/inference_service.rs backend/src/services/inference_voice.rs backend/src/services/inference_voice_tests.rs
+git diff --check
+```
+
+`AssistantVoiceConversation.tsx` has reproduced pre-existing Prettier debt:
+both its HEAD baseline and current content fail the same formatter. Its small
+functional diff preserves the existing layout instead of reformatting the
+whole component. No reliable affected mobile typecheck exists; full frontend
+suite/typecheck/build is delegated to GitHub CI. The earlier green CI result at
+`99d023c6c` predates this voice follow-up and does not verify these changes.
+
+The backend's targeted test command was attempted from the repository root:
+
+```sh
+CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/Users/abigaildeng/Documents/work/NyxID/target NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:33018/nyxid_test_probe?directConnection=true' cargo test -p nyxid --bin nyxid-server services::inference_voice_tests -- --nocapture
+```
+
+Compilation rebuilt changed dependencies and reached the current backend, but
+the external disk guard stopped the process group with exit 75 after free disk
+fell below 2 GiB. **No backend tests began executing.** The new migration tests
+cover ten MongoDB fixtures, raw document preservation and idempotence, but are
+not claimed as passed; backend CI must verify them. No old binary was used to
+represent validation of the new backend, and no shared caches were deleted.

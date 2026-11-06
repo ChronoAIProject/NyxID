@@ -136,17 +136,19 @@ function VoiceConversation({
   });
   const saved = settings.data?.voice;
   const choices = options.data?.options ?? [];
-  const option = chooseVoiceOption(choices);
+  const selectionReady = options.isSuccess && settings.isSuccess;
+  const option = selectionReady ? chooseVoiceOption(choices, saved) : undefined;
   const isGrok = option?.voice.protocol === "xai_realtime";
   const [modeChoice, setModeChoice] =
     useState<VoicePreferences["input_mode"]>();
   const inputMode = isGrok
     ? "push_to_talk"
     : (modeChoice ?? saved?.input_mode ?? "push_to_talk");
-  const voiceId =
-    option?.voice.voices.find((row) => row.id === saved?.voice)?.id ??
-    option?.voice.voices[0]?.id ??
-    null;
+  const voiceId = saved?.voice ?? option?.voice.voices[0]?.id ?? null;
+  const missingVoice =
+    !!option &&
+    !!saved?.voice &&
+    !option.voice.voices.some((row) => row.id === voiceId);
   const voiceLabel = option?.voice.voices.find(
     (row) => row.id === voiceId,
   )?.label;
@@ -183,18 +185,26 @@ function VoiceConversation({
           ? "Call already active"
           : voice.snapshot
             ? "Call ended"
-            : "Ready to talk";
+            : missingVoice
+              ? "Choose a voice"
+              : "Ready to talk";
   const duration = voiceElapsed(session?.created_at, session?.closed_at, now);
   const talking = holdStartedAt
     ? voiceElapsed(new Date(holdStartedAt).toISOString(), null, now)
     : undefined;
   const canStart =
     !!option?.available &&
+    !missingVoice &&
     !active &&
     !voice.conflict &&
     isConnected &&
-    options.isSuccess &&
-    settings.isSuccess;
+    selectionReady;
+  const canChangeMode =
+    selectionReady &&
+    !!option?.available &&
+    !missingVoice &&
+    isConnected &&
+    !voice.starting;
   const running = tasks.some(
     (task) => task.state === "queued" || task.state === "claimed",
   );
@@ -267,7 +277,7 @@ function VoiceConversation({
   function preferences(
     mode: VoicePreferences["input_mode"],
   ): VoicePreferences | undefined {
-    if (!option) return undefined;
+    if (!selectionReady || !option?.available || missingVoice) return undefined;
     return {
       service_id: option.service_id,
       connection_id: option.connection_id,
@@ -287,7 +297,7 @@ function VoiceConversation({
   }
   /** Hands-free or Hold to talk, from the call itself; saved for next time. */
   function changeMode(mode: VoicePreferences["input_mode"]) {
-    if (isGrok || mode === inputMode) return;
+    if (!canChangeMode || isGrok || mode === inputMode) return;
     if (active && !voice.setInputMode(mode)) return;
     setModeChoice(mode);
     const chosen = preferences(mode);
@@ -601,7 +611,9 @@ function VoiceConversation({
                     />
                   </>
                 ) : null}
-                {options.isSuccess && !choices.length ? (
+                {selectionReady && saved && !option ? (
+                  <Notice message="Your saved voice source is no longer available for this chat. Reconnect it or update your voice source on Web before starting a call." />
+                ) : options.isSuccess && !choices.length ? (
                   <Notice message="No voice sources are available for this chat. Voice needs an eligible connected provider or platform connection." />
                 ) : null}
                 {option && !option.available ? (
@@ -610,6 +622,11 @@ function VoiceConversation({
                       option.unavailable_reason ??
                       "Voice is unavailable. Reconnect your provider and try again."
                     }
+                  />
+                ) : null}
+                {missingVoice ? (
+                  <Notice
+                    message={`Your saved voice (${saved?.voice}) is no longer available. Choose a voice in Settings > Voice before starting a call.`}
                   />
                 ) : null}
               </>
@@ -692,9 +709,9 @@ function VoiceConversation({
                     accessibilityState={{
                       selected,
                       checked: selected,
-                      disabled: voice.starting,
+                      disabled: !canChangeMode,
                     }}
-                    disabled={voice.starting}
+                    disabled={!canChangeMode}
                     onPress={() => changeMode(mode)}
                     style={[
                       styles.mode,
