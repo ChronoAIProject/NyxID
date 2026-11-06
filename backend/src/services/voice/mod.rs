@@ -3,6 +3,7 @@ pub mod access;
 pub mod announcements;
 pub mod application;
 pub mod binding;
+pub mod catalog;
 pub mod client_key;
 #[cfg(test)]
 mod client_key_tests;

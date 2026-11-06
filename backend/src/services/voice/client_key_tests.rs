@@ -109,6 +109,134 @@ async fn child(f: &Fixture, parent: &str) -> (String, String) {
     }).await.unwrap();
     (id, secret.to_string())
 }
+
+#[tokio::test]
+async fn seeded_catalog_enables_owner_publication_and_exact_device_discovery() {
+    use crate::handlers::assistant_voice::{publish_voice_service, voice_service};
+    use axum::{
+        body::{Body, to_bytes},
+        extract::{Path, State},
+        http::Request,
+    };
+    use tower::ServiceExt;
+
+    Box::pin(async {
+        let (f, _) = fixture("voice_seed_publication").await;
+        let agent =
+            crate::services::assistant_team_service::agent_for_conversation(&f.state.db, &f.row)
+                .await
+                .unwrap();
+        let human = crate::test_utils::test_auth_user(&f.owner);
+        // Reproduce the missing-catalog failure independently of rollout flags.
+        assert!(matches!(
+            super::binding::publish(&f.state.db, &f.owner, &agent.id, &f.state.config.base_url)
+                .await,
+            Err(crate::errors::AppError::NotFound(_))
+        ));
+        super::catalog::seed(&f.state.db, &f.state.config.base_url)
+            .await
+            .unwrap();
+        // The seed publishes no connection and enables no feature.
+        assert!(
+            super::binding::get(&f.state.db, &f.owner, &agent.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            publish_voice_service(
+                State(f.state.clone()),
+                human.clone(),
+                Path(agent.id.clone())
+            )
+            .await,
+            Err(crate::errors::AppError::Forbidden(_))
+        ));
+        crate::services::security_readiness_service::ready_test_replica(&f.state.db).await;
+        flags::set_platform_override(
+            &f.state.db,
+            flags::VOICE_AGENT_KEY_FLAG_KEY,
+            &flags::FlagTarget::Global,
+            true,
+            &f.owner,
+        )
+        .await
+        .unwrap();
+        let published = publish_voice_service(
+            State(f.state.clone()),
+            human.clone(),
+            Path(agent.id.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        let read = voice_service(State(f.state.clone()), human, Path(agent.id.clone()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(published, read);
+        assert_eq!(read["service"]["agent_id"], agent.id);
+        assert_eq!(read["service"]["is_active"], true);
+        let service_id = read["service"]["id"].as_str().unwrap().to_string();
+        let created = key_service::create_api_key(
+            &f.state.db,
+            &f.owner,
+            "seeded-device",
+            "read proxy",
+            None,
+            None,
+            Some(std::slice::from_ref(&service_id)),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+        let app = private.with_state(f.state.clone());
+        for path in [
+            "/api/v1/keys".to_string(),
+            format!("/api/v1/proxy/nyxbot-voice/{service_id}/voice/agents"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&path)
+                        .header("authorization", format!("Bearer {}", created.full_key))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+            assert_eq!(status, 200, "{path}: {}", String::from_utf8_lossy(&bytes));
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if path == "/api/v1/keys" {
+                let connections = body["keys"].as_array().unwrap();
+                assert_eq!(connections.len(), 1);
+                assert_eq!(connections[0]["id"], service_id);
+                assert_eq!(
+                    connections[0]["catalog_service_slug"],
+                    super::access::SERVICE_SLUG
+                );
+            } else {
+                assert_eq!(body["agents"].as_array().unwrap().len(), 1);
+                assert_eq!(body["agents"][0]["agent_id"], agent.id);
+                assert_eq!(body["agents"][0]["service_id"], service_id);
+            }
+        }
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn voice_key_uses_existing_service_grants_and_no_bot_hardcoding() {
     Box::pin(async {
