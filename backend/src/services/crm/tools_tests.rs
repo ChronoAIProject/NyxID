@@ -98,7 +98,7 @@ fn crm_native_discovery_and_admission_agree_on_closed_shapes() {
     for name in NAMES {
         let schema = schema(name);
         assert_eq!(schema["additionalProperties"], false);
-        assert_eq!(action_class(name).is_some(), true);
+        assert!(action_class(name).is_some());
     }
     let read = json!({"input":{"object":"company"}});
     assert!(validate_shape(&read, &schema("crm_query")));

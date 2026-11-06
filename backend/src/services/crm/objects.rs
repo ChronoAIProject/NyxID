@@ -250,19 +250,18 @@ pub async fn create(
                     ));
                 }
                 for (index, field) in input.fields.iter().enumerate() {
-                    if let CrmFieldKind::Record { target, .. } = &field.kind {
-                        if target != &input.key
-                            && collection
-                                .find_one(doc! {"owner_id":owner,"key":target})
-                                .session(&mut *tx)
-                                .await?
-                                .is_none()
-                        {
-                            return Err(super::validation_error(
-                                format!("fields.{index}.target"),
-                                "must name an object owned by the same CRM owner",
-                            ));
-                        }
+                    if let CrmFieldKind::Record { target, .. } = &field.kind
+                        && target != &input.key
+                        && collection
+                            .find_one(doc! {"owner_id":owner,"key":target})
+                            .session(&mut *tx)
+                            .await?
+                            .is_none()
+                    {
+                        return Err(super::validation_error(
+                            format!("fields.{index}.target"),
+                            "must name an object owned by the same CRM owner",
+                        ));
                     }
                 }
                 let now = bson::DateTime::now().to_chrono();

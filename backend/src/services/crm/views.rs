@@ -746,13 +746,13 @@ fn validate_element(
             if let Some(props) = props::<ObjectTableProps>(&element.props, &base, errors) {
                 match envelope.queries.get(&props.query_id) {
                     Some(ViewQuery::Table { query }) => {
-                        if let (Some(columns), Some(select)) = (&props.columns, &query.select) {
-                            if columns.iter().any(|column| !select.contains(column)) {
-                                errors.push(issue(
-                                    format!("{base}.columns"),
-                                    "displayed columns must be included in query.select",
-                                ));
-                            }
+                        if let (Some(columns), Some(select)) = (&props.columns, &query.select)
+                            && columns.iter().any(|column| !select.contains(column))
+                        {
+                            errors.push(issue(
+                                format!("{base}.columns"),
+                                "displayed columns must be included in query.select",
+                            ));
                         }
                         if let Some(columns) = &props.columns
                             && let Some(object) = query_objects.get(props.query_id.as_str())
@@ -823,7 +823,7 @@ fn validate_element(
                     Some(object) => {
                         if let Some(fields) = &props.fields {
                             errors.extend(query::validate_live_fields(
-                                &object,
+                                object,
                                 fields,
                                 &format!("{base}.fields"),
                             ));

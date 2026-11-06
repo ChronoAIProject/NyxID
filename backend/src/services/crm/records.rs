@@ -218,7 +218,7 @@ pub async fn create(
 
 pub(crate) async fn create_in_session(
     db: &Database,
-    owner: &String,
+    owner: &str,
     actor: &CrmActor,
     input: &CreateRecordInput,
     receipt: &Option<ReceiptContext>,
@@ -241,7 +241,7 @@ pub(crate) async fn create_in_session(
     let mut record = CrmRecord {
         field_sources: mongodb::bson::Document::new(),
         id: Uuid::new_v4().to_string(),
-        owner_id: owner.clone(),
+        owner_id: owner.to_owned(),
         object_id: object.id.clone(),
         object_key: object.key.clone(),
         revision: 1,

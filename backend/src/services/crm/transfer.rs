@@ -330,13 +330,12 @@ pub async fn import(
         |tx, (db, owner, actor, input, receipt)| {
             Box::pin(async move {
                 super::fence_owner(db, owner, tx).await?;
-                if commit {
-                    if let Some(value) =
+                if commit
+                    && let Some(value) =
                         records::receipt_in_session(db, receipt.as_ref(), tx).await?
-                    {
-                        return serde_json::from_value(value)
-                            .map_err(|_| AppError::Internal("Invalid CRM import receipt".into()));
-                    }
+                {
+                    return serde_json::from_value(value)
+                        .map_err(|_| AppError::Internal("Invalid CRM import receipt".into()));
                 }
                 let object = records::object_in_session(db, owner, &input.object, tx).await?;
                 let mut rows = Vec::new();

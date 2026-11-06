@@ -204,12 +204,11 @@ async fn crm_import_snapshot_sparse_updates_replay_and_drift() {
         Err(AppError::CrmValidationFailed(_))
     ));
     assert!(
-        records::get(&db, &owner, &replacement.id)
+        !records::get(&db, &owner, &replacement.id)
             .await
             .unwrap()
             .values
-            .get("domain")
-            .is_none()
+            .contains_key("domain")
     );
     db.drop().await.unwrap();
 }

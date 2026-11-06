@@ -981,7 +981,7 @@ mod crm_tests {
             "actor",
             "field_sources",
         ] {
-            assert!(!project.contains_key(&format!("fullDocument.{private}")));
+            assert!(!project.contains_key(format!("fullDocument.{private}")));
         }
         for collection in [
             "crm_records",

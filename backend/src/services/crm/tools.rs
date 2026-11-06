@@ -404,17 +404,13 @@ async fn execute_inner(
             "Schema edits require owner or organization administrator access".into(),
         ));
     }
-    authorize_operation(
-        &state.db,
-        &chat,
-        &agent,
-        owner,
+    let operation = Operation {
         name,
         args,
-        object_key.as_deref(),
+        object_key: object_key.as_deref(),
         capability,
-    )
-    .await?;
+    };
+    authorize_operation(&state.db, &chat, &agent, owner, operation).await?;
     let receipt = if class == acks::OwnerActionClass::Read {
         None
     } else {
@@ -452,8 +448,8 @@ async fn execute_inner(
     let committed = records::lookup_receipt::<Value>(&state.db, receipt.as_ref()).await?;
     let gate =
         acks::confirmation_needed(&state.db, &chat, acks::ActionFacts::of(class), false).await?;
-    if let Some(need) = gate.ask().filter(|_| committed.is_none()) {
-        if let Some(refusal) = acks::confirm_action(
+    if let Some(need) = gate.ask().filter(|_| committed.is_none())
+        && let Some(refusal) = acks::confirm_action(
             &state.db,
             &chat,
             tool,
@@ -462,9 +458,8 @@ async fn execute_inner(
             &confirmation_summary(&state.db, owner, name, args, object_key.as_deref()).await?,
         )
         .await?
-        {
-            return Ok(refusal);
-        }
+    {
+        return Ok(refusal);
     }
     // Reload after confirmation before touching data. An acknowledgement never
     // restores a revoked grant, stopped turn, or removed organization member.
@@ -489,17 +484,7 @@ async fn execute_inner(
     {
         return Err(AppError::Forbidden("CRM owner authority changed".into()));
     }
-    authorize_operation(
-        &state.db,
-        &chat,
-        &agent,
-        owner,
-        name,
-        args,
-        object_key.as_deref(),
-        capability,
-    )
-    .await?;
+    authorize_operation(&state.db, &chat, &agent, owner, operation).await?;
     if name == "crm_delete_view" {
         let view = views::for_delete(&state.db, owner, id(args, "view_id")?).await?;
         if view.created_by.user_id != chat.user_id && !access.can_write() {
@@ -951,16 +936,27 @@ fn require_object(
         )))
     }
 }
+#[derive(Clone, Copy)]
+struct Operation<'a> {
+    name: &'a str,
+    args: &'a Value,
+    object_key: Option<&'a str>,
+    capability: CrmCapability,
+}
+
 async fn authorize_operation(
     db: &mongodb::Database,
     chat: &acks::ChatAuthority,
     agent: &AssistantAgent,
     owner: &str,
-    name: &str,
-    args: &Value,
-    object_key: Option<&str>,
-    capability: CrmCapability,
+    operation: Operation<'_>,
 ) -> AppResult<()> {
+    let Operation {
+        name,
+        args,
+        object_key,
+        capability,
+    } = operation;
     if let Some(key) = object_key {
         require_object(chat, agent, owner, key, capability)?;
         if name != "crm_create_object" {
@@ -971,25 +967,23 @@ async fn authorize_operation(
     if name == "crm_create_object" {
         let body: objects::CreateObjectInput = input(args)?;
         for field in body.fields {
-            if let crate::models::crm_object::CrmFieldKind::Record { target, .. } = field.kind {
-                if Some(target.as_str()) != object_key {
-                    require_object(chat, agent, owner, &target, CrmCapability::Read)?;
-                }
+            if let crate::models::crm_object::CrmFieldKind::Record { target, .. } = field.kind
+                && Some(target.as_str()) != object_key
+            {
+                require_object(chat, agent, owner, &target, CrmCapability::Read)?;
             }
         }
     }
-    if matches!(name, "crm_add_field") {
-        if args["input"]["field"]["type"] == "record" {
-            require_object(
-                chat,
-                agent,
-                owner,
-                args["input"]["field"]["target"]
-                    .as_str()
-                    .unwrap_or_default(),
-                CrmCapability::Read,
-            )?;
-        }
+    if matches!(name, "crm_add_field") && args["input"]["field"]["type"] == "record" {
+        require_object(
+            chat,
+            agent,
+            owner,
+            args["input"]["field"]["target"]
+                .as_str()
+                .unwrap_or_default(),
+            CrmCapability::Read,
+        )?;
     }
     if name == "crm_present" && args["kind"] == "view" {
         let view = views::get(db, owner, id(args, "id")?).await?;
@@ -1373,10 +1367,10 @@ fn validate_shape(value: &Value, schema: &Value) -> bool {
         if !matches(kind) {
             return false;
         }
-    } else if let Some(kinds) = schema["type"].as_array() {
-        if !kinds.iter().any(|k| k.as_str().is_some_and(matches)) {
-            return false;
-        }
+    } else if let Some(kinds) = schema["type"].as_array()
+        && !kinds.iter().any(|k| k.as_str().is_some_and(matches))
+    {
+        return false;
     }
     if let Some(text) = value.as_str() {
         if schema["pattern"].as_str().is_some_and(|pattern| {
@@ -1395,12 +1389,11 @@ fn validate_shape(value: &Value, schema: &Value) -> bool {
             return false;
         }
     }
-    if let Some(number) = value.as_i64() {
-        if schema["minimum"].as_i64().is_some_and(|min| number < min)
-            || schema["maximum"].as_i64().is_some_and(|max| number > max)
-        {
-            return false;
-        }
+    if let Some(number) = value.as_i64()
+        && (schema["minimum"].as_i64().is_some_and(|min| number < min)
+            || schema["maximum"].as_i64().is_some_and(|max| number > max))
+    {
+        return false;
     }
     if let Some(map) = value.as_object() {
         if schema["maxProperties"]
@@ -1420,10 +1413,9 @@ fn validate_shape(value: &Value, schema: &Value) -> bool {
                 if !validate_shape(value, prop) {
                     return false;
                 }
-            } else if schema["additionalProperties"] == false {
-                return false;
-            } else if schema["additionalProperties"].is_object()
-                && !validate_shape(value, &schema["additionalProperties"])
+            } else if schema["additionalProperties"] == false
+                || (schema["additionalProperties"].is_object()
+                    && !validate_shape(value, &schema["additionalProperties"]))
             {
                 return false;
             }
@@ -1441,10 +1433,10 @@ fn validate_shape(value: &Value, schema: &Value) -> bool {
         {
             return false;
         }
-        if let Some(item_schema) = schema.get("items") {
-            if !items.iter().all(|item| validate_shape(item, item_schema)) {
-                return false;
-            }
+        if let Some(item_schema) = schema.get("items")
+            && !items.iter().all(|item| validate_shape(item, item_schema))
+        {
+            return false;
         }
     }
     true
