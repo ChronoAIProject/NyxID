@@ -258,6 +258,7 @@ function setup(
       StyleSheet: { create: (value: unknown) => value },
     },
     "@react-navigation/native": {
+      useIsFocused: () => true,
       useNavigation: () => ({
         setParams: (params: Record<string, unknown>) => {
           events.push(["params", { ...params }]);

@@ -368,3 +368,71 @@ The duplicate-transcript screenshot was audited without redesigning the UI:
 main messages and the voice caption ScrollView both render the same speech.
 Backend stable segment IDs update one stored message. Recommended design:
 one main-chat transcript and compact bottom call controls.
+
+## Chat details preserves transcript position — 2026-11-06
+
+Opening the top-right Chat options button could animate the retained iPad chat
+list to its oldest messages. Back then left the reader at offset 0. The actual
+long-chat reproduction measured content 6332pt, viewport 811pt and offset 5521pt
+before navigation, followed by native offsets 2622, 102 and 0 while details opened.
+The conversation identity did not change. No JavaScript scroll command was
+observed during that animation; its exact UIKit origin is not established.
+
+The transcript hook now saves the last focused position and follow intent on
+blur, ignores hidden native offset/gesture events, and restores the same chat
+once on return. History readers keep their saved offset, clamped to current
+content; latest followers use the current end. Current hidden focus-cycle
+positive dimensions remain available for restoration after keyboard dismissal.
+Zero-size hidden layouts, old focus/chat callbacks and unmounted callbacks are
+rejected. Chat changes, another blur and an explicit user drag cancel queued
+restoration. A screen first mounted while hidden has no reading snapshot to
+restore and follows its normal first-visible initialization.
+
+Final-source complete-App Simulator verification used iPad Pro 13 M5 / iOS 26.3,
+bundle `dev.nyxid.ipadqa`, retaining the existing signed-in account. Metro was
+restarted with its cache cleared after source edits, then the App was reloaded;
+CI-mode Metro reload alone had reused an earlier bundle.
+
+- Normal details/Back: before 5521, native offscreen 0, saved visible 5521, returned
+  native 5521 / hook 5521 / distance-to-end 0 / following=true.
+- With software keyboard: before 5995 at viewport 337, details hid the keyboard
+  and measured viewport 811 while preserving the visible 5995 snapshot. Back
+  restored native 5521 / hook 5521 / viewport 811 / distance-to-end 0. The keyboard
+  stayed dismissed, and the same chat remained selected.
+- Earlier iterations also passed repeated normal details/Back cycles. Final
+  source passed the normal and keyboard cycles above. No messages were sent,
+  no voice call was started and no account/chat data was cleared for this fix.
+- Historical offset retention, hidden content changes, stale callbacks, cold
+  hidden initialization and gesture cancellation are covered by the real hook
+  regression tests. Native accessibility scrolling moved the list, but CUA drag
+  attempts did not produce a native reader gesture; manual middle-of-history
+  drag is therefore not claimed as passed in this Simulator run. No ambient
+  voice transcripts or account identifiers are included in this evidence.
+
+Focused verification from `mobile/`:
+
+```sh
+pnpm exec tsx --test src/features/assistant/AssistantScreen.voice.test.ts src/features/assistant/useTranscriptScrollFollow.test.ts src/features/assistant/assistantTranscriptScroll.test.ts
+# 74 passed, 0 failed, 0 skipped
+```
+
+Changed-file static checks from repository root:
+
+```sh
+/Users/abigaildeng/Documents/work/NyxID/frontend/node_modules/.bin/prettier --check mobile/src/features/assistant/useTranscriptScrollFollow.ts
+# passed
+
+git diff --check
+# passed
+```
+
+New regression-test ranges were formatted. Whole-file Prettier warnings for
+AssistantScreen.tsx, AssistantScreen.voice.test.ts and
+useTranscriptScrollFollow.test.ts also reproduce on their unchanged HEAD
+versions; unrelated formatting debt is preserved. Independent review verified
+that Assistant, AssistantContext and AssistantDetails share the ContentStack,
+that useIsFocused follows the correct navigation boundary and that the direct
+screen test has its required navigation mock. No blocking issue was found.
+There is no reliable affected typecheck; the full frontend suite/typecheck/build
+is delegated to GitHub CI. This focused fix does not complete the earlier
+full-iPad acceptance matrix or the paused voice recovery work.
