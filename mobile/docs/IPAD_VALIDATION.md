@@ -1,11 +1,13 @@
 # iPad adaptation validation report
 
-**Latest voice status — 2026-11-06:** Marin startup is not a successful spoken
-conversation. The production call received the provider's idle-warning audio
-and assistant caption but no user transcript. WebKit enables mock capture on
-iOS Simulator; the media bridge now rejects its four known test microphones
-before preparing a provider session. Real-device speech recognition, audible
-reply, interruption and PTT remain unaccepted. See the final follow-up below.
+**Latest voice status — 2026-11-06:** Simulator can use the Mac microphone;
+the previous physical-device-only conclusion was too broad. The known WebKit
+test source remains blocked before provider session creation. A Debug Simulator
+real-capture experiment reaches system capture permission but blocks in WebKit
+sandbox-extension issuance. Independent native dictation also aborts during
+AudioUnit initialization, including after restarting this iPad. Actual input,
+recognition and a reply have not passed. The experiment is opt-in; see the final
+follow-up for reproduction and the current environment blocker.
 
 Date: 2026-11-05. Related issue: #2226. Pull request: #2233.
 
@@ -228,8 +230,8 @@ The follow-up changes:
 - Match only those four exact mock microphone names after capture, emit a
   bounded `mock_capture` boolean, stop all acquired tracks and refuse the
   offer/session. No raw device label or identifier enters diagnostics. The
-  fixed user message explains that Simulator has a test microphone and asks
-  for a physical device. A non-match does not certify real microphone input.
+  original message asked for a physical device; the follow-up below corrects
+  that unsupported generalization. A non-match does not certify real input.
 - Keep the App connecting until provider-ready, authoritative active controls
   and the open control socket all agree. Mute/PTT state does not prevent the
   connection from becoming ready.
@@ -248,7 +250,8 @@ before the RTP call and is tracked separately from this capture limitation.
 
 After cold-loading the final source, Start in the original production chat
 returned `input_source: ready, mock_capture: 1`. The full App visibly displayed
-`Unable to start` and the exact Simulator/physical-device message. A temporary
+`Unable to start` and the then-current Simulator/physical-device message
+(at revision `b98144603`). A temporary
 development observer counted **zero calls to the voice-session creation API**;
 the client closed locally. This confirms the known mock source in the current
 runtime and the guard's actual UI/creation boundary. No new call receipt or
@@ -283,3 +286,90 @@ fell below 2 GiB. **No backend tests began executing.** The new migration tests
 cover ten MongoDB fixtures, raw document preservation and idempotence, but are
 not claimed as passed; backend CI must verify them. No old binary was used to
 represent validation of the new backend, and no shared caches were deleted.
+
+
+## Simulator real-capture investigation — 2026-11-06
+
+Apple explicitly supports choosing the Mac microphone in the Simulator's
+[Sound Input settings](https://developer.apple.com/documentation/xcode/configuring-the-environment-of-a-simulated-device#Set-the-audio-input-and-output).
+A default mock source does not prove that real capture is impossible. The red
+message was application-authored, and the blanket instruction to use a physical
+device was incorrect. The fixed, sanitized message now reads:
+
+> A test microphone is active. Select a real microphone and try again.
+
+A development-only hook can request real capture before RN WebView creates the
+voice WKWebView. It calls the original configuration method, checks the exact
+voice HTML marker, and disables WebKit mock capture through a typed Objective-C
+IMP. Missing runtime capabilities preserve the original configuration and mock
+guard. It does not change OS permissions or disable the sandbox.
+
+This path requires **both a Debug Simulator build and the explicit process
+environment `NYXID_SIMULATOR_REAL_MICROPHONE=1`**. Default launches keep the guard
+rather than enabling an experiment that currently hangs. All imports, helper,
+call sites and private selectors are excluded at compile time from physical
+device and Release configurations. Although only voice configuration is changed,
+WebKit's capture factory has process-wide state; this is a diagnostic option,
+not a claim of capture isolation or production voice acceptance.
+
+Actual full-App evidence on iPad Pro13 M5 / iOS26.3:
+
+- Signed native Debug builds succeeded with `SKIP_BUNDLING=1`; the same app
+  bundle and login were retained. Metro loaded the current complete app.
+- With real capture requested, Start reached real system capture validation but
+  the app main thread blocked in `GPUProcessProxy::updateCaptureAccess` and
+  `_sandbox_extension_issue`. No acquired real track or provider POST was
+  established.
+- A separate experiment disabled both GPU capture feature flags. The stack
+  moved to a different grant-request path but still blocked while issuing a
+  generic sandbox extension. Those ineffective routing changes were removed.
+- The existing native Composer dictation, which uses AVAudioEngine rather than
+  WKWebView capture, independently aborted with `AURemoteIO::Initialize` /
+  `AudioUnitInitialize` RPC timeout while constructing its input node. The
+  speech-recognition permission was accepted through the normal system prompt;
+  the app's microphone permission was already allowed.
+- Restarting only this iPad Simulator, preserving data, and rebinding input and
+  output to the Mac's built-in devices did not establish a working audio input.
+  A second native dictation attempt repeated the failure. These are separate
+  observed failures; a shared underlying OS cause has not been proven.
+- No speech recognition, actual dialogue, interruption, PTT or audible reply is
+  accepted from these attempts. There is no active provider call. Do not hide
+  the guard, send WebKit test tones or treat packet growth as spoken success.
+
+To repeat after the Simulator's real audio capture works, install the current
+Debug app, select the Mac microphone/output through the Simulator menu and use
+an explicit opt-in launch (substitute the target simulator and Debug bundle):
+
+```sh
+SIMCTL_CHILD_NYXID_SIMULATOR_REAL_MICROPHONE=1 xcrun simctl launch --terminate-running-process <simulator-udid> <debug-bundle-id>
+xcrun simctl openurl <simulator-udid> 'nyxid://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8096'
+```
+
+First prove local capture, then a short real call with a recognized utterance
+and a corresponding reply. The normal launch omits the opt-in variable. Host
+system audio services and other simulators were not restarted or reconfigured.
+
+Latest focused verification, from `mobile/`:
+
+```sh
+pnpm exec tsx --test src/features/assistant/voice/AssistantVoiceClient.test.ts src/features/assistant/voice/voiceMediaDocument.test.ts
+# 99 passed, 0 failed
+../frontend/node_modules/.bin/prettier --check src/features/assistant/voice/AssistantVoiceClient.ts src/features/assistant/voice/AssistantVoiceClient.test.ts src/features/assistant/voice/VoiceMediaBridge.tsx src/features/assistant/voice/voiceMediaDocument.ts src/features/assistant/voice/voiceMediaDocument.test.ts
+# All matched files use Prettier code style
+```
+
+Changed native source is checked through the signed Simulator Debug build and
+focused Swift helper compilation in Release Simulator / Debug device / Debug
+Simulator configurations, with strings and symbols checked against a positive
+Debug Simulator control. These are targeted exclusion checks, not a full
+Release App build. Full frontend suite/typecheck/build remains with GitHub CI;
+no current-head CI result is claimed. Overall iPad coverage gaps above remain.
+
+Final normal-launch check on the signed default Debug app showed the corrected
+message in the actual voice panel. Safe observer output confirmed
+`mock_capture=1`, `provider_start_calls=0`, and `client_closed=true`; the app
+remained responsive. This check observed the normal API creation boundary.
+Real-capture experiments above instead used a temporary local-only preflight
+wrapper that intercepted provider creation; they cannot establish a successful
+provider session or normal end-to-end call. Diagnostic observers were removed
+by a cold restart after recording the final default-path evidence.

@@ -298,7 +298,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
         "WebRTC negotiation failed.",
         "Voice ended when the app left the foreground.",
         "Microphone access ended. Start a new call when it is available.",
-        "The iOS Simulator uses a test microphone. Use a physical device to test voice calls.",
+        "A test microphone is active. Select a real microphone and try again.",
       ]);
       this.unavailable(
         typeof event.message === "string" && allowed.has(event.message)

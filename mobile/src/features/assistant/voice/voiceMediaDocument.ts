@@ -560,7 +560,7 @@ export const VOICE_MEDIA_ENGINE = String.raw`
       const reason = error?.name === 'NotAllowedError' ? 'Microphone access was denied. Enable it in Settings to use voice.'
         : error?.name === 'NotFoundError' ? 'No microphone is available.'
         : error?.message === 'unsupported' ? 'Voice audio is not supported by this app runtime.'
-        : error?.message === 'mock_capture' ? 'The iOS Simulator uses a test microphone. Use a physical device to test voice calls.'
+        : error?.message === 'mock_capture' ? 'A test microphone is active. Select a real microphone and try again.'
         : error?.message === 'loopback' ? 'Voice playback could not be started. Try another voice source or continue with text.'
         : 'Voice audio could not be started. Please try again.';
       if (message.requestId) emit({ type: 'response', requestId: message.requestId, error: reason });

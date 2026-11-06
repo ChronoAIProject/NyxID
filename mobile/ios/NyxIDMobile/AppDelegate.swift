@@ -2,6 +2,11 @@ internal import Expo
 import React
 import ReactAppDependencyProvider
 
+#if DEBUG && targetEnvironment(simulator)
+import ObjectiveC
+import WebKit
+#endif
+
 @main
 class AppDelegate: ExpoAppDelegate {
   var window: UIWindow?
@@ -13,6 +18,10 @@ class AppDelegate: ExpoAppDelegate {
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
   ) -> Bool {
+#if DEBUG && targetEnvironment(simulator)
+    SimulatorVoiceCapture.install()
+#endif
+
     let delegate = ReactNativeDelegate()
     let factory = ExpoReactNativeFactory(delegate: delegate)
     delegate.dependencyProvider = RCTAppDependencyProvider()
@@ -50,6 +59,70 @@ class AppDelegate: ExpoAppDelegate {
     return super.application(application, continue: userActivity, restorationHandler: restorationHandler) || result
   }
 }
+
+#if DEBUG && targetEnvironment(simulator)
+// Opt-in diagnostic path: real Simulator capture depends on host/runtime audio
+// support and can stall. Leave WebKit's mock capture enabled by default so the
+// voice mock-device guard can reject it. Device and Release builds omit this SPI.
+private enum SimulatorVoiceCapture {
+  private typealias ObjectGetter = @convention(c) (AnyObject, Selector) -> Unmanaged<AnyObject>?
+  private typealias ConfigurationGetter = @convention(c) (AnyObject, Selector) -> Unmanaged<AnyObject>
+  private typealias BooleanSetter = @convention(c) (AnyObject, Selector, Bool) -> Void
+
+  static func install() {
+    guard ProcessInfo.processInfo.environment["NYXID_SIMULATOR_REAL_MICROPHONE"] == "1" else {
+      return
+    }
+    _ = installOnce
+  }
+
+  private static let installOnce: Void = {
+    let configurationSelector = NSSelectorFromString("setUpWkWebViewConfig")
+    guard let webViewClass = NSClassFromString("RNCWebViewImpl"),
+      let configurationMethod = class_getInstanceMethod(webViewClass, configurationSelector)
+    else {
+      return
+    }
+
+    let original = unsafeBitCast(
+      method_getImplementation(configurationMethod), to: ConfigurationGetter.self)
+    let sourceSelector = NSSelectorFromString("source")
+    let mockCaptureSelector = NSSelectorFromString("_setMockCaptureDevicesEnabled:")
+
+    let replacement: @convention(block) (AnyObject) -> AnyObject = { view in
+      let result = original(view, configurationSelector).takeUnretainedValue()
+      guard let configuration = result as? WKWebViewConfiguration,
+        let receiver = view as? NSObject,
+        receiver.responds(to: sourceSelector),
+        let sourceImplementation = receiver.method(for: sourceSelector)
+      else {
+        return result
+      }
+
+      let getSource = unsafeBitCast(sourceImplementation, to: ObjectGetter.self)
+      guard let source = getSource(receiver, sourceSelector)?.takeUnretainedValue() as? NSDictionary,
+        let html = source["html"] as? String,
+        html.contains("window.__nyxVoiceMessage")
+      else {
+        return result
+      }
+
+      let preferences = configuration.preferences
+      guard preferences.responds(to: mockCaptureSelector),
+        let setterImplementation = preferences.method(for: mockCaptureSelector)
+      else {
+        return result
+      }
+
+      let setMockCapture = unsafeBitCast(setterImplementation, to: BooleanSetter.self)
+      setMockCapture(preferences, mockCaptureSelector, false)
+      return result
+    }
+
+    method_setImplementation(configurationMethod, imp_implementationWithBlock(replacement))
+  }()
+}
+#endif
 
 class ReactNativeDelegate: ExpoReactNativeFactoryDelegate {
   // Extension point for config-plugins

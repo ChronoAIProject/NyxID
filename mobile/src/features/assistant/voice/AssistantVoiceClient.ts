@@ -107,7 +107,7 @@ const defaultClock: VoiceClientClock = {
 };
 
 const simulatorMicrophoneMessage =
-  "The iOS Simulator uses a test microphone. Use a physical device to test voice calls.";
+  "A test microphone is active. Select a real microphone and try again.";
 
 /** One explicit call attempt. It never retries a POST or silently restarts audio. */
 export class AssistantVoiceClient {

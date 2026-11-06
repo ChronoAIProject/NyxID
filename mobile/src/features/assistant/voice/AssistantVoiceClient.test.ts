@@ -507,7 +507,7 @@ test("a denied microphone is diagnosed before any server session is created", as
 for (const first of ["media event", "prepare rejection"] as const) {
   test(`the simulator microphone stops preparation once when ${first} arrives first`, async () => {
     const message =
-      "The iOS Simulator uses a test microphone. Use a physical device to test voice calls.";
+      "A test microphone is active. Select a real microphone and try again.";
     const e = setup();
     const waiting = deferred<string>();
     e.media.prepareResult = waiting.promise;
@@ -538,7 +538,7 @@ for (const first of ["media event", "prepare rejection"] as const) {
 
 test("simulator diagnostics allow only the exact fixed message without exposing appended device details", async () => {
   const message =
-    "The iOS Simulator uses a test microphone. Use a physical device to test voice calls.";
+    "A test microphone is active. Select a real microphone and try again.";
   for (const detail of [
     `${message} private microphone identifier`,
     `private microphone identifier ${message}`,

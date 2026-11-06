@@ -388,7 +388,7 @@ test("insecure contexts fail before acquiring the microphone", async () => {
 
 test("known WebKit mock microphones reject both voice transports before any peer or offer", async () => {
   const reason =
-    "The iOS Simulator uses a test microphone. Use a physical device to test voice calls.";
+    "A test microphone is active. Select a real microphone and try again.";
   for (const label of [
     "Mock audio device 1",
     "Mock audio device 2",
@@ -512,7 +512,7 @@ test("a mock second audio track rejects capture and stops the entire stream", as
   assert.equal(e.peers.length, 0);
   assert.equal(
     e.messages.find((message) => message.type === "response")?.error,
-    "The iOS Simulator uses a test microphone. Use a physical device to test voice calls.",
+    "A test microphone is active. Select a real microphone and try again.",
   );
   assert.equal(JSON.stringify(e.messages).includes(mockTrack.label), false);
 });
