@@ -182,3 +182,15 @@ binaries before rolling back. Global false alone does not override a user/org tr
 A racing admitted send may finish; flags are rollout controls, while saved permission
 and claim fences remain authority. Off→on may resume pending valid marked work,
 never a consumed/uncertain claim. See [enrollment contract](EXECUTION_PERMISSIONS.md#global-and-organization-enrollment).
+
+
+Machine execution-permission authoring additionally requires
+`permissions:execution-authoring-machine-v1`. Its closed Machine source and
+retained-adapter variants are not readable by B1-only servers, so deploy every
+API/worker reader before allowing these rows. This gate applies only to Machine
+proposals; existing B1 sources remain available. Node-side
+`machine_execution_approval_v1` negotiation is separately required and defaults
+off when absent. Old nodes keep legacy prompts indefinitely. Drain/remove all
+Machine-variant proposal rows, including terminal receipts, before a binary
+rollback to readers without this capability. Disabling authoring never converts
+a retained occurrence into a legacy request or permits another send.

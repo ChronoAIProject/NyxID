@@ -544,6 +544,7 @@ mod tests {
             credential_ack_correlation: false,
             credential_target_update_v1: false,
             remote_credential_crypto_v1: false,
+            machine_execution_approval_v1: false,
             proxy_max_body_size: None,
             capabilities_resolved: false,
         });

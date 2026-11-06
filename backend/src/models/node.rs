@@ -95,6 +95,8 @@ pub struct NodeConnectionOwner {
     #[serde(default)]
     pub remote_credential_crypto_v1: bool,
     #[serde(default)]
+    pub machine_execution_approval_v1: bool,
+    #[serde(default)]
     pub proxy_max_body_size: Option<usize>,
     #[serde(default)]
     pub capabilities_resolved: bool,
@@ -378,6 +380,7 @@ mod tests {
             credential_ack_correlation: true,
             credential_target_update_v1: false,
             remote_credential_crypto_v1: true,
+            machine_execution_approval_v1: false,
             proxy_max_body_size: Some(1024),
             capabilities_resolved: true,
         };
