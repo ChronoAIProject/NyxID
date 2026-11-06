@@ -495,3 +495,47 @@ Do not rewrite scoped rows into the default provider to force compatibility.
 ## Telegram #2045/#1974 live acceptance record
 
 The [retained source-review signoff](plans/2026-10-27-telegram-signoff.md) records the historical review snapshot and preserved evidence locations. Local HTTP, MongoDB and browser fixtures do not establish Telegram client rendering or creation-event semantics. L1 (named supported client creation), L2 (same intended specialist, owner link and an actual unique-message reply), and L3 (same-account/source live retry/recovery) remain **OPEN**. No live account, token, remote bot creation or production message was used for this implementation. Deployment and live effects require their own authorized destination and version checks.
+
+## Setup status and `/start` recovery (#2257)
+
+A payload-bearing `/start` resolves the current launch hash within the receiving
+manager's identity. A repeated command keeps the original sender and creation
+boundary. Bare `/start` resumes pending creation or consent, reports saved
+connection progress/completion, and preserves an opted-in manager's normal
+public/personal entry. It never offers another unbound creation keyboard for a
+completed or cancelled request. Forwarded/quoted controls cannot bind a setup.
+
+The manager and the authenticated web request projection share a live explanation:
+
+| Reason | Meaning and recovery |
+| --- | --- |
+| `expired` | Request or hosted authority expired; start a new setup. |
+| `completed` | The request or tracked link completed; review the saved bot or open the agent. |
+| `cancelled` | Request or tracked link cancelled; start a new setup. |
+| `superseded` | Launch link replaced or captured destination retargeted; use the current setup link. |
+| `missing` | Unknown/invalid launch or removed request/context; start a new setup. |
+| `account_mismatch` | A different Telegram sender already bound the setup; use that original account or start your own. |
+| `manager_changed` | Saved manager identity/observation is no longer ready; review setup. |
+| `access_changed` | Initiating account no longer has destination access; review access in NyxID. |
+| `context_changed` | Captured agent, source, watch or reviewed platform authority closed; review setup. |
+| `in_progress` | A saved bot is awaiting connection; check status without creating another bot. |
+| `suspended` | Telegram management changed; review the saved connection. |
+| `retry` | A concurrent change prevented admission; check current status and reopen Telegram. |
+
+Replies contain direct browser links built with `AssistantPage` for checking
+status, starting a new setup and, when authorized, opening the saved
+agent. Mismatched senders and revoked owners receive only generic destinations,
+never another account's request/agent identifiers. These links grant no authority.
+The additive `setup_notice` response explains unavailable context even when the
+underlying request still has its original `waiting_bot` status; it does not
+rewrite terminal events or authorize a replacement destination. Older browser
+clients ignore this field. Existing persisted status enums remain unchanged.
+
+Launch renewal retains at most four previous SHA-256 hashes, indexed by manager,
+only to recognize replaced links. They cannot bind or resume a request. Old
+replicas ignore this optional metadata; launches renewed by old replicas, older
+hashes beyond the bound and TTL-deleted requests can only report `missing`.
+Server diagnostics log one fixed reason code, request UUID, saved status and
+sender-match boolean per recovery reply; no challenges, tokens, content, labels
+or URLs are logged. Existing `config.same_base_url` callback checks continue to
+accept configured API aliases and reject unrelated hosts.

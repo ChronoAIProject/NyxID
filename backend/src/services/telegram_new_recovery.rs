@@ -104,7 +104,7 @@ impl TelegramNewService<'_> {
 
     /// The read-only projection uses the exact same predicates as issuance.
     /// Its answer is advisory; only the real-write transaction admits an effect.
-    async fn check_creation_context(
+    pub(super) async fn check_creation_context(
         &self,
         request: &TelegramBotRequest,
         session: &mut ClientSession,

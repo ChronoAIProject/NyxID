@@ -37,6 +37,13 @@ export const telegramNewRequestSchema = z.object({
   connection_error: z.string().nullable().optional(),
   prompt_delivery: telegramPromptDeliverySchema.nullable().optional(),
   can_open_creation_form: z.boolean().optional(),
+  setup_notice: z.object({
+    reason: z.string(),
+    message: z.string(),
+    status_url: z.string().url(),
+    new_setup_url: z.string().url(),
+    agent_url: z.string().url().nullable(),
+  }).nullable().optional(),
 });
 
 export const telegramNewConfigSchema = z.object({
