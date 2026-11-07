@@ -583,7 +583,7 @@ async fn retail_projection_matches_billing_and_never_exposes_private_tariff_data
         "0.000001000001"
     );
     let json = actual.to_string();
-    for secret in [
+    for (index, private_field) in [
         &service.id,
         &tariff.id,
         &tariff.source,
@@ -593,8 +593,14 @@ async fn retail_projection_matches_billing_and_never_exposes_private_tariff_data
         "sync_error",
         "service_id",
         "model_id",
-    ] {
-        assert!(!json.contains(secret), "private field: {secret}");
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            !json.contains(private_field),
+            "private field #{index} leaked into the public projection"
+        );
     }
     // Missing/stale economics never appear as free or fall back to 999 base credits.
     state
