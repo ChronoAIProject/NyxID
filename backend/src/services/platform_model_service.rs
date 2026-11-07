@@ -963,6 +963,23 @@ pub async fn retail_explanations(
             .map(|rate| (rate.lago_metric_code.clone(), rate))
             .collect()
     };
+    let image_ready =
+        security_readiness_service::report(db, super::platform_model_execution::images::READINESS)
+            .await?
+            .ready;
+    let routing_ids: Vec<_> = models
+        .iter()
+        .filter_map(|m| m.routing_revision_id.as_deref())
+        .collect();
+    let routings: Vec<RoutingRevision> = if image_ready && !routing_ids.is_empty() {
+        db.collection(ROUTING_COLLECTION)
+            .find(doc! {"_id":{"$in":routing_ids}})
+            .await?
+            .try_collect()
+            .await?
+    } else {
+        vec![]
+    };
     let now = Utc::now();
     Ok(models
         .iter()
@@ -977,6 +994,26 @@ pub async fn retail_explanations(
                         p.model_id == model.id
                             && p.lane
                                 == crate::models::platform_model_tariff::TariffLane::PlatformKey
+                    })
+                    .map(|mut price| {
+                        if price.available
+                            && price.variant.is_empty()
+                            && let Some(tariff) = tariffs
+                                .iter()
+                                .find(|t| Some(&t.id) == price.active_tariff_id.as_ref())
+                            && let Some(routing) = routings.iter().find(|r| {
+                                Some(&r.id) == model.routing_revision_id.as_ref()
+                                    && r.model_id == model.id
+                            })
+                        {
+                            price.image_input =
+                                super::platform_model_execution::images::public_limits(
+                                    model,
+                                    &routing.routes,
+                                    tariff,
+                                );
+                        }
+                        price
                     })
                     .collect();
             Some((model.id.clone(), prices))

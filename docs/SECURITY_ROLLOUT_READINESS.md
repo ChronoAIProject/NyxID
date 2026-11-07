@@ -225,6 +225,13 @@ Upgrade and drain every credential consumer before enabling model-only catalog
 records: old replicas ignore their additive purpose field. The restriction remains
 enforced when the flag is off. See [the registry contract](PLATFORM_MODELS.md).
 
+PR 3b additionally advertises `inference:platform-model-images-v1`. Certified
+image-tariff authoring and image execution require that capability across the
+fleet, in addition to the existing model gates. Text execution and historical
+text tariffs do not acquire an image dependency. The assistant guard remains;
+this capability does not advertise `assistant:platform-models-v1`. No new
+environment setting or automatic model/rate activation is introduced.
+
 ### Channel guest media
 
 `assistant:channel-guest-media` is a separate default-off flag and replica

@@ -336,7 +336,18 @@ async fn execute_with_runtime(
     let person = auth.user_id.to_string();
     let public_id = value["model"].as_str().ok_or_else(registry::unavailable)?;
     registry::authorized_model(&state.db, &person, public_id).await?;
-    let request = execution::Request::parse(&method, &path, value)?;
+    if body.len() > state.config.llm_max_body_size || body.len() > execution::images::MAX_REQUEST {
+        return Err(AppError::RequestBodyTooLarge {
+            max_bytes: state
+                .config
+                .llm_max_body_size
+                .min(execution::images::MAX_REQUEST),
+            context: "Platform model gateway".into(),
+        });
+    }
+    let request = execution::Request::parse_async(method.clone(), path.clone(), value)
+        .await?
+        .with_ingress_limit(state.config.llm_max_body_size);
     let path = format!(
         "/v1/{}",
         path.trim_start_matches('/')
@@ -363,6 +374,14 @@ async fn execute_with_runtime(
         &request,
     )
     .await?;
+    if request.has_images()
+        && access.body.len() as i64 > plan.tariff.tariff().bounds.max_request_bytes
+    {
+        return Err(AppError::RequestBodyTooLarge {
+            max_bytes: plan.tariff.tariff().bounds.max_request_bytes as usize,
+            context: "Platform model request".into(),
+        });
+    }
     execution::Authority::check(&access, &plan).await?;
     // Reuse ordinary approval policy and its bounded notification/wait path.
     super::llm_gateway::check_llm_approval(

@@ -369,6 +369,13 @@ pub async fn create(
     input: NewTariff,
 ) -> AppResult<ModelTariff> {
     security_readiness_service::require(db, READINESS).await?;
+    if super::super::platform_model_execution::certification::image_contract(&input.contract) {
+        security_readiness_service::require(
+            db,
+            super::super::platform_model_execution::images::READINESS,
+        )
+        .await?;
+    }
     create_ready(db, actor, model_id, input).await
 }
 async fn create_ready(
@@ -758,6 +765,8 @@ pub struct Explanation {
     pub pending_tariff_id: Option<String>,
     pub available: bool,
     pub blocking_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_input: Option<super::super::platform_model_execution::images::PublicLimits>,
     pub components: Vec<TariffComponent>,
 }
 
@@ -805,6 +814,7 @@ pub fn explain(
                         active_tariff_id: binding.active_tariff_id.clone(),
                         pending_tariff_id: binding.pending_tariff_id.clone(),
                         available: reason.is_none(),
+                        image_input: None,
                         blocking_reason: reason.map(str::to_owned),
                         components: selected.map(|t| t.tariff.components).unwrap_or_default(),
                     });

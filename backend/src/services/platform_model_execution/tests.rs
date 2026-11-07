@@ -1,3 +1,4 @@
+mod images_tests;
 use super::adapters::Native;
 use super::*;
 use crate::{
@@ -790,6 +791,13 @@ async fn expired_attempt_diagnosed_once_without_releasing_and_known_intent_wins(
 
 #[tokio::test]
 async fn paid_provider_evidence_uses_exact_funding_tax_and_one_durable_settlement() {
+    paid_provider_evidence(false).await;
+}
+#[tokio::test]
+async fn paid_image_evidence_uses_exact_funding_tax_ledger_lago_and_recovery() {
+    paid_provider_evidence(true).await;
+}
+async fn paid_provider_evidence(images: bool) {
     use crate::models::{
         billing_rate_cache::BillingRateCache,
         billing_target::BillingTargetKind,
@@ -797,7 +805,11 @@ async fn paid_provider_evidence_uses_exact_funding_tax_and_one_durable_settlemen
         credits::Credits,
         usage_allowance::{AllowanceRecurrence, UsageAllowance},
     };
-    let (state, mut plan, request) = fixture(Native::Responses, false).await;
+    let (state, mut plan, mut request) = fixture(Native::Responses, false).await;
+    if images {
+        request = images_tests::image_plan(&mut plan, false);
+        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    }
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/subscriptions/subscription/entitlements"))
