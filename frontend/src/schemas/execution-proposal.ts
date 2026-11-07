@@ -26,6 +26,9 @@ export const executionProposalSchema = z.object({
       digest: z.string(),
       label: z.string(),
       valid_until: z.string().nullable(),
+      context_scope: z
+        .enum(["current_conversation", "private_conversations", "same_audience"])
+        .optional(),
     }),
   ),
   grant_id: z.string().nullable(),
@@ -33,3 +36,16 @@ export const executionProposalSchema = z.object({
   result_text: z.string().nullable().optional(),
 });
 export type ExecutionProposal = z.infer<typeof executionProposalSchema>;
+
+export function executionContextLabel(scope?: string | null) {
+  switch (scope) {
+    case "current_conversation":
+      return "Only this conversation";
+    case "private_conversations":
+      return "Across my private conversations";
+    case "same_audience":
+      return "Across conversations with the same audience";
+    default:
+      return undefined;
+  }
+}

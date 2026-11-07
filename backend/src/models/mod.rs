@@ -258,3 +258,5 @@ pub mod voice_responses;
 pub mod generated_artifact;
 
 pub mod platform_model;
+
+pub mod platform_model_tariff;

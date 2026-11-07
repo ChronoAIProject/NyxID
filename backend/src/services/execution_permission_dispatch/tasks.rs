@@ -370,9 +370,11 @@ pub(crate) fn settle<'a>(
             .filter_map(|e| e.id.strip_prefix("execution-decision:"))
             .collect();
         if !receipts.is_empty() && message.status == "completed" {
-            db.collection::<Document>("approval_requests").update_many(doc!{"_id":{"$in":receipts},"user_id":&row.user_id,
-                "execution_proposal.v1.state":{"$in":["completed","not_sent","unknown","denied","expired","cancelled"]}},
-                doc!{"$set":{"execution_proposal.v1.delivered_turn_id":&turn.turn_id}}).session(&mut *session).await?;
+            for version in proposals::v3::AssistantVersion::ALL {
+                db.collection::<Document>("approval_requests").update_many(version.selector(doc!{"_id":{"$in":&receipts},"user_id":&row.user_id,
+                    "execution_proposal.v1.state":{"$in":["completed","not_sent","unknown","denied","expired","cancelled"]}}),
+                    version.update(doc!{"$set":{"execution_proposal.v1.delivered_turn_id":&turn.turn_id}})).session(&mut *session).await?;
+            }
         }
         let v2_receipts: Vec<_> = turn
             .events
@@ -403,13 +405,11 @@ pub(crate) fn settle<'a>(
             .session(&mut *session)
             .await?
             .is_some();
-        let pending_effect = db.collection::<Document>("approval_requests").find_one(doc! {
-            "user_id":&row.user_id,"$or":[{"execution_proposal.v1.task.task":&reference,
+        let pending_effect = db.collection::<Document>("approval_requests").find_one(proposals::v3::source_selector(doc! {
+            "user_id":&row.user_id,"execution_proposal.v1.task.task":&reference,
             "execution_proposal.v1.state":{"$in":["pending","queued","preparing","dispatched","waiting"]},
-            "execution_proposal.v1.task.hard_deadline":{"$gt":bson::DateTime::now()}},{"execution_proposal.v2.task.task":&reference,
-            "execution_proposal.v2.state":{"$in":["pending","queued","preparing","dispatched","waiting"]},
-            "execution_proposal.v2.task.hard_deadline":{"$gt":bson::DateTime::now()}}]
-        }).session(&mut *session).await?.is_some();
+            "execution_proposal.v1.task.hard_deadline":{"$gt":bson::DateTime::now()}
+        })).session(&mut *session).await?.is_some();
         let mut background = false;
         for (collection, states) in [
             ("machine_jobs", vec!["running"]),

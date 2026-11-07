@@ -336,12 +336,58 @@ requires that human and accepts only:
 
 The client cannot author a connection, audience, scope, validity payload or task.
 Operation is the default. The immutable choices are this operation, this task,
-one displayed hour, and persistent until revoked/binding changes. Reusable
+one displayed hour, and persistent until revoked/binding changes. These existing
+choices remain bound to the current conversation, including Persistent. Reusable
 choices require an enforceable closed shape: exact path/query and JSON inputs,
 no semantic headers beyond JSON Content-Type, and empty bodies for bodyless
 methods. Sensitive/large inputs permit Operation only. The same shape restriction
 runs on every reusable use and again at egress. Omitted input constraints never
 mean an approved wildcard. No Full-access suggestion is shown.
+
+### Explicit reuse across private conversations (#2196b)
+
+An additional, separate choice reads: **This agent, this connection and the
+displayed operation/inputs, across my private conversations, until revoked**.
+It is never preselected. It is available only for a personal owner's ordinary
+assistant request, a personal connection, a private audience and an enforceable,
+non-sensitive reusable input scope. Org/shared/group/guest/channel and v2
+sources keep their existing choices. The card and saved permission both show
+whether the scope is one conversation or private conversations.
+
+This is new authoring, not migration. Existing choices retain their IDs, digests,
+validity and Exact context, including already-pending reviews. The new choice's
+keyed digest binds the whole selected contract, including SameAudience context
+and Persistent validity. The human still submits only the server-issued choice
+identity/digest, expected revision and idempotency key.
+
+The writer uses optional `ExecutionProposal.v3`, with v1/v2 absent. Old readers
+ignore that slot and cannot decide/resume it; their legacy decision guards still
+refuse the extension. B2 retains its v2 Machine source/adapter allocation.
+Assistant v1/v3 share effect retention, claim, resume, cancellation, receipt and
+maintenance logic, with exact-version selectors and bounded indexed sweeps.
+Dedupe checks both versions, so readiness changes do not create a second review.
+There is no backfill, TTL change, new feature flag or environment variable.
+
+Approval writes the existing ExecutionPermission v1 contract with
+`ConversationScope::SameAudience`. Every use still checks the same actor and
+agent, exact connection/credential binding, operation/input constraints, private
+audience, live ceilings and current task. A new thread has its own key and
+occurrence. Reusable permission never makes the original retained effect reusable;
+duplicate decisions and uncertain sends retain the existing no-resend fences.
+
+Activation requires `permissions:execution-authoring-private-conversations-v1`
+from every serving replica/worker. This is optional for existing enrollment and
+v1/v2 authoring. A definitively unready fresh gap retains v1 choices; a readiness
+read failure is operational. Existing v3 work never downgrades: decisions,
+resumes and sends recheck this capability. Cancellation, expiry, cleanup and
+authorized readback remain available.
+
+Deploy all readers/workers and the v3 indexes before exposing the choice through
+fleet readiness. For binary rollback, disable effective cohorts and drain/cancel
+v3 work on upgraded binaries first; preserve terminal receipts and unknown
+outcomes. Saved SameAudience permissions use the already-supported v1 reader and
+remain explicitly authorized until revoked or their binding/authority changes.
+Disabling rollout does not silently revoke or broaden them.
 
 The transaction rechecks actor enrollment, source/key, live task/audience,
 shared behavior and endpoint/connection authority, then commits the card decision,
@@ -771,10 +817,10 @@ issues no execution permit: the normal shared gate still checks live authority
 and claims Once before egress. A consumed HTTP Once decision cannot authorize
 another occurrence; changed consent must pass the original live checks.
 
-The remaining #2196 slices are explicit private cross-conversation authoring,
-verified-owner channel source/resume/result delivery, and integrated B2 evidence.
-Current assistant choices, including persistent, still bind one conversation.
-The reader's explicit `SameAudience` support is not proof of an owner-facing
-cross-conversation authoring journey. Channel/automation/guest and live voice
-remain outside the supported source list above. No #2196a test or diagnostic
-implicitly enrolls them or changes their audience.
+The remaining #2196 slices are verified-owner channel source/resume/result
+delivery and integrated B2 evidence. Existing assistant choices, including
+persistent, still bind one conversation. Slice (b)'s separate, explicit v3 choice
+supports private cross-conversation reuse only under its readiness gate and
+eligibility rules above. Channel/automation/guest and live voice remain outside
+the supported source list above. No migration diagnostic implicitly enrolls
+them or changes their audience.

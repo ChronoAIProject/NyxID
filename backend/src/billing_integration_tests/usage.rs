@@ -9,6 +9,7 @@ pub(super) fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
     let now = Utc::now();
     let id = Uuid::new_v4().to_string();
     UsageMeterRow {
+        model_tariff: None,
         org_channel_guest: None,
         rollup_pending: true,
         id: id.clone(),

@@ -5,9 +5,11 @@ This is the approved platform-model contract for
 public-name, credential and first-release scope decisions. It supersedes the
 design's earlier brand-neutral naming and keyless-first recommendations.
 
-**Current implementation: PR 1, registry/readers/authorization.** It stores configuration and evaluates
-live entitlement metadata. It does **not** execute inference, mint Google tokens,
-decrypt route credentials, publish model prices or modify NyxAgent selection.
+**Current implementation: PRs 1–2, registry, authorization and model tariffs.**
+It stores configuration, evaluates live entitlement metadata and publishes
+complete immutable model tariffs through the existing billing path. It does
+**not** execute inference, mint Google tokens, decrypt route credentials or
+modify NyxAgent selection.
 No models, credentials, prices, connections or cloud resources are seeded.
 
 Public IDs are immutable real model names under `nyxid/`, for example
@@ -61,7 +63,7 @@ Capabilities are declarations, not adapter certifications. Unknown capability
 values remain absent; authoring them never activates an executor. Updates include
 `expected_revision`, display text, capabilities, lifecycle, enabled and optional
 `billing_service_id`. Only an active model can be enabled. PR 1 refuses activation
-because complete execution and billing readiness are not yet implemented.
+because complete execution readiness is not yet implemented.
 Disabling, retirement, reads and entitlement revocation remain available.
 
 An entitlement body has `expected_revision` and `entitlements`:
@@ -142,8 +144,9 @@ This foundation does not claim that merely storing JSON certifies a GCP key.
 `inference:platform-models` is a code-declared, default-off flag using existing
 person/org/global overrides. No new environment variable is introduced.
 
-PR 1 advertises only `inference:platform-model-registry-v1`. It deliberately does
-not advertise `inference:platform-models-v1`, `billing:model-prices-v1` or
+PRs 1–2 advertise `inference:platform-model-registry-v1` and
+`billing:model-prices-v1`. They deliberately do not advertise
+`inference:platform-models-v1` or
 `assistant:platform-models-v1`. Flag enable and active-model publication fail
 closed until this binary **and** the whole declared fleet support execution and
 billing. Fabricating future capabilities in heartbeat rows cannot make a PR 1
@@ -387,3 +390,118 @@ Gemini Enterprise Agent Platform documentation while retaining the Vertex API.
 - [Vertex/Model Garden pricing](https://cloud.google.com/vertex-ai/generative-ai/pricing)
 - [Claude cache semantics](https://cloud.google.com/vertex-ai/generative-ai/docs/partner-models/claude/prompt-caching)
 - [429 and capacity handling](https://cloud.google.com/vertex-ai/generative-ai/docs/provisioned-throughput/error-code-429)
+
+## PR 2: immutable tariffs and exact units
+
+PR 2 advertises `billing:model-prices-v1`; execution and assistant capabilities
+remain absent. Upgrade **all** API, worker and reader binaries and confirm the
+existing drained-fleet readiness roster before authoring tariffs or allowances
+using the new units. No new environment variable, price, model or rate is seeded.
+The platform-model flag stays default-off and cannot yet enable inference.
+
+The `platform_model_tariffs` collection stores immutable economics. A lane's
+`model_prices` contains model UUID + exact variant bindings, separate active and
+pending tariff IDs, and derived allowance-unit metadata. Prices exist only in
+the immutable revision. Ordinary catalog saves preserve bindings and recheck
+against the live record transactionally; they cannot publish, forge or clear them.
+
+Admin API additions (first-party humans only; admin writes, admin/operator reads):
+
+- `GET /api/v1/admin/platform-models/{id}/tariffs`: latest 100 revisions.
+- `POST /api/v1/admin/platform-models/{id}/tariffs`: create a pending revision.
+  `revision` is the model's current revision (CAS); the new tariff consumes the
+  next model revision. Read the model and tariff list after an ambiguous response.
+- `POST /api/v1/admin/platform-models/{id}/tariffs/{tariff_id}/retire` with
+  `{"revision": CURRENT_MODEL_REVISION}`: stop new selection, preserve history.
+- The existing `/admin/billing/services/{service_id}/resync` retries publication;
+  bounded billing reconciliation also retries pending revisions automatically.
+
+The create body includes `revision`, `lane` (`byok` or `platform_key`), exact
+`variant` (at most eight finite string selectors), `source` (private verification
+reference), `contract`, `bounds`, and `components`. No caller-supplied Lago code
+is trusted; codes are generated as:
+
+```
+platform_svc_<slug>_<pk|byok>_mdl_<model_uuid_without_hyphens>_t<revision>_<component_key>
+```
+
+The 255-byte limit and component-key uniqueness are checked without truncation.
+Each component has `key`, `metric`, tagged `selector`, exact decimal
+`credits_per_unit`, `explicit_free`, and `max_quantity`. Zero requires
+`explicit_free: true`; missing is never free. Components allocate benefits in
+lexicographic component-key order, independently of request or provider order.
+A replacement never mixes components with its predecessor. Every charge and
+matching exact rate-cache entry must synchronize before the binding moves.
+Old charges and rates remain for accepted work and billing-period obligations;
+there is no destructive tariff garbage collector. Retirement forbids admission,
+not settlement, and never reuses a code.
+
+A contract fixes the adapter version, a 64-hex certified `fixture_sha256`, family,
+`tokens`, `cache_read`, `cache_write_ttls`, `split_reasoning`, input/output modality
+splits, explicit Gemini `bill_tool_input`, `images`, and a distinct `requests` fee.
+Versions are `openai.responses.v1`, `anthropic.messages.v1`, `gemini.generate.v1`,
+and `open_maas.certified.v1`. Open MaaS has no generic OpenAI-shaped wire parser:
+its adapter must certify the mapping to integer evidence. Certification and
+stream-event accumulation are serving-adapter responsibilities in PR 3.
+
+Selectors are `{"kind":"input"}`, `output`, `reasoning`, `cache_read`,
+`image_input`, `image_output`, `audio_input`, `audio_output`, `images`, `requests`,
+`{"kind":"cache_write","ttl":"five_minutes"}` (also `one_hour`,
+`thirty_minutes`, `twelve_hours`), and
+`{"kind":"cached_modality","modality":"image"}` (or `audio`). The contract
+derives the complete disjoint component set; missing, duplicate, overlapping,
+or unexpected selectors fail authoring. A tariff uses image-token accounting or
+per-image accounting, not both. Phase 1 rejects combined write-TTL/modality and
+reasoning/output-modality splits without a certified intersection contract.
+Gemini tool input can be aggregate-priced or excluded; separate tool-input
+modality prices also require a future certified intersection contract. Supplied
+Gemini modality arrays must sum exactly to their corresponding total.
+
+Bounds include `max_input_tokens`, `max_output_tokens`, `max_candidates`,
+`max_tool_iterations`, `max_images`, `max_request_bytes`, `max_response_bytes`.
+Every component's prepaid bound must cover the full candidate/tool-loop ceiling.
+Each bounded component is conservatively reserved together in the existing
+funding transaction. PR 3 must enforce those request limits **before dispatch**;
+there is no byte-to-token estimate and no one-token cache admission. Unknown
+variants, absent/stale/retired/mismatched rates and unavailable paid billing
+refuse. A deliberate all-zero tariff remains metered without consuming benefits.
+
+Strict evidence keeps missing, known zero and inapplicable distinct. Fractions,
+negative values, overflow, inconsistent totals and incomplete required splits
+refuse. Native integer counters and the normalized per-code vector are retained
+on the coordinator with a payload digest; changed evidence on replay conflicts.
+Only the coordinator contributes request/token totals. All component rows retain
+the public model, distinct code, actual unit and frozen reservation rate.
+Examples covered by tests:
+
+1. OpenAI input 12,000, read 4,000, write 7,000 (3,000 at 30m + 4,000 at 12h):
+   ordinary input 1,000, separate write classes, no aggregate write charge.
+2. Claude ordinary 100, read 800, write 200 (150 at 5m + 50 at 1h): ordinary
+   stays 100; input-related total is 1,100.
+3. Gemini prompt 1,000, cached 200, candidates 100, thoughts 50, tool input zero:
+   input 800 + cache 200, and either output 150 or output 100 + reasoning 50.
+4. Gemini image input 300 of 1,000 and cache 200 without cached-image counts:
+   split image/cache pricing refuses; aggregate input 800 + cache 200 is valid.
+
+The additive metrics are `reasoning_tokens`, `image_input_tokens`,
+`image_output_tokens`, `audio_input_tokens`, and `audio_output_tokens`. TTLs are
+selectors on existing cache units. Generic lane editors cannot author these new
+units: they require strict model evidence. Metric-matched allowances, exact
+credits, grant ordering, wallet tax, the ledger and Lago residues remain shared.
+Multiple TTL components of one unit share allowance availability within the same
+transaction. Paid model admissions forbid overdraft and metering-only fallback.
+
+`resolve_service_billing` exposes `model_prices` with active/pending IDs, exact
+components and blocking reasons using the admission selector. Its ordinary class
+view reports `model_tariff_required`, never a free or legacy fallback. Existing
+usage readers and hourly/daily covering indexes already group by metric, code
+and model; new units use their existing quantity measures and flat cost mirrors.
+No financial backfill, historical rekey or new quantitative rollup field is needed.
+UI/CLI unit labels are additive; route/native model identities are not exposed.
+
+Missing final evidence preserves forwarded holds. Existing durable settlement
+intent recovery, claim fencing, ledger/account reconciliation and wallet-only
+Lago emission handle finalized vectors. Disabling the feature does not discard
+those obligations. PR 3 must provide bounded adapter recovery and diagnostics
+for provider-accepted work without recoverable final evidence; this PR does not
+activate a transport or claim that every provider supplies usage lookup.

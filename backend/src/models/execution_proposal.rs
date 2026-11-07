@@ -10,6 +10,8 @@ pub struct ExecutionProposal {
     pub v1: Option<Proposal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub v2: Option<ProposalV2>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v3: Option<Proposal>,
 }
 impl std::fmt::Debug for ExecutionProposal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -74,6 +76,9 @@ pub struct Choice {
     pub digest: String,
     pub validity: super::execution_permission::Validity,
     pub label: String,
+    /// Only the v3 assistant envelope can author a different conversation scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_scope: Option<super::execution_permission::ConversationScope>,
 }
 
 /// Safe structured owner review; raw HTTP inputs and credentials are never embedded.

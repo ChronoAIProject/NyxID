@@ -7,6 +7,7 @@ import {
 } from "@/hooks/use-approvals";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
+import { executionContextLabel } from "@/schemas/execution-proposal";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -369,6 +370,9 @@ function ExecutionGrantDetails({
         {permission.review?.operation ?? "Execution permission"} ·{" "}
         {permission.validity}
       </summary>
+      {executionContextLabel(permission.context_scope) && (
+        <p>Applies to: {executionContextLabel(permission.context_scope)}</p>
+      )}
       {permission.review && (
         <div className="space-y-1 py-2">
           <p>{permission.review.connection}</p>

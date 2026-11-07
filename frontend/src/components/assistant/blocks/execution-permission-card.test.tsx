@@ -139,6 +139,49 @@ it("selects an enforceable persistent choice without changing scope", async () =
   );
   expect(vi.mocked(api.post).mock.calls[0]?.[1]).not.toHaveProperty("scope");
 });
+
+it("requires an explicit choice for private conversations and submits only its bound identity", async () => {
+  const value: ExecutionProposal = {
+    ...proposal,
+    version: 3,
+    choices: [
+      ...proposal.choices.map((choice) => ({
+        ...choice,
+        context_scope: "current_conversation" as const,
+      })),
+      {
+        id: "persistent_private_conversations",
+        digest: "private-conversations-digest",
+        label: "This agent, this connection and the displayed operation/inputs, across my private conversations, until revoked",
+        valid_until: null,
+        context_scope: "private_conversations",
+      },
+    ],
+  };
+  vi.mocked(api.post).mockResolvedValue({
+    execution_proposal: { ...value, state: "queued", can_decide: false },
+  });
+  card(value);
+  expect(screen.getByRole("radio", { name: /This operation/ })).toBeChecked();
+  expect(screen.getByText("Applies to: Only this conversation")).toBeInTheDocument();
+  const across = screen.getByRole("radio", { name: /across my private conversations/ });
+  expect(across).not.toBeChecked();
+  fireEvent.click(across);
+  expect(screen.getByText("Applies to: Across my private conversations")).toBeInTheDocument();
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Allow selected permission" }));
+  });
+  expect(api.post).toHaveBeenCalledWith(
+    "/approvals/requests/request/execution-decision",
+    {
+      approved: true,
+      expected_revision: 2,
+      choice_id: "persistent_private_conversations",
+      choice_digest: "private-conversations-digest",
+      idempotency_key: expect.any(String),
+    },
+  );
+});
 it("reloads a lost decision response without blindly retrying the effect", async () => {
   vi.mocked(api.post).mockRejectedValue(new Error("Response lost"));
   vi.mocked(api.get).mockResolvedValue({

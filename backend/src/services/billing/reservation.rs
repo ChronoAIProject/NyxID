@@ -1001,18 +1001,52 @@ pub(crate) async fn estimate_layer_reservations(
         )
     });
     for (layer, metric, code) in platform.chain(resale) {
-        let rate = fresh_rate(
-            db,
-            code,
-            ctx.public_admission.as_ref().map(|a| a.model_id.as_str()),
-            rate_cache_ttl_secs,
-        )
-        .await?;
+        let free = ctx.model_tariff.as_ref().is_some_and(|t| {
+            t.tariff()
+                .components
+                .iter()
+                .any(|c| c.lago_metric_code == code && c.explicit_free)
+        });
+        let rate = if free {
+            BillingRateCache {
+                id: BillingRateCache::cache_id(code, None),
+                lago_metric_code: code.into(),
+                model: None,
+                credits_per_unit_micros: 0,
+                credits_per_unit_pico: Some(0),
+                synced_at: Utc::now(),
+                retired_at: None,
+            }
+        } else {
+            fresh_rate(
+                db,
+                code,
+                ctx.public_admission.as_ref().map(|a| a.model_id.as_str()),
+                rate_cache_ttl_secs,
+            )
+            .await?
+        };
         let rate_pico =
             super::amounts::rate_pico(rate.credits_per_unit_pico, rate.credits_per_unit_micros);
         // Preserve the existing one-unit gate for standalone legacy charges
         // and resale. New component configurations estimate every platform unit.
-        let estimated_quantity = if !ctx.has_native_text_bound()
+        let estimated_quantity = if let Some(selected) = &ctx.model_tariff {
+            let component = selected
+                .tariff()
+                .components
+                .iter()
+                .find(|c| c.lago_metric_code == code)
+                .ok_or_else(|| super::model_tariffs::unavailable("missing_component"))?;
+            if rate_pico
+                != i128::from(
+                    super::amounts::decimal_to_pico(&component.credits_per_unit)
+                        .ok_or_else(|| super::model_tariffs::unavailable("invalid_rate"))?,
+                )
+            {
+                return Err(super::model_tariffs::unavailable("rate_changed"));
+            }
+            component.max_quantity
+        } else if !ctx.has_native_text_bound()
             && (layer == BillingLayer::Resale
                 || (ctx.platform_components.is_empty() && metric.is_legacy()))
         {

@@ -115,6 +115,9 @@ impl RequestContext {
         if resume.version == 2 {
             return proposals::v2::attach_resume(auth, resume);
         }
+        if !matches!(resume.version, 1 | 3) {
+            return Err(refused());
+        }
         let chat = auth
             .assistant_chat
             .as_deref()
