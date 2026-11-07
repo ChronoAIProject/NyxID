@@ -60,6 +60,28 @@ pub enum LagoPushDecision {
 }
 
 impl BillingReconciler {
+    #[cfg(test)]
+    pub(crate) async fn compare_usage_for_test(&self) -> AppResult<ReconcileStats> {
+        let mut stats = ReconcileStats::default();
+        self.compare_finalized_usage(
+            self.lago.as_ref().expect("test Lago client").as_ref(),
+            &mut stats,
+        )
+        .await?;
+        Ok(stats)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn push_usage_for_test(&self) -> AppResult<ReconcileStats> {
+        let mut stats = ReconcileStats::default();
+        self.push_unacked(
+            self.lago.as_ref().expect("test Lago client").as_ref(),
+            &mut stats,
+        )
+        .await?;
+        Ok(stats)
+    }
+
     pub fn new(
         db: mongodb::Database,
         lago: Option<Arc<dyn LagoApi>>,
@@ -85,6 +107,7 @@ impl BillingReconciler {
             )
             .await?;
         }
+        crate::services::platform_model_execution::recover(&self.db).await?;
         let mut stats = ReconcileStats::default();
         match super::pool_attempt::recover_expired(&self.db, Utc::now()).await {
             Ok(count) => stats.abandoned += count,

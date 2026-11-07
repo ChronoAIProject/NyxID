@@ -52,8 +52,12 @@ const model: AdminModel = {
   routing_revision_id: null,
   routes: [],
   execution_ready: false,
-  blocking_reason: "execution_not_implemented",
-  required_readiness: ["inference:platform-models-execution-v1"],
+  blocking_reason: "execution_fleet_not_ready",
+  required_readiness: [
+    "inference:platform-model-registry-v1",
+    "inference:platform-models-v1",
+    "billing:model-prices-v1",
+  ],
   created_at: "2026-11-01T00:00:00Z",
   updated_at: "2026-11-01T00:00:00Z",
 };
@@ -208,6 +212,55 @@ describe("platform model surfaces", () => {
       "/llm/models?limit=50&after=nyxid%2Fgpt-test",
     );
   });
+  it("keeps retail prices visible when execution depends on the request", async () => {
+    mock.get.mockResolvedValue({
+      models: [{ ...publicModel, availability: "request_dependent" }],
+      next_after: null,
+    });
+    show(<PlatformModelsPage />);
+    expect(
+      await screen.findByText("Availability checked per request"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Execution unavailable")).not.toBeInTheDocument();
+    expect(screen.queryByText("Ready for use")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("0.000000000001 credits / unit"),
+    ).toBeInTheDocument();
+  });
+  it.each([
+    [
+      false,
+      "execution_fleet_not_ready",
+      "Execution unavailable: Execution fleet not ready",
+    ],
+    [true, "", "Execution ready"],
+    [
+      false,
+      "execution_not_implemented",
+      "Execution unavailable: Execution not implemented",
+    ],
+  ])(
+    "renders readiness and activation for ready=%s reason=%s",
+    async (ready, reason, label) => {
+      mock.get.mockResolvedValue({
+        ...model,
+        execution_ready: ready,
+        blocking_reason: reason,
+      });
+      show(<AdminPlatformModelDetailPage />);
+      expect(await screen.findByText(label)).toBeInTheDocument();
+      const readiness = screen.getByText(/Required fleet readiness:/);
+      for (const capability of model.required_readiness) {
+        expect(readiness).toHaveTextContent(capability);
+      }
+      expect(readiness).not.toHaveTextContent("assistant:platform-models-v1");
+      const enable = screen.getByRole("checkbox", {
+        name: "Enabled for entitled people",
+      });
+      if (ready) expect(enable).toBeEnabled();
+      else expect(enable).toBeDisabled();
+    },
+  );
   it("shows missing prices as unavailable, never free", async () => {
     mock.get.mockResolvedValue({
       models: [{ ...publicModel, retail_prices: [] }],

@@ -5,11 +5,12 @@ This is the approved platform-model contract for
 public-name, credential and first-release scope decisions. It supersedes the
 design's earlier brand-neutral naming and keyless-first recommendations.
 
-**Current implementation: PRs 1, 2 and 4 — registry, authorization, model tariffs, admin/customer surfaces and CLI.**
-It stores configuration, evaluates live entitlement metadata and publishes
-complete immutable model tariffs through the existing billing path. Web and CLI surfaces inspect and administer these contracts. It does
-**not** execute inference, mint Google tokens, decrypt route credentials or
-modify NyxAgent selection.
+**Current implementation: PRs 1–4 — registry, authorization, tariffs, bounded execution, and admin/customer/CLI surfaces.**
+It stores configuration, evaluates live entitlements and executes the stateless
+Chat text/function subset below through complete immutable model tariffs and
+the existing billing path. Web and CLI surfaces inspect and administer these
+contracts. NyxAgent selection and actor-bound internal execution remain PR 5;
+this does not yet satisfy the real-conversation acceptance of #2274.
 No models, credentials, prices, connections or cloud resources are seeded.
 
 Public IDs are immutable real model names under `nyxid/`, for example
@@ -62,8 +63,8 @@ Create example:
 Capabilities are declarations, not adapter certifications. Unknown capability
 values remain absent; authoring them never activates an executor. Updates include
 `expected_revision`, display text, capabilities, lifecycle, enabled and optional
-`billing_service_id`. Only an active model can be enabled. PR 1 refuses activation
-because complete execution readiness is not yet implemented.
+`billing_service_id`. Only an active model can be enabled. Activation requires the local execution
+capability and the same capability on every declared live replica.
 Disabling, retirement, reads and entitlement revocation remain available.
 
 An entitlement body has `expected_revision` and `entitlements`:
@@ -111,7 +112,7 @@ Routes use closed typed targets:
 
 Each route includes a UUID, credential catalog-service UUID, enabled state,
 priority and positive weight. No target accepts a URL, caller route override,
-secret or arbitrary pool. The later executor constructs trusted authorities and
+secret or arbitrary pool. The executor constructs trusted authorities and
 resolves the active route set server-side. No customer API returns the private
 route plan. An internal metadata plan is **not** a decrypt/send permit.
 
@@ -133,10 +134,10 @@ restriction independently of the feature flag and readiness. Do not convert an
 existing directly offered service to hide its routes: create a separate dedicated
 record so current customers retain their existing product.
 
-Credential material stays in the existing encrypted catalog field. PR 3 will
-validate a GCP key strictly as `service_account`, reject executable/external/file
-sources and untrusted token URLs, and mint/cache short-lived tokens using trusted
-Google authorities. ADC/WIF is deferred behind the token-provider abstraction.
+Credential material stays in the existing encrypted catalog field. The executor
+validates a GCP key strictly as `service_account`, rejects executable/external/file
+sources and untrusted token URLs, and mints/caches short-lived tokens using the
+fixed Google OAuth token authority. ADC/WIF is deferred behind the token-provider abstraction.
 This foundation does not claim that merely storing JSON certifies a GCP key.
 
 ## Deployment and readiness
@@ -144,9 +145,8 @@ This foundation does not claim that merely storing JSON certifies a GCP key.
 `inference:platform-models` is a code-declared, default-off flag using existing
 person/org/global overrides. No new environment variable is introduced.
 
-PRs 1–2 advertise `inference:platform-model-registry-v1` and
-`billing:model-prices-v1`. They deliberately do not advertise
-`inference:platform-models-v1` or
+PRs 1–4 advertise `inference:platform-model-registry-v1`,
+`billing:model-prices-v1` and `inference:platform-models-v1`. They do not advertise
 `assistant:platform-models-v1`. Flag enable and active-model publication fail
 closed until this binary **and** the whole declared fleet support execution and
 billing. Fabricating future capabilities in heartbeat rows cannot make a PR 1
@@ -160,12 +160,13 @@ alternate/internal credential consumer and writer. Use the existing immutable
 optional/defaulted serialization alone is not a security rollout guarantee.
 Old binaries must not rejoin after restricted credential records are enabled.
 
-Remaining PRs add bounded admission and the four serving families, and the
-paired NyxAgent contract. Prices never fall back silently to legacy lanes. No execution is
-unlocked by this PR's metadata API or a manually inserted flag. Ordinary services,
-pools and billing retain their existing paths with the flag off.
+PR 3 supplies bounded admission and the four serving families described below.
+PR 5 adds the paired NyxAgent contract. Prices never fall back silently to legacy
+lanes. Metadata access or a manually inserted flag cannot bypass live execution
+readiness, entitlement and funding checks. Ordinary services, pools and billing
+retain their existing paths with the flag off.
 
-## Approved execution contract (subsequent PRs)
+## Approved execution contract and remaining integration
 
 The first release includes **all four** serving families and the paired NyxAgent
 integration. A picker or registry alone does not complete #2274. Public IDs such
@@ -205,9 +206,8 @@ credential authority and evidence contract. Clients cannot select a private
 route, account, project, region or upstream. Reuse bounded priority/weight,
 health/cooldown and deadline primitives; one planner owns retries. No mutable
 user pool, recursive alias, generic proxy or caller destination may bypass this
-boundary. The metadata plan from PR 1 is not an execution permit: later
-credential materialization requires a server-constructed, actor-bound permit for
-the live model, route/revision, credential, operation and funded admission.
+boundary. A metadata plan is not a decrypt/send permit: the executor revalidates
+the live actor, model, route/revision, credential, operation and funded admission.
 
 A retry/fallback requires proof the request was unsent or rejected with zero
 consumption. An HTTP status alone does not prove zero consumption. Never retry
@@ -392,11 +392,12 @@ Gemini Enterprise Agent Platform documentation while retaining the Vertex API.
 
 ## PR 2: immutable tariffs and exact units
 
-PR 2 advertises `billing:model-prices-v1`; execution and assistant capabilities
-remain absent. Upgrade **all** API, worker and reader binaries and confirm the
+PR 2 introduced `billing:model-prices-v1`; PR 3 adds execution readiness, while
+the paired assistant capability remains absent. Upgrade **all** API, worker and reader binaries and confirm the
 existing drained-fleet readiness roster before authoring tariffs or allowances
 using the new units. No new environment variable, price, model or rate is seeded.
-The platform-model flag stays default-off and cannot yet enable inference.
+The platform-model flag stays default-off; inference requires the PR 3 execution
+capability across the fleet.
 
 The `platform_model_tariffs` collection stores immutable economics. A lane's
 `model_prices` contains model UUID + exact variant bindings, separate active and
@@ -441,7 +442,7 @@ splits, explicit Gemini `bill_tool_input`, `images`, and a distinct `requests` f
 Versions are `openai.responses.v1`, `anthropic.messages.v1`, `gemini.generate.v1`,
 and `open_maas.certified.v1`. Open MaaS has no generic OpenAI-shaped wire parser:
 its adapter must certify the mapping to integer evidence. Certification and
-stream-event accumulation are serving-adapter responsibilities in PR 3.
+stream-event accumulation are enforced by the serving adapters below.
 
 Selectors are `{"kind":"input"}`, `output`, `reasoning`, `cache_read`,
 `image_input`, `image_output`, `audio_input`, `audio_output`, `images`, `requests`,
@@ -460,7 +461,7 @@ Bounds include `max_input_tokens`, `max_output_tokens`, `max_candidates`,
 `max_tool_iterations`, `max_images`, `max_request_bytes`, `max_response_bytes`.
 Every component's prepaid bound must cover the full candidate/tool-loop ceiling.
 Each bounded component is conservatively reserved together in the existing
-funding transaction. PR 3 must enforce those request limits **before dispatch**;
+funding transaction. PR 3 enforces those request limits **before dispatch**;
 there is no byte-to-token estimate and no one-token cache admission. Unknown
 variants, absent/stale/retired/mismatched rates and unavailable paid billing
 refuse. A deliberate all-zero tariff remains metered without consuming benefits.
@@ -501,9 +502,9 @@ UI/CLI unit labels are additive; route/native model identities are not exposed.
 Missing final evidence preserves forwarded holds. Existing durable settlement
 intent recovery, claim fencing, ledger/account reconciliation and wallet-only
 Lago emission handle finalized vectors. Disabling the feature does not discard
-those obligations. PR 3 must provide bounded adapter recovery and diagnostics
-for provider-accepted work without recoverable final evidence; this PR does not
-activate a transport or claim that every provider supplies usage lookup.
+those obligations. PR 3 supplies bounded adapter recovery and diagnostics
+for provider-accepted work without recoverable final evidence. Missing evidence
+never implies zero consumption, and not every provider supplies usage lookup.
 
 ## Admin, customer and CLI surfaces (PR 4)
 
@@ -519,8 +520,14 @@ Public IDs and families cannot be edited. Contract/route/access writes include t
 model's `expected_revision`; tariff create/retire includes its current `revision`.
 A 409 preserves the form and requires explicit reload/discard; there is no blind
 retry. The enable switch remains unavailable while execution is not ready.
-Readiness is reported independently of lifecycle and rate sync. The PR 1/2 stack
-continues to report `execution_not_implemented` until the execution work lands.
+Readiness is reported independently of lifecycle and rate sync. Admin responses
+return `execution_ready: false` and `blocking_reason: execution_fleet_not_ready`
+until the registry, billing and execution fleet gates pass; once ready, the
+blocking reason is empty. `required_readiness` contains those three capabilities,
+not the separate assistant gate. Public rows retain their `retail_prices` and
+report `availability: request_dependent` when that fleet is ready: each request
+still needs supported inputs, a usable tariff, live authority and funding. Older
+replicas' `unavailable` and `execution_not_implemented` values remain readable.
 
 Access starts with default deny. Rules select people, organizations or groups,
 with a searchable target picker or UUID input. Every matching deny overrides
@@ -554,8 +561,9 @@ never encode route identity.
 Usage and execution records continue to use the public `nyxid/...` model string;
 existing model breakdown/labels render it without substituting private native
 model names. Administrative billing explanations link model tariff readiness to
-its registry editor. This PR adds no inference path, assistant model selection,
-new billing semantics or paid probe.
+its registry editor. The PR 4 surfaces add no separate inference path, assistant
+model selection, new billing semantics or paid probe; execution uses the PR 3
+gateway contract below.
 
 ### CLI
 
@@ -593,3 +601,115 @@ never floating-point numbers. `verify` is read-only and shows the same effective
 billing/readiness selection; `publish`/`resync` use the existing billing resync
 route. Writes never auto-retry a conflict or uncertain response. Future unknown
 billing units retain their labels and exact prices in CLI output.
+
+## PR 3 execution contract
+
+`POST /api/v1/llm/gateway/v1/chat/completions` accepts a `nyxid/<model>` plus
+`messages` and an explicit positive `max_tokens` or `max_completion_tokens`.
+The gateway reserves the namespace before ordinary provider-name inference.
+Only stateless text and function tools, one candidate and at most one model
+invocation per attempt are enabled. `stream: true` returns Chat SSE. Native
+caller protocols, images/audio, hosted tools, cache creation, provider state,
+continuations and arbitrary passthrough fields are refused, not silently removed.
+The registry may describe future capabilities; that does not enable an adapter.
+Direct OpenAI Responses requires an output bound of at least 16; smaller bounds
+are refused before admission, following its documented native minimum.
+
+The ordinary entrance accepts personal sessions, access tokens and general API
+keys. Live token/session/key authority, original and current connection/operation
+ceilings, model entitlements, the offering policy and route credential version
+are checked again after waits and before send. Actor-bound assistant, service
+account, delegated, relay and execution-permission-enrolled transports are
+refused here pending their private-model adapter; an HTTP approval cannot replace
+an enrolled one-use permission fence. PR 5 must bind those internal occurrences
+before enabling them. API-key checks use live enrollment resolution as well as
+authentication hints, so a cold/stale process snapshot cannot bypass that fence.
+Public discovery's `request_dependent` availability means
+that execution checks the concrete request, configuration and funding; it is not
+a provider health promise. Admin fleet readiness is also not such a promise.
+
+The transport mappings are:
+
+| Route | Native request | Certified evidence |
+| --- | --- | --- |
+| Vertex Google | `POST /v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent` (stream: `streamGenerateContent?alt=sse`) | `usageMetadata`; separate candidate/reasoning output |
+| Vertex Claude | Same publisher path with `anthropic`, `rawPredict` / `streamRawPredict` | Messages usage, separate cache counters/TTLs; body `anthropic_version=vertex-2023-10-16` and no `model` field |
+| Vertex Open MaaS | `/v1/projects/{project}/locations/{location}/endpoints/openapi/chat/completions` | Certified `openai/gpt-oss-120b-maas` mapping only; aggregate prompt/completion counts |
+| Direct OpenAI | `https://api.openai.com/v1/responses`, `store=false` | Responses usage including cached input and reasoning subset |
+| Direct Anthropic | `https://api.anthropic.com/v1/messages` | Same Messages usage contract as Vertex Claude |
+
+Regional Vertex authorities are `{location}-aiplatform.googleapis.com`; global
+uses `aiplatform.googleapis.com`. Typed validated admin fields construct every URL.
+No user headers, query strings or destination selectors reach native endpoints.
+The `gpt-oss-120b-maas` native ID is an exact reviewed equivalent of public
+`nyxid/gpt-oss-120b`; no generic `-maas` alias rule exists. Its documented
+`max_tokens` bound and final SSE usage are used without assuming OpenAI-only
+options or cache/reasoning counters. Other MaaS models need reviewed fixture
+certification before they can execute.
+Each tariff's `fixture_sha256` must equal the SHA256 of its checked-in fixture in
+`backend/src/services/platform_model_execution/fixtures/`. Admins must certify the
+real model's native context/output limits; admission reserves the entire declared
+native context, never a byte-to-token guess. The explicit output bound is sent
+to the provider. Request and response bounds are enforced before send/during
+read, capped at 1 MiB and 8 MiB. No variant-specific contract executes yet.
+
+GCP auth signs RS256 service-account assertions for the cloud-platform scope and
+posts only to `https://oauth2.googleapis.com/token`. JSON-supplied URLs are checked
+as metadata and never fetched. Cache keys bind credential identity, ciphertext
+and version; rotation cannot reuse an old token. The cache has 128 entries,
+single-flight minting per key, at most eight concurrent token requests, a
+10-second mint timeout, 60–89 seconds of early refresh and two-second suppression
+after failure. Only idle entries can be evicted. Credential/token strings use
+zeroizing storage and are never logged, audited or placed in errors.
+Bearer syntax is checked before funding; selecting service-account JSON for a
+direct route cannot forward its private key to that provider.
+
+One private planner samples routes by priority then weight, at most four attempts.
+Cooled routes do not spend this attempt budget or hide a later healthy route.
+The dispatch/read deadline is 120 seconds (approval waiting precedes it). Existing
+cluster leases bound each project/location/model target to eight concurrent calls
+and two per person, plus any offering-specific limit; a process also caps each
+target at four. Lease loss cancels work. Cooldowns are credential-version scoped,
+bounded and jittered; no independent HTTP retry layer resends inference.
+
+Fallback requires a proven connection failure before send or a bounded,
+adapter-certified authentication/permission/rate-limit error envelope with its
+matching 401/403/429 status. A status alone, arbitrary proxy error page, 408, 5xx,
+redirect, timeout or broken accepted body never permits fallback. Once successful
+headers commit a route, neither output failure nor cancellation can switch it.
+
+All tariff components reserve atomically through the PR 2 funding transaction.
+A snapshot/majority transaction marks the full meter vector forwarded and creates
+one private attempt marker before provider I/O. Final normalized evidence is
+persisted as one digest-fenced component intent before success or `[DONE]` reaches
+the caller. Existing settlement/reconcile handles exact benefits, wallet tax,
+ledger postings and wallet-only Lago quantities, including provider retry and
+cumulative-floor residue. No native routing identity enters those records.
+
+Streaming uses bounded SSE framing, cumulative snapshots (never sums snapshots),
+sequence duplicate checks where the protocol provides them, and final-usage
+validation. Text may be delivered incrementally; function arguments are released
+only when complete. Native identifiers, headers, reasoning state, signatures and
+error bodies are omitted. Cancel/disconnect drops transport. Authoritative final
+usage already received still settles; absent, malformed, truncated or
+out-of-contract evidence leaves a hold with `model_usage_pending`.
+
+`platform_model_attempts` is private recovery metadata, not another billing
+system. It retains the immutable routing revision/route reference and a
+credential-version digest for reviewed investigation; these never enter public
+usage or response DTOs. The existing reconcile tick CAS-claims at most 100 expired attempts,
+recognizes persisted component intents and otherwise flags `pending_review` in
+Integrity. These stateless providers do not guarantee a recoverable usage lookup:
+there is no inference redispatch, guessed charge, automatic zero or timed hold
+release. Operators must obtain authoritative evidence or authorize a reviewed
+write-off; PR 3 does not expose an automated write-off endpoint. Prompts,
+completions and raw provider errors are never retained in recovery rows.
+
+The MaaS model ID, output parameter and aggregate usage shape were rechecked on
+2026-11-07 against [the gpt-oss model card](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/maas/openai/gpt-oss-120b)
+and [the request/SSE examples](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/maas/call-open-model-apis).
+The committed fixtures are synthetic examples of those documented shapes; they
+do not claim a live provider canary.
+
+The direct Responses output bound, terminal SSE and usage fields were checked
+against [OpenAI's Responses reference](https://developers.openai.com/api/reference/resources/responses/methods/create).

@@ -562,4 +562,5 @@ pub mod org_channel_service;
 
 pub mod generated_artifacts;
 
+pub mod platform_model_execution;
 pub mod platform_model_service;

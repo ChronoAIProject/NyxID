@@ -42,7 +42,9 @@ export function PlatformModelsPage() {
               <p className="type-secondary text-muted-foreground">
                 {model.availability === "available"
                   ? "Ready for use"
-                  : "Execution unavailable"}
+                  : model.availability === "request_dependent"
+                    ? "Availability checked per request"
+                    : "Execution unavailable"}
               </p>
               <p className="type-secondary text-muted-foreground">
                 {model.capabilities.protocols.join(" · ")} ·{" "}
