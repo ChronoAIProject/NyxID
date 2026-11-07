@@ -46,6 +46,7 @@ pub struct AuditLogQuery {
     /// Legacy exact-match filters, predating the admin table controls.
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
+    pub turn_id: Option<String>,
     pub search: Option<String>,
     pub search_filters: Option<String>,
     pub custom_filters: Option<String>,
@@ -72,6 +73,7 @@ impl AuditLogQuery {
             actor: self.actor.as_deref(),
             user_id: self.user_id.as_deref(),
             api_key_id: self.api_key_id.as_deref(),
+            turn_id: self.turn_id.as_deref(),
             created_dates: self.created_dates.as_deref(),
             created_from: self.created_from.as_deref(),
             created_to: self.created_to.as_deref(),
@@ -147,6 +149,8 @@ pub struct AuditLogItem {
 
 #[derive(Debug, Serialize)]
 pub struct AuditLogListResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_turn_id: Option<String>,
     pub entries: Vec<AuditLogItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total: Option<u64>,
@@ -158,6 +162,8 @@ pub struct AuditLogListResponse {
 
 #[derive(Debug, Serialize)]
 pub struct AuditLogCountResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_turn_id: Option<String>,
     pub total: u64,
 }
 
@@ -1403,6 +1409,11 @@ pub async fn list_audit_log(
     .await;
 
     Ok(Json(AuditLogListResponse {
+        applied_turn_id: query
+            .turn_id
+            .as_deref()
+            .and_then(|id| uuid::Uuid::parse_str(id.trim()).ok())
+            .map(|id| id.to_string()),
         entries: items,
         total: result.total,
         has_more: result.has_more,
@@ -1420,7 +1431,14 @@ pub async fn count_audit_log(
 ) -> AppResult<Json<AuditLogCountResponse>> {
     require_admin_or_operator(&state, &auth_user, "admin.audit_log.list").await?;
     let total = admin_audit_service::count_entries(&state.db, query.list_params()).await?;
-    Ok(Json(AuditLogCountResponse { total }))
+    Ok(Json(AuditLogCountResponse {
+        total,
+        applied_turn_id: query
+            .turn_id
+            .as_deref()
+            .and_then(|id| uuid::Uuid::parse_str(id.trim()).ok())
+            .map(|id| id.to_string()),
+    }))
 }
 
 /// Names the controls that were applied, never their values.
@@ -1428,6 +1446,7 @@ fn audit_log_filter_marker(query: &AuditLogQuery) -> Option<String> {
     let applied = [
         ("user_id", query.user_id.is_some()),
         ("api_key_id", query.api_key_id.is_some()),
+        ("turn_id", query.turn_id.is_some()),
         ("search", query.search.is_some()),
         ("search_filters", query.search_filters.is_some()),
         ("custom_filters", query.custom_filters.is_some()),
@@ -1486,6 +1505,10 @@ fn audit_log_filter_options(event_types: Vec<String>) -> AuditLogFilterOptions {
         search_fields: admin_audit_service::ADMIN_SEARCH_FIELDS
             .iter()
             .map(|(key, label)| AuditLogSearchField { key, label })
+            .chain(std::iter::once(AuditLogSearchField {
+                key: "turn_id_exact",
+                label: "Turn ID (exact)",
+            }))
             .collect(),
         fields: vec![
             AuditLogFilterField {
@@ -3618,6 +3641,17 @@ mod operator_route_tests {
             ])
             .await
             .unwrap();
+        let turn = uuid::Uuid::new_v4().to_string();
+        crate::services::admin_audit_service::ensure_turn_trace_index(&db)
+            .await
+            .unwrap();
+        db.collection::<mongodb::bson::Document>(crate::models::audit_log::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":"match"},
+                doc! {"$set":{"event_data.turn_id":&turn}},
+            )
+            .await
+            .unwrap();
         let state = test_app_state(db.clone());
         for actor in [&operator, &admin] {
             let result = count_audit_log(
@@ -3625,6 +3659,7 @@ mod operator_route_tests {
                 test_auth_user(actor),
                 Query(AuditLogQuery {
                     user_id: Some(ordinary.clone()),
+                    turn_id: Some(turn.clone()),
                     ..Default::default()
                 }),
             )
@@ -3635,7 +3670,10 @@ mod operator_route_tests {
         let denied = count_audit_log(
             State(state),
             test_auth_user(&ordinary),
-            Query(AuditLogQuery::default()),
+            Query(AuditLogQuery {
+                turn_id: Some(turn),
+                ..Default::default()
+            }),
         )
         .await;
         assert!(matches!(denied, Err(AppError::Forbidden(_))));

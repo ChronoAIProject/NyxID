@@ -1156,16 +1156,18 @@ pub(crate) fn prepare_node_request(
     if let Some(token) = forwarded_caller_token(target, caller_token, extra_outbound_headers) {
         base_headers.push(("authorization".to_string(), format!("Bearer {token}")));
     }
+    let mut headers = build_effective_outbound_headers(
+        target,
+        base_headers,
+        identity_headers,
+        &prepared.delegated_headers,
+        extra_outbound_headers,
+    );
+    crate::turn_trace::inject_secret_egress(&mut headers);
     Ok(PreparedNodeRequest {
         path,
         query: prepared.query,
-        headers: build_effective_outbound_headers(
-            target,
-            base_headers,
-            identity_headers,
-            &prepared.delegated_headers,
-            extra_outbound_headers,
-        ),
+        headers,
     })
 }
 
@@ -4568,6 +4570,11 @@ async fn forward_request_with_egress_guard_inner(
     egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
     resource_proof: Option<&super::resource_request_proof::ReadProofIssuer<'_>>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
+    let mut operation = crate::turn_trace::Operation::start(
+        crate::turn_trace::TurnContext::current(),
+        crate::turn_trace::Stage::ProxyHeaders,
+    );
+    let result: Result<reqwest::Response, ForwardRequestError> = crate::turn_trace::scope(operation.context(), async {
     target.require_credential_materialized()?;
     if let Some(permit) = &target.execution_permission {
         let ProxyBody::Buffered(bytes) = &body else {
@@ -4667,13 +4674,15 @@ async fn forward_request_with_egress_guard_inner(
             target.user_service_default_headers.as_slice(),
         ],
     );
-    let outbound_headers = build_effective_outbound_headers(
+    let mut outbound_headers = build_effective_outbound_headers(
         target,
         outbound_headers,
         &identity_headers,
         &prepared.delegated_headers,
         &extra_outbound_headers,
     );
+
+    crate::turn_trace::inject_secret_egress(&mut outbound_headers);
 
     if target.auth_method == nyxid_service_adapters::ifttt::AUTH_METHOD {
         let body = body.buffered()?;
@@ -5062,6 +5071,21 @@ async fn forward_request_with_egress_guard_inner(
     }
 
     Ok(response)
+
+    }).await;
+    match &result {
+        Ok(response) => operation.finish(
+            if response.status().is_success() {
+                crate::turn_trace::Outcome::Completed
+            } else {
+                crate::turn_trace::Outcome::Failed
+            },
+            Some(response.status().as_u16()),
+            None,
+        ),
+        Err(_) => operation.finish(crate::turn_trace::Outcome::Failed, None, None),
+    }
+    result
 }
 
 /// Whether an HTTP method semantically supports a request body.
@@ -6876,6 +6900,208 @@ mod tests {
         );
         target.service.token_exchange_config = Some(mk_cfg("unrecognized-format"));
         assert_eq!(credential_header_name(&target), None);
+    }
+
+    #[tokio::test]
+    async fn turn_trace_proxy_resolution_command_count_parity() {
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::collections::BTreeMap;
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("private-body"))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let mut measured = Vec::new();
+        for enabled in [false, true] {
+            let counts = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
+            let observed = counts.clone();
+            let handler = EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event {
+                    let collection = event.command.get_str(&event.command_name).unwrap_or("");
+                    *observed
+                        .lock()
+                        .unwrap()
+                        .entry(format!("{}:{collection}", event.command_name))
+                        .or_default() += 1;
+                }
+            });
+            let db = crate::test_utils::connect_transaction_test_database_with_command_handler(
+                "turn_trace_proxy",
+                handler,
+            )
+            .await;
+            let owner = uuid::Uuid::new_v4().to_string();
+            let endpoint = uuid::Uuid::new_v4().to_string();
+            let service = uuid::Uuid::new_v4().to_string();
+            db.collection::<User>(USERS)
+                .insert_one(test_user(&owner, UserType::Person))
+                .await
+                .unwrap();
+            db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                .insert_one(test_user_endpoint(
+                    &endpoint,
+                    &owner,
+                    "Trace proxy",
+                    &server.uri(),
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap();
+            db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+                .insert_one(test_user_service(
+                    &service,
+                    &owner,
+                    "trace-proxy",
+                    &endpoint,
+                    None,
+                    None,
+                ))
+                .await
+                .unwrap();
+            counts.lock().unwrap().clear();
+            let trace = enabled.then(|| {
+                crate::turn_trace::TurnContext::for_turn(&uuid::Uuid::new_v4().to_string()).unwrap()
+            });
+            crate::turn_trace::scope(trace, async {
+                let target = resolve_proxy_target_from_user_service(
+                    &db,
+                    &test_encryption_keys(),
+                    &Arc::new(NodeWsManager::new(30, 100)),
+                    &owner,
+                    Some("trace-proxy"),
+                    None,
+                    test_execution_context(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                let response = forward_request(
+                    &Client::new(),
+                    &target.target,
+                    reqwest::Method::GET,
+                    "/test",
+                    None,
+                    HeaderMap::new(),
+                    ProxyBody::Buffered(None),
+                    vec![],
+                    vec![],
+                    None,
+                    &empty_token_cache(),
+                    &empty_response_cache(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(response.text().await.unwrap(), "private-body");
+            })
+            .await;
+            measured.push(counts.lock().unwrap().clone());
+            db.drop().await.unwrap();
+        }
+        assert_eq!(measured[0], measured[1]);
+        assert!(measured[0].keys().any(|key| key.starts_with("find:")));
+        eprintln!(
+            "turn trace proxy resolution command parity: {:?}",
+            measured[0]
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn turn_trace_proxy_and_node_headers_preserve_execution_semantics() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_string("private-response-canary"),
+            )
+            .mount(&server)
+            .await;
+        let target = make_proxy_target(server.uri());
+        let turn = uuid::Uuid::new_v4().to_string();
+        let context = crate::turn_trace::TurnContext::for_turn(&turn).unwrap();
+        let mut incoming = HeaderMap::new();
+        incoming.insert(
+            "traceparent",
+            "00-11111111111141118111111111111111-1111111111111111-01"
+                .parse()
+                .unwrap(),
+        );
+        incoming.insert("x-request-id", "private-header-canary".parse().unwrap());
+        incoming.insert(
+            "idempotency-key",
+            "unchanged:continuation:2".parse().unwrap(),
+        );
+        incoming.insert("baggage", "private-baggage-canary".parse().unwrap());
+        let (result, records) = crate::turn_trace::capture(crate::turn_trace::scope(Some(context), async {
+            let node = prepare_node_request(&target, "/test", None, vec![("traceparent".into(), "untrusted".into())], &[], &[], None, &[]).unwrap();
+            assert!(node.headers.iter().any(|(key, value)| key == "traceparent" && value == &context.traceparent()));
+            forward_request(&Client::new(), &target, reqwest::Method::POST, "/test", None, incoming.clone(),
+                ProxyBody::Buffered(Some(bytes::Bytes::from_static(b"private-body-canary"))), vec![], vec![], None,
+                &empty_token_cache(), &empty_response_cache()).await.unwrap()
+        })).await;
+        assert_eq!(result.text().await.unwrap(), "private-response-canary");
+        let requests = server.received_requests().await.unwrap();
+        let headers = &requests[0].headers;
+        assert!(
+            headers["traceparent"]
+                .to_str()
+                .unwrap()
+                .starts_with(&format!("00-{}-", turn.replace('-', "")))
+        );
+        assert_eq!(headers["idempotency-key"], "unchanged:continuation:2");
+        assert_ne!(headers["x-request-id"], "private-header-canary");
+        assert!(!headers.contains_key("baggage"));
+        assert!(
+            !serde_json::to_string(&records)
+                .unwrap()
+                .contains("private-")
+        );
+        let callback = crate::turn_trace::TurnContext::for_request(
+            &incoming,
+            Some(&uuid::Uuid::new_v4().to_string()),
+        );
+        assert!(callback.context().is_none());
+        callback
+            .scope(async {
+                let node = prepare_node_request(
+                    &target,
+                    "/test",
+                    None,
+                    vec![("traceparent".into(), "untrusted".into())],
+                    &[],
+                    &[],
+                    None,
+                    &[],
+                )
+                .unwrap();
+                assert!(!node.headers.iter().any(|(key, _)| key == "traceparent"));
+                let result = forward_request(
+                    &Client::new(),
+                    &target,
+                    reqwest::Method::POST,
+                    "/test",
+                    None,
+                    incoming.clone(),
+                    ProxyBody::Buffered(None),
+                    vec![],
+                    vec![],
+                    None,
+                    &empty_token_cache(),
+                    &empty_response_cache(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(result.text().await.unwrap(), "private-response-canary");
+            })
+            .await;
+        let requests = server.received_requests().await.unwrap();
+        let headers = &requests[1].headers;
+        assert!(!headers.contains_key("traceparent"));
+        assert!(!headers.contains_key("baggage"));
+        assert!(!headers.contains_key("tracestate"));
+        assert!(uuid::Uuid::parse_str(headers["x-request-id"].to_str().unwrap()).is_ok());
+        assert_eq!(headers["idempotency-key"], "unchanged:continuation:2");
     }
 
     fn make_proxy_target(base_url: String) -> ProxyTarget {

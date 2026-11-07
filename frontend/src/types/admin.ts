@@ -195,6 +195,7 @@ export type AdminAuditLogFilterField =
 export type AdminAuditLogSearchFieldKey =
   | "user_id_exact"
   | "api_key_id_exact"
+  | "turn_id_exact"
   | "event_type"
   | "user_id"
   | "api_key"
@@ -213,6 +214,7 @@ export interface AdminAuditLogFilterOptions {
 }
 
 export interface AdminAuditLogListResponse {
+  readonly applied_turn_id?: string;
   readonly entries: readonly AdminAuditLogEntry[];
   readonly total?: number;
   readonly has_more?: boolean;
@@ -225,6 +227,7 @@ export interface AdminAuditLogListResponse {
 export type AdminAuditLogPerPage = 10 | 25 | 50 | 100;
 
 export interface AdminAuditLogListParams {
+  readonly turn_id?: string;
   readonly page: number;
   readonly per_page: AdminAuditLogPerPage;
   readonly user_id?: string;
@@ -243,6 +246,7 @@ export interface AdminAuditLogListParams {
 
 /** Canonical URL state for the audit-log table. */
 export interface AdminAuditLogSearchState {
+  readonly turn_id?: string;
   readonly page?: number;
   readonly per_page?: AdminAuditLogPerPage;
   readonly user_id?: string;

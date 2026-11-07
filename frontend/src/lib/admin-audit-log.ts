@@ -103,13 +103,15 @@ const SEARCH_FIELD_KEYS: readonly AdminAuditLogSearchFieldKey[] =
 const EXACT_SEARCH_FIELDS = [
   { key: "user_id_exact", label: "User ID (exact)" },
   { key: "api_key_id_exact", label: "API key ID (exact)" },
+  { key: "turn_id_exact", label: "Turn ID (exact)" },
 ] as const satisfies readonly AdminAuditLogSearchField[];
 
 export function adminAuditLogExactFieldParam(
   field: AdminAuditLogSearchFieldKey,
-): "user_id" | "api_key_id" | undefined {
+): "user_id" | "api_key_id" | "turn_id" | undefined {
   if (field === "user_id_exact") return "user_id";
   if (field === "api_key_id_exact") return "api_key_id";
+  if (field === "turn_id_exact") return "turn_id";
   return undefined;
 }
 
@@ -293,7 +295,7 @@ export function getAdminAuditLogSearchFields(
   }
 
   return [
-    ...EXACT_SEARCH_FIELDS,
+    ...EXACT_SEARCH_FIELDS.filter(({ key }) => key !== "turn_id_exact" || filterOptions?.search_fields?.some(field => field.key === "turn_id_exact")),
     ...SEARCH_FIELD_KEYS.flatMap((key) => {
       const field = fieldsByKey.get(key);
       return field ? [field] : [];
@@ -878,6 +880,14 @@ function canonicalCalendarDateCsv(value: unknown): string | undefined {
   return [...new Set(dates as string[])].sort().join(",");
 }
 
+/** One turn UUID; accepts the lossless W3C spelling as well. */
+export function normalizeAuditTurnId(value: string): string | undefined {
+  const hex = value.trim().toLowerCase();
+  if (!/^(?:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15})$/.test(hex)) return undefined;
+  const compact = hex.replaceAll("-", "");
+  return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`;
+}
+
 export function normalizeAdminAuditLogSearch(
   raw: Record<string, unknown>,
 ): AdminAuditLogSearchState {
@@ -908,6 +918,7 @@ export function normalizeAdminAuditLogSearch(
 
   return {
     ...exactIds,
+    ...(raw.turn_id !== undefined ? { turn_id: typeof raw.turn_id === "string" ? normalizeAuditTurnId(raw.turn_id) ?? "invalid-turn-id" : "invalid-turn-id" } : {}),
     ...(page !== undefined && page > 1 ? { page } : {}),
     ...(perPage !== undefined &&
     perPage !== ADMIN_AUDIT_LOG_DEFAULT_PER_PAGE &&

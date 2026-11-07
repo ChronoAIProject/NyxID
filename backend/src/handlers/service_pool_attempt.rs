@@ -509,7 +509,7 @@ impl Drop for Completion {
             observability: self.observability.clone(),
         };
         self.completed = true;
-        tokio::spawn(async move {
+        crate::turn_trace::spawn(async move {
             if let Err(error) =
                 Box::pin(completion.finish(completion.context.cancellation_cause())).await
             {
@@ -695,7 +695,7 @@ pub(super) async fn response_body(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(8);
     // Provider ownership stays in this task. Cancellation wins even when the
     // client stops polling and the bounded response queue is full.
-    tokio::spawn(async move {
+    crate::turn_trace::spawn(async move {
         loop {
             let next =
                 until_client_disconnect(&token, tokio::time::timeout(idle, upstream.next())).await;
@@ -987,7 +987,9 @@ mod tests {
             assert!(futures::poll!(&mut finish).is_pending());
         }
         assert!(completion.usage_extracted && completion.extracted_usage.is_some());
-        drop(completion);
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        let trace = crate::turn_trace::TurnContext::for_turn(&turn_id);
+        crate::turn_trace::scope(trace, async { drop(completion) }).await;
         tokio::time::timeout(
             std::time::Duration::from_secs(10),
             await_finalization(&finalization),
@@ -1013,6 +1015,24 @@ mod tests {
             Some(PoolAttemptOutcome::Reported)
         );
         assert!(row.released);
+        let audit = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(row) = db
+                    .collection::<crate::models::audit_log::AuditLog>(
+                        crate::models::audit_log::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"event_type": "service_pool_attempt"})
+                    .await
+                    .unwrap()
+                {
+                    break row;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(audit.event_data.unwrap()["turn_id"], turn_id);
         db.drop().await.unwrap();
     }
     #[tokio::test]

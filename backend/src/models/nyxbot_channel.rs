@@ -388,6 +388,10 @@ impl std::fmt::Debug for EventMedia {
 /// `readEventContext` returns exactly what was admitted. TTL-expired.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotEvent {
+    /// Server-issued ingress association, piggybacked on the source insert.
+    /// Retained across queue/replay; never execution authority or a caller ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_request_id: Option<String>,
     /// Trusted presence for every sender; independent of owner-only media claims.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_media_declared: Option<usize>,

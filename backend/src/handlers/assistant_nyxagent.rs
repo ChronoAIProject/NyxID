@@ -2311,7 +2311,7 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
         let origin = crate::services::assistant_checking_notice::destination(row)?;
         let state = self.state.clone();
         let row = row.clone();
-        Some(tokio::spawn(async move {
+        Some(crate::turn_trace::spawn(async move {
             use crate::services::assistant_checking_notice as notice;
             let turn = row.active_turn.as_ref().expect("claimed turn");
             let remaining = (turn.started_at
@@ -2352,25 +2352,42 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
         credential: &crate::services::platform_manager_contract::RuntimeCredential,
         request: crate::services::platform_manager_contract::NyxAgentRequest,
     ) -> AppResult<Response> {
-        let crate::services::platform_manager_contract::NyxAgentExecutionContext::Owner {
-            user_id,
-            ..
-        } = context
-        else {
-            return Err(AppError::Forbidden("Owner execution required".into()));
+        let turn = match context {
+            crate::services::platform_manager_contract::NyxAgentExecutionContext::Owner {
+                turn,
+                ..
+            } => &turn.turn_id,
+            crate::services::platform_manager_contract::NyxAgentExecutionContext::Public(
+                context,
+            ) => &context.turn.turn_id,
         };
-        if user_id != &self.auth.user_id.to_string() {
-            return Err(AppError::Forbidden("Owner execution required".into()));
-        }
-        proxy_raw(
-            &self.state,
-            &self.auth,
-            credential.raw_key.as_str(),
-            request.method.as_str(),
-            &request.relative_path,
-            request.body,
-            (!request.idempotency_key.is_empty()).then_some(request.idempotency_key.as_str()),
-            request.billing_policy,
+        crate::turn_trace::response(
+            crate::turn_trace::TurnContext::for_turn(turn),
+            crate::turn_trace::Stage::Engine,
+            async {
+                let crate::services::platform_manager_contract::NyxAgentExecutionContext::Owner {
+                    user_id,
+                    ..
+                } = context
+                else {
+                    return Err(AppError::Forbidden("Owner execution required".into()));
+                };
+                if user_id != &self.auth.user_id.to_string() {
+                    return Err(AppError::Forbidden("Owner execution required".into()));
+                }
+                proxy_raw(
+                    &self.state,
+                    &self.auth,
+                    credential.raw_key.as_str(),
+                    request.method.as_str(),
+                    &request.relative_path,
+                    request.body,
+                    (!request.idempotency_key.is_empty())
+                        .then_some(request.idempotency_key.as_str()),
+                    request.billing_policy,
+                )
+                .await
+            },
         )
         .await
     }

@@ -1567,6 +1567,7 @@ async fn inbound_of(
 
 fn admission(channel_id: &str, event_id: &str) -> NyxbotEvent {
     NyxbotEvent {
+        trace_request_id: None,
         media: None,
         source_media_declared: None,
         native_bot_budget_claimed: false,
@@ -1719,6 +1720,7 @@ async fn lost_chat_app_messages_are_reported_to_the_agent_once() {
     // Once a message reaches the agent again, the channel is healthy.
     let arrived = inbound(&state, &route_id, "7", "delivered", None, 0).await;
     let admitted = NyxbotEvent {
+        trace_request_id: None,
         media: None,
         source_media_declared: None,
         native_bot_budget_claimed: false,
