@@ -244,7 +244,9 @@ impl Responses {
                     }
                     super::client_key::revalidate(&state.db, call).await?;
                     let receipt = match &invocation.operation {
-                        Operation::Status => super::progress::task_status(&state.db, call).await?,
+                        Operation::Status => {
+                            Box::pin(super::progress::task_status(&state.db, call)).await?
+                        }
                         Operation::Submit(task) => {
                             if confirmation_pending {
                                 json!({"status":"refused","reason":"An actual confirmation is pending; task text cannot approve it."})
