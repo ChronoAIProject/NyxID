@@ -22,7 +22,7 @@ export const voiceSessionSchema = z.object({
 export const activeVoiceSessionSchema = z.object({
   session: voiceSessionSchema.nullable(),
 });
-export const voiceSnapshotSchema = z.object({
+const strictVoiceSnapshotSchema = z.object({
   type: z.literal("snapshot"),
   session: voiceSessionSchema,
   captions: z.array(
@@ -61,15 +61,43 @@ export const voiceSnapshotSchema = z.object({
       pending_acknowledgement_ids: z.array(z.string()),
       title: z.string().max(120).nullable().optional(),
       result_message_id: z.string().nullable().optional(),
-      progress: z.object({
-        stage: z.string(),
-        detail: z.string(),
-        last_completed_step: z.string().nullable(),
-        completed_steps: z.number().int().nonnegative(),
-        updated_at: z.string().datetime(),
-      }).nullable().optional(),
+      progress: z
+        .object({
+          stage: z.string(),
+          detail: z.string(),
+          last_completed_step: z.string().nullable(),
+          completed_steps: z.number().int().nonnegative(),
+          updated_at: z.string().datetime(),
+        })
+        .nullable()
+        .optional(),
     }),
   ),
+});
+// Presentation rows may evolve independently of the call-control protocol.
+// Validate the session strictly; omit an incompatible caption/task rather than
+// converting a display-only schema change into a lost audio call.
+export const voiceSnapshotSchema = strictVoiceSnapshotSchema.extend({
+  captions: z
+    .array(z.unknown())
+    .catch([])
+    .transform((rows) =>
+      rows.flatMap((row) => {
+        const result =
+          strictVoiceSnapshotSchema.shape.captions.element.safeParse(row);
+        return result.success ? [result.data] : [];
+      }),
+    ),
+  tasks: z
+    .array(z.unknown())
+    .catch([])
+    .transform((rows) =>
+      rows.flatMap((row) => {
+        const result =
+          strictVoiceSnapshotSchema.shape.tasks.element.safeParse(row);
+        return result.success ? [result.data] : [];
+      }),
+    ),
 });
 export const voiceStartedSchema = z.object({
   session: voiceSessionSchema,

@@ -18,26 +18,35 @@ use crate::{
 
 const LIMIT: usize = 256;
 const TOOL: &str = "request_nyxbot";
+const STATUS_TOOL: &str = "get_task_status";
 
 pub(super) fn configuration(model: &str) -> Value {
     json!({"type":"responses","responses":{
         "model":model,"max_output_tokens":2048,"parallel_tool_calls":false,"tool_choice":"auto",
-        "instructions":"You organize spoken requests for the same selected NyxBot. Use request_nyxbot once for each new task beyond small talk, including capability questions, current facts, owner data, device actions and explicit task-stop requests. Supply a complete self-contained task in the user's language, preserving every requested outcome, correction and relevant conversational reference. Do not truncate at a transcript fragment or invent missing details. The tool takes only task text: identity, Bot selection, credentials, permissions and confirmations are enforced by NyxID. Never claim that the user granted permission or approved an action. A queued receipt means work was accepted, not completed; never call again for the same task after receiving it. Verified results will arrive separately. Speak as the same assistant, never mention a handoff, backend chat, internal queue or another bot. Never invent results or approval questions.",
+        "instructions":"You organize spoken requests for the same selected NyxBot. Use request_nyxbot once for each new task beyond small talk, including capability questions, current facts, owner data, device actions and explicit task-stop requests. Supply a complete self-contained task in the user's language, preserving every requested outcome, correction and relevant conversational reference. Do not truncate at a transcript fragment or invent missing details. The tool takes only task text: identity, Bot selection, credentials, permissions and confirmations are enforced by NyxID. Never claim that the user granted permission or approved an action. A queued receipt means work was accepted, not completed; never call again for the same task after receiving it. For progress questions about accepted work, use get_task_status instead of request_nyxbot. Report only the returned state and useful concrete progress; missing detail is unknown, not success or a reason to restart the task. Verified results will arrive separately. Speak as the same assistant, never mention a handoff, backend chat, internal queue or another bot. Never invent results or approval questions.",
         "tools":[{"type":"function","name":TOOL,"strict":true,
             "description":"Ask this same selected NyxBot to perform the user's complete task under its existing permissions. This is task submission, not a permission grant.",
-            "parameters":{"type":"object","properties":{"request":{"type":"string"}},"required":["request"],"additionalProperties":false}}]
+            "parameters":{"type":"object","properties":{"request":{"type":"string"}},"required":["request"],"additionalProperties":false}},
+            {"type":"function","name":STATUS_TOOL,"strict":true,
+            "description":"Read verified current status of tasks already accepted in this call. Use for progress questions instead of submitting another task. This cannot start, repeat, cancel or approve work. Report only the supplied evidence; empty detail means no further detail is known.",
+            "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}]
     }})
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct Task {
     request: String,
 }
+#[derive(Clone, PartialEq)]
+enum Operation {
+    Submit(Task),
+    Status,
+}
 #[derive(Clone)]
 struct Call {
     id: String,
-    task: Task,
+    operation: Operation,
 }
 struct Response {
     delegation: String,
@@ -155,10 +164,7 @@ impl Responses {
             "response.output_item.done" if event["item"]["type"] == "function_call" => {
                 let response_id = self.current.get(delegation).ok_or_else(invalid)?;
                 let response = self.responses.get_mut(response_id).ok_or_else(invalid)?;
-                if response.delegation != delegation
-                    || event["item"]["name"] != TOOL
-                    || event["item"]["status"] != "completed"
-                {
+                if response.delegation != delegation || event["item"]["status"] != "completed" {
                     return Err(invalid());
                 }
                 let call_id = id(&event["item"]["call_id"])?;
@@ -166,12 +172,24 @@ impl Responses {
                     .as_str()
                     .filter(|s| s.len() <= 32_768)
                     .ok_or_else(invalid)?;
-                let task: Task = serde_json::from_str(arguments).map_err(|_| invalid())?;
-                if task.request.trim().is_empty() || task.request.len() > 16_384 {
-                    return Err(invalid());
-                }
+                let operation = match event["item"]["name"].as_str() {
+                    Some(TOOL) => {
+                        let task: Task = serde_json::from_str(arguments).map_err(|_| invalid())?;
+                        if task.request.trim().is_empty() || task.request.len() > 16_384 {
+                            return Err(invalid());
+                        }
+                        Operation::Submit(task)
+                    }
+                    Some(STATUS_TOOL)
+                        if serde_json::from_str::<Value>(arguments).map_err(|_| invalid())?
+                            == json!({}) =>
+                    {
+                        Operation::Status
+                    }
+                    _ => return Err(invalid()),
+                };
                 if let Some(prior) = response.calls.iter().find(|c| c.id == call_id) {
-                    return if prior.task.request == task.request {
+                    return if prior.operation == operation {
                         Ok(())
                     } else {
                         Err(invalid())
@@ -182,7 +200,7 @@ impl Responses {
                 }
                 response.calls.push(Call {
                     id: call_id.into(),
-                    task,
+                    operation,
                 });
             }
             "response.completed"
@@ -210,7 +228,12 @@ impl Responses {
                 }
                 // Continuation acknowledges a submission; a fresh function
                 // call ID cannot submit that same Live delegation again.
-                if !response.calls.is_empty() && !self.submitted.insert(delegation.into()) {
+                if response
+                    .calls
+                    .iter()
+                    .any(|c| matches!(c.operation, Operation::Submit(_)))
+                    && !self.submitted.insert(delegation.into())
+                {
                     return Err(invalid());
                 }
                 for invocation in &response.calls {
@@ -220,52 +243,59 @@ impl Responses {
                         return Err(invalid());
                     }
                     super::client_key::revalidate(&state.db, call).await?;
-                    let receipt = if confirmation_pending {
-                        json!({"status":"refused","reason":"An actual confirmation is pending; task text cannot approve it."})
-                    } else if Box::pin(super::control::stop_if_requested(
-                        state,
-                        call,
-                        &invocation.task.request,
-                    ))
-                    .await?
-                    {
-                        json!({"status":"stopped","detail":"The task was stopped. The call remains open."})
-                    } else {
-                        let source = VoiceTaskSource {
-                            model: call
-                                .responses
-                                .model()
-                                .map(str::to_owned)
-                                .ok_or_else(invalid)?,
-                            response_id: response_id.into(),
-                            delegation_id: delegation.into(),
-                        };
-                        match super::transcript::delegate_task(
-                            &state.db,
-                            call,
-                            &invocation.id,
-                            &invocation.task.request,
-                            source,
-                        )
-                        .await
-                        {
-                            Ok(mut request) => {
-                                super::progress::mark(
+                    let receipt = match &invocation.operation {
+                        Operation::Status => {
+                            Box::pin(super::progress::task_status(&state.db, call)).await?
+                        }
+                        Operation::Submit(task) => {
+                            if confirmation_pending {
+                                json!({"status":"refused","reason":"An actual confirmation is pending; task text cannot approve it."})
+                            } else if Box::pin(super::control::stop_if_requested(
+                                state,
+                                call,
+                                &task.request,
+                            ))
+                            .await?
+                            {
+                                json!({"status":"stopped","detail":"The task was stopped. The call remains open."})
+                            } else {
+                                let source = VoiceTaskSource {
+                                    model: call
+                                        .responses
+                                        .model()
+                                        .map(str::to_owned)
+                                        .ok_or_else(invalid)?,
+                                    response_id: response_id.into(),
+                                    delegation_id: delegation.into(),
+                                };
+                                match super::transcript::delegate_task(
                                     &state.db,
-                                    &mut request,
-                                    "queued_ms",
-                                    (chrono::Utc::now() - call.created_at)
-                                        .num_milliseconds()
-                                        .max(0),
+                                    call,
+                                    &invocation.id,
+                                    &task.request,
+                                    source,
                                 )
-                                .await?;
-                                super::wake_dispatch();
-                                json!({"status":"queued","task_id":request.id,"detail":"Accepted only. Wait for a verified result; do not submit this task again."})
+                                .await
+                                {
+                                    Ok(mut request) => {
+                                        super::progress::mark(
+                                            &state.db,
+                                            &mut request,
+                                            "queued_ms",
+                                            (chrono::Utc::now() - call.created_at)
+                                                .num_milliseconds()
+                                                .max(0),
+                                        )
+                                        .await?;
+                                        super::wake_dispatch();
+                                        json!({"status":"queued","task_id":request.id,"detail":"Accepted only. Wait for a verified result; do not submit this task again."})
+                                    }
+                                    Err(AppError::VoiceQueueFull) => {
+                                        json!({"status":"refused","reason":"The task queue is full. Wait for current work."})
+                                    }
+                                    Err(error) => return Err(error),
+                                }
                             }
-                            Err(AppError::VoiceQueueFull) => {
-                                json!({"status":"refused","reason":"The task queue is full. Wait for current work."})
-                            }
-                            Err(error) => return Err(error),
                         }
                     };
                     socket.send(json!({"type":"response.item.create","event_id":uuid::Uuid::new_v4().to_string(),
