@@ -2950,7 +2950,9 @@ mod tests {
     async fn ensure_customer_gets_existing_customer_before_create() {
         async fn get_customer() -> axum::Json<serde_json::Value> {
             axum::Json(json!({
-                "customer": { "external_id": "owner-1" }
+                "customer": {
+                    "external_id": "owner-1", "timezone": null, "applicable_timezone": "UTC"
+                }
             }))
         }
 
@@ -2994,7 +2996,9 @@ mod tests {
             assert_eq!(billing["payment_provider"].as_str(), Some("stripe"));
             assert_eq!(billing["payment_provider_code"].as_str(), Some("sandbox"));
             assert_eq!(billing["sync_with_provider"].as_bool(), Some(true));
-            axum::Json(json!({ "customer": { "external_id": "owner-1" } }))
+            axum::Json(json!({ "customer": {
+                "external_id": "owner-1", "timezone": null, "applicable_timezone": "UTC"
+            } }))
         }
 
         let base_url = spawn_lago_mock(
