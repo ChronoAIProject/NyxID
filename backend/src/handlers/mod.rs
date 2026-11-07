@@ -236,4 +236,5 @@ pub mod org_specialist_channels;
 
 pub(crate) mod execution_permission_resume;
 
+mod platform_model_gateway;
 pub mod platform_models;

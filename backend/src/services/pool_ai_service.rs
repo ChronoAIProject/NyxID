@@ -224,7 +224,7 @@ pub fn prepare(
     plan(service, catalog_service_slug, model, &request)?.prepare(&request)
 }
 
-fn validate_translated_chat(body: &Value, anthropic: bool) -> AppResult<()> {
+pub(crate) fn validate_translated_chat(body: &Value, anthropic: bool) -> AppResult<()> {
     only_fields(
         body,
         &[

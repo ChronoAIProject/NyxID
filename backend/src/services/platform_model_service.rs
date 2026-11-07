@@ -22,11 +22,10 @@ use crate::{
 };
 
 pub const FLAG: &str = "inference:platform-models";
-/// Only the foundation capability is advertised by PR 1.
+/// Independent fleet gates; assistant activation has a separate paired contract.
 pub const REGISTRY_READINESS: &str = "inference:platform-model-registry-v1";
 pub const EXECUTION_READINESS: &str = "inference:platform-models-v1";
 pub const BILLING_READINESS: &str = "billing:model-prices-v1";
-pub const ASSISTANT_READINESS: &str = "assistant:platform-models-v1";
 const MAX_ROUTES: usize = 32;
 const MAX_RULES: usize = 500;
 
@@ -75,8 +74,8 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     Ok(())
 }
 
-/// Unlike require(), unknown/future capabilities must fail closed. PR 1 cannot
-/// be activated even if someone writes a flag or fabricated future heartbeat.
+/// Unlike require(), unknown/future capabilities must fail closed. Local code
+/// support and the whole observed fleet must agree before any activation.
 pub async fn require_execution_ready(db: &Database) -> AppResult<()> {
     for capability in [REGISTRY_READINESS, EXECUTION_READINESS, BILLING_READINESS] {
         if !security_readiness_service::CAPABILITIES.contains(&capability)
@@ -468,7 +467,12 @@ pub fn validate_route(model: &PlatformModel, route: &ModelRoute) -> AppResult<()
             (native_model, None)
         }
     };
-    if !same_model(native, public) || location.is_some_and(|l| l.contains("..")) {
+    // Exact reviewed MaaS model-card spelling, not a generic suffix alias.
+    let certified_maas = matches!(&route.target,
+        RouteTarget::VertexOpenapiMaas { publisher, native_model, .. }
+            if publisher == "openai" && native_model == "gpt-oss-120b-maas" && public == "gpt-oss-120b");
+    if !(same_model(native, public) || certified_maas) || location.is_some_and(|l| l.contains(".."))
+    {
         return Err(invalid(
             "Every route must serve the same public model; aliases are not accepted",
         ));
@@ -856,6 +860,9 @@ pub struct AuthorizedRouteMetadata {
     routing: RoutingRevision,
 }
 impl AuthorizedRouteMetadata {
+    pub(crate) fn into_execution_parts(self) -> (PlatformModel, RoutingRevision) {
+        (self.model, self.routing)
+    }
     pub fn model_revision(&self) -> i64 {
         self.model.revision
     }

@@ -458,6 +458,10 @@ async fn flag_is_default_off_activation_is_blocked_and_disabling_works() {
             .await
             .is_ok()
     );
+    db.collection::<Document>(crate::models::security_replica::COLLECTION_NAME)
+        .update_many(doc! {}, doc! {"$pull":{"capabilities":EXECUTION_READINESS}})
+        .await
+        .unwrap();
     for target in [
         feature_flag_service::FlagTarget::Global,
         feature_flag_service::FlagTarget::User(person.clone()),
@@ -489,7 +493,7 @@ async fn flag_is_default_off_activation_is_blocked_and_disabling_works() {
         .await,
         Err(AppError::SecurityReadinessUnavailable)
     ));
-    assert!(!security_readiness_service::CAPABILITIES.contains(&EXECUTION_READINESS));
+    assert!(security_readiness_service::CAPABILITIES.contains(&EXECUTION_READINESS));
     assert!(security_readiness_service::CAPABILITIES.contains(&BILLING_READINESS));
     db.drop().await.unwrap();
 }

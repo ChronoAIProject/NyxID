@@ -215,9 +215,10 @@ remains v1 with a Channel audience; it never becomes a private permission.
 
 ## Platform model foundation
 
-PR 1 advertises `inference:platform-model-registry-v1` for the registry, entitlement
-readers and restricted catalog-credential purpose. It does not advertise complete
-execution, model-price billing or the paired NyxAgent contract. The default-off
+PRs 1–3 advertise `inference:platform-model-registry-v1` for registry/entitlements,
+`billing:model-prices-v1` for exact tariffs and `inference:platform-models-v1` for
+the bounded stateless Chat executor. They do not advertise the paired NyxAgent
+`assistant:platform-models-v1` contract. The default-off
 `inference:platform-models` flag cannot be enabled until all required local and
 fleet capabilities are implemented and ready. Reads and disabling remain usable.
 Upgrade and drain every credential consumer before enabling model-only catalog

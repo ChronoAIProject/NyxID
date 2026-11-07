@@ -95,6 +95,11 @@ pub struct AdminModel {
 }
 async fn admin_view(state: &AppState, row: PlatformModel) -> AppResult<AdminModel> {
     let routing = registry::routing(&state.db, &row).await?;
+    let execution_ready = match registry::require_execution_ready(&state.db).await {
+        Ok(()) => true,
+        Err(crate::errors::AppError::SecurityReadinessUnavailable) => false,
+        Err(error) => return Err(error),
+    };
     Ok(AdminModel {
         id: row.id,
         public_id: row.public_id,
@@ -110,13 +115,16 @@ async fn admin_view(state: &AppState, row: PlatformModel) -> AppResult<AdminMode
         entitlements: row.entitlements,
         routing_revision_id: row.routing_revision_id,
         routes: routing.map_or_else(Vec::new, |r| r.routes),
-        execution_ready: false,
-        blocking_reason: "execution_not_implemented",
+        execution_ready,
+        blocking_reason: if execution_ready {
+            ""
+        } else {
+            "execution_fleet_not_ready"
+        },
         required_readiness: vec![
             registry::REGISTRY_READINESS,
             registry::EXECUTION_READINESS,
             registry::BILLING_READINESS,
-            registry::ASSISTANT_READINESS,
         ],
         created_at: row.created_at.to_rfc3339(),
         updated_at: row.updated_at.to_rfc3339(),
@@ -394,6 +402,11 @@ pub async fn public_list(
         state.billing.billing_enabled(),
     )
     .await?;
+    let ready = match registry::require_execution_ready(&state.db).await {
+        Ok(()) => true,
+        Err(crate::errors::AppError::SecurityReadinessUnavailable) => false,
+        Err(error) => return Err(error),
+    };
     Ok(Json(PublicList {
         models: rows
             .iter()
@@ -405,6 +418,9 @@ pub async fn public_list(
                     .into_iter()
                     .map(Into::into)
                     .collect();
+                if ready {
+                    model.availability = "request_dependent";
+                }
                 model
             })
             .collect(),

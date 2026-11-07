@@ -64,7 +64,23 @@ async fn admin_writes_operator_reads_and_private_projection() {
         .await
         .unwrap();
     assert!(!view.execution_ready);
+    assert_eq!(view.blocking_reason, "execution_fleet_not_ready");
+    assert_eq!(
+        view.required_readiness,
+        vec![
+            registry::REGISTRY_READINESS,
+            registry::EXECUTION_READINESS,
+            registry::BILLING_READINESS
+        ]
+    );
     assert_eq!(view.revision, 1);
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let Json(ready) = admin_get(State(state.clone()), admin.clone(), Path(model.id.clone()))
+        .await
+        .unwrap();
+    assert!(ready.execution_ready);
+    assert!(ready.blocking_reason.is_empty());
+    assert_eq!(ready.required_readiness, view.required_readiness);
     let mut delegated = admin.clone();
     delegated.auth_method = AuthMethod::Delegated;
     assert!(
@@ -694,7 +710,7 @@ async fn public_retail_metadata_is_projected_only_after_live_entitlement_and_fla
             }),
         )
     };
-    // Test-only activation bypasses the future execution gate, as registry ACL tests do.
+    // Discovery remains available while execution fleet readiness is missing.
     state.db.collection::<bson::Document>(crate::models::feature_flag_override::COLLECTION_NAME).insert_one(doc! {
         "_id":Uuid::new_v4().to_string(),"org_user_id":bson::Bson::Null,"flag_key":registry::FLAG,"target_kind":"global","target_key":bson::Bson::Null,
         "enabled":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),"updated_by":person.user_id.to_string()
@@ -715,6 +731,15 @@ async fn public_retail_metadata_is_projected_only_after_live_entitlement_and_fla
     assert_eq!(result.models[0].retail_prices.len(), 1);
     assert!(!result.models[0].retail_prices[0].available);
     assert!(result.models[0].retail_prices[0].components.is_empty());
+    assert_eq!(result.models[0].availability, "unavailable");
+    let prices = serde_json::to_value(&result.models[0].retail_prices).unwrap();
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let ready = read().await.unwrap().0;
+    assert_eq!(ready.models[0].availability, "request_dependent");
+    assert_eq!(
+        serde_json::to_value(&ready.models[0].retail_prices).unwrap(),
+        prices
+    );
     state
         .db
         .collection::<bson::Document>(crate::models::feature_flag_override::COLLECTION_NAME)

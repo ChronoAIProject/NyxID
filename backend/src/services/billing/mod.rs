@@ -63,7 +63,7 @@ pub struct BillingStartupDiagnostic {
 pub async fn startup_diagnostics(
     db: &mongodb::Database,
 ) -> AppResult<Vec<BillingStartupDiagnostic>> {
-    let mut items = Vec::new();
+    let mut items = crate::services::platform_model_execution::diagnostics(db).await?;
     let migration = db
         .collection::<Document>("billing_migrations")
         .find_one(doc! {

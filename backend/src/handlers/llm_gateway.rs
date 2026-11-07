@@ -1136,6 +1136,7 @@ async fn gateway_request_inner(
     if !auth_user.assistant_operation_scopes.is_empty() {
         crate::services::proxy_authorization::CanonicalPath::from_mcp_built(request.uri().path())?;
     }
+    let model_cancellation = crate::downstream_disconnect::request_cancellation(&request);
     let gateway_started_at = std::time::Instant::now();
     let gateway_uri = request.uri().clone();
     let gateway_extensions = request.extensions().clone();
@@ -1195,9 +1196,19 @@ async fn gateway_request_inner(
         })?;
 
     // Reserved platform IDs must never fall through to provider-name heuristics.
-    // PR 1 has no executable platform adapter or tariff admission yet.
     if model.starts_with("nyxid/") {
-        return Err(crate::services::platform_model_service::unavailable());
+        return Box::pin(super::platform_model_gateway::execute(
+            state,
+            auth_user,
+            path,
+            method,
+            query,
+            headers,
+            body_bytes,
+            body_json,
+            model_cancellation,
+        ))
+        .await;
     }
 
     if let Some(pool_slug) = model.strip_prefix("pool:") {
@@ -2678,7 +2689,7 @@ fn parse_next_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
 /// `UserService` (the actor for personal credentials, an org for
 /// org-shared credentials). When `None`, the caller couldn't determine
 /// the owner -- the function falls back to the actor's policy only.
-async fn preflight_llm_deny_before_resolution(
+pub(super) async fn preflight_llm_deny_before_resolution(
     state: &AppState,
     auth_user: &AuthUser,
     service_id: &str,
@@ -2724,7 +2735,7 @@ async fn preflight_llm_deny_before_resolution(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn check_llm_approval(
+pub(super) async fn check_llm_approval(
     state: &AppState,
     auth_user: &AuthUser,
     service_id: &str,
@@ -2857,7 +2868,7 @@ fn should_bypass_approval_flow(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn enforce_agent_llm_operations(
+pub(super) async fn enforce_agent_llm_operations(
     db: &mongodb::Database,
     auth: &AuthUser,
     user_service: Option<&str>,
@@ -2951,14 +2962,14 @@ async fn enforce_agent_llm_operations(
 /// limits check the bytes actually sent (after translation and stream-usage
 /// normalization), and a scoped call never follows a redirect.
 #[derive(Default)]
-struct LlmOperationScope {
+pub(super) struct LlmOperationScope {
     forwarding: Option<String>,
     guest: bool,
     identity: Option<(String, Option<String>)>,
 }
 
 impl LlmOperationScope {
-    fn check_outbound(
+    pub(super) fn check_outbound(
         &self,
         auth: &AuthUser,
         method: &str,

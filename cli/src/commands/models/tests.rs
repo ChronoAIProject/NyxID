@@ -77,6 +77,67 @@ fn public_output_strips_private_fields_and_preserves_exact_unknown_units() {
     assert!(shown.contains("0.000000000001"));
     assert!(!shown.contains("Free"));
     assert!(render(&public_model(&json!({"id":"nyxid/test","retail_prices":[{"available":false,"variant":{},"components":[]}]}))).contains("Retail prices unavailable"));
+    let mut ready = row;
+    ready["availability"] = json!("request_dependent");
+    let shown = render(&ready);
+    assert!(shown.contains("request_dependent"));
+    assert!(shown.contains("0.000000000001"));
+}
+
+#[test]
+fn price_verification_preserves_execution_readiness_without_assistant_gate() {
+    with_env(async {
+        for (ready, reason) in [
+            (false, "execution_fleet_not_ready"),
+            (true, ""),
+            (false, "execution_not_implemented"),
+        ] {
+            let server = MockServer::start().await;
+            let readiness = json!({
+                "public_id": "nyxid/test",
+                "execution_ready": ready,
+                "blocking_reason": reason,
+                "required_readiness": [
+                    "inference:platform-model-registry-v1",
+                    "inference:platform-models-v1",
+                    "billing:model-prices-v1",
+                ],
+            });
+            let mut model = readiness.clone();
+            model["billing_service_id"] = json!(ID);
+            model["routes"] = json!([{"project": "private-project"}]);
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/admin/platform-models/{ID}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(model))
+                .expect(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/admin/billing/services/{ID}")))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"effective": {"model_prices": []}})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let (value, _) = billing(
+                ModelArgs {
+                    model: ID.into(),
+                    auth: mock_auth(server.uri()),
+                },
+                false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(value["model"], readiness);
+            let shown = render(&value);
+            assert_eq!(serde_json::from_str::<Value>(&shown).unwrap(), value);
+            assert!(!shown.contains("assistant:platform-models-v1"));
+            assert!(!shown.contains("private-project"));
+            server.verify().await;
+        }
+    });
 }
 #[test]
 fn show_paginates_public_endpoint_only_and_does_not_fetch_private_routes() {
