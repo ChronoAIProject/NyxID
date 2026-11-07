@@ -71,18 +71,25 @@ NyxBot or specialist through NyxID's relay or the Agent Event Gateway, including
 admitted followed threads. Telegram owner files use the same flag and shared
 byte budget; their preparation before turn admission and per-file fallback are
 described in [Telegram forwarding](../TELEGRAM_NEW.md#telegram-forwarding-and-secure-pairing).
-Other adapters and Lark audio/video retain their existing behavior. Platform/channel guests never download media or
+Discord, Slack, WhatsApp and X owner media also use late binding through
+NyxID's relay adapters, gated by the all-replica `assistant:channel-media-v2`
+readiness capability. This includes relay-through-CMA events when CMA admits
+and delivers the `nyxid_relay` activity; it does not add a CMA raw-event verifier.
+Native CMA Discord/WhatsApp downloads remain on hold for CMA#1402. Lark/Feishu
+audio/video and Aurinko keep their existing behavior. Platform/channel guests never download media or
 create uploads; their admitted turn receives the fixed note
 `attachments from guests are not shared with the assistant`. Media-bearing messages cannot answer
 approval cards or text decisions and do not enter duplicate-question coalescing.
 
 Admission records source selectors, not bytes. Gateway source IDs are accepted
-only from `nyxid_relay` Lark/Feishu activities and must match NyxID's own inbound
+only from `nyxid_relay` activities on these supported relay platforms and must match NyxID's own inbound
 row, owner, bot, route, chat, sender and thread/follow binding. Provider handles
 from the gateway are never dereferenced. A missing source produces a fixed
 unavailable-media note; a foreign source is refused. Each fetch rechecks live
 owner, org-admin, specialist and follow authority before resolving the bot
-credential. Revocation means no download.
+credential. New relay adapters additionally recheck after the download and
+before binding; a revoked source cannot become a visible upload. Revocation
+before fetch means no download.
 
 Ingestion is the first step of the consuming turn's run, after the conversation
 and user message exist. A busy conversation queues the media event IDs and sent
@@ -94,6 +101,22 @@ for retention. The immutable `media_bound` receipt holds the bound IDs and
 per-item outcomes. A retry reads that receipt first, so it cannot bind twice,
 reset retention dates or change a committed result. Bound images use the same
 upstream capability negotiation and explicit fallback as browser images.
+
+Discord uses its pinned CDN hosts; Slack uses its authenticated file endpoints;
+WhatsApp resolves the stored numeric media ID through Graph before a validated
+CDN download; X uses its live OAuth connection and pinned media hosts. No
+callback URL, Markdown link or gateway-supplied locator authorizes a fetch.
+Valid PNG/JPEG/GIF/WebP bytes render inline through authenticated assistant
+attachment GETs, including extensionless platform images. Other retained files
+use the existing download chip. New relay adapters preserve an unsupported
+original (including audio/video) as download-only, just like Telegram, with a
+`stored_original` receipt and an explicit model limitation notice. MIME claims
+alone never make an invalid image model input. Files follow ordinary document
+retention; validated rasters follow image retention. Remote Markdown images
+remain inert links, and historical link-only messages are not backfilled.
+Queued channel messages settle as `event` transcript rows. Web and mobile show
+their retained attachments outside the collapsed event notice, through the same
+scoped attachment components used for ordinary messages.
 
 Stop, failure, timeout and orphan recovery call `media_finalize` outside the
 cancellable run. It clears `media_pending`, records terminal per-item outcomes
@@ -147,7 +170,14 @@ admission; no partially held reservation waits for a larger one.
 ### Channel rollout and rollback
 
 Upgrade **all NyxID replicas** and drain pre-release workers before enabling
-`assistant:channel-media`. Gateway delivery also requires CMA at least
+`assistant:channel-media`. The added Discord/Slack/WhatsApp/X path requires a
+ready `assistant:channel-media-v2` report at admission and every fetch/recheck;
+legacy Lark/Feishu/Telegram owner paths do not acquire this new gate. With the
+existing flag already on, new adapters activate only after the complete roster
+advertises this capability and old workers are declared drained. A red report
+produces the unavailable-media note rather than a download. No new environment
+variable or guest-media authority is introduced in this stage.
+Lark/Feishu gateway delivery also requires CMA at least
 `a570be21` and `CMAEG_MEDIA_ENABLED=true`. CMA's default provider header budget is
 30 seconds (`CMAEG_PROVIDER_REQUEST_TIMEOUT_MS`); admission performs no downloads,
 and ingestion begins only in the run after admission. For inbound downloads,

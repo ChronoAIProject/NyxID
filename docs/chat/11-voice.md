@@ -450,8 +450,8 @@ Only durable settlement produces a final result announcement. Persist the full
 backend answer; send a bounded, factual speech summary (one/two coherent chunks,
 each <=500 tokens for Live) and leave details/cards/attachments on screen.
 Do not announce a provider effect as successful from a text delta or a completed
-activity alone. If no safe bounded summary is available, explain the
-presentation failure without redirecting the user to another conversation. Suppress duplicate or superseded announcements using task version
+activity alone. If no safe bounded summary is available, give the complete result
+to the live model as quoted factual context within its separate budget. Suppress duplicate or superseded announcements using task version
 and session generation. Append acknowledgement is not proof the user heard it;
 reconnect should show "Result ready" rather than blindly replaying speech.
 
@@ -477,8 +477,18 @@ language allowlist. The summary has a three-second timeout and the existing
 concrete findings/failure and necessary detail directly, without mentioning saved
 answers, another chat, backend conversations or internal handoffs. If
 summarization is unavailable, a safe successful answer may be spoken whole within
-the same byte budget. Otherwise send bounded task-state facts for the live model
-to explain naturally in the conversation language. Presentation failure does not
+the same byte budget. Otherwise preserve the entire answer as quoted factual
+context, including technical fields and Markdown that must not be read verbatim.
+The complete serialized context has an 8,000-byte budget, matching the existing
+Grok presentation queue. OpenAI receives larger answers in ordered, correlated
+parts, each within the 480-byte append limit including JSON escaping and metadata.
+All preceding parts use silent `session.thinking.append`; only the final part uses
+`session.commentary.append` to request one natural presentation. Construct and
+validate the complete sequence before sending; each send retains the transport's
+live authority checks. These parts split result data only, never user speech or
+task execution. Grok receives the complete context as one queued presentation.
+Only empty answers or results exceeding the full context budget fall back to
+task-state facts without an answer; never send a truncated result. Presentation failure does not
 change a completed task into a failed task or request its execution again. Never
 select partial findings, rewrite Markdown, infer completeness from punctuation,
 or substitute a fixed spoken sentence. Grok queues presentation separately from

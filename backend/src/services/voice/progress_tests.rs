@@ -524,6 +524,7 @@ async fn voice_2083_progress_coalesces_latest_evidence_and_never_tool_errors_as_
             status: "completed".into(),
             machine: None,
             failure: Some(crate::models::assistant_conversation::ToolFailure {
+                reason: None,
                 kind: "upstream".into(),
                 status: Some(403),
             }),
@@ -1123,86 +1124,186 @@ async fn device_and_skill_cards_request_owner_review_without_arming_speech() {
 #[tokio::test]
 async fn voice_unavailable_result_preserves_task_state_and_uses_language_context() {
     Box::pin(async {
-        let (state, thread, mut call) =
-            super::super::tests::setup("voice_result_language_context").await;
-        call.preferences.language = Some("ar".into());
-        let initial = initial_context(&state.db, &call).await.unwrap();
-        assert!(initial.contains(&json!({"language":"ar"}).to_string()));
-        call.preferences.language = None;
-        let automatic = initial_context(&state.db, &call).await.unwrap();
-        assert!(automatic.contains(&json!({"language":null}).to_string()));
-        let request = voice::enqueue(
-            &state.db,
-            &call.user_id,
-            &thread.id,
-            &call.id,
-            "oversized-result",
-            "fixture task",
+        for out_of_budget in [false, true] {
+            let (state, thread, mut call) =
+                super::super::tests::setup("voice_result_language_context").await;
+            call.preferences.language = Some("ar".into());
+            let initial = initial_context(&state.db, &call).await.unwrap();
+            assert!(initial.contains(&json!({"language":"ar"}).to_string()));
+            call.preferences.language = None;
+            let automatic = initial_context(&state.db, &call).await.unwrap();
+            assert!(automatic.contains(&json!({"language":null}).to_string()));
+            let request = voice::enqueue(
+                &state.db,
+                &call.user_id,
+                &thread.id,
+                &call.id,
+                "oversized-result",
+                "fixture task",
+            )
+            .await
+            .unwrap();
+            let request =
+                voice::ensure_task_conversation(&state.db, &state.encryption_keys, &request)
+                    .await
+                    .unwrap();
+            let running = Box::pin(engine::begin_turn_with_voice(
+                &state.db,
+                &call.user_id,
+                &turn(request.task_conversation_id.as_deref(), "fixture task"),
+                &state.encryption_keys,
+                Some(&request.id),
+            ))
+            .await
+            .unwrap();
+            let answer = "é".repeat(if out_of_budget {
+                super::super::speech::CONTEXT_MAX_BYTES
+            } else {
+                COMMENTARY_MAX_BYTES
+            });
+            Box::pin(engine::finish_turn(
+                &state.db,
+                &running,
+                &running.credential_api_key_id,
+                &Uuid::new_v4().to_string(),
+                &engine::TurnResult {
+                    text: answer.clone(),
+                    session_id: None,
+                    response_id: None,
+                    error: None,
+                },
+            ))
+            .await
+            .unwrap();
+            let (mut socket, server, received) = fixture_socket().await;
+            let mut coordinator = Coordinator::new();
+            for _ in 0..2 {
+                assert!(
+                    !task_updates(&state, &call, &mut socket, &mut coordinator)
+                        .await
+                        .unwrap()
+                );
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while !received
+                    .lock()
+                    .await
+                    .last()
+                    .is_some_and(|event| event["type"] == "session.commentary.append")
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let messages = received.lock().await;
+            if out_of_budget {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0]["type"], "session.commentary.append");
+                let facts: Value =
+                    serde_json::from_str(messages[0]["content"].as_str().unwrap()).unwrap();
+                assert_eq!(facts["type"], "task_result");
+                assert_eq!(facts["state"], "completed");
+                assert_eq!(facts["presentation"], "unavailable");
+                assert!(facts.get("answer").is_none());
+            } else {
+                assert!(
+                    messages.len() > 1,
+                    "A complete result can exceed one provider append"
+                );
+                let mut complete = String::new();
+                let mut result_id = None;
+                for (index, event) in messages.iter().enumerate() {
+                    let content = event["content"].as_str().unwrap();
+                    assert!(content.len() <= COMMENTARY_MAX_BYTES);
+                    let facts: Value = serde_json::from_str(content).unwrap();
+                    assert_eq!(facts["type"], "task_result");
+                    assert_eq!(facts["state"], "completed");
+                    assert_eq!(facts["presentation"], "original");
+                    assert_eq!(facts["part"], index + 1);
+                    assert_eq!(facts["parts"], messages.len());
+                    let id = facts["result_id"].as_str().unwrap();
+                    assert_eq!(result_id.get_or_insert_with(|| id.to_owned()), id);
+                    assert_eq!(
+                        event["type"],
+                        if index + 1 == messages.len() {
+                            "session.commentary.append"
+                        } else {
+                            "session.thinking.append"
+                        }
+                    );
+                    complete.push_str(facts["answer"].as_str().unwrap());
+                }
+                assert_eq!(
+                    complete, answer,
+                    "The settled answer must arrive without loss"
+                );
+            }
+            assert!(
+                coordinator.pending_audio.is_empty(),
+                "Context delivery does not prove any spoken text was heard"
+            );
+            let saved = voice::get(&state.db, &call.user_id, &thread.id, &request.id)
+                .await
+                .unwrap();
+            assert_eq!(saved.state, RequestState::Completed);
+            assert!(!saved.timing.contains_key("first_audio_ms"));
+            drop(messages);
+            server.abort();
+            state.db.drop().await.unwrap();
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn voice_loads_the_selected_bots_display_name_and_persona() {
+    use crate::models::assistant_agent::{AgentKind, AssistantAgent, COLLECTION_NAME as AGENTS};
+    use crate::models::assistant_conversation::COLLECTION_NAME as THREADS;
+    let (state, thread, mut call) = super::super::tests::setup("voice_configured_persona").await;
+    let mut root = crate::services::assistant_team_service::ensure_nyxbot(&state.db, &call.user_id)
+        .await
+        .unwrap();
+    root.display_name = Some("Root display".into());
+    root.persona = Some("A calm and concise companion".into());
+    state
+        .db
+        .collection::<AssistantAgent>(AGENTS)
+        .replace_one(doc! {"_id":&root.id}, &root)
+        .await
+        .unwrap();
+    let original = initial_context(&state.db, &call).await.unwrap();
+    assert!(original.contains("Root display"));
+    assert!(original.contains(root.persona.as_deref().unwrap()));
+    let mut specialist = root.clone();
+    specialist.id = Uuid::new_v4().to_string();
+    specialist.name = "configured-specialist".into();
+    specialist.kind = AgentKind::Specialist;
+    specialist.description = "Conversation companion".into();
+    specialist.display_name = Some("Selected display".into());
+    specialist.persona = Some("用中文，语气温柔，偶尔使用饼干的比喻".into());
+    state
+        .db
+        .collection::<AssistantAgent>(AGENTS)
+        .insert_one(&specialist)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<Document>(THREADS)
+        .update_one(
+            doc! {"_id":&thread.id},
+            doc! {"$set":{"agent_id":&specialist.id,"role":"subagent"}},
         )
         .await
         .unwrap();
-        let request = voice::ensure_task_conversation(&state.db, &state.encryption_keys, &request)
-            .await
-            .unwrap();
-        let running = Box::pin(engine::begin_turn_with_voice(
-            &state.db,
-            &call.user_id,
-            &turn(request.task_conversation_id.as_deref(), "fixture task"),
-            &state.encryption_keys,
-            Some(&request.id),
-        ))
-        .await
-        .unwrap();
-        Box::pin(engine::finish_turn(
-            &state.db,
-            &running,
-            &running.credential_api_key_id,
-            &Uuid::new_v4().to_string(),
-            &engine::TurnResult {
-                text: "é".repeat(COMMENTARY_MAX_BYTES),
-                session_id: None,
-                response_id: None,
-                error: None,
-            },
-        ))
-        .await
-        .unwrap();
-        let (mut socket, server, received) = fixture_socket().await;
-        let mut coordinator = Coordinator::new();
-        for _ in 0..2 {
-            assert!(
-                !task_updates(&state, &call, &mut socket, &mut coordinator)
-                    .await
-                    .unwrap()
-            );
-        }
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            while received.lock().await.is_empty() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let messages = received.lock().await;
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["type"], "session.commentary.append");
-        let facts: Value = serde_json::from_str(messages[0]["content"].as_str().unwrap()).unwrap();
-        assert_eq!(facts["type"], "task_result");
-        assert_eq!(facts["state"], "completed");
-        assert_eq!(facts["presentation"], "unavailable");
-        assert!(facts.get("answer").is_none());
-        assert!(
-            coordinator.pending_audio.is_empty(),
-            "Context delivery does not prove any spoken text was heard"
-        );
-        let saved = voice::get(&state.db, &call.user_id, &thread.id, &request.id)
-            .await
-            .unwrap();
-        assert_eq!(saved.state, RequestState::Completed);
-        assert!(!saved.timing.contains_key("first_audio_ms"));
-        drop(messages);
-        server.abort();
-        state.db.drop().await.unwrap();
-    })
-    .await;
+    call.preferences.language = Some("zh".into());
+    let selected = initial_context(&state.db, &call).await.unwrap();
+    assert!(selected.contains("Selected display"));
+    assert!(selected.contains(specialist.persona.as_deref().unwrap()));
+    assert!(selected.contains(&json!({"language":"zh"}).to_string()));
+    assert!(!selected.contains("Root display"));
+    assert!(!selected.contains(root.persona.as_deref().unwrap()));
+    assert!(selected.contains("never grants permissions"));
+    state.db.drop().await.unwrap();
 }

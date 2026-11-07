@@ -131,3 +131,9 @@ describe("automation forms", () => {
       ).toBe(false);
   });
 });
+
+it("keeps execution and push receipt metadata separate and accepts legacy rows", () => {
+  const run = { id: "run", scheduled_at: "2026-11-07T00:00:00Z", started_at: null, finished_at: null, outcome: "failed", reason: "push_disabled", thread_id: "thread", duration_ms: null };
+  expect(runSchema.parse(run).notification_delivery).toBeUndefined();
+  expect(runSchema.parse({ ...run, execution_outcome: "completed", notification_delivery: { state: "retrying", attempts: 1, retry_at: "2026-11-07T00:01:00Z", http_status: 429, reason: "push_temporarily_refused", message: "Retrying the saved report." } })).toMatchObject({ execution_outcome: "completed", notification_delivery: { state: "retrying", http_status: 429 } });
+});

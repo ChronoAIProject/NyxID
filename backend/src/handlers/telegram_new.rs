@@ -81,6 +81,7 @@ pub struct RequestResponse {
     pub prompt_delivery: Option<PromptDeliveryResponse>,
     pub can_open_creation_form: bool,
     pub setup_notice: Option<SetupNoticeResponse>,
+    pub username_suggestions: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -120,6 +121,8 @@ pub struct PromptDeliveryResponse {
 
 impl From<TelegramBotRequest> for RequestResponse {
     fn from(request: TelegramBotRequest) -> Self {
+        let username_suggestions =
+            crate::services::telegram_new_service::username_suggestions(&request);
         let approved = matches!(
             request.status,
             Status::Ready | Status::Provisioning | Status::Connected | Status::Suspended
@@ -154,6 +157,7 @@ impl From<TelegramBotRequest> for RequestResponse {
             }
         });
         Self {
+            username_suggestions,
             setup_notice: None,
             prompt_delivery,
             can_open_creation_form,
@@ -375,6 +379,13 @@ pub async fn launch(
 pub struct CreationLinkResponse {
     pub request: RequestResponse,
     pub creation_url: String,
+    pub username_suggestions: Vec<UsernameSuggestionResponse>,
+}
+
+#[derive(Serialize)]
+pub struct UsernameSuggestionResponse {
+    pub username: String,
+    pub creation_url: String,
 }
 
 pub async fn creation_link(
@@ -391,12 +402,41 @@ pub async fn creation_link(
         ));
     }
     let (request, creation_url) = service(&state).creation_link(&actor, &id).await?;
+    let username_suggestions =
+        crate::services::telegram_new_service::creation_suggestions(&request, &creation_url)?
+            .into_iter()
+            .map(|(username, creation_url)| UsernameSuggestionResponse {
+                username,
+                creation_url,
+            })
+            .collect();
     Ok((
         private_headers(),
         Json(CreationLinkResponse {
             request: projected_request(&state, request).await?,
             creation_url,
+            username_suggestions,
         }),
+    ))
+}
+
+pub async fn regenerate_username(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> AppResult<(HeaderMap, Json<RequestResponse>)> {
+    let actor = human(&auth)?;
+    limit(&state, &actor).await?;
+    if !body.is_empty() {
+        return Err(AppError::BadRequest(
+            "This action accepts no parameters".into(),
+        ));
+    }
+    let request = service(&state).regenerate_username(&actor, &id).await?;
+    Ok((
+        private_headers(),
+        Json(projected_request(&state, request).await?),
     ))
 }
 

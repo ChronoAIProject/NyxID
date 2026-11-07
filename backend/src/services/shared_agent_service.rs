@@ -1553,6 +1553,11 @@ pub async fn private_notes(db: &Database, actor: &str, agent: &str) -> AppResult
         .map_or_else(Vec::new, |r| r.notes))
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static PRIVATE_NOTE_COLLISION: super::api_key_mutation_service::TransactionCollisionHook;
+}
+
 /// Native remember/forget on a shared private thread never edits owner or team memory.
 pub async fn edit_private_note(
     db: &Database,
@@ -1561,53 +1566,84 @@ pub async fn edit_private_note(
     text: Option<&str>,
     note_id: Option<&str>,
 ) -> AppResult<String> {
-    let access = require(db, actor, agent).await?;
-    let mut session = db.client().start_session().await?;
-    session.start_transaction().await?;
-    fence(db, &access, &mut session).await?;
-    let collection = db.collection::<PrivateNotes>(model::NOTES_COLLECTION_NAME);
-    let filter = doc! {"agent_id": &agent.id, "actor_user_id": actor};
-    let mut row = collection
-        .find_one(filter.clone())
-        .session(&mut session)
-        .await?
-        .unwrap_or_else(|| PrivateNotes {
-            id: Uuid::new_v4().to_string(),
-            agent_id: agent.id.clone(),
-            actor_user_id: actor.into(),
-            revision: 0,
-            notes: Vec::new(),
-            updated_at: Utc::now(),
-        });
-    let id = note_id
-        .map(str::to_owned)
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
-    if note_id.is_some() && !row.notes.iter().any(|n| n.id == id) {
-        return Err(missing());
-    }
-    if let Some(text) = text {
-        let mut note = notes(vec![text.into()])?.remove(0);
-        note.id.clone_from(&id);
-        if let Some(existing) = row.notes.iter_mut().find(|n| n.id == id) {
-            *existing = note;
-        } else if row.notes.len() < crate::models::assistant_agent::MAX_MEMORY_NOTES {
-            row.notes.push(note);
-        } else {
-            return Err(AppError::Conflict(
-                "Private notes are full; replace or forget a note".into(),
-            ));
-        }
-    } else {
-        row.notes.retain(|n| n.id != id);
-    }
-    row.revision = row.revision.checked_add(1).ok_or_else(missing)?;
-    row.updated_at = Utc::now();
-    collection
-        .replace_one(filter, &row)
-        .upsert(true)
-        .session(&mut session)
-        .await?;
-    session.commit_transaction().await?;
+    // Retry only definitely aborted transactions. Unknown commits retry COMMIT
+    // on the same transaction, never the note append; keep the live sharing fence.
+    let context = (
+        db.clone(),
+        actor.to_owned(),
+        agent.clone(),
+        text.map(str::to_owned),
+        note_id.map(str::to_owned),
+    );
+    let id = super::transaction_service::run_db_only(
+        db,
+        &context,
+        |session, (db, actor, agent, text, note_id)| {
+            Box::pin(async move {
+                use crate::errors::memory_write::MemoryWriteReason as Reason;
+                let access = require(db, actor, agent).await?;
+                #[cfg(test)]
+                let hook = PRIVATE_NOTE_COLLISION.try_with(Clone::clone).ok();
+                #[cfg(test)]
+                if let Some(hook) = &hook {
+                    hook.begin_attempt();
+                }
+                let collection = db.collection::<PrivateNotes>(model::NOTES_COLLECTION_NAME);
+                let filter = doc! {"agent_id": &agent.id, "actor_user_id": actor};
+                let mut row = collection
+                    .find_one(filter.clone())
+                    .session(&mut *session)
+                    .await?
+                    .unwrap_or_else(|| PrivateNotes {
+                        id: Uuid::new_v4().to_string(),
+                        agent_id: agent.id.clone(),
+                        actor_user_id: actor.clone(),
+                        revision: 0,
+                        notes: Vec::new(),
+                        updated_at: Utc::now(),
+                    });
+                #[cfg(test)]
+                if let Some(hook) = &hook {
+                    hook.after_reads().await;
+                }
+                fence(db, &access, session).await?;
+                let id = note_id
+                    .clone()
+                    .unwrap_or_else(|| Uuid::new_v4().to_string());
+                if note_id.is_some() && !row.notes.iter().any(|n| n.id == id) {
+                    return Err(if text.is_some() {
+                        AppError::MemoryWrite(Reason::ReplaceTargetNotFound)
+                    } else {
+                        missing()
+                    });
+                }
+                if let Some(text) = text {
+                    let text = super::assistant_team_service::validate_memory_text(text)?;
+                    let mut note = notes(vec![text.into()])?.remove(0);
+                    note.id.clone_from(&id);
+                    if let Some(existing) = row.notes.iter_mut().find(|n| n.id == id) {
+                        note.created_at = existing.created_at;
+                        *existing = note;
+                    } else if row.notes.len() < crate::models::assistant_agent::MAX_MEMORY_NOTES {
+                        row.notes.push(note);
+                    } else {
+                        return Err(AppError::MemoryWrite(Reason::MemoryFull));
+                    }
+                } else {
+                    row.notes.retain(|n| n.id != id);
+                }
+                row.revision = row.revision.checked_add(1).ok_or_else(missing)?;
+                row.updated_at = Utc::now();
+                collection
+                    .replace_one(filter, &row)
+                    .upsert(true)
+                    .session(&mut *session)
+                    .await?;
+                Ok(id)
+            })
+        },
+    )
+    .await?;
     audit(db, actor, agent, "private_note").await;
     Ok(id)
 }

@@ -159,7 +159,13 @@ enforcement is independent of the flag.
 
 `spawn_subagent` and `update_subagent` also take `display_name` and `persona`
 (`update_subagent` with `nyxbot` sets NyxBot's own). Every agent: `remember`
-(optional `replace_id`) and `forget`. Memory and personas refuse obvious
+(optional `replace_id`) and `forget`. `remember` reports stable content-free
+validation, capacity, missing-replacement, authorization, conflict and storage/internal
+diagnostics in the tool result and activity panel. Keep notes to 500 characters
+and 50 total; split long facts deliberately. Confirm saved facts only from
+successful receipts, and report any still-unresolved writes. Later success never
+silently relabels an earlier failed write. See [memory diagnostics](08-nyxagent-engine.md#nyxbot-agents).
+Memory and personas refuse obvious
 credential shapes.
 
 ## 8. Permission requests (specialist → NyxBot)

@@ -116,6 +116,7 @@ fn tool_failure(response: &Response) -> Option<crate::models::assistant_conversa
         return Some(failure.clone());
     }
     Some(ToolFailure {
+        reason: None,
         kind: if let Some(code) = response.extensions().get::<RpcFailureCode>() {
             if code.0 == -32603 {
                 "internal"
@@ -158,6 +159,7 @@ fn rpc_success(id: Option<serde_json::Value>, result: serde_json::Value) -> Resp
         response
             .extensions_mut()
             .insert(crate::models::assistant_conversation::ToolFailure {
+                reason: None,
                 kind: "tool_error".into(),
                 status: None,
             });
@@ -184,6 +186,7 @@ fn rpc_error(id: Option<serde_json::Value>, code: i32, message: &str) -> Respons
     response
         .extensions_mut()
         .insert(crate::models::assistant_conversation::ToolFailure {
+            reason: None,
             kind: if code == -32603 {
                 "internal"
             } else {
@@ -492,6 +495,7 @@ async fn service_tool_content(
             vec![serde_json::json!({ "type": "text", "text": text })],
             is_error,
             is_error.then(|| crate::models::assistant_conversation::ToolFailure {
+                reason: None,
                 kind: "service_status".into(),
                 status: Some(status),
             }),
@@ -3625,6 +3629,7 @@ fn dispatch_service_tool<'a>(
                     vec![serde_json::json!({"type":"text","text":error.to_string()})],
                     true,
                     Some(crate::models::assistant_conversation::ToolFailure {
+                        reason: None,
                         kind: "resource_unavailable".into(),
                         status: None,
                     }),
@@ -4394,6 +4399,34 @@ fn permission_dispatch_auth(auth: &McpAuthContext) -> crate::errors::AppResult<a
     })
 }
 
+fn native_team_tool_result(
+    request_id: Option<serde_json::Value>,
+    name: &str,
+    value: &serde_json::Value,
+    is_error: bool,
+) -> Response {
+    let mut response = tool_result(request_id, &value.to_string(), is_error);
+    // Only a trusted native remember diagnostic may enrich persisted activity.
+    // Never interpret arbitrary downstream result text as safe UI metadata.
+    if name == "nyxid__remember"
+        && is_error
+        && let Ok(reason) = serde_json::from_value::<crate::errors::memory_write::MemoryWriteReason>(
+            value["details"]["reason"].clone(),
+        )
+    {
+        response
+            .extensions_mut()
+            .insert(crate::models::assistant_conversation::ToolFailure {
+                kind: "tool_error".into(),
+                status: None,
+                reason: serde_json::to_value(reason)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned)),
+            });
+    }
+    response
+}
+
 async fn handle_account_tool(
     state: &AppState,
     auth: &McpAuthContext,
@@ -4452,12 +4485,13 @@ async fn handle_account_tool(
     if let Err(error) =
         crate::services::service_history::context::authenticated(&state.db, &user).await
     {
-        let result = crate::services::assistant_account_tools::error_result_for(
-            error,
-            auth.chat.as_ref(),
-            &state.config.frontend_url,
-        );
-        return tool_result(request_id, &result.value.to_string(), true);
+        let project_error = if name == "nyxid__remember" {
+            crate::services::assistant_account_tools::memory_error_result_for
+        } else {
+            crate::services::assistant_account_tools::error_result_for
+        };
+        let result = project_error(error, auth.chat.as_ref(), &state.config.frontend_url);
+        return native_team_tool_result(request_id, name, &result.value, true);
     }
     if crate::services::assistant_team_tools::is_team_tool(name) {
         let Some(chat) = auth.chat.as_ref() else {
@@ -4469,7 +4503,7 @@ async fn handle_account_tool(
         };
         let (value, is_error) =
             Box::pin(super::assistant_team::execute_tool(state, chat, name, args)).await;
-        return tool_result(request_id, &value.to_string(), is_error);
+        return native_team_tool_result(request_id, name, &value, is_error);
     }
     let result = tools.execute(&user, name, args).await;
     if let (Some(chat), Some(request)) = (auth.chat.as_ref(), result.permission_request.as_ref()) {
@@ -7670,6 +7704,7 @@ mod tests {
         downstream
             .extensions_mut()
             .insert(crate::models::assistant_conversation::ToolFailure {
+                reason: None,
                 kind: "service_status".into(),
                 status: Some(404),
             });
@@ -11989,3 +12024,7 @@ mod broad_enrollment_tests {
         state.db.drop().await.unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "memory_write_tests.rs"]
+mod memory_write_tests;

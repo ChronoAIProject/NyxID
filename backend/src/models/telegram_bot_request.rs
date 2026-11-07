@@ -143,6 +143,9 @@ pub struct TelegramBotRequest {
     pub manager_bot_id: i64,
     pub observation_id: String,
     pub label: String,
+    /// Cosmetic username regeneration only; absent on older requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username_seed: Option<String>,
     pub destination: String,
     pub status: TelegramRequestStatus,
     pub active: bool,

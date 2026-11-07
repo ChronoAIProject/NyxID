@@ -5355,7 +5355,8 @@ async fn responses_with_producers_impl(
     } else {
         text
     };
-    let (source_media_declared, media) = if media_text.is_some()
+    let (source_media_declared, media) = if (media_text.is_some()
+        || crate::services::channel_media_authority::expanded_relay(&row.platform))
         && activity["source"]["type"] == "nyxid_relay"
         && activity["source"]["platform"].as_str() == Some(row.platform.as_str())
         && activity["actor"]["kind"] == "human"
@@ -5367,7 +5368,10 @@ async fn responses_with_producers_impl(
             activity["conversation"]["id"].as_str().unwrap_or_default(),
             activity["actor"]["id"].as_str().unwrap_or_default(),
             activity["conversation"]["thread_id"].as_str(),
-            true,
+            media_text.is_some()
+                || activity["kind"]["attachments"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty()),
         ))
         .await
         {
@@ -5379,17 +5383,19 @@ async fn responses_with_producers_impl(
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
     } else {
-        // Discord's provider path has no negotiated attachment ingestion.
-        // Preserve presence for the existing unavailable-media note; never
-        // fetch gateway-supplied locators or silently claim the files were read.
-        let declared = if row.platform == "discord" {
+        (0, None)
+    };
+    // Discord's provider attachment presence predates relay ingestion and must
+    // survive disabled/ineligible ingestion. Presence only drives the explicit
+    // unavailable-media note; it never authorizes fetching gateway locators.
+    let source_media_declared = if row.platform == "discord" {
+        source_media_declared.max(
             activity["kind"]["attachments"]
                 .as_array()
-                .map_or(0, Vec::len)
-        } else {
-            0
-        };
-        (declared, None)
+                .map_or(0, Vec::len),
+        )
+    } else {
+        source_media_declared
     };
     let retention = if media.is_some() {
         ChronoDuration::days(7)
