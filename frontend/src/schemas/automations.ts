@@ -228,6 +228,15 @@ export function automationDefaults(
   };
 }
 export const runSchema = z.object({
+  execution_outcome: z.enum(["pending", "started", "waiting", "completed", "failed", "skipped"]).nullish(),
+  notification_delivery: z.object({
+    state: z.string(),
+    reason: z.string().nullish(),
+    message: z.string().nullish(),
+    attempts: z.number().int(),
+    http_status: z.number().int().nullish(),
+    retry_at: instant.nullish(),
+  }).nullish(),
   coordinator_deadline: instant.nullish(),
   wait_kind: z.string().nullish(),
   can_cancel: z.boolean().optional(),

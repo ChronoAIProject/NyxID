@@ -76,6 +76,11 @@ pub struct TriggerRun {
     pub waiting_for: Vec<String>,
     #[serde(default)]
     pub result_claimed: bool,
+    /// Task execution is independent of delivery of its saved result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_outcome: Option<RunOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_delivery: Option<NotificationDelivery>,
     #[serde(default)]
     pub image_refs: Vec<RunImageRef>,
     #[serde(default)]
@@ -93,6 +98,17 @@ pub struct TriggerRun {
     pub lease_until: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
+}
+
+/// Push receipt metadata only. No device tokens, provider prose or report text.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationDelivery {
+    pub state: String,
+    pub reason: Option<String>,
+    pub attempts: u32,
+    pub http_status: Option<u16>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub retry_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

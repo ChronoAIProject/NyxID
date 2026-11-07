@@ -628,6 +628,8 @@ pub struct RunsQuery {
 
 #[derive(Serialize)]
 pub struct RunResponse {
+    pub execution_outcome: Option<crate::models::trigger_run::RunOutcome>,
+    pub notification_delivery: Option<NotificationDeliveryResponse>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coordinator_deadline: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -649,6 +651,16 @@ pub struct RunResponse {
 }
 
 #[derive(Serialize)]
+pub struct NotificationDeliveryResponse {
+    pub state: String,
+    pub reason: Option<String>,
+    pub message: Option<String>,
+    pub attempts: u32,
+    pub http_status: Option<u16>,
+    pub retry_at: Option<String>,
+}
+
+#[derive(Serialize)]
 pub struct RunFailureReasonResponse {
     pub source: String,
     pub stage: String,
@@ -666,6 +678,19 @@ pub struct MissedResponse {
 
 pub(crate) fn run_response(run: crate::models::trigger_run::TriggerRun) -> RunResponse {
     RunResponse {
+        execution_outcome: run.execution_outcome,
+        notification_delivery: run.notification_delivery.map(|delivery| {
+            NotificationDeliveryResponse {
+                message: delivery.reason.as_deref().map(|code| {
+                    crate::services::notification_service::automation::message(code).to_owned()
+                }),
+                state: delivery.state,
+                reason: delivery.reason,
+                attempts: delivery.attempts,
+                http_status: delivery.http_status,
+                retry_at: delivery.retry_at.map(|at| at.to_rfc3339()),
+            }
+        }),
         coordinator_deadline: run.coordinator.as_ref().map(|c| c.deadline.to_rfc3339()),
         wait_kind: run.coordinator.as_ref().and_then(|c| c.wait_kind.clone()),
         can_cancel: run.coordinator.as_ref().map(|c| {

@@ -279,7 +279,7 @@ pub const SYSTEM_PROMPT: &str = concat!(
     " Description=role/scope; persona=tone; skills=procedures.",
 );
 const _: () = assert!(SYSTEM_PROMPT.len() + 2 + SCHEDULE_PROMPT.len() < 4096);
-const SCHEDULE_PROMPT: &str = "Offer schedules for recurring work and reminders. Use nyxid__create_schedule/list_schedules/update_schedule/delete_schedule/run_schedule_now, and confirm the returned next times with the owner's timezone. If the timezone is unknown, ask and pass owner_timezone on create_schedule. For pushed reports prefer deliver_to with a chat from list_channel_chats (posting must be allowed) or notification. Webhook triggers need a one-time secret: give a prefilled nyxid__settings_link for automations; never put secrets in chat. Specialists have no schedule tools; set up theirs for the owner. ";
+const SCHEDULE_PROMPT: &str = "Offer recurring work/reminders via nyxid__create_schedule/list_schedules/update_schedule/delete_schedule/run_schedule_now. Confirm next times in the owner's timezone; if unknown, ask, then pass owner_timezone. For reports use deliver_to: a list_channel_chats chat with posting allowed (including Telegram), or notification for mobile push only (enabled registered device; no Telegram fallback). Webhooks need a one-time secret: give a prefilled nyxid__settings_link for automations; never put secrets in chat. Specialists lack schedule tools; create theirs for the owner. ";
 
 const TASK_COMPLETION_PROMPT: &str = concat!(
     "\n\nComplete the user's requested outcome within your role and live permissions. ",
