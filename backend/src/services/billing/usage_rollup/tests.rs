@@ -1135,3 +1135,87 @@ async fn benchmark_daily_fixture_scales_decimal_money_and_quantities() {
     );
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn model_tariff_units_survive_hourly_daily_and_admin_readers_without_duplicate_requests() {
+    let db = connect_test_database("model_tariff_rollup_units")
+        .await
+        .unwrap();
+    ensure_indexes(&db).await.unwrap();
+    let now = hour(Utc::now());
+    let metrics = [
+        "reasoning_tokens",
+        "image_input_tokens",
+        "image_output_tokens",
+        "audio_input_tokens",
+        "audio_output_tokens",
+    ];
+    let request = uuid::Uuid::new_v4().to_string();
+    let mut rows = vec![];
+    for (i, metric) in metrics.iter().enumerate() {
+        let mut r = row(now - chrono::Duration::hours(2));
+        r.insert("billing_request_id", &request);
+        r.insert(
+            "transaction_id",
+            if i == 0 {
+                format!("{request}:platform")
+            } else {
+                format!("{request}:platform:component:{metric}")
+            },
+        );
+        r.insert("metric", *metric);
+        r.insert(
+            "lago_metric_code",
+            format!("platform_svc_models_pk_mdl_test_t2_{metric}"),
+        );
+        r.insert("model", "nyxid/gpt-test");
+        r.insert("quantity", i64::try_from(i + 1).unwrap());
+        if i > 0 {
+            r.remove("token_breakdown");
+        }
+        rows.push(r);
+    }
+    db.collection::<Document>(METERS)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    while fold_once(&db, now).await.unwrap() > 0 {}
+    let result = read(&db, now - chrono::Duration::days(1), now).await;
+    assert_eq!(result.totals.requests, 1);
+    assert_eq!(result.totals.events, 5);
+    for (i, metric) in metrics.iter().enumerate() {
+        assert_eq!(
+            result.totals.quantities[*metric],
+            i64::try_from(i + 1).unwrap()
+        );
+    }
+    for collection in [
+        crate::models::usage_rollup_hourly::COLLECTION_NAME,
+        crate::models::usage_rollup_daily::COLLECTION_NAME,
+    ] {
+        let rows: Vec<Document> = db
+            .collection(collection)
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 5);
+        assert!(
+            rows.iter()
+                .all(|r| r.get_str("model") == Ok("nyxid/gpt-test"))
+        );
+        assert_eq!(
+            rows.iter().map(|r| integer(r.get("requests"))).sum::<i64>(),
+            1
+        );
+    }
+    db.collection::<Document>(METERS)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    let retained = read(&db, now - chrono::Duration::days(1), now).await;
+    assert_eq!(retained.totals.quantities, result.totals.quantities);
+    db.drop().await.unwrap();
+}

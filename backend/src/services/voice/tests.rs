@@ -1133,6 +1133,7 @@ fn duration_billing_requires_synced_authored_prices_and_meters_unpriced_byok() {
     };
     use credentials::duration_billing;
     let lane = LanePricing {
+        model_prices: Vec::new(),
         metric: BillingMetric::InputTokens,
         credits_per_unit: "0.001".into(),
         lago_metric_code: "input".into(),

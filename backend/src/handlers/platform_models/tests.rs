@@ -327,3 +327,135 @@ async fn dormant_platform_model_never_falls_through_to_a_provider() {
     }
     state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn model_tariff_handlers_keep_writes_admin_only_and_reads_private() {
+    use crate::services::billing::model_tariffs;
+    let (state, admin, operator, person) = setup().await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let Json(model) = create(
+        State(state.clone()),
+        admin.clone(),
+        Json(CreateRequest {
+            public_id: "nyxid/gpt-test".into(),
+            family: ModelFamily::Openai,
+            ..input()
+        }),
+    )
+    .await
+    .unwrap();
+    let (service, t, _) = model_tariffs::tests::fixture();
+    state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .insert_one(&service)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::platform_model::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&model.id},
+            doc! {"$set":{"billing_service_id":&service.id}},
+        )
+        .await
+        .unwrap();
+    let body = model_tariffs::NewTariff {
+        revision: model.revision,
+        lane: t.lane,
+        variant: t.variant,
+        contract: t.contract,
+        bounds: t.bounds,
+        components: t.components,
+        source: t.source,
+    };
+    assert!(
+        tariffs(State(state.clone()), person, Path(model.id.clone()))
+            .await
+            .is_err()
+    );
+    assert!(
+        tariffs(
+            State(state.clone()),
+            operator.clone(),
+            Path(model.id.clone())
+        )
+        .await
+        .unwrap()
+        .0
+        .is_empty()
+    );
+    let mut delegated = admin.clone();
+    delegated.auth_method = AuthMethod::Delegated;
+    assert!(
+        tariffs(
+            State(state.clone()),
+            delegated.clone(),
+            Path(model.id.clone())
+        )
+        .await
+        .is_err()
+    );
+    for caller in [operator.clone(), delegated] {
+        assert!(
+            create_tariff(
+                State(state.clone()),
+                caller,
+                Path(model.id.clone()),
+                Json(body.clone())
+            )
+            .await
+            .is_err()
+        );
+    }
+    let Json(created) = create_tariff(
+        State(state.clone()),
+        admin.clone(),
+        Path(model.id.clone()),
+        Json(body),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        created.status,
+        crate::models::platform_model_tariff::TariffStatus::Pending
+    );
+    assert_eq!(
+        tariffs(
+            State(state.clone()),
+            operator.clone(),
+            Path(model.id.clone())
+        )
+        .await
+        .unwrap()
+        .0
+        .len(),
+        1
+    );
+    assert!(
+        retire_tariff(
+            State(state.clone()),
+            operator,
+            Path((model.id.clone(), created.id.clone())),
+            Json(RetireTariffRequest {
+                revision: created.revision
+            })
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        retire_tariff(
+            State(state.clone()),
+            admin,
+            Path((model.id, created.id)),
+            Json(RetireTariffRequest {
+                revision: created.revision
+            })
+        )
+        .await
+        .unwrap(),
+        axum::http::StatusCode::NO_CONTENT
+    );
+    state.db.drop().await.unwrap();
+}

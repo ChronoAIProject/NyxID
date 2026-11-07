@@ -106,6 +106,7 @@ async fn billed_fixture(label: &str, first_response: ResponseTemplate) -> Billed
         .await
         .unwrap();
     let lane = |code: &str| LanePricing {
+        model_prices: Vec::new(),
         metric: BillingMetric::Tokens,
         credits_per_unit: "1".into(),
         lago_metric_code: code.into(),
@@ -787,6 +788,7 @@ async fn pool_attempts_price_the_matched_operation_on_each_member_lane() {
     // The base rate (5) exceeds the one-credit wallet; only the operation
     // price (1) can admit either attempt.
     let lane = |suffix: &str| LanePricing {
+        model_prices: Vec::new(),
         metric: BillingMetric::Requests,
         credits_per_unit: "5".into(),
         lago_metric_code: format!("platform_svc_pool-review-api_{suffix}"),

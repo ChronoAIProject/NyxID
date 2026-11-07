@@ -490,7 +490,7 @@ async fn flag_is_default_off_activation_is_blocked_and_disabling_works() {
         Err(AppError::SecurityReadinessUnavailable)
     ));
     assert!(!security_readiness_service::CAPABILITIES.contains(&EXECUTION_READINESS));
-    assert!(!security_readiness_service::CAPABILITIES.contains(&BILLING_READINESS));
+    assert!(security_readiness_service::CAPABILITIES.contains(&BILLING_READINESS));
     db.drop().await.unwrap();
 }
 

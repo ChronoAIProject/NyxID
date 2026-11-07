@@ -249,6 +249,15 @@ pub(crate) async fn validate_update_fields(
     authority: &Authority,
     admin: bool,
 ) -> AppResult<()> {
+    if let Some(value) = fields.get("billing") {
+        let requested: Option<crate::models::service_billing::ServiceBilling> =
+            bson::from_bson(value.clone())
+                .map_err(|_| AppError::ValidationError("Invalid billing configuration".into()))?;
+        super::billing::model_tariffs::validate_catalog_update(
+            live.billing.as_ref(),
+            requested.as_ref(),
+        )?;
+    }
     if let Some(value) = fields.get("platform_key") {
         let next: Option<crate::models::downstream_service::PlatformKeyConfig> =
             bson::from_bson(value.clone())

@@ -94,7 +94,16 @@ pub async fn sync_service_price(
     plan_code: &str,
     service: &DownstreamService,
 ) -> AppResult<bool> {
-    let mut changed = cleanup_components(db, lago, plan_code, service).await?;
+    let mut changed = false;
+    for tariff in super::model_tariffs::load_for(db, std::slice::from_ref(service)).await? {
+        changed |= super::model_tariffs::sync(db, lago, plan_code, &tariff).await?;
+    }
+    if service.platform_key.as_ref().is_some_and(|p| {
+        p.purpose == crate::models::downstream_service::PlatformKeyPurpose::ModelOffering
+    }) {
+        return Ok(changed);
+    }
+    changed |= cleanup_components(db, lago, plan_code, service).await?;
     changed |= sync_legacy_price(db, lago, plan_code, service).await?;
     for field in ["byok_pricing", "platform_key_pricing"] {
         changed |= sync_lane_price(db, lago, plan_code, service, field).await?;
@@ -136,7 +145,29 @@ pub fn normalize_lane_pricing(
             "pk",
         ),
     ] {
+        if lane.is_none() && previous.is_some_and(|p| !p.model_prices.is_empty()) {
+            return Err(AppError::ValidationError(
+                "Model tariff billing lanes cannot be removed by ordinary catalog edits".into(),
+            ));
+        }
         if let Some(lane) = lane {
+            let references = previous.map(|p| p.model_prices.clone()).unwrap_or_default();
+            if !lane.model_prices.is_empty() && lane.model_prices != references {
+                return Err(AppError::ValidationError(
+                    "Model prices are published through the model tariff API".into(),
+                ));
+            }
+            lane.model_prices = references;
+            if lane.metric.requires_model_evidence()
+                || lane
+                    .components
+                    .iter()
+                    .any(|c| c.metric.requires_model_evidence())
+            {
+                return Err(AppError::ValidationError(
+                    "This unit requires a certified model tariff".into(),
+                ));
+            }
             if lane.metric == crate::models::service_billing::BillingMetric::MachineRunningSeconds
                 || lane.components.iter().any(|component| {
                     component.metric
@@ -752,6 +783,7 @@ pub async fn retry_pending_service_prices(
     let services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find(doc! {
+            "platform_key.purpose": {"$ne":"model_offering"},
             "$or": [
                 { "billing.component_cleanup_metric_codes.0": { "$exists": true } },
                 { "billing.byok_pricing.components.sync_status": { "$in": ["pending", "failed"] } },
@@ -843,6 +875,7 @@ mod tests {
         use crate::models::service_billing::{BillingMetric, LanePriceComponent, LanePricing};
         let mut billing = ServiceBilling {
             platform_key_pricing: Some(LanePricing {
+                model_prices: Vec::new(),
                 metric: BillingMetric::SandboxCpuMillisSeconds,
                 credits_per_unit: "0.000000010000".into(),
                 lago_metric_code: String::new(),
@@ -895,6 +928,7 @@ mod tests {
         for component in [false, true] {
             let mut billing = ServiceBilling {
                 byok_pricing: Some(LanePricing {
+                    model_prices: Vec::new(),
                     metric: if component {
                         BillingMetric::Requests
                     } else {

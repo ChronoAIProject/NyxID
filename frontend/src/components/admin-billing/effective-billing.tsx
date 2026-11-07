@@ -39,6 +39,7 @@ const CLASS_LABELS: Record<CredentialClass, string> = {
 };
 
 const REASON_TEXT: Record<EffectiveReason, string> = {
+  model_tariff_required: "A complete model tariff is required. Base and legacy prices never apply.",
   billing_disabled:
     "Billing is disabled for this deployment (BILLING_ENABLED).",
   nyxid_credentials_only:
