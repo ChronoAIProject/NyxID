@@ -1173,6 +1173,16 @@ async fn browser_disconnect_does_not_cancel_detached_turn_and_headers_are_server
         format!("Bearer {}", key.raw_key.as_str())
     );
     assert_eq!(call.headers["idempotency-key"], messages[0].turn_id);
+    assert!(crate::services::proxy_service::valid_traceparent_header(
+        &call.headers
+    ));
+    assert_eq!(
+        &call.headers["traceparent"].to_str().unwrap()[3..35],
+        messages[0].turn_id.replace('-', "")
+    );
+    assert!(uuid::Uuid::parse_str(call.headers["x-request-id"].to_str().unwrap()).is_ok());
+    assert!(!call.headers.contains_key("baggage"));
+    assert!(!call.headers.contains_key("tracestate"));
     assert_eq!(call.body["input"], "hello");
     assert!(call.body.get("previous_response_id").is_none());
     let dto = serde_json::to_string(&ConversationResponse::from(row.clone())).unwrap();
@@ -2951,6 +2961,24 @@ async fn budget_and_time_limits_continue_the_same_session_without_reset_or_extra
         assert!(messages[1].error_code.is_none());
         let calls = calls.lock().await;
         assert_eq!(calls.len(), 2);
+        for call in calls.iter() {
+            assert!(crate::services::proxy_service::valid_traceparent_header(
+                &call.headers
+            ));
+            assert_eq!(
+                &call.headers["traceparent"].to_str().unwrap()[3..35],
+                messages[0].turn_id.replace('-', "")
+            );
+        }
+        assert_ne!(
+            calls[0].headers["traceparent"],
+            calls[1].headers["traceparent"]
+        );
+        assert_ne!(
+            calls[0].headers["x-request-id"],
+            calls[1].headers["x-request-id"]
+        );
+
         assert_eq!(calls[1].body["conversation"], SESSION);
         assert_eq!(
             calls[0].headers["authorization"],

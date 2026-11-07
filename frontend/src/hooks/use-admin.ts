@@ -1,3 +1,4 @@
+import { normalizeAuditTurnId } from "@/lib/admin-audit-log";
 import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { accountErasureSchema, type AccountErasure } from "@/schemas/account-erasure";
 import {
@@ -75,6 +76,7 @@ function auditLogFilterQuery(params: AdminAuditLogListParams): URLSearchParams {
   for (const key of [
     "user_id",
     "api_key_id",
+    "turn_id",
     "search",
     "search_filters",
     "custom_filters",
@@ -85,16 +87,26 @@ function auditLogFilterQuery(params: AdminAuditLogListParams): URLSearchParams {
     "created_from",
     "created_to",
   ] as const) {
-    if (params[key]) query.set(key, params[key]);
+    const value = params[key];
+    if (value !== undefined && (key === "turn_id" || value)) {
+      query.set(key, value);
+    }
   }
   return query;
 }
 
 export function useAdminAuditLog(params: AdminAuditLogListParams) {
+  const hasTurnFilter = params.turn_id !== undefined;
+  const expectedTurnId = params.turn_id === undefined
+    ? undefined
+    : normalizeAuditTurnId(params.turn_id);
   const filters = auditLogFilterQuery(params).toString();
   const page = useQuery({
     queryKey: ["admin", "audit-log", "page", params],
     queryFn: async ({ signal }): Promise<AdminAuditLogListResponse> => {
+      if (hasTurnFilter && !expectedTurnId) {
+        throw new Error("Enter a complete turn ID");
+      }
       const query = new URLSearchParams({
         page: String(params.page),
         per_page: String(params.per_page),
@@ -104,12 +116,16 @@ export function useAdminAuditLog(params: AdminAuditLogListParams) {
       auditLogFilterQuery(params).forEach((value, key) =>
         query.set(key, value),
       );
-      return apiClient<AdminAuditLogListResponse>(
+      const response = await apiClient<AdminAuditLogListResponse>(
         `/admin/audit-log?${query.toString()}`,
         { signal },
       );
+      if (hasTurnFilter && response.applied_turn_id !== expectedTurnId) {
+        throw new Error("This server has not applied the exact turn filter. Retry after the upgrade.");
+      }
+      return response;
     },
-    placeholderData: keepPreviousData,
+    placeholderData: hasTurnFilter ? undefined : keepPreviousData,
   });
 
   const needsTotal =
@@ -118,10 +134,13 @@ export function useAdminAuditLog(params: AdminAuditLogListParams) {
     !page.isPlaceholderData;
   const count = useQuery({
     queryKey: ["admin", "audit-log", "count", filters],
-    queryFn: ({ signal }) =>
-      apiClient<{ readonly total: number }>(`/admin/audit-log/count?${filters}`, {
-        signal,
-      }),
+    queryFn: async ({ signal }) => {
+      const response = await apiClient<{ readonly total: number; readonly applied_turn_id?: string }>(`/admin/audit-log/count?${filters}`, { signal });
+      if (hasTurnFilter && response.applied_turn_id !== expectedTurnId) {
+        throw new Error("This server has not applied the exact turn filter. Retry after the upgrade.");
+      }
+      return response;
+    },
     enabled: needsTotal,
     staleTime: 60_000,
     retry: false,

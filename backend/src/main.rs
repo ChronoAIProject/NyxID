@@ -27,6 +27,7 @@ mod services;
 mod ssh_cli;
 mod telemetry;
 mod telemetry_erasure_cli;
+mod turn_trace;
 
 #[cfg(test)]
 mod test_utils;
@@ -414,6 +415,7 @@ async fn server_main() {
         )
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
+    turn_trace::init();
 
     // Login and Ssh don't touch the database; handle them before we connect.
     // Other subcommands (like CleanupOrphans) fall through to the post-DB path.
@@ -2011,9 +2013,10 @@ fn private_cors(allowed_origins: std::collections::HashSet<axum::http::HeaderVal
             "DNT".parse().unwrap(),
             "X-NyxID-Account-Deletion-Policy".parse().unwrap(),
         ]))
-        .expose_headers([axum::http::HeaderName::from_static(
-            mw::assistant_trace::TRACE_HEADER,
-        )])
+        .expose_headers([
+            axum::http::HeaderName::from_static(mw::assistant_trace::TRACE_HEADER),
+            axum::http::HeaderName::from_static(turn_trace::REQUEST_HEADER),
+        ])
         .allow_credentials(true)
 }
 

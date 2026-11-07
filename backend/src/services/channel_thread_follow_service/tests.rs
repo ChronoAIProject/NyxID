@@ -733,6 +733,7 @@ async fn source_admission_retry_revalidates_uncommitted_native_follow_origin_aft
         )
         .await
         .unwrap()
+        .accepted
     );
     let projected = super::super::channel_turn_delivery::queued_origin_in_session(
         &db,

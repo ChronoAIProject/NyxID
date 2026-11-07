@@ -1496,15 +1496,48 @@ async fn native_async_reply_thread_mode_and_delivery_receipts_iteration(native_t
             .expect(1)
             .mount(&gateway)
             .await;
-        let result = native_responses::send_update(
-            &state,
-            &row,
-            origin,
-            stored.conversation_id.as_deref().unwrap(),
-            "Update",
-        )
+        // A later ambient turn cannot take ownership of this source's delivery.
+        let other_turn = crate::turn_trace::TurnContext::for_turn(&Uuid::new_v4().to_string());
+        let (result, trace) = crate::turn_trace::capture(crate::turn_trace::scope(
+            other_turn,
+            native_responses::send_update(
+                &state,
+                &row,
+                origin,
+                stored.conversation_id.as_deref().unwrap(),
+                "Update",
+            ),
+        ))
         .await;
         assert_eq!(result.is_ok(), expected == "reply_confirmed", "{expected}");
+        let original_turn = event.turn_id.as_deref().unwrap();
+        assert!(!trace.is_empty());
+        assert!(
+            trace
+                .iter()
+                .all(|record| record["turn_id"] == original_turn)
+        );
+        let sent = trace
+            .iter()
+            .find(|record| record["stage"] == "channel" && record["phase"] == "end")
+            .unwrap();
+        assert_eq!(
+            sent["outcome"],
+            if expected == "reply_confirmed" {
+                "confirmed"
+            } else {
+                "unknown"
+            }
+        );
+        let part = trace
+            .iter()
+            .find(|record| record["stage"] == "channel_part" && record["phase"] == "start")
+            .unwrap();
+        let gateway_span = trace
+            .iter()
+            .find(|record| record["stage"] == "gateway" && record["phase"] == "start")
+            .unwrap();
+        assert_eq!(gateway_span["parent_span_id"], part["span_id"]);
         let requests = gateway.received_requests().await.unwrap();
         assert_eq!(
             requests.len(),

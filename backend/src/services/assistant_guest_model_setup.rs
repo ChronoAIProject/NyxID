@@ -606,6 +606,9 @@ async fn run_inner(
         engine::append_events_in_session(db,&row.user_id,&row.id,&[event],tx).await?;
         Ok(engine::begin_owner_turn_in_session(db,tx,keys,&row.user_id,start,ids,agent,None,None,None).await?.into_started()?.conversation)
     })).await?;
+    if let Some(turn) = active.active_turn.as_ref() {
+        crate::turn_trace::admitted(&turn.turn_id, turn.started_at, turn.retry_of.as_deref());
+    }
     let credential = super::assistant_agent_credential_service::load_for_conversation(
         &state.db,
         &state.encryption_keys,

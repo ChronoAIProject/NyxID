@@ -325,6 +325,14 @@ pub(super) async fn stream_output(
             .collection::<NyxbotEvent>(EVENTS)
             .find_one(doc! {"_id":&stored.event_key})
             .await?;
+        if let Some(turn) = event.as_ref().and_then(|event| event.turn_id.as_deref()) {
+            crate::turn_trace::milestone(
+                turn,
+                crate::turn_trace::Stage::Channel,
+                None,
+                Some(crate::turn_trace::Outcome::Streamed),
+            );
+        }
         audit(
             state,
             &row.user_id,

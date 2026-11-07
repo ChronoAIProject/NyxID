@@ -181,7 +181,10 @@ pub async fn create(
     // Replays bypass limiter/provisioning and retain their receipt after deletion.
     match invocations::get(&state.db, &owner, &input.idempotency_key).await {
         Ok(row) => {
-            invocations::same_request(row, &digest)?;
+            let row = invocations::same_request(row, &digest)?;
+            if let Some(context) = crate::turn_trace::TurnContext::for_turn(&row.turn_id) {
+                crate::turn_trace::associate(context);
+            }
             return Ok((
                 StatusCode::OK,
                 Json(
@@ -227,6 +230,9 @@ pub async fn create(
         &state.encryption_keys,
     ))
     .await?;
+    if let Some(context) = crate::turn_trace::TurnContext::for_turn(&admission.invocation.turn_id) {
+        crate::turn_trace::associate(context);
+    }
     let fresh = admission.claim.is_some();
     if let Some(claim) = admission.claim {
         // No await between acknowledged commit and handing off the admitted
@@ -236,7 +242,7 @@ pub async fn create(
         let text = engine::turn_input(&claim.conversation, &start);
         let replaced = start.conversation_id.is_some();
         let owner = owner.clone();
-        tokio::spawn(async move {
+        crate::turn_trace::spawn(async move {
             claim.log_reclaimed();
             crate::services::assistant_agent_credential_service::audit_provision(
                 &state2.db,

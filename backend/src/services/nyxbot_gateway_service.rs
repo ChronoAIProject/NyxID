@@ -200,30 +200,61 @@ pub(crate) async fn gateway_call_at_base(
     body: Option<&Value>,
     idempotency_key: Option<&str>,
 ) -> AppResult<GatewayResponse> {
-    let requires_json = method != reqwest::Method::DELETE && method != reqwest::Method::HEAD;
-    let mut request = GATEWAY_HTTP_CLIENT
-        .request(method, format!("{base}{path}"))
-        .bearer_auth(bearer)
-        .timeout(Duration::from_secs(GATEWAY_TIMEOUT_SECS));
-    if let Some(body) = body {
-        request = request.json(body);
+    let mut operation = crate::turn_trace::Operation::start(
+        crate::turn_trace::TurnContext::current(),
+        crate::turn_trace::Stage::Gateway,
+    );
+    let result: AppResult<GatewayResponse> = crate::turn_trace::scope(operation.context(), async {
+        let requires_json = method != reqwest::Method::DELETE && method != reqwest::Method::HEAD;
+        let mut request = GATEWAY_HTTP_CLIENT
+            .request(method, format!("{base}{path}"))
+            .bearer_auth(bearer)
+            .timeout(Duration::from_secs(GATEWAY_TIMEOUT_SECS));
+        if let Some(trace) = crate::turn_trace::TurnContext::current() {
+            // This request is built here; it has no caller correlation headers.
+            request = request.header("traceparent", trace.traceparent()).header(
+                crate::turn_trace::REQUEST_HEADER,
+                trace.request_id().to_string(),
+            );
+        }
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        if let Some(key) = idempotency_key {
+            request = request.header("Idempotency-Key", key);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
+        let status = response.status().as_u16();
+        let body = gateway_body(response, requires_json).await;
+        // HTTP refusals remain classified by status even if their diagnostic body
+        // cannot be read. Never parse a partial body or turn a broken 2xx into success.
+        let body = match body {
+            Err(_) if !(200..300).contains(&status) => Value::Null,
+            result => result?,
+        };
+        Ok(GatewayResponse { status, body })
+    })
+    .await;
+    match &result {
+        Ok(response) => operation.finish(
+            if (200..300).contains(&response.status) {
+                crate::turn_trace::Outcome::Completed
+            } else {
+                crate::turn_trace::Outcome::Failed
+            },
+            Some(response.status),
+            None,
+        ),
+        Err(error) => operation.finish(
+            crate::turn_trace::Outcome::Failed,
+            Some(error.status_code().as_u16()),
+            Some(error.error_code()),
+        ),
     }
-    if let Some(key) = idempotency_key {
-        request = request.header("Idempotency-Key", key);
-    }
-    let response = request
-        .send()
-        .await
-        .map_err(|_| AppError::ValidationError("gateway_unavailable".into()))?;
-    let status = response.status().as_u16();
-    let body = gateway_body(response, requires_json).await;
-    // HTTP refusals remain classified by status even if their diagnostic body
-    // cannot be read. Never parse a partial body or turn a broken 2xx into success.
-    let body = match body {
-        Err(_) if !(200..300).contains(&status) => Value::Null,
-        result => result?,
-    };
-    Ok(GatewayResponse { status, body })
+    result
 }
 
 async fn gateway_body(mut response: reqwest::Response, requires_json: bool) -> AppResult<Value> {
@@ -480,6 +511,66 @@ mod tests {
         Mock, ResponseTemplate,
         matchers::{method, path},
     };
+    #[tokio::test]
+    async fn turn_trace_gateway_headers_and_allowlisted_body_outcome() {
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/events/private-capability/replies"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"content":"private-response-canary"})),
+            )
+            .mount(&server)
+            .await;
+        let turn = Uuid::new_v4().to_string();
+        let context = crate::turn_trace::TurnContext::for_turn(&turn).unwrap();
+        let ((first, second), records) =
+            crate::turn_trace::capture(crate::turn_trace::scope(Some(context), async {
+                let first = gateway_call_at_base(
+                    &server.uri(),
+                    reqwest::Method::POST,
+                    "/events/private-capability/replies",
+                    "private-bearer-canary",
+                    Some(&serde_json::json!({"text":"private-body-canary"})),
+                    Some("unchanged-dedup"),
+                )
+                .await
+                .unwrap();
+                let second = gateway_call_at_base(
+                    &server.uri(),
+                    reqwest::Method::POST,
+                    "/events/private-capability/replies",
+                    "private-bearer-canary",
+                    None,
+                    Some("unchanged-dedup"),
+                )
+                .await
+                .unwrap();
+                (first, second)
+            }))
+            .await;
+        assert_eq!((first.status, second.status), (200, 200));
+        let requests = server.received_requests().await.unwrap();
+        for request in &requests {
+            assert!(
+                request.headers["traceparent"]
+                    .to_str()
+                    .unwrap()
+                    .starts_with(&format!("00-{}-", turn.replace('-', "")))
+            );
+            assert_eq!(request.headers["idempotency-key"], "unchanged-dedup");
+        }
+        assert_ne!(
+            requests[0].headers["x-request-id"],
+            requests[1].headers["x-request-id"]
+        );
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[1]["outcome"], "completed");
+        let encoded = serde_json::to_string(&records).unwrap();
+        assert!(!encoded.contains("private-"));
+        assert!(!encoded.contains("confirmed"));
+    }
+
     async fn fixture() -> (support::Fixture, PlatformBotCleanup) {
         let f = support::distinct_fixture().await;
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();

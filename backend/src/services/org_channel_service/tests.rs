@@ -1418,6 +1418,7 @@ async fn public_transcript_excludes_private_messages_and_erasure_purges_actor_co
         )
         .await
         .unwrap()
+        .accepted
     );
     tx.abort_transaction().await.unwrap();
     assert!(

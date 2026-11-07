@@ -355,7 +355,19 @@ pub async fn llm_proxy_request(
     if let Some(context) = &auth_user.execution_permission {
         context.bind_cancellation(crate::downstream_disconnect::request_cancellation(&request));
     }
-    Box::pin(llm_proxy_request_inner(state, auth_user, path, request)).await
+    let trace = crate::turn_trace::TurnContext::for_request(
+        request.headers(),
+        auth_user
+            .assistant_chat
+            .as_ref()
+            .and_then(|chat| chat.turn_id.as_deref()),
+    );
+    trace
+        .response(
+            crate::turn_trace::Stage::Proxy,
+            Box::pin(llm_proxy_request_inner(state, auth_user, path, request)),
+        )
+        .await
 }
 async fn llm_proxy_request_inner(
     State(state): State<AppState>,
@@ -1099,7 +1111,19 @@ pub fn gateway_request(
         if let Some(context) = &auth_user.execution_permission {
             context.bind_cancellation(crate::downstream_disconnect::request_cancellation(&request));
         }
-        Box::pin(gateway_request_inner(state, auth_user, path, request)).await
+        let trace = crate::turn_trace::TurnContext::for_request(
+            request.headers(),
+            auth_user
+                .assistant_chat
+                .as_ref()
+                .and_then(|chat| chat.turn_id.as_deref()),
+        );
+        trace
+            .response(
+                crate::turn_trace::Stage::Proxy,
+                Box::pin(gateway_request_inner(state, auth_user, path, request)),
+            )
+            .await
     })
 }
 
@@ -2242,7 +2266,7 @@ async fn build_filtered_response(
                 .as_ref()
                 .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric));
 
-            tokio::spawn(async move {
+            crate::turn_trace::spawn(async move {
                 let mut buffer = String::new();
                 let mut stream = downstream_response.bytes_stream();
                 let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
@@ -2540,7 +2564,7 @@ async fn build_translated_sse_response(
         .as_ref()
         .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric));
 
-    tokio::spawn(async move {
+    crate::turn_trace::spawn(async move {
         let mut buffer = String::new();
         let mut state = llm_gateway_service::StreamTranslationState::default();
         let mut stream = downstream_response.bytes_stream();

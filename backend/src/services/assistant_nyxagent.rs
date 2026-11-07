@@ -2148,6 +2148,7 @@ pub(crate) struct OwnerTurnIds {
 
 /// This value is not executable until the caller has committed its transaction.
 pub(crate) struct OwnerTurnClaim {
+    pub(crate) trace_sources: Vec<String>,
     pub(crate) reclaimed: Option<ActiveTurn>,
     pub conversation: AssistantConversation,
     pub credential: super::assistant_agent_credential_service::AssistantCredential,
@@ -2155,6 +2156,12 @@ pub(crate) struct OwnerTurnClaim {
 
 impl OwnerTurnClaim {
     pub(crate) fn log_reclaimed(&self) {
+        if let Some(turn) = self.conversation.active_turn.as_ref() {
+            crate::turn_trace::admitted(&turn.turn_id, turn.started_at, turn.retry_of.as_deref());
+            for source in &self.trace_sources {
+                crate::turn_trace::source_link(&turn.turn_id, source);
+            }
+        }
         if let Some(turn) = self.reclaimed.as_ref() {
             super::assistant_turn_observability::settled(
                 &self.conversation,
@@ -3173,6 +3180,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         ))
         .await?;
     }
+    let mut trace_sources = Vec::new();
     if let Some(event_id) = start.channel_event_id.as_deref() {
         Box::pin(
             super::channel_turn_delivery::validate_guest_setup_in_session(
@@ -3180,7 +3188,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             ),
         )
         .await?;
-        super::channel_turn_delivery::bind_in_session(
+        let trace_source = super::channel_turn_delivery::bind_in_session(
             db,
             session,
             event_id,
@@ -3189,6 +3197,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             turn_id,
         )
         .await?;
+        trace_sources.extend(trace_source);
     }
     if start.channel_event_id.is_some() {
         super::org_channel_service::transcript::publish(
@@ -3205,7 +3214,7 @@ pub(crate) async fn begin_owner_turn_in_session(
     // transaction. The source records retain their independent dispatch claims.
     if let Some(turn) = row.active_turn.as_mut() {
         for source in turn.events.iter().flat_map(|e| &e.source_event_ids) {
-            super::channel_turn_delivery::bind_in_session(
+            let trace_source = super::channel_turn_delivery::bind_in_session(
                 db,
                 session,
                 source,
@@ -3214,6 +3223,7 @@ pub(crate) async fn begin_owner_turn_in_session(
                 turn_id,
             )
             .await?;
+            trace_sources.extend(trace_source);
         }
         if turn.channel_event_id.is_none() {
             turn.channel_event_id = turn
@@ -3603,6 +3613,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .await?;
     }
     Ok(OwnerTurnAdmission::Started(Box::new(OwnerTurnClaim {
+        trace_sources,
         reclaimed,
         conversation: row,
         credential,

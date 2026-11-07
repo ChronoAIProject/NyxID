@@ -247,12 +247,28 @@ impl PublicTurnProducer for PublicProducer {
         input: TurnInput,
         events: mpsc::Sender<ExecutionEvent>,
     ) -> AppResult<TurnRef> {
-        policy::verified_context(db, &context).await?;
-        let turn = context.turn.clone();
-        self.execution
-            .execute_nyxagent_turn(db, NyxAgentExecutionContext::Public(context), input, events)
-            .await?;
-        Ok(turn)
+        let trace = crate::turn_trace::TurnContext::for_turn(&context.turn.turn_id);
+        let mut operation =
+            crate::turn_trace::Operation::start(trace, crate::turn_trace::Stage::Execution);
+        let result: AppResult<TurnRef> = crate::turn_trace::scope(operation.context(), async {
+            policy::verified_context(db, &context).await?;
+            let turn = context.turn.clone();
+            self.execution
+                .execute_nyxagent_turn(db, NyxAgentExecutionContext::Public(context), input, events)
+                .await?;
+            Ok(turn)
+        })
+        .await;
+        operation.finish(
+            if result.is_ok() {
+                crate::turn_trace::Outcome::Completed
+            } else {
+                crate::turn_trace::Outcome::Failed
+            },
+            None,
+            None,
+        );
+        result
     }
     async fn fence_public_reply(
         &self,
