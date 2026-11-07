@@ -821,7 +821,7 @@ or `everyone`: anyone who messages the bot privately gets their own thread, as a
 guest.
 
 The linked channel also has `private_chat_posts` (absent/false by default).
-The owner can enable it in **Chats and who can talk**, through the human-only
+The owner can enable it in **Chats and posting**, through the human-only
 channel PATCH, or through NyxBot's `nyxid__update_channel_access`. New private
 customer chats then start with `allow_posts: true` when a verified message
 registers them. It does not open private-chat access, contact someone who has
@@ -1885,7 +1885,7 @@ First-party human endpoints under `/assistant/nyxagent/channels/{id}` are
 `GET/PUT org-specialist`, `POST/DELETE member-link`,
 `GET member-link/{challenge}`, and `POST member-link/{challenge}/confirm`.
 Other live org admins can manage/unlink the binding without reading member DMs
-or obtaining provider keys. Relinking resets verification and guest exposure;
+or obtaining provider keys. Changing the specialist resets verification and guest exposure;
 changing personal ↔ org target requires disconnect/reconnect. Loss of the
 transport admin or org/bot/agent authority retires the link with
 `org_access_lost`. Flag-off, unavailable security readiness and dependency errors
@@ -1896,6 +1896,42 @@ or payer. A verified private chat moves between relay and gateway with its membe
 home reply binding and guest execution lane; adoption is atomic and keeps the
 relay alias for flag-off return, without merging already established chats. Roll out with the flag off, upgrade all executing workers, drain old
 workers, then enable for an admin. Disable and retire before binary downgrade.
+
+### Guest settings and binding recovery
+
+Every listed binding has a **Who can talk to this bot** section, separate from
+member verification. Failed and pending bindings retain read-only settings and
+a reconnect action. Organization admins enable guests immediately with the
+server default daily budget (one credit); subsequent budget and delegated-service
+edits use reviewed saves and a guest-policy revision fence. Dirty drafts survive
+spend/verification refreshes and conflicts. Personal bindings retain their private
+chat audience selector and link to the specialist's Grants settings.
+
+Rebuilding the same organization/bot/specialist carries forward the newest
+compatible saved guest policy. Current admin, bot, specialist and service
+authority is rechecked transactionally. Changed or revoked service grants,
+changed guest operation scopes, node credentials and moved services are dropped.
+An incompatible latest predecessor is a boundary; recovery never searches past
+it for an older policy. Invalid budgets or an unavailable/suspended org wallet
+leave restored exposure off. Member verification and conversation lanes are not
+copied. Rebuilds share the original sender-hash namespace only for refusal checks:
+previously verified or erased identities must verify afresh and cannot silently
+become organization-paid guests. The restored policy gets a fresh revision and retains the original
+`continuity_channel_id`, so today's spend and outstanding reservations continue to
+count against the cap, including after late settlement. Policy edits preserve
+that ledger identity. Upgrade all executing replicas before rebuilding bindings
+with preserved guest exposure; older binaries do not read this ledger identity.
+
+NyxBot uses the existing sensitive `update_channel_access` tool with an
+`org_guests` object (`expected_revision` from `list_channel_agents`, optional
+`enabled`, `daily_credits`, `service_ids`). Omitted values retain the saved
+policy; first enable uses the server default budget. The tool shares web
+validation/admin authorization and existing owner confirmations. It refuses
+mixed guest-policy and posting/audience mutations. Enabling guests also opens
+private guest admission; budget-only edits and recovery preserve the saved
+private-chat audience. Group audience settings remain independent. Settings,
+channel listings and chat tool results share the organization/personal billing
+explanation.
 
 ### Finding organization channel member verification (#2242)
 

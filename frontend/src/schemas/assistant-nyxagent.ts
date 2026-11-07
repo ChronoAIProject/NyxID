@@ -692,12 +692,15 @@ export const assistantAgentDestroyedSchema = z.object({ id: z.string(), destroye
 
 /** A channel bot that reaches one of the owner's agents. */
 export const nyxAgentChannelAgentSchema = z.object({
+  guest_access_description: z.string().optional(),
   org_specialist: z
     .object({
       org_id: z.string(),
       guest_enabled: z.boolean(),
       delegated_service_ids: z.array(z.string()),
       daily_credits: z.string().nullish(),
+      guest_revision: z.string().optional(),
+      default_daily_credits: z.string().optional(),
     })
     .optional(),
   guest_readiness: guestReadinessSchema.nullish(),

@@ -1244,6 +1244,16 @@ it("indexes connected bot handles, unopened chats and available bots, revealing 
   expect(chat).toHaveFocus();
   expect(chat).toBeVisible();
   expect(chat).toHaveTextContent("Café research room · Group");
+  // Audience access moved out of the chats page; search must reveal its exact root section.
+  fireEvent.change(search, { target: { value: "guest access" } });
+  await act(async () => fireEvent.click(screen.getByLabelText("Who can talk to this bot Channels › Helper", { selector: "button" })));
+  await act(() => vi.advanceTimersByTimeAsync(32));
+  const audience = screen.getByRole("region", { name: "Who can talk to this bot · Helper" });
+  expect(audience).toHaveFocus();
+  expect(audience).toBeVisible();
+  expect(within(audience).getByRole("button", { name: "About Who can talk to this bot" })).toBeVisible();
+  expect(within(audience).getByRole("combobox", { name: "Who can talk to Helper in private chats" })).toBeVisible();
+  expect(within(audience).getByRole("link", { name: /Guest service access/ })).toHaveAttribute("href", `/assistant?agent=${agent.id}&details=grants`);
   fireEvent.change(search, { target: { value: "help desk" } });
   // Leaving the previous drill-in resolves its guard before scheduling the focus frame.
   await act(async () => fireEvent.click(screen.getByLabelText("Help desk Channels › Available bots", { selector: "button" })));
@@ -1256,7 +1266,7 @@ it("indexes connected bot handles, unopened chats and available bots, revealing 
   fireEvent.click(page.getByRole("button", { name: "Back to Channels" }));
   await act(() => vi.advanceTimersByTimeAsync(32));
   const channels = within(screen.getByRole("tabpanel", { name: "Channels" }));
-  expect(channels.getByRole("button", { name: "Chats and who can talk" })).toBeVisible();
+  expect(channels.getByRole("button", { name: "Chats and posting" })).toBeVisible();
   expect(writes).toHaveLength(0);
 });
 

@@ -73,33 +73,10 @@ function view() {
     </QueryClientProvider>,
   );
 }
-it("lets an admin enable a model-only budget without granting services", async () => {
-  view();
-  expect(
-    await screen.findByText(/Organization spend today: 0.000000000001/),
-  ).toBeVisible();
-  expect(
-    screen.getByText(/organization pays for every guest model/),
-  ).toBeVisible();
-  await userEvent.click(
-    screen.getByRole("checkbox", { name: "Enable guests for this binding" }),
-  );
-  await userEvent.click(
-    screen.getByRole("button", { name: "Save guest access" }),
-  );
-  await waitFor(() =>
-    expect(writes[0]).toEqual({
-      endpoint: "/assistant/nyxagent/channels/channel/org-specialist",
-      method: "PUT",
-      body: { enabled: true, service_ids: [], daily_credits: "1" },
-    }),
-  );
-});
 it("members can confirm only their own chat account and cannot edit guest exposure", async () => {
   admin = false;
   reason = "org_wallet_not_provisioned";
   view();
-  expect(await screen.findByText(/Only organization admins/)).toBeVisible();
   expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "Open organization Billing" })).not.toBeInTheDocument();
   await userEvent.click(
@@ -119,17 +96,6 @@ it("members can confirm only their own chat account and cannot edit guest exposu
   expect(
     await screen.findByText("Your chat account is verified."),
   ).toBeVisible();
-});
-it("explains a missing wallet and disables guest enabling", async () => {
-  reason = "org_wallet_not_provisioned";
-  view();
-  expect(
-    await screen.findByText(/Provision the organization billing wallet/),
-  ).toBeVisible();
-  expect(screen.getByRole("link", { name: "Open organization Billing" })).toHaveAttribute("href", "/billing?ownerId=org");
-  expect(
-    screen.getByRole("checkbox", { name: "Enable guests for this binding" }),
-  ).toBeDisabled();
 });
 it("keeps credit precision and rejects absent, zero and fractional-overflow budgets", () => {
   for (const daily_credits of [

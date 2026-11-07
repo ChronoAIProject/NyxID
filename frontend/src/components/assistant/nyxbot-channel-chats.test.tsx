@@ -121,7 +121,7 @@ it("loads chats in a pushed page, groups readiness in footers and restores the d
   mount();
   expect(reads).toEqual([]);
   const disclosure = screen.getByRole("button", {
-    name: "Chats and who can talk",
+    name: "Chats and posting",
   });
   await user.click(disclosure);
   expect(
@@ -137,23 +137,11 @@ it("loads chats in a pushed page, groups readiness in footers and restores the d
   expect(writes).toEqual([]);
 });
 
-it("preserves private access, bulk posting and per-chat settings payloads", async () => {
+it("preserves bulk posting and per-chat settings payloads", async () => {
   const user = userEvent.setup();
   mount();
   await user.click(
-    screen.getByRole("button", { name: "Chats and who can talk" }),
-  );
-  await user.click(
-    await screen.findByRole("combobox", {
-      name: "Who can talk to Helper in private chats",
-    }),
-  );
-  await user.click(screen.getByRole("option", { name: "Anyone" }));
-  await waitFor(() =>
-    expect(writes).toContainEqual({
-      endpoint: "/assistant/nyxagent/channels/bot",
-      body: { private_chats: "everyone" },
-    }),
+    screen.getByRole("button", { name: "Chats and posting" }),
   );
   await user.click(
     screen.getByRole("switch", {
@@ -194,7 +182,7 @@ it("keeps a per-chat failure visible in the active page's footer", async () => {
   fail = true;
   mount();
   await user.click(
-    screen.getByRole("button", { name: "Chats and who can talk" }),
+    screen.getByRole("button", { name: "Chats and posting" }),
   );
   await user.click(
     await screen.findByRole("switch", {

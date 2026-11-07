@@ -4,6 +4,9 @@ export const orgChannelSettingsSchema = z.object({
   channel_id: z.string(),
   org_id: z.string(),
   can_manage: z.boolean(),
+  guest_revision: z.string().default(""),
+  channel_status: z.string().optional(),
+  description: z.string().optional(),
   member_verified: z.boolean().optional(),
   guest_enabled: z.boolean(),
   delegated_service_ids: z.array(z.string()),
@@ -27,6 +30,7 @@ export const orgChannelGuestFormSchema = z.object({
     .refine((v) => /[1-9]/.test(v), "The daily budget must be positive"),
 });
 export type OrgChannelGuestForm = z.infer<typeof orgChannelGuestFormSchema>;
+export type OrgChannelGuestUpdate = OrgChannelGuestForm & { expected_revision?: string };
 export const orgChannelChallengeSchema = z.object({
   id: z.string(),
   state: z.string(),

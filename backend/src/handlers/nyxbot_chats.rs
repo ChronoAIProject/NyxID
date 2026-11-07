@@ -1710,6 +1710,11 @@ pub(crate) async fn update_access(
     )
     .await;
     let mut result = json!({"channel_agent_id":row.id,
+        "guest_access_description": if row.org_specialist.is_some() {
+            crate::services::org_channel_service::management::ORG_GUEST_EXPLANATION
+        } else {
+            crate::services::org_channel_service::management::PERSONAL_GUEST_EXPLANATION
+        },
         "private_chats":settings.private_chats.as_deref().or(row.private_chats.as_deref()).unwrap_or("owner"),
         "private_chat_posts":settings.private_chat_posts.or(row.private_chat_posts).unwrap_or(false),"applied_count":applied});
     if let Some(access) = settings

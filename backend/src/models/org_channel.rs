@@ -24,6 +24,9 @@ pub struct Binding {
 #[serde(default)]
 pub struct GuestPolicy {
     pub revision: String,
+    /// Rebuilds share the original daily ledger and sender-hash namespace.
+    /// Absent on legacy policies, which use their own channel ID.
+    pub continuity_channel_id: Option<String>,
     pub service_authority: std::collections::BTreeMap<String, String>,
     pub enabled: bool,
     pub service_ids: Vec<String>,
