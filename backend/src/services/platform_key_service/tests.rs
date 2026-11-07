@@ -1872,6 +1872,7 @@ async fn non_llm_slug_token_lane_settles_reported_json_and_sse_usage() {
         .unwrap();
     catalog.billing = Some(ServiceBilling {
         platform_key_pricing: Some(LanePricing {
+            model_prices: Vec::new(),
             components: Vec::new(),
             operations: vec![],
             metric: BillingMetric::Tokens,

@@ -10,6 +10,8 @@ pub mod machine_runtime;
 mod machine_runtime_math;
 pub mod meter;
 pub mod metric_resolution;
+pub mod model_tariffs;
+pub mod model_usage;
 pub mod owner_resolver;
 pub mod periods;
 pub mod pool_attempt;
@@ -529,6 +531,22 @@ impl BillingService {
         ctx: &BillingRouteContext,
         required: bool,
     ) -> AppResult<MeteredProxyContext> {
+        let model_paid = ctx.model_tariff.as_ref().is_some_and(|t| t.paid());
+        let required = required || model_paid;
+        if model_paid && (!self.config.billing_enabled || self.lago.is_none()) {
+            return Err(model_tariffs::unavailable(
+                "billing_disabled_or_unconfigured",
+            ));
+        }
+        if ctx.model_tariff.is_none()
+            && ctx
+                .platform_specs()
+                .any(|(metric, _)| metric.requires_model_evidence())
+        {
+            return Err(crate::errors::AppError::BillingNotConfigured(
+                "Strict model units require a complete model tariff".into(),
+            ));
+        }
         if ctx
             .platform_specs()
             .any(|(metric, _)| metric.is_runtime_allocation())
@@ -615,7 +633,7 @@ impl BillingService {
                 false
             };
             if (org_guest && !rollout_enabled)
-                || ((public || managed) && (!rollout_enabled || !platform_billable))
+                || ((public || managed || model_paid) && (!rollout_enabled || !platform_billable))
             {
                 return Err(crate::errors::AppError::BillingProviderUnavailable(
                     "Required execution funding is unavailable".into(),
@@ -1295,6 +1313,7 @@ mod tests {
         catalog.id = Uuid::new_v4().to_string();
         catalog.slug = "service-one".into();
         let lane = |metric| LanePricing {
+            model_prices: Vec::new(),
             components: Vec::new(),
             operations: vec![],
             metric,
@@ -1550,6 +1569,7 @@ mod tests {
         catalog.id = Uuid::new_v4().to_string();
         catalog.slug = "service-one".into();
         let lane = |metric| LanePricing {
+            model_prices: Vec::new(),
             components: Vec::new(),
             operations: vec![],
             metric,
@@ -1656,6 +1676,7 @@ mod tests {
                 .settle(
                     &metered,
                     PlatformUsage {
+                        model_charges: None,
                         input_tokens: 0,
                         output_tokens: 0,
                         cache_read_tokens: 0,
@@ -2088,6 +2109,7 @@ mod tests {
                     sync_error: None,
                 }),
                 byok_pricing: credits.map(|credits| LanePricing {
+                    model_prices: Vec::new(),
                     components: Vec::new(),
                     operations: vec![],
                     metric: BillingMetric::Requests,

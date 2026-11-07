@@ -2146,6 +2146,7 @@ async fn voice_and_reported_token_components_settle_independently_without_replay
         }
         let billing = ServiceBilling {
             byok_pricing: Some(LanePricing {
+                model_prices: Vec::new(),
                 metric: BillingMetric::InputTokens,
                 credits_per_unit: "0.000001".into(),
                 lago_metric_code: "input-rate".into(),
@@ -2302,6 +2303,7 @@ async fn voice_without_byok_duration_price_records_seconds_without_charges_or_be
         };
         let text_only = ServiceBilling {
             byok_pricing: Some(LanePricing {
+                model_prices: Vec::new(),
                 metric: BillingMetric::InputTokens,
                 credits_per_unit: "0.001".into(),
                 lago_metric_code: "input".into(),
@@ -2579,6 +2581,7 @@ async fn voice_funding_zero_observed_startup_releases_wallet_and_request_fee() {
         let tariff = ServiceBilling {
             platform_billable: true,
             platform_key_pricing: Some(LanePricing {
+ model_prices: Vec::new(),
                 metric: BillingMetric::VoiceSeconds,
                 credits_per_unit: "1".into(),
                 lago_metric_code: "voice-duration".into(),
@@ -2691,3 +2694,6 @@ async fn voice_funding_zero_observed_startup_releases_wallet_and_request_fee() {
     })
     .await;
 }
+
+#[path = "model_tariff_accounting_tests.rs"]
+mod model_tariff_accounting_tests;

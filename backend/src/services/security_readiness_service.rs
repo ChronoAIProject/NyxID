@@ -38,6 +38,7 @@ use crate::{
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
     super::platform_model_service::REGISTRY_READINESS,
+    super::billing::model_tariffs::READINESS,
     "assistant:generated-artifacts",
     "assistant:org-agents",
     super::org_channel_service::FLAG,

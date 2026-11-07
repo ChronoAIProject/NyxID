@@ -104,6 +104,7 @@ export const credentialClassSchema = z.enum([
 export type CredentialClass = z.infer<typeof credentialClassSchema>;
 
 export const effectiveReasonSchema = z.enum([
+  "model_tariff_required",
   "billing_disabled",
   "nyxid_credentials_only",
   "lane_synced",

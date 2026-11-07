@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { billingRow } from "@/test/billing-fixture";
 import { billingUsageRowSchema } from "@/schemas/billing";
-import { groupRows } from "./billing-usage";
+import { groupRows, metricFamily } from "./billing-usage";
 
 it("groups usage by service operation and labels base-priced requests", () => {
   const catalog = [{ slug: "api-twitter", name: "X", inference: null }];
@@ -61,4 +61,16 @@ it("identifies org-funded channel guest usage without exposing the sender", () =
   expect(
     groups.every((group) => !group.name.includes("private-sender-hash")),
   ).toBe(true);
+});
+
+it("shows strict model token units in the token usage and allowance group", () => {
+  for (const metric of [
+    "reasoning_tokens",
+    "image_input_tokens",
+    "image_output_tokens",
+    "audio_input_tokens",
+    "audio_output_tokens",
+  ]) {
+    expect(metricFamily(metric)).toBe("Tokens");
+  }
 });

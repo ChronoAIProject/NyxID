@@ -70,6 +70,7 @@ fn config() -> ServiceBilling {
             tariff_verified_at: Utc::now() - Duration::minutes(1),
         }),
         platform_key_pricing: Some(LanePricing {
+            model_prices: Vec::new(),
             metric: BillingMetric::InputTokens,
             credits_per_unit: "0.000000000002".into(),
             lago_metric_code: "test_input".into(),

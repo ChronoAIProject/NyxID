@@ -1068,6 +1068,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let admin_routes = Router::new()
         .route(
+            "/platform-models/{id}/tariffs/{tariff_id}/retire",
+            post(handlers::platform_models::retire_tariff),
+        )
+        .route(
+            "/platform-models/{id}/tariffs",
+            get(handlers::platform_models::tariffs).post(handlers::platform_models::create_tariff),
+        )
+        .route(
             "/platform-models",
             get(handlers::platform_models::admin_list).post(handlers::platform_models::create),
         )

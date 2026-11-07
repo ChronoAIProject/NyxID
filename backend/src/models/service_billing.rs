@@ -30,6 +30,11 @@ pub enum BillingMetric {
     OutputTokens,
     CacheReadTokens,
     CacheWriteTokens,
+    ReasoningTokens,
+    ImageInputTokens,
+    ImageOutputTokens,
+    AudioInputTokens,
+    AudioOutputTokens,
     Images,
     VoiceSeconds,
     MachineRunningSeconds,
@@ -76,6 +81,9 @@ pub struct LanePricing {
     pub components: Vec<LanePriceComponent>,
     #[serde(default, deserialize_with = "deserialize_operations")]
     pub operations: Vec<OperationPrice>,
+    /// Server-owned references; ordinary lane edits cannot publish or clear tariffs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_prices: Vec<super::platform_model_tariff::ModelPriceBinding>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -116,7 +124,7 @@ fn deserialize_components<'de, D: serde::Deserializer<'de>>(
 
 impl BillingMetric {
     /// Stable names enter ledger canonical encoding. Never rename existing units.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 18] = [
         Self::Tokens,
         Self::Requests,
         Self::Bytes,
@@ -124,6 +132,11 @@ impl BillingMetric {
         Self::OutputTokens,
         Self::CacheReadTokens,
         Self::CacheWriteTokens,
+        Self::ReasoningTokens,
+        Self::ImageInputTokens,
+        Self::ImageOutputTokens,
+        Self::AudioInputTokens,
+        Self::AudioOutputTokens,
         Self::Images,
         Self::VoiceSeconds,
         Self::MachineRunningSeconds,
@@ -141,6 +154,11 @@ impl BillingMetric {
             Self::OutputTokens => ("output_tokens", "Output tokens", true),
             Self::CacheReadTokens => ("cache_read_tokens", "Cache-read tokens", true),
             Self::CacheWriteTokens => ("cache_write_tokens", "Cache-write tokens", true),
+            Self::ReasoningTokens => ("reasoning_tokens", "Reasoning tokens", true),
+            Self::ImageInputTokens => ("image_input_tokens", "Image input tokens", true),
+            Self::ImageOutputTokens => ("image_output_tokens", "Image output tokens", true),
+            Self::AudioInputTokens => ("audio_input_tokens", "Audio input tokens", true),
+            Self::AudioOutputTokens => ("audio_output_tokens", "Audio output tokens", true),
             Self::Images => ("images", "Images", false),
             Self::VoiceSeconds => ("voice_seconds", "Voice seconds", false),
             Self::MachineRunningSeconds => {
@@ -174,6 +192,17 @@ impl BillingMetric {
     }
     pub fn is_legacy(self) -> bool {
         matches!(self, Self::Tokens | Self::Requests | Self::Bytes)
+    }
+    /// These units require a certified disjoint model usage contract.
+    pub fn requires_model_evidence(self) -> bool {
+        matches!(
+            self,
+            Self::ReasoningTokens
+                | Self::ImageInputTokens
+                | Self::ImageOutputTokens
+                | Self::AudioInputTokens
+                | Self::AudioOutputTokens
+        )
     }
     /// These units require a durable lifecycle reservation and observation.
     pub fn is_runtime_allocation(self) -> bool {
@@ -339,6 +368,8 @@ impl ImageTokens {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct PlatformUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_charges: Option<Box<super::platform_model_tariff::ModelChargeVector>>,
     pub requests: i64,
     pub bytes: i64,
     #[serde(default)]

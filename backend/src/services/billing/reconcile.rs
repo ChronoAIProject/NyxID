@@ -138,6 +138,19 @@ impl BillingReconciler {
             &self.config.lago_plan_code,
         )
         .await?;
+        match super::model_tariffs::retry_pending(
+            &self.db,
+            lago.as_ref(),
+            &self.config.lago_plan_code,
+        )
+        .await
+        {
+            Ok(n) => stats.service_price_syncs += n,
+            Err(error) => tracing::warn!(
+                error_code = error.error_code(),
+                "Model tariff synchronization will retry"
+            ),
+        }
         let mut runtime_billing = super::BillingService::new(self.db.clone(), self.config.clone());
         runtime_billing.lago = self.lago.clone();
         // CMA configuration work must not prevent ordinary usage emission or
@@ -766,6 +779,7 @@ mod tests {
     pub(super) fn finalized_row(transaction_id: &str) -> UsageMeterRow {
         let now = Utc::now() - Duration::seconds(120);
         UsageMeterRow {
+            model_tariff: None,
             org_channel_guest: None,
             rollup_pending: true,
             id: Uuid::new_v4().to_string(),

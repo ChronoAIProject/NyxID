@@ -73,7 +73,7 @@ async fn admin_view(state: &AppState, row: PlatformModel) -> AppResult<AdminMode
         routing_revision_id: row.routing_revision_id,
         routes: routing.map_or_else(Vec::new, |r| r.routes),
         execution_ready: false,
-        blocking_reason: "execution_and_billing_not_implemented",
+        blocking_reason: "execution_not_implemented",
         required_readiness: vec![
             registry::REGISTRY_READINESS,
             registry::EXECUTION_READINESS,
@@ -353,6 +353,104 @@ pub async fn public_list(
         models: rows.iter().map(PublicModel::from).collect(),
         next_after,
     }))
+}
+
+/// Private admin projection; customer readers never receive verification sources.
+#[derive(Serialize)]
+pub struct TariffResponse {
+    pub id: String,
+    pub revision: i64,
+    pub service_id: String,
+    pub model_id: String,
+    pub public_model: String,
+    pub lane: crate::models::platform_model_tariff::TariffLane,
+    pub variant: std::collections::BTreeMap<String, String>,
+    pub contract: crate::models::platform_model_tariff::UsageContract,
+    pub bounds: crate::models::platform_model_tariff::RequestBounds,
+    pub components: Vec<crate::models::platform_model_tariff::TariffComponent>,
+    pub source: String,
+    pub status: crate::models::platform_model_tariff::TariffStatus,
+    pub sync_error: Option<String>,
+    pub created_at: String,
+}
+impl From<crate::models::platform_model_tariff::ModelTariff> for TariffResponse {
+    fn from(t: crate::models::platform_model_tariff::ModelTariff) -> Self {
+        Self {
+            id: t.id,
+            revision: t.revision,
+            service_id: t.service_id,
+            model_id: t.model_id,
+            public_model: t.public_model,
+            lane: t.lane,
+            variant: t.variant,
+            contract: t.contract,
+            bounds: t.bounds,
+            components: t.components,
+            source: t.source,
+            status: t.status,
+            sync_error: t.sync_error,
+            created_at: t.created_at.to_rfc3339(),
+        }
+    }
+}
+pub async fn tariffs(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Vec<TariffResponse>>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    require_admin_or_operator(&state, &auth, "admin.platform_models.tariffs").await?;
+    registry::get(&state.db, &id).await?;
+    Ok(Json(
+        crate::services::billing::model_tariffs::list(&state.db, &id)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
+}
+pub async fn create_tariff(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<crate::services::billing::model_tariffs::NewTariff>,
+) -> AppResult<Json<TariffResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    require_admin(&state, &auth).await?;
+    let t = crate::services::billing::model_tariffs::create(
+        &state.db,
+        &AuditActor::from_auth_user(&auth),
+        &id,
+        body,
+    )
+    .await?;
+    // Durable pending state is returned even if Lago is down. Reconcile, or
+    // the existing admin billing resync route, publishes the complete revision.
+    Ok(Json(t.into()))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetireTariffRequest {
+    pub revision: i64,
+}
+pub async fn retire_tariff(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path((id, tariff_id)): Path<(String, String)>,
+    Json(body): Json<RetireTariffRequest>,
+) -> AppResult<axum::http::StatusCode> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    require_admin(&state, &auth).await?;
+    crate::services::billing::model_tariffs::retire(
+        &state.db,
+        &AuditActor::from_auth_user(&auth),
+        &id,
+        &tariff_id,
+        body.revision,
+    )
+    .await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
