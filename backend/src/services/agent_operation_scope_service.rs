@@ -8,6 +8,9 @@ use mongodb::{
 };
 use serde::Serialize;
 
+mod discovery;
+pub(crate) use discovery::PageRequest;
+
 use crate::{
     errors::{AppError, AppResult},
     models::{
@@ -654,7 +657,7 @@ pub async fn options(
     owner: &str,
     agent_id: &str,
 ) -> AppResult<Vec<ServiceOptions>> {
-    options_for(db, owner, agent_id, false).await
+    options_for(db, owner, agent_id, false, None).await
 }
 
 pub async fn guest_options(
@@ -662,7 +665,36 @@ pub async fn guest_options(
     owner: &str,
     agent_id: &str,
 ) -> AppResult<Vec<ServiceOptions>> {
-    options_for(db, owner, agent_id, true).await
+    options_for(db, owner, agent_id, true, None).await
+}
+
+/// Native discovery uses the same live management ACL as REST. Cursors are
+/// locators over a versioned view, never authority or cached permission grants.
+pub(crate) async fn options_page(
+    db: &Database,
+    chat: &super::assistant_acknowledgement_service::ChatAuthority,
+    agent_id: &str,
+    request: &PageRequest,
+) -> AppResult<serde_json::Value> {
+    let options = options_for(
+        db,
+        &chat.user_id,
+        agent_id,
+        request.guests,
+        request.service_id.as_deref(),
+    )
+    .await?;
+    discovery::page(
+        options,
+        &serde_json::json!([
+            chat.user_id,
+            chat.api_key_id,
+            chat.conversation_id,
+            chat.agent_id,
+            agent_id,
+        ]),
+        request,
+    )
 }
 
 async fn options_for(
@@ -670,6 +702,7 @@ async fn options_for(
     owner: &str,
     agent_id: &str,
     guests: bool,
+    service_filter: Option<&str>,
 ) -> AppResult<Vec<ServiceOptions>> {
     let mut agent = team::live_specialist(db, owner, agent_id).await?;
     super::org_agent_service::require_maintain(db, owner, &agent).await?;
@@ -683,6 +716,14 @@ async fn options_for(
     if guests {
         agent.operation_scopes = agent.guest_operation_scopes.clone();
         agent.operation_scope_revisions = agent.guest_operation_scope_revisions.clone();
+    }
+    if let Some(id) = service_filter {
+        // Filter only already-granted IDs: never resolve an arbitrary service.
+        agent.grants.service_ids.retain(|granted| granted == id);
+        agent
+            .grants
+            .platform_service_ids
+            .retain(|granted| granted == id);
     }
     // Management reads durable rows, including offline services. Loading the
     // execution catalog here would fetch remote specs and hide offline grants.
