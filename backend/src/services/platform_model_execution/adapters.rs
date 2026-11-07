@@ -1,4 +1,4 @@
-//! Closed, stateless text/function adapters. No arbitrary provider fields cross
+//! Closed, stateless text/image/function adapters. No arbitrary provider fields cross
 //! this boundary; native evidence is extracted before public serialization.
 use crate::{
     errors::{AppError, AppResult},
@@ -118,9 +118,85 @@ pub(crate) struct Request {
     pub body: Value,
     pub streaming: bool,
     pub max_output: i64,
+    ingress_limit: usize,
+    pub(super) images: super::images::Summary,
 }
 impl Request {
+    #[cfg(test)]
     pub fn parse(method: &http::Method, path: &str, body: Value) -> AppResult<Self> {
+        let memory = Self::image_memory(
+            &body,
+            &uuid::Uuid::new_v4().to_string(),
+            &super::images::decode_budget(),
+        )?;
+        Self::parse_inner(method, path, body, memory)
+    }
+    fn image_memory(
+        body: &Value,
+        person: &str,
+        budget: &std::sync::Arc<super::images::DecodeBudget>,
+    ) -> AppResult<Option<super::images::DecodePermit>> {
+        if super::images::contains_images(body) {
+            let size = super::images::json_size(body)?;
+            let parts = body["messages"]
+                .as_array()
+                .ok_or_else(unsupported)?
+                .iter()
+                .filter_map(|m| m["content"].as_array())
+                .flatten()
+                .filter(|p| p["type"] == "image_url");
+            let mut count = 0;
+            let mut uri_bytes = 0;
+            for part in parts {
+                count += 1;
+                super::images::data_uri(part)?;
+                uri_bytes += part["image_url"]["url"]
+                    .as_str()
+                    .ok_or_else(unsupported)?
+                    .len();
+            }
+            if count > super::images::MAX_IMAGES || size.saturating_sub(uri_bytes) > 1024 * 1024 {
+                return Err(unsupported());
+            }
+            Ok(Some(budget.reserve(person, size)?))
+        } else {
+            Ok(None)
+        }
+    }
+    /// `person` is the authenticated acting person, never a client selector or
+    /// shared credential owner. Its decode slot ends before this method returns.
+    /// The caller checks image readiness before invoking this CPU-bound parser.
+    pub async fn parse_async(
+        method: http::Method,
+        path: String,
+        body: Value,
+        person: &str,
+    ) -> AppResult<Self> {
+        Self::parse_with_budget(method, path, body, person, &super::images::decode_budget()).await
+    }
+    async fn parse_with_budget(
+        method: http::Method,
+        path: String,
+        body: Value,
+        person: &str,
+        budget: &std::sync::Arc<super::images::DecodeBudget>,
+    ) -> AppResult<Self> {
+        let memory = Self::image_memory(&body, person, budget)?;
+        if memory.is_none() {
+            return Self::parse_inner(&method, &path, body, memory);
+        }
+        // Acquire memory before queueing work; cancellation leaves the permit
+        // with the bounded decoder until it actually exits.
+        tokio::task::spawn_blocking(move || Self::parse_inner(&method, &path, body, memory))
+            .await
+            .map_err(|_| unsupported())?
+    }
+    fn parse_inner(
+        method: &http::Method,
+        path: &str,
+        body: Value,
+        _memory: Option<super::images::DecodePermit>,
+    ) -> AppResult<Self> {
         if method != http::Method::POST
             || !matches!(
                 path.trim_matches('/'),
@@ -172,20 +248,23 @@ impl Request {
             }
         }
         let mut calls = std::collections::HashMap::new();
+        let mut images = super::images::Summary::default();
         for message in body["messages"].as_array().ok_or_else(unsupported)? {
-            // Media, provider-hosted files, thinking signatures and continuations
-            // need their own cost/lifecycle adapters; never silently drop them.
             let content = &message["content"];
-            if !(content.is_string()
-                || content.is_null()
-                || content.as_array().is_some_and(|p| {
-                    p.iter().all(|p| {
-                        fields(p, &["type", "text"]).is_ok()
-                            && p["type"] == "text"
-                            && p["text"].is_string()
-                    })
-                }))
-            {
+            if let Some(parts) = content.as_array() {
+                for part in parts {
+                    match part["type"].as_str() {
+                        Some("text")
+                            if fields(part, &["type", "text"]).is_ok()
+                                && part["text"].is_string() => {}
+                        Some("image_url") if message["role"] == "user" => {
+                            fields(part, &["type", "image_url"])?;
+                            images.push(part)?;
+                        }
+                        _ => return Err(unsupported()),
+                    }
+                }
+            } else if !content.is_null() && !content.is_string() {
                 return Err(unsupported());
             }
             if let Some(tc) = message["tool_calls"].as_array() {
@@ -215,7 +294,16 @@ impl Request {
             streaming: body["stream"] == true,
             body,
             max_output,
+            ingress_limit: super::images::MAX_REQUEST,
+            images,
         })
+    }
+    pub fn with_ingress_limit(mut self, limit: usize) -> Self {
+        self.ingress_limit = limit.min(super::images::MAX_REQUEST);
+        self
+    }
+    pub fn has_images(&self) -> bool {
+        self.images.count != 0
     }
     pub fn validate_bounds(&self, model: &PlatformModel, tariff: &ModelTariff) -> AppResult<()> {
         let b = &tariff.bounds;
@@ -238,12 +326,23 @@ impl Request {
                 .is_none_or(|n| self.max_output > i64::from(n))
             || self.max_output > b.max_output_tokens
             || size as i64 > b.max_request_bytes
-            || size > 1024 * 1024
+            || size.saturating_sub(self.images.uri_bytes) > 1024 * 1024
+            || size > self.ingress_limit
+            || self.has_images()
+                && (!model
+                    .capabilities
+                    .input_modalities
+                    .contains(&Modality::Image)
+                    || self.images.count as i64 > b.max_images)
             || b.max_response_bytes > 8 * 1024 * 1024
             || !tariff.variant.is_empty()
             || !tariff.contract.tokens
             || tariff.contract.images
-            || !tariff.contract.input_modalities.is_empty()
+            || tariff
+                .contract
+                .input_modalities
+                .iter()
+                .any(|m| *m != crate::models::platform_model_tariff::Modality::Image)
             || !tariff.contract.output_modalities.is_empty()
         {
             return Err(unsupported());
@@ -292,7 +391,15 @@ fn gemini_request(request: &Request) -> AppResult<Value> {
         .ok_or_else(unsupported)?
     {
         let role = message["role"].as_str().ok_or_else(unsupported)?;
-        let t = text(&message["content"])?;
+        let multipart = role == "user"
+            && message["content"]
+                .as_array()
+                .is_some_and(|parts| parts.iter().any(|p| p["type"] == "image_url"));
+        let t = if multipart {
+            String::new()
+        } else {
+            text(&message["content"])?
+        };
         if matches!(role, "system" | "developer") {
             system.push(json!({"text":t}));
             continue;
@@ -303,6 +410,15 @@ fn gemini_request(request: &Request) -> AppResult<Value> {
                 .get(message["tool_call_id"].as_str().ok_or_else(unsupported)?)
                 .ok_or_else(unsupported)?;
             parts.push(json!({"functionResponse":{"name":name,"response":{"result":t}}}));
+        } else if multipart {
+            for part in message["content"].as_array().ok_or_else(unsupported)? {
+                if part["type"] == "text" {
+                    parts.push(json!({"text":part["text"]}));
+                } else {
+                    let (mime, data) = super::images::data_uri(part)?;
+                    parts.push(json!({"inlineData":{"mimeType":mime,"data":data}}));
+                }
+            }
         } else if !t.is_empty() {
             parts.push(json!({"text":t}));
         }
@@ -446,11 +562,8 @@ pub(super) fn prepare(
             native_model.clone(),
         ),
     };
-    if native.family() != tariff.contract.family
-        || tariff.contract.fixture_sha256 != native.digest()
-    {
-        return Err(unsupported());
-    }
+    super::certification::certify(native, &route.target, tariff, request.has_images())?;
+    super::certification::request_limits(native, &request.images)?;
     let mut body = match native {
         Native::Gemini => gemini_request(request)?,
         Native::Claude => {
@@ -499,7 +612,10 @@ pub(super) fn prepare(
         body["stream"] = json!(request.streaming);
     }
     if serde_json::to_vec(&body).map_err(|_| unsupported())?.len() as i64
-        > tariff.bounds.max_request_bytes
+        > tariff
+            .bounds
+            .max_request_bytes
+            .min(request.ingress_limit as i64)
     {
         return Err(unsupported());
     }
@@ -532,6 +648,17 @@ pub(super) fn evidence(native: Native, usage: &Value) -> AppResult<Evidence> {
     } else {
         model_usage::parse_usage(native.family(), usage)?
     };
+    if native == Native::Gemini {
+        // parse_usage already proved each supplied modality array sums exactly
+        // to its aggregate. A complete all-text partition proves image zero;
+        // an absent array still supplies no such evidence.
+        if usage.get("promptTokensDetails").is_some() && e.input_image.is_none() {
+            e.input_image = Some(0);
+        }
+        if usage.get("cacheTokensDetails").is_some() && e.cached_image.is_none() {
+            e.cached_image = Some(0);
+        }
+    }
     // Missing priced counters stay unknown. Only costs impossible for this
     // stateless request subset may be established as zero without a counter.
     // No adapter accepts cache-creation directives or server-hosted tools.
@@ -723,3 +850,7 @@ pub(super) fn chunk(delta: Value, finish: Option<&str>, model: &str, id: &str) -
         })
     ))
 }
+
+#[cfg(test)]
+#[path = "decode_tests.rs"]
+mod decode_tests;

@@ -41,6 +41,8 @@ pub struct RetailPrice {
     pub variant: std::collections::BTreeMap<String, String>,
     pub available: bool,
     pub components: Vec<RetailComponent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_input: Option<crate::services::platform_model_execution::images::PublicLimits>,
 }
 #[derive(Serialize)]
 pub struct RetailComponent {
@@ -54,6 +56,7 @@ impl From<crate::services::billing::model_tariffs::Explanation> for RetailPrice 
         Self {
             variant: price.variant,
             available: price.available,
+            image_input: price.image_input,
             components: if price.available {
                 price
                     .components
@@ -416,7 +419,22 @@ pub async fn public_list(
                     .remove(&row.id)
                     .unwrap_or_default()
                     .into_iter()
-                    .map(Into::into)
+                    .map(|mut price| {
+                        if !ready
+                            || auth.api_key_purpose
+                                != crate::models::api_key::ApiKeyPurpose::General
+                            || auth.assistant_chat.is_some()
+                            || auth.org_agent_access.is_some()
+                            || auth.execution_permission.is_some()
+                        {
+                            price.image_input = None;
+                        }
+                        if let Some(limits) = &mut price.image_input {
+                            limits.max_request_bytes =
+                                limits.max_request_bytes.min(state.config.llm_max_body_size);
+                        }
+                        price.into()
+                    })
                     .collect();
                 if ready {
                     model.availability = "request_dependent";

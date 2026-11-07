@@ -1,6 +1,8 @@
 //! Private, funded platform-model executor. Its only entrance is the reserved
 //! gateway; there is no generic proxy target or client-selected route.
 pub(crate) mod adapters;
+pub(crate) mod certification;
+pub(crate) mod images;
 mod stream;
 mod token;
 
@@ -62,6 +64,9 @@ impl Plan {
         request: &Request,
     ) -> AppResult<Self> {
         registry::require_execution_ready(db).await?;
+        if request.has_images() {
+            crate::services::security_readiness_service::require(db, images::READINESS).await?;
+        }
         let metadata = registry::resolve_route_metadata(db, person, public_id, scope).await?;
         let (model, routing) = metadata.into_execution_parts();
         let offering = db
@@ -266,6 +271,9 @@ pub(crate) async fn dispatch(
     request: &Request,
 ) -> AppResult<Accepted> {
     let deadline = Instant::now() + DEADLINE;
+    if request.has_images() {
+        crate::services::security_readiness_service::require(ctx.db, images::READINESS).await?;
+    }
     let work = async {
         let mut attempts = 0;
         for route in &plan.routes {
