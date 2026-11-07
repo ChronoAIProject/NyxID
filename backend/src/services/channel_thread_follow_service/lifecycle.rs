@@ -187,6 +187,13 @@ pub async fn update_settings_as(
     stop_children: bool,
     reassign: bool,
 ) -> AppResult<NyxbotThread> {
+    let mut update = update;
+    update
+        .entry("$inc".into())
+        .or_insert_with(|| bson::Bson::Document(doc! {}))
+        .as_document_mut()
+        .ok_or_else(not_found)?
+        .insert("execution_policy_revision", 1_i64);
     let manager = manager.to_owned();
     let db = db.clone();
     let owner = owner.to_owned();
@@ -274,7 +281,7 @@ pub async fn relink(
                 super::super::org_channel_service::lifecycle::retire_in_session(db,session,channel,None).await?;
             }
             db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":channel,"user_id":owner},
-                doc! {"$set":{"agent_id":agent,"updated_at":bson::DateTime::now()},"$inc":{"follow_capacity_revision":1,"follow_binding_generation":1}})
+                doc! {"$set":{"agent_id":agent,"updated_at":bson::DateTime::now()},"$inc":{"follow_capacity_revision":1,"follow_binding_generation":1,"execution_policy_revision":1_i64}})
                 .session(&mut *session).await?;
             let parents:Vec<NyxbotThread>=db.collection(THREADS).find(doc! {"channel_id":channel,"user_id":owner,"agent_id":bson::Bson::Null,"record_scope":{"$ne":SCOPE}})
                 .session(&mut *session).await?.stream(&mut *session).try_collect().await?;

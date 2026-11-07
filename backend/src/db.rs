@@ -1573,6 +1573,30 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
                 .build(),
         )
         .await?;
+    crate::services::execution_permission_channel::deliveries::ensure_indexes(db).await?;
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"execution_proposal.v4.effect_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! {"execution_proposal.v4.effect_id":{"$type":"string"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    approval_requests.create_index(IndexModel::builder().keys(doc!{"execution_proposal.version":1,"execution_proposal.v4.delivered_turn_id":1,"execution_proposal.v4.maintenance_at":1,"created_at":1}).build()).await?;
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"execution_proposal.v4.gap_key":1,"created_at":-1})
+                .build(),
+        )
+        .await?;
     // ── approval_grants ──
     let approval_grants = db.collection::<mongodb::bson::Document>("approval_grants");
     approval_grants

@@ -2,8 +2,9 @@
 use super::*;
 use crate::models::{assistant_conversation::AssistantConversation, assistant_group::GroupRequest};
 use crate::services::assistant_nyxagent::{OwnerTurnIds, TurnStart};
+use crate::services::execution_permission_channel as channel;
 
-pub(super) fn collection(task: &TaskRef) -> &'static str {
+pub(crate) fn collection(task: &TaskRef) -> &'static str {
     match task.root_kind {
         TaskRootKind::Message => "assistant_messages",
         TaskRootKind::Invocation => "assistant_invocations",
@@ -38,6 +39,16 @@ pub(crate) fn admit<'a>(
             || (row.automation_thread && row.voice_parent_conversation_id.is_none())
             || row.platform_thread.is_some()
         {
+            if turn
+                .execution_task
+                .as_ref()
+                .into_iter()
+                .chain(start.execution_parent.as_ref().map(|p| &p.task))
+                .chain(turn.events.iter().filter_map(|e| e.execution_task.as_ref()))
+                .any(|task| task.channel_source.is_some())
+            {
+                return Err(refused());
+            }
             return Ok(());
         }
         let mut inherited = turn
@@ -60,11 +71,29 @@ pub(crate) fn admit<'a>(
                         || other.epoch != task.epoch
                         || other.actor_user_id != task.actor_user_id
                         || other.audience != task.audience
+                        || other.channel_source != task.channel_source
                 })
         {
             return Err(refused());
         }
+        if inherited.is_none()
+            && row.channel.is_some()
+            && start.origin != crate::models::assistant_conversation::TurnOrigin::Channel
+        {
+            return Ok(());
+        }
         if !start.execution_enrollment && inherited.is_none() {
+            return Ok(());
+        }
+        // Unsupported fresh channel lanes are known from the loaded row; they
+        // must not add enrollment/readiness commands to their legacy path.
+        if inherited.is_none()
+            && start.origin == crate::models::assistant_conversation::TurnOrigin::Channel
+            && (row.agent_owner_id.is_some()
+                || row.shared_agent_thread
+                || row.group_id.is_some()
+                || row.collaboration.is_some())
+        {
             return Ok(());
         }
         // Queue roots and voice requests already carry durable enrollment.
@@ -109,7 +138,44 @@ pub(crate) fn admit<'a>(
         }
 
         let now = bson::DateTime::now().to_chrono();
-        let current_audience = if let Some(group) = row
+        let channel_source =
+            if let Some(source) = inherited.as_ref().and_then(|t| t.channel_source.clone()) {
+                if row.agent_owner_id.is_some()
+                    || row.shared_agent_thread
+                    || row.group_id.is_some()
+                    || row.collaboration.is_some()
+                {
+                    return Err(refused());
+                }
+                Some(source)
+            } else if start.origin == crate::models::assistant_conversation::TurnOrigin::Channel {
+                if !crate::services::security_readiness_service::report(db, channel::READINESS)
+                    .await?
+                    .ready
+                {
+                    return Ok(());
+                }
+                let event = start.channel_event_id.as_deref().ok_or_else(refused)?;
+                Some(Box::new(channel::admit(db, session, row, event).await?))
+            } else {
+                None
+            };
+        if let Some(source) = &channel_source
+            && (start
+                .channel_event_id
+                .as_ref()
+                .is_some_and(|id| id != &source.event_id)
+                || turn
+                    .events
+                    .iter()
+                    .flat_map(|e| &e.source_event_ids)
+                    .any(|id| id != &source.event_id))
+        {
+            return Err(refused());
+        }
+        let current_audience = if let Some(source) = &channel_source {
+            channel::audience(source)
+        } else if let Some(group) = row
             .collaboration
             .as_ref()
             .map(|b| &b.group_id)
@@ -178,12 +244,15 @@ pub(crate) fn admit<'a>(
                 )
             };
             let proposed = TaskAdmission {
+                channel_source: channel_source.clone(),
                 version: VERSION,
                 task: root,
                 actor_user_id: row.user_id.clone(),
                 audience,
                 epoch: 1,
-                hard_deadline: now + chrono::Duration::hours(24),
+                hard_deadline: channel_source
+                    .as_ref()
+                    .map_or(now + chrono::Duration::hours(24), |s| s.expires_at),
                 cancelled: false,
                 parent_turn_id: None,
             };
@@ -263,6 +332,7 @@ async fn voice_task(
         return bson::from_document(task.clone()).map_err(encoding);
     }
     let task = TaskAdmission {
+        channel_source: None,
         version: VERSION,
         task: TaskRef {
             root_kind: TaskRootKind::Message,
@@ -305,6 +375,12 @@ pub(super) fn live_filter(task: &TaskAdmission) -> AppResult<Document> {
     "execution_task.task":bson::to_bson(&task.task).map_err(encoding)?,"execution_task.actor_user_id":&task.actor_user_id,"execution_task.epoch":task.epoch,
     "execution_task.audience":bson::to_bson(&task.audience).map_err(encoding)?,
     "execution_task.cancelled":false,"execution_task.hard_deadline":{"$gt":bson::DateTime::now()}};
+    if let Some(source) = &task.channel_source {
+        filter.insert(
+            "execution_task.channel_source",
+            bson::to_bson(source).map_err(encoding)?,
+        );
+    }
     if task.task.root_kind == TaskRootKind::GroupRequest {
         filter.insert("dropped", doc! {"$ne":true});
     }
@@ -318,6 +394,7 @@ pub(super) fn live_filter(task: &TaskAdmission) -> AppResult<Document> {
 }
 
 pub(super) async fn check(db: &Database, task: &TaskAdmission) -> AppResult<()> {
+    channel::check(db, task).await?;
     if db
         .collection::<Document>(collection(&task.task))
         .find_one(live_filter(task)?)
@@ -336,6 +413,9 @@ pub(crate) async fn fence(
     task: &TaskAdmission,
 ) -> AppResult<()> {
     require_enrolled(db, &task.actor_user_id, Some(session)).await?;
+    if let Some(source) = &task.channel_source {
+        channel::validate(db, session, source, true).await?;
+    }
     let filter = live_filter(task)?;
     if db
         .collection::<Document>(collection(&task.task))
@@ -364,6 +444,7 @@ pub(crate) fn settle<'a>(
         let Some(task) = turn.execution_task.as_ref() else {
             return Ok(());
         };
+        channel::deliveries::enqueue(db, session, row, turn, message).await?;
         let receipts: Vec<_> = turn
             .events
             .iter()
@@ -497,6 +578,7 @@ fn same_task(a: &TaskAdmission, b: &TaskAdmission) -> bool {
         && a.task == b.task
         && a.actor_user_id == b.actor_user_id
         && a.audience == b.audience
+        && a.channel_source == b.channel_source
         && a.epoch == b.epoch
         && a.hard_deadline == b.hard_deadline
         && !a.cancelled

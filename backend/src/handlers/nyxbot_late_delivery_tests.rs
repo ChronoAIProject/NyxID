@@ -97,6 +97,8 @@ async fn fixture(name: &str) -> Fixture {
             .unwrap(),
     );
     event.delivery = Some(ChannelTurnDelivery {
+        execution_source_bound: false,
+        execution_owner_verified: false,
         sender_kind: None,
         version: 1,
         state: "waiting".into(),

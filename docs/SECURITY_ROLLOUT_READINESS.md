@@ -204,6 +204,15 @@ Machine-variant proposal rows, including terminal receipts, before a binary
 rollback to readers without this capability. Disabling authoring never converts
 a retained occurrence into a legacy request or permits another send.
 
+`permissions:execution-authoring-channel-v1` is an optional v4 channel source,
+review and result-delivery capability. It is not a new prerequisite for existing
+web/v1/v3 or B2/v2 cohorts. Upgrade all API replicas/workers, deploy the monotonic
+channel/settings policy writers and outbox cleanup, then drain old writers before
+allowing this capability to become ready. Fresh unready sources stay legacy;
+existing marked work refuses at task/decision/send/delivery barriers. Disable
+and drain on upgraded binaries before a binary rollback. The saved permission
+remains v1 with a Channel audience; it never becomes a private permission.
+
 ## Platform model foundation
 
 PRs 1–3 advertise `inference:platform-model-registry-v1` for registry/entitlements,

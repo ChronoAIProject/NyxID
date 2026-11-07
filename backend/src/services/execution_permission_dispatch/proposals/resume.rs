@@ -85,8 +85,12 @@ pub(crate) async fn resume_turn(
                 || t.epoch != p.task.epoch
                 || t.actor_user_id != p.task.actor_user_id
                 || t.audience != p.task.audience
+                || t.channel_source != p.task.channel_source
         }) {
             return Err(refused());
+        }
+        if p.task.channel_source.is_some() {
+            super::super::super::execution_permission_channel::check(&state.db, &p.task).await?;
         }
         if request.status != "approved" {
             notes.push("The execution permission was not approved. Nothing was sent.".into());

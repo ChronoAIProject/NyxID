@@ -9,33 +9,44 @@ pub(crate) const CHOICE: &str = "persistent_private_conversations";
 pub(crate) enum AssistantVersion {
     V1,
     V3,
+    V4,
 }
 
 impl AssistantVersion {
-    pub(crate) const ALL: [Self; 2] = [Self::V1, Self::V3];
+    pub(crate) const ALL: [Self; 3] = [Self::V1, Self::V3, Self::V4];
 
     pub(crate) const fn number(self) -> u32 {
         match self {
             Self::V1 => 1,
             Self::V3 => 3,
+            Self::V4 => 4,
         }
     }
 
     pub(crate) fn of(row: &ApprovalRequest) -> AppResult<Self> {
         let e = row.execution_proposal.as_ref().ok_or_else(conflict)?;
         match e.version {
-            1 if e.v1.is_some() && e.v3.is_none() => Ok(Self::V1),
-            3 if e.v3.is_some() && e.v1.is_none() && e.v2.is_none() => Ok(Self::V3),
+            1 if e.v1.is_some() && e.v2.is_none() && e.v3.is_none() && e.v4.is_none() => {
+                Ok(Self::V1)
+            }
+            3 if e.v3.is_some() && e.v1.is_none() && e.v2.is_none() && e.v4.is_none() => {
+                Ok(Self::V3)
+            }
+            4 if e.v4.is_some() && e.v1.is_none() && e.v2.is_none() && e.v3.is_none() => {
+                Ok(Self::V4)
+            }
             _ => Err(conflict()),
         }
     }
 
     pub(super) fn envelope(self, p: Proposal) -> ExecutionProposal {
-        let (v1, v3) = match self {
-            Self::V1 => (Some(p), None),
-            Self::V3 => (None, Some(p)),
+        let (v1, v3, v4) = match self {
+            Self::V1 => (Some(p), None, None),
+            Self::V3 => (None, Some(p), None),
+            Self::V4 => (None, None, Some(p)),
         };
         ExecutionProposal {
+            v4,
             version: self.number(),
             v1,
             v2: None,
@@ -56,6 +67,13 @@ impl AssistantVersion {
     pub(super) async fn require(self, db: &Database) -> AppResult<()> {
         if self == Self::V3 {
             crate::services::security_readiness_service::require(db, READINESS).await?;
+        }
+        if self == Self::V4 {
+            crate::services::security_readiness_service::require(
+                db,
+                crate::services::execution_permission_channel::READINESS,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -112,6 +130,10 @@ pub(super) async fn choose_version(
     c: &ExecutionContract,
     reusable: bool,
 ) -> AppResult<AssistantVersion> {
+    if matches!(c.context.audience, Audience::Channel { .. }) {
+        AssistantVersion::V4.require(db).await?;
+        return Ok(AssistantVersion::V4);
+    }
     if reusable
         && eligible(c)
         && crate::services::security_readiness_service::report(db, READINESS)
@@ -257,7 +279,7 @@ mod tests {
             "execution_proposal.v1.literal"
         );
         let both = assistant_selector(template.clone());
-        assert_eq!(both.get_array("$or").unwrap().len(), 2);
-        assert_eq!(source_selector(template).get_array("$or").unwrap().len(), 3);
+        assert_eq!(both.get_array("$or").unwrap().len(), 3);
+        assert_eq!(source_selector(template).get_array("$or").unwrap().len(), 4);
     }
 }

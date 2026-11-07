@@ -768,6 +768,7 @@ async fn connect_inner(
         agent_key_raw = Some(Zeroizing::new(agent.full_key));
     }
     let row = NyxbotChannel {
+        execution_policy_revision: 0,
         org_specialist: org_binding.clone(),
         gateway_source: None,
         gateway_native_phase: None,
@@ -1154,7 +1155,7 @@ async fn connect_gateway(
         .map_err(|_| "gateway_native_unavailable")?;
     if row.gateway_source.is_some() {
         state.db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&row.id,"status":"pending"},
-            doc! {"$set":{"gateway_source":bson::to_bson(&row.gateway_source).map_err(|_|"storage_unavailable")?,"gateway_native_phase":"preparing","gateway_native_activation_detail":bson::Bson::Null,"gateway_native_activation_operation":bson::Bson::Null}}).await.map_err(|_|"storage_unavailable")?;
+            doc! {"$inc":{"execution_policy_revision":1_i64},"$set":{"gateway_source":bson::to_bson(&row.gateway_source).map_err(|_|"storage_unavailable")?,"gateway_native_phase":"preparing","gateway_native_activation_detail":bson::Bson::Null,"gateway_native_activation_operation":bson::Bson::Null}}).await.map_err(|_|"storage_unavailable")?;
     }
     if row.platform != "telegram"
         && let Some(bot_id) = match crate::services::nyxbot_gateway_source::verified_bot_id(
@@ -1258,7 +1259,7 @@ async fn connect_gateway(
             .await?;
     let db = &state.db;
     if db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&row.id,"status":"pending","gateway_setup_release_id":&release.id},
-        doc! {"$set":{"gateway_channel_id":&channel_id,"gateway_record_id":record_id,"gateway_version":version,"binding_id":&release.binding_id,"gateway_no_progress":false}})
+        doc! {"$inc":{"execution_policy_revision":1_i64},"$set":{"gateway_channel_id":&channel_id,"gateway_record_id":record_id,"gateway_version":version,"binding_id":&release.binding_id,"gateway_no_progress":false}})
         .await.map_err(|_|"storage_unavailable")?.matched_count!=1 {return Err("channel_changed");}
     if key_service::update_api_key_scope_with_scope_authorization(
         db,
@@ -1699,7 +1700,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         .update_one(
             doc! {"_id": &row.id, "status": "active", "transport": "direct",
             "route_api_key_id": &row.route_api_key_id, "pending_agent_api_key_id": null, "pending_route_api_key_id": null},
-            doc! {"$set": {"pending_agent_api_key_id": &agent.id,
+            doc! {"$inc":{"execution_policy_revision":1_i64},"$set": {"pending_agent_api_key_id": &agent.id,
             "pending_route_api_key_id": &route_key.id, "gateway_no_progress": false,
             "gateway_source":bson::to_bson(&source).map_err(|_|"storage_unavailable")?,
             "gateway_native_phase":source.as_ref().map(|_|"preparing"),"gateway_native_activation_detail":bson::Bson::Null,"gateway_native_activation_operation":bson::Bson::Null},
@@ -3164,12 +3165,21 @@ enum Inbound {
 }
 
 struct Sender<'a> {
+    /// Provider classification before any normalization used by legacy chat.
+    /// Only the new execution-source proof uses this distinction.
+    original_kind: Option<crate::models::channel_thread::ThreadSenderKind>,
     original_message: bool,
     media: Vec<crate::services::channel_platform::InboundAttachment>,
     kind: crate::models::channel_thread::ThreadSenderKind,
     owner_eligible: bool,
     id: &'a str,
     display_name: Option<&'a str>,
+}
+
+impl Sender<'_> {
+    fn execution_kind(&self) -> crate::models::channel_thread::ThreadSenderKind {
+        self.original_kind.unwrap_or(self.kind)
+    }
 }
 
 const PRIVATE_REFUSAL: &str = "This bot answers only its owner. If this is your bot, ask NyxBot \
@@ -3314,7 +3324,7 @@ async fn link_owner(
             .collection::<NyxbotChannel>(CHANNELS)
             .update_one(
                 doc! {"_id": &row.id, "link_code_hash": hash},
-                doc! {"$addToSet": {"owner_sender_ids": sender.id},
+                doc! {"$inc":{"execution_policy_revision":1_i64},"$addToSet": {"owner_sender_ids": sender.id},
                 "$unset": {"link_code_hash": "", "link_code_expires_at": ""},
                 "$set": {"updated_at": bson::DateTime::now()}},
             )
@@ -3335,7 +3345,7 @@ async fn link_owner(
             .collection::<NyxbotChannel>(CHANNELS)
             .update_one(
                 doc! {"_id": &row.id},
-                doc! {"$addToSet": {"owner_sender_ids": sender.id},
+                doc! {"$inc":{"execution_policy_revision":1_i64},"$addToSet": {"owner_sender_ids": sender.id},
                 "$set": {"updated_at": bson::DateTime::now()}},
             )
             .await?;
@@ -3791,7 +3801,16 @@ async fn start_chat_turn(
     let start = TurnStart {
         automation_work: None,
         automation_parent: None,
-        execution_enrollment: false,
+        execution_enrollment: crate::services::execution_permission_channel::verified_owner(
+            row,
+            sender.execution_kind(),
+            sender.owner_eligible,
+            sender.original_message,
+            guest,
+        )
+            && crate::services::execution_permission_enrollment::snapshot::channel_candidate(
+                &state.db, &actor,
+            ),
         execution_parent: None,
         channel_context: Some(source_context.clone()),
         owner_instruction_source: (!guest && private)
@@ -4400,7 +4419,11 @@ pub async fn put_binding(
                 if row.binding_id.as_deref() != Some(binding_id.as_str()) {
                     set.insert("gateway_no_progress", false);
                 }
-                doc! {"$set": set}
+                let mut update = doc! {"$set": set};
+                if row.binding_id.as_deref() != Some(binding_id.as_str()) {
+                    update.insert("$inc", doc! {"execution_policy_revision":1_i64});
+                }
+                update
             },
         )
         .await
@@ -4505,7 +4528,7 @@ pub async fn delete_binding(
             "route_api_key_id": &row.route_api_key_id, "transport": &row.transport,
             "status": &row.status, "agent_api_key_id": &row.agent_api_key_id,
             "pending_agent_api_key_id": &row.pending_agent_api_key_id},
-            doc! {"$unset": {"binding_id": ""}, "$set": {"gateway_no_progress": false, "updated_at": bson::DateTime::now()}},
+            doc! {"$inc":{"execution_policy_revision":1_i64},"$unset": {"binding_id": ""}, "$set": {"gateway_no_progress": false, "updated_at": bson::DateTime::now()}},
         )
         .await
     {
@@ -4631,10 +4654,19 @@ pub async fn delete_conversation(
             session
                 .start_transaction()
                 .and_run2(async move |session| {
-                    db.collection::<NyxbotThread>(THREADS)
-                        .delete_one(doc! {"channel_id":&channel,"partition":&partition})
+                    if let Some(thread) = db
+                        .collection::<NyxbotThread>(THREADS)
+                        .find_one_and_delete(doc! {"channel_id":&channel,"partition":&partition})
+                        .session(&mut *session)
+                        .await?
+                    {
+                        db.collection::<bson::Document>(
+                            crate::models::execution_permission_channel::COLLECTION_NAME,
+                        )
+                        .delete_many(doc! {"task.channel_source.thread_id":&thread.id})
                         .session(&mut *session)
                         .await?;
+                    }
                     db.collection::<bson::Document>(
                         crate::models::nyxbot_gateway_response::COLLECTION_NAME,
                     )
@@ -4653,11 +4685,20 @@ pub async fn delete_conversation(
         };
     }
     // The NyxBot chat itself stays in the owner's history.
-    let _ = state
+    if let Ok(Some(thread)) = state
         .db
         .collection::<NyxbotThread>(THREADS)
-        .delete_one(doc! {"channel_id": &row.id, "partition": &conversation_id})
-        .await;
+        .find_one_and_delete(doc! {"channel_id": &row.id, "partition": &conversation_id})
+        .await
+    {
+        let _ = state
+            .db
+            .collection::<bson::Document>(
+                crate::models::execution_permission_channel::COLLECTION_NAME,
+            )
+            .delete_many(doc! {"task.channel_source.thread_id":&thread.id})
+            .await;
+    }
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -5081,6 +5122,7 @@ async fn custom_responses(
         return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
     }
     let sender = Sender {
+        original_kind: None,
         original_message: true,
         media: Vec::new(),
         kind: crate::models::channel_thread::ThreadSenderKind::Human,
@@ -5596,6 +5638,7 @@ async fn dispatch_relay_response(
         activity,
         context["event_ref"].as_str(),
         &Sender {
+            original_kind: None,
             media,
             kind: sender_kind,
             original_message,
@@ -6770,6 +6813,7 @@ pub async fn relay_callback(
                 }
             };
             let sender = Sender {
+                original_kind: None,
                 media: if canonical_platform(&row.platform) == "telegram" {
                     chats::native_message(&raw)
                         .map(crate::services::telegram_input::attachments)
@@ -7366,3 +7410,6 @@ pub(crate) mod guest_setup_queue;
 
 #[path = "nyxbot_org_channels.rs"]
 mod org_channels;
+
+#[path = "nyxbot_execution_delivery.rs"]
+pub(crate) mod execution_delivery;

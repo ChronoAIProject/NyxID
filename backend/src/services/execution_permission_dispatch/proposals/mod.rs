@@ -338,6 +338,12 @@ pub(super) async fn create(
         &json!({"subject":contract.subject,"binding":contract.binding,"context":contract.context,"task":task.task,"epoch":task.epoch,"deadline":task.hard_deadline,"key":chat.api_key_id,"occurrence_turn":chat.turn_id,"digest":digest,"authority":authority_digest,"floors":effect.floors,"compiler":1,"report_to":chat.report_to}),
     )?;
 
+    let gap_key = if let Some(source) = &task.channel_source {
+        fingerprint(&json!({"legacy_gap":gap_key,"channel_source":source,"envelope":4}))?
+    } else {
+        gap_key
+    };
+
     let mut choices = vec![("operation", "This operation", contract.validity.clone())];
     if reusable {
         choices.extend([
@@ -498,6 +504,7 @@ pub(crate) fn proposal(row: &ApprovalRequest) -> AppResult<&Proposal> {
         .and_then(|p| match version {
             AssistantVersion::V1 => p.v1.as_ref(),
             AssistantVersion::V3 => p.v3.as_ref(),
+            AssistantVersion::V4 => p.v4.as_ref(),
         })
         .ok_or_else(conflict)
 }
@@ -558,7 +565,7 @@ pub(crate) async fn decide(
     let row = state
         .db
         .collection::<ApprovalRequest>(REQUESTS)
-        .find_one(doc! {"_id":id,"user_id":actor,"execution_proposal.version":{"$in":[1,2,3]}})
+        .find_one(doc! {"_id":id,"user_id":actor,"execution_proposal.version":{"$in":[1,2,3,4]}})
         .await?
         .ok_or_else(missing)?;
     if row
@@ -622,7 +629,9 @@ pub(crate) async fn decide(
             fence_behavior(db,session,&source,&p).await?;
             fence_endpoint(db,session,&p).await?;
             if source.collaboration.is_some(){super::super::collaboration_group_service::runtime::fence_decision(db,&source,actor,session).await?;}
-            let current_audience=if let Some(group)=source.collaboration.as_ref().map(|b|&b.group_id).or(source.group_id.as_ref()) {
+            let current_audience=if let Some(channel)=&p.task.channel_source {
+                crate::services::execution_permission_channel::audience(channel)
+            } else if let Some(group)=source.collaboration.as_ref().map(|b|&b.group_id).or(source.group_id.as_ref()) {
                 let group=db.collection::<crate::models::assistant_group::AssistantGroup>("assistant_groups").find_one(doc!{"_id":group}).session(&mut *session).await?.ok_or_else(missing)?;
                 group_audience(&group)
             } else {Audience::Private{user_id:actor.to_string()}};
@@ -824,7 +833,7 @@ async fn review(
         agent:label(&chat.agent_name),
         connection:format!("{} · {} · {}",label(&connection.slug),if effect.owner==chat.user_id{"your connection"}else{"shared connection"},effect.connection.chars().rev().take(8).collect::<String>().chars().rev().collect::<String>()),
         operation:format!("{} {}",effect.method,label(effect.path)),
-        audience:if chat.execution_group_id.is_some(){"This group and its current participants".into()}else{"This private conversation".into()},
+        audience:if let Some(source)=chat.execution_task.as_ref().and_then(|t|t.channel_source.as_ref()) {format!("{} — the original channel chat/thread and everyone who can see it. Decide only in NyxID; the result will be replied there while its source is valid.",label(&source.audience_label))}else if chat.execution_group_id.is_some(){"This group and its current participants".into()}else{"This private conversation".into()},
         scope:if reusable{"Only this exact path, query and JSON input in this conversation"}else{"Only this retained operation, including its exact inputs and headers"}.into(),
         inputs:inputs.chars().filter(|c| !c.is_control()).take(12_000).collect(),
         existing_permission:existing_permissions(grants,gaps),

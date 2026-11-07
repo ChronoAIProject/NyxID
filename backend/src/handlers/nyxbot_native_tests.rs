@@ -1466,91 +1466,121 @@ async fn native_async_reply_thread_mode_and_delivery_receipts_iteration(native_t
         .insert_one(service)
         .await
         .unwrap();
-    for (receipt, expected) in [
-        (
-            json!({"delivery":{"outcome":"confirmed"}}),
-            "reply_confirmed",
-        ),
-        (
-            json!({"delivery":{"outcome":"rejected","reason":"test"}}),
-            "reply_rejected",
-        ),
-        (
-            json!({"delivery":{"outcome":"unsupported"}}),
-            "reply_unsupported",
-        ),
-        (
-            json!({"delivery":{"outcome":"rate_limited","retry_after":1}}),
-            "reply_rate_limited",
-        ),
-        (
-            json!({"delivery":{"outcome":"unknown","reason":"test"}}),
-            "reply_unknown",
-        ),
-        (json!({}), "reply_unknown"),
-    ] {
-        gateway.reset().await;
-        Mock::given(method("POST"))
-            .and(path("/events/opaque-native-ref/replies"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(receipt))
-            .expect(1)
-            .mount(&gateway)
-            .await;
-        // A later ambient turn cannot take ownership of this source's delivery.
-        let other_turn = crate::turn_trace::TurnContext::for_turn(&Uuid::new_v4().to_string());
-        let (result, trace) = crate::turn_trace::capture(crate::turn_trace::scope(
-            other_turn,
-            native_responses::send_update(
-                &state,
-                &row,
-                origin,
-                stored.conversation_id.as_deref().unwrap(),
-                "Update",
+    for occurrence in [None, Some("permission-result-occurrence")] {
+        for (receipt, expected) in [
+            (
+                json!({"delivery":{"outcome":"confirmed"}}),
+                "reply_confirmed",
             ),
-        ))
-        .await;
-        assert_eq!(result.is_ok(), expected == "reply_confirmed", "{expected}");
-        let original_turn = event.turn_id.as_deref().unwrap();
-        assert!(!trace.is_empty());
-        assert!(
-            trace
-                .iter()
-                .all(|record| record["turn_id"] == original_turn)
-        );
-        let sent = trace
-            .iter()
-            .find(|record| record["stage"] == "channel" && record["phase"] == "end")
-            .unwrap();
-        assert_eq!(
-            sent["outcome"],
-            if expected == "reply_confirmed" {
-                "confirmed"
+            (
+                json!({"delivery":{"outcome":"rejected","reason":"test"}}),
+                "reply_rejected",
+            ),
+            (
+                json!({"delivery":{"outcome":"unsupported"}}),
+                "reply_unsupported",
+            ),
+            (
+                json!({"delivery":{"outcome":"rate_limited","retry_after":1}}),
+                "reply_rate_limited",
+            ),
+            (
+                json!({"delivery":{"outcome":"unknown","reason":"test"}}),
+                "reply_unknown",
+            ),
+            (json!({}), "reply_unknown"),
+        ] {
+            gateway.reset().await;
+            Mock::given(method("POST"))
+                .and(path("/events/opaque-native-ref/replies"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(receipt))
+                .expect(1)
+                .mount(&gateway)
+                .await;
+            // A later ambient turn cannot take ownership of this source's delivery.
+            let other_turn = crate::turn_trace::TurnContext::for_turn(&Uuid::new_v4().to_string());
+            let (result, trace) =
+                crate::turn_trace::capture(crate::turn_trace::scope(other_turn, async {
+                    if let Some(occurrence) = occurrence {
+                        native_responses::send_occurrence(
+                            &state,
+                            &row,
+                            origin,
+                            stored.conversation_id.as_deref().unwrap(),
+                            "Update",
+                            occurrence,
+                        )
+                        .await
+                    } else {
+                        native_responses::send_update(
+                            &state,
+                            &row,
+                            origin,
+                            stored.conversation_id.as_deref().unwrap(),
+                            "Update",
+                        )
+                        .await
+                        .map(|()| "confirmed")
+                    }
+                }))
+                .await;
+            let expected_outcome = match expected {
+                "reply_confirmed" => "confirmed",
+                "reply_rejected" | "reply_unsupported" | "reply_rate_limited" => "rejected",
+                _ => "unknown",
+            };
+            if occurrence.is_some() {
+                assert_eq!(result.unwrap(), expected_outcome, "{expected}");
             } else {
-                "unknown"
+                assert_eq!(result.is_ok(), expected == "reply_confirmed", "{expected}");
             }
-        );
-        let part = trace
-            .iter()
-            .find(|record| record["stage"] == "channel_part" && record["phase"] == "start")
-            .unwrap();
-        let gateway_span = trace
-            .iter()
-            .find(|record| record["stage"] == "gateway" && record["phase"] == "start")
-            .unwrap();
-        assert_eq!(gateway_span["parent_span_id"], part["span_id"]);
-        let requests = gateway.received_requests().await.unwrap();
-        assert_eq!(
-            requests.len(),
-            1,
-            "no automatic retry of an uncertain receipt"
-        );
-        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-        assert_eq!(
-            body.get("thread_reply"),
-            native_thread.then_some(&Value::Bool(true))
-        );
-        let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
-        assert_eq!(saved.gateway_native_delivery.as_deref(), Some(expected));
+            let original_turn = event.turn_id.as_deref().unwrap();
+            assert!(!trace.is_empty());
+            assert!(
+                trace
+                    .iter()
+                    .all(|record| record["turn_id"] == original_turn)
+            );
+            let sent = trace
+                .iter()
+                .find(|record| record["stage"] == "channel" && record["phase"] == "end")
+                .unwrap();
+            assert_eq!(sent["outcome"], expected_outcome);
+            let part_end = trace
+                .iter()
+                .find(|record| record["stage"] == "channel_part" && record["phase"] == "end")
+                .unwrap();
+            assert_eq!(part_end["outcome"], expected_outcome);
+            let part = trace
+                .iter()
+                .find(|record| record["stage"] == "channel_part" && record["phase"] == "start")
+                .unwrap();
+            let gateway_span = trace
+                .iter()
+                .find(|record| record["stage"] == "gateway" && record["phase"] == "start")
+                .unwrap();
+            assert_eq!(gateway_span["parent_span_id"], part["span_id"]);
+            let requests = gateway.received_requests().await.unwrap();
+            assert_eq!(
+                requests.len(),
+                1,
+                "no automatic retry of an uncertain receipt"
+            );
+            assert_eq!(
+                requests[0]
+                    .headers
+                    .get("idempotency-key")
+                    .map(|value| value.to_str().unwrap()),
+                occurrence.map(|_| "permission-result-occurrence:0"),
+            );
+            let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+            assert_eq!(
+                body.get("thread_reply"),
+                native_thread.then_some(&Value::Bool(true))
+            );
+            let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
+            assert_eq!(saved.gateway_native_delivery.as_deref(), Some(expected));
+        }
     }
     upstream.abort();
 }

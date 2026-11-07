@@ -260,3 +260,5 @@ pub mod generated_artifact;
 pub mod platform_model;
 
 pub mod platform_model_tariff;
+
+pub mod execution_permission_channel;
