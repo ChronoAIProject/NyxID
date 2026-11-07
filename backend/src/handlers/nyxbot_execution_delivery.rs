@@ -1,0 +1,133 @@
+//! Delivery adapters only; the service owns durable source/claim authorization.
+use super::*;
+use crate::{
+    models::{
+        assistant_message::AssistantMessage,
+        execution_permission_channel::{COLLECTION_NAME as DELIVERIES, Delivery},
+    },
+    services::execution_permission_channel::{self as channel, deliveries},
+};
+
+pub(crate) async fn process(state: &AppState, id: &str) -> AppResult<()> {
+    let Some(d) = deliveries::lease(&state.db, id).await? else {
+        return Ok(());
+    };
+    let preparation=async {
+        let source=d.task.channel_source.as_ref().ok_or_else(channel::refused)?;
+        let mut session=state.db.client().start_session().await?;
+        let rows=channel::validate(&state.db,&mut session,source,false).await?;
+        let history=engine::get(&state.db,&d.user_id,&d.conversation_id).await?;
+        let message=state.db.collection::<AssistantMessage>("assistant_messages").find_one(doc!{
+            "_id":&d.message_id,"user_id":&d.user_id,"conversation_id":&d.conversation_id,"turn_id":&d.turn_id,"role":"assistant"
+        }).await?.ok_or_else(channel::refused)?;
+        // Text-only receipt. The web thread retains attachment access under its ACL.
+        let mut text=late_delivery::answer(&message.text,message.status!="completed");
+        if !message.attachments.is_empty() {text.push_str("\n\nAttachments are available in the NyxID thread.");}
+        let delivery=rows.event.delivery.as_ref().ok_or_else(channel::refused)?;
+        if rows.channel.transport=="gateway"
+            && delivery.target_expires_at.is_none_or(|t|t<=Utc::now())
+            && rows.event.created_at+ChronoDuration::minutes(29)<=Utc::now()
+        {return Err(channel::refused());}
+        Ok((rows,history,text))
+    }.await;
+    let (rows, history, text) = match preparation {
+        Ok(p) => p,
+        Err(
+            AppError::Forbidden(_) | AppError::NotFound(_) | AppError::SecurityReadinessUnavailable,
+        ) => {
+            deliveries::finish(&state.db, &d, "refused").await?;
+            return Ok(());
+        }
+        Err(error) => return Err(error), // recoverable no-send preparation lease
+    };
+    match deliveries::claim(&state.db, &d).await {
+        Ok(true) => {}
+        Ok(false) => return Ok(()),
+        Err(
+            AppError::Forbidden(_) | AppError::NotFound(_) | AppError::SecurityReadinessUnavailable,
+        ) => {
+            deliveries::finish(&state.db, &d, "refused").await?;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    }
+    let delivery = rows.event.delivery.as_ref().ok_or_else(channel::refused)?;
+    let outcome = if rows.channel.gateway_source.is_some() {
+        native_responses::send_occurrence(
+            state,
+            &rows.channel,
+            &delivery.origin,
+            &history.id,
+            &text,
+            &d.id,
+        )
+        .await
+        .unwrap_or("unknown")
+    } else {
+        late_delivery::dispatch_occurrence(
+            state,
+            &rows.event,
+            delivery,
+            &rows.channel,
+            &history,
+            &text,
+            Some(&d.id),
+        )
+        .await
+        .unwrap_or("unknown")
+    };
+    deliveries::finish(&state.db, &d, outcome).await?;
+    tracing::info!(
+        outcome,
+        transport = rows.channel.transport,
+        "Execution permission channel result delivery settled"
+    );
+    Ok(())
+}
+
+pub(crate) async fn for_turn(state: &AppState, turn: &str) {
+    let result: AppResult<()> = async {
+        let rows: Vec<Delivery> = state
+            .db
+            .collection::<Delivery>(DELIVERIES)
+            .find(doc! {"turn_id":turn,"state":"pending"})
+            .limit(1)
+            .await?
+            .try_collect()
+            .await?;
+        for row in rows {
+            process(state, &row.id).await?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(e) = result {
+        tracing::warn!(
+            code = e.error_code(),
+            "Execution permission channel result delivery deferred"
+        );
+    }
+}
+
+pub(crate) fn spawn_sweep(state: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let result: AppResult<()> = async {
+                for id in deliveries::due(&state.db).await? {
+                    process(&state, &id).await?;
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(e) = result {
+                tracing::warn!(
+                    code = e.error_code(),
+                    "Execution permission channel result sweep deferred"
+                );
+            }
+        }
+    });
+}

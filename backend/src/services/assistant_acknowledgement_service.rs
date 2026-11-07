@@ -1628,6 +1628,15 @@ pub async fn for_key_with_access(
             && conversation.voice_parent_conversation_id.is_none())
             || conversation.platform_thread.is_some()
             || conversation.active_turn.as_ref().is_some_and(|t| {
+                (conversation.channel.is_some()
+                    || t.asked_from.is_some()
+                    || t.channel_context.is_some()
+                    || t.channel_event_id.is_some())
+                    && t.execution_task
+                        .as_ref()
+                        .is_none_or(|task| task.channel_source.is_none())
+            })
+            || conversation.active_turn.as_ref().is_some_and(|t| {
                 t.trigger_run_id.is_some()
                     || t.automation_work.is_some()
                     || t.channel_adapter_origin.is_some()

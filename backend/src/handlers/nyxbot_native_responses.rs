@@ -313,6 +313,25 @@ async fn accept(
     Ok(stored)
 }
 
+pub(super) fn native_sender(activity: &Value) -> Sender<'_> {
+    use crate::models::channel_thread::ThreadSenderKind as Kind;
+    Sender {
+        original_kind: Some(match activity["actor"]["kind"].as_str() {
+            Some("human") => Kind::Human,
+            Some("bot") => Kind::Bot,
+            _ => Kind::Unknown,
+        }),
+        id: activity["actor"]["id"].as_str().unwrap_or_default(),
+        display_name: None,
+        // Preserve the deployed native-chat behavior. Permission enrollment
+        // separately requires the provider's positive human classification.
+        kind: Kind::Human,
+        media: vec![],
+        original_message: true,
+        owner_eligible: true,
+    }
+}
+
 async fn execute(
     state: &AppState,
     row: &NyxbotChannel,
@@ -323,14 +342,7 @@ async fn execute(
     let partition = stored.partition.as_str();
     let event_key = stored.event_key.as_str();
     let mut thread_reply = false;
-    let sender = Sender {
-        id: activity["actor"]["id"].as_str().unwrap_or_default(),
-        display_name: None,
-        kind: crate::models::channel_thread::ThreadSenderKind::Human,
-        media: vec![],
-        original_message: true,
-        owner_eligible: true,
-    };
+    let sender = native_sender(activity);
     let text = if row.platform == "whatsapp"
         && crate::services::whatsapp_native::has_unavailable_media(activity)
     {
@@ -607,7 +619,24 @@ pub(super) fn send_update<'a>(
     conversation: &'a str,
     text: &'a str,
 ) -> futures::future::BoxFuture<'a, AppResult<()>> {
-    Box::pin(send_update_impl(state, row, origin, conversation, text))
+    Box::pin(async move {
+        match send_update_impl(state, row, origin, conversation, text, None).await? {
+            "confirmed" => Ok(()),
+            _ => Err(AppError::NotFound("Native reply source unavailable".into())),
+        }
+    })
+}
+
+/// An independently claimed permission result has its own stable occurrence.
+pub(super) async fn send_occurrence(
+    state: &AppState,
+    row: &NyxbotChannel,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    text: &str,
+    occurrence: &str,
+) -> AppResult<&'static str> {
+    send_update_impl(state, row, origin, conversation, text, Some(occurrence)).await
 }
 
 async fn send_update_impl(
@@ -616,7 +645,8 @@ async fn send_update_impl(
     origin: &ChannelOrigin,
     conversation: &str,
     text: &str,
-) -> AppResult<()> {
+    occurrence: Option<&str>,
+) -> AppResult<&'static str> {
     let unavailable = || AppError::NotFound("Native reply source unavailable".into());
     if !source::ready(row) {
         return Err(unavailable());
@@ -696,20 +726,21 @@ async fn send_update_impl(
         }]
     };
     let mut outcome = "reply_confirmed";
-    for part in reply_parts {
+    for (index, part) in reply_parts.into_iter().enumerate() {
         let mut body = json!({"text":part.text.unwrap_or_default()});
         // A local followed reply chain is not necessarily a Discord thread.
         // CMA accepts native-thread mode only for the original thread channel.
         if context["activity"]["conversation"]["thread_id"].is_string() {
             body["thread_reply"] = json!(true);
         }
+        let idempotency = occurrence.map(|id| format!("{id}:{index}"));
         let result = gateway_call(
             state,
             reqwest::Method::POST,
             &format!("/events/{}/replies", urlencode(reference)),
             &key,
             Some(&body),
-            None,
+            idempotency.as_deref(),
         )
         .await;
         // Transport success alone is not a platform send receipt. Do not retry
@@ -724,6 +755,7 @@ async fn send_update_impl(
                     _ => "reply_unknown",
                 }
             }
+            Ok(result) if (500..600).contains(&result.status) => "reply_unknown",
             Ok(_) => "reply_refused",
             Err(_) => "reply_unknown",
         };
@@ -735,8 +767,11 @@ async fn send_update_impl(
         doc! {"_id":&row.id,"binding_id":&row.binding_id,"transport":"gateway","gateway_native_phase":"ready"},
         doc! {"$set":{"gateway_native_delivery":outcome}},
     ).await?;
-    if outcome != "reply_confirmed" {
-        return Err(unavailable());
-    }
-    Ok(())
+    Ok(match outcome {
+        "reply_confirmed" => "confirmed",
+        "reply_rejected" | "reply_unsupported" | "reply_rate_limited" | "reply_refused" => {
+            "rejected"
+        }
+        _ => "unknown",
+    })
 }

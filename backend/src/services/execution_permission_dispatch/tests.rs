@@ -909,6 +909,7 @@ async fn task_roots_fence_actor_epoch_deadline_and_terminal_state() {
         TaskRootKind::GroupRequest,
     ] {
         let task = TaskAdmission {
+            channel_source: None,
             version: VERSION,
             task: TaskRef {
                 root_kind,
@@ -2278,6 +2279,7 @@ fn event_turns_partition_distinct_tasks_without_changing_legacy_events() {
     use crate::models::assistant_conversation::TurnOrigin;
     let mut pending = Vec::new();
     let task = TaskAdmission {
+        channel_source: None,
         version: VERSION,
         task: TaskRef {
             root_kind: TaskRootKind::Message,

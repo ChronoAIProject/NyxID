@@ -137,7 +137,7 @@ pub(crate) async fn update_as(
                 channel_filter.insert("status", doc! {"$in": ["active", "pending"]});
             }
             let changed = db.collection::<Document>(CHANNELS)
-                .update_one(channel_filter, doc! {"$set": set})
+                .update_one(channel_filter, doc! {"$set": set,"$inc":{"execution_policy_revision":1_i64}})
                 .session(&mut *tx)
                 .await?;
             if changed.matched_count != 1 {
@@ -173,7 +173,7 @@ pub(crate) async fn update_as(
             filter.insert("_id", doc! {"$in": ids});
             Ok(threads.update_many(
                     filter,
-                    doc! {"$set": {"allow_posts": allow, "updated_at": bson::DateTime::now()}},
+                    doc! {"$set": {"allow_posts": allow, "updated_at": bson::DateTime::now()},"$inc":{"execution_policy_revision":1_i64}},
                 )
                 .session(&mut *tx)
                 .await?

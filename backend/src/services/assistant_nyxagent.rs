@@ -6293,6 +6293,7 @@ pub(crate) async fn delete_in_session(
             crate::models::nyxbot_gateway_response::COLLECTION_NAME,
             crate::models::nyxbot_image_delivery::COLLECTION_NAME,
             crate::models::nyxbot_image_delivery::LEGACY_COLLECTION_NAME,
+            crate::models::execution_permission_channel::COLLECTION_NAME,
             crate::models::assistant_upload_retention::TOMBSTONES,
             crate::models::assistant_agent_credential::COLLECTION_NAME,
             MESSAGES,
@@ -6303,6 +6304,15 @@ pub(crate) async fn delete_in_session(
                 .session(&mut *session)
                 .await?;
         }
+        // A channel permission result may retain the original encrypted reply
+        // capability after the initial stream settles. Deletion removes that
+        // material together with its outbox; never reopen the original claim.
+        db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+            .update_many(doc!{"user_id":user_id,"conversation_id":id,"delivery.execution_source_bound":true},
+                doc!{"$set":{"delivery.execution_source_bound":false},"$unset":{
+                    "event_context_ciphertext":"","delivery.target_ciphertext":"","delivery.target_expires_at":""
+                }})
+            .session(&mut *session).await?;
         // Pending guest input has not yet been bound to a turn.
         // Revoke its resumability with the conversation, preserving dedup metadata.
         db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)

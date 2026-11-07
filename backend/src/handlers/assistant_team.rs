@@ -564,6 +564,20 @@ pub(crate) async fn after_turn(
     let also = engine::take_deliveries(&state.db, owner, &row.id)
         .await
         .unwrap_or_default();
+    if turn
+        .execution_task
+        .as_ref()
+        .and_then(|task| task.channel_source.as_ref())
+        .is_some_and(|source| source.original_turn_id != turn.turn_id)
+    {
+        // This settled continuation has its own fenced occurrence. Never send
+        // it through a mutable home-thread target or the original stream claim.
+        if crate::services::execution_permission_channel::deliveries::owns_result(row, turn) {
+            super::nyxbot::execution_delivery::for_turn(state, &turn.turn_id).await;
+        }
+        let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
+        return;
+    }
     if error.is_some() {
         // They were told an answer would come: say it did not.
         for origin in &also {
@@ -3904,6 +3918,7 @@ pub fn spawn_sweeps(state: AppState) {
     crate::services::nyxbot_gateway_release_service::spawn_worker(state.clone());
     super::mcp_transport::async_operations::spawn_sweep(state.clone());
     super::nyxbot::late_delivery::spawn_sweep(state.clone());
+    super::nyxbot::execution_delivery::spawn_sweep(state.clone());
     super::assistant_voice::spawn_dispatch(state.clone());
     crate::services::voice::runtime::spawn_recovery(state.clone());
     tokio::spawn(async move {

@@ -267,8 +267,12 @@ pub async fn silence(db: &Database, event: &str) -> AppResult<bool> {
         .update_one(
             doc! {"_id": event, "delivery.version": 1,
             "delivery.state": {"$in": ["waiting", "pending"]}},
-            doc! {"$set": {"delivery.state": "silent", "status": "completed"},
-            "$unset": {"event_context_ciphertext": "", "delivery.target_ciphertext": ""}},
+            // A separate permission result may still need the same original
+            // capability. Never reopen the terminal delivery claim itself.
+            vec![doc! {"$set": {"delivery.state": "silent", "status": "completed",
+                "event_context_ciphertext":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$event_context_ciphertext","$$REMOVE"]},
+                "delivery.target_ciphertext":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$delivery.target_ciphertext","$$REMOVE"]}
+            }}],
         )
         .await?
         .modified_count
