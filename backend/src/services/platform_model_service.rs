@@ -963,10 +963,18 @@ pub async fn retail_explanations(
             .map(|rate| (rate.lago_metric_code.clone(), rate))
             .collect()
     };
-    let image_ready =
-        security_readiness_service::report(db, super::platform_model_execution::images::READINESS)
-            .await?
-            .ready;
+    // Discovery must never fail because readiness is unconfigured or unknown;
+    // image limits are simply omitted. Execution enforces readiness itself.
+    let image_ready = match security_readiness_service::report(
+        db,
+        super::platform_model_execution::images::READINESS,
+    )
+    .await
+    {
+        Ok(report) => report.ready,
+        Err(crate::errors::AppError::SecurityReadinessUnavailable) => false,
+        Err(error) => return Err(error),
+    };
     let routing_ids: Vec<_> = models
         .iter()
         .filter_map(|m| m.routing_revision_id.as_deref())
