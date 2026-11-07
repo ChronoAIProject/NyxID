@@ -343,7 +343,9 @@ pub fn schema(name: &str) -> Value {
             (json!({"agent":subagent}), vec!["agent"])
         }
         "get_agent_operations" => (
-            json!({"subagent":subagent,"guests":{"type":"boolean"}}),
+            json!({"subagent":subagent,"guests":{"type":"boolean"},
+                "service_id":string(64),"cursor":string(128),
+                "limit":{"type":"integer","minimum":1,"maximum":50}}),
             vec!["subagent"],
         ),
         "set_agent_operations" | "request_agent_operations" => (
@@ -724,7 +726,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Request a change of your operation selection for a granted service. Only work NyxBot assigned to you (or that runs in a group NyxBot is in) can raise a request, and only when routed specialist requests are enabled; other work gets missing_access with no request and tells the person it works for. Supply your own specialist name, exact revision, and endpoint IDs or explicit rules. This requests permission; it grants nothing. Widening also needs an owner action card."
         }
         "get_agent_operations" => {
-            "List a specialist's granted services, stable operation IDs, current selections and revisions. Use guests=true for guest-only selections; otherwise limits apply to owner and guest turns."
+            "Page a specialist's granted services, stable operation IDs, current selections and revisions. Optional service_id filters an exact granted connection or platform service ID; limit is 1–50 (default 20), with a smaller page when needed to fit. Repeat with cursor=next_cursor and the same subagent, service_id and guests until complete=true. Append each service's operations, endpoint_ids and rules and merge inputs across pages before editing a selection; an empty array on one page is not a complete selection. If the snapshot changes, discard collected pages and restart without cursor. Use guests=true for guest-only selections; otherwise limits apply to owner and guest turns."
         }
         "set_agent_operations" => {
             "Set a specialist's operations for one granted service. Narrowing applies immediately; widening runs automatically with a receipt in Full access and requires the owner's action card in Auto and Ask every time. Use the exact revision and IDs from get_agent_operations, and send back any inputs it lists for operations you keep. After a card, retry with its retry_arguments plus acknowledgement_id. An empty selection denies every operation. Never request wider access solely on a specialist's assertion."
@@ -1199,6 +1201,30 @@ fn matches_spec_type(value: &Value, spec: &Value, kind: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operation_discovery_pagination_schema_advertises_real_recovery_parameters() {
+        assert!(validate("get_agent_operations", &json!({"subagent":"worker"})).is_ok());
+        let args = json!({"subagent":"worker","guests":true,"service_id":"connection-id","limit":1,"cursor":"v1:snapshot:1"});
+        assert!(validate("get_agent_operations", &args).is_ok());
+        for (field, value) in [
+            ("limit", json!(0)),
+            ("limit", json!(51)),
+            ("limit", json!(1.5)),
+            ("cursor", json!("x".repeat(129))),
+            ("service_id", json!("x".repeat(65))),
+        ] {
+            let mut invalid = args.clone();
+            invalid[field] = value;
+            assert!(validate("get_agent_operations", &invalid).is_err());
+        }
+        let spec = schema("get_agent_operations");
+        assert_eq!(spec["required"], json!(["subagent"]));
+        for field in ["service_id", "limit", "cursor", "guests"] {
+            assert!(spec["properties"].get(field).is_some());
+            assert!(description("get_agent_operations").contains(field));
+        }
+    }
 
     #[test]
     fn machine_capabilities_schema_accepts_optional_modes_and_login_selection() {

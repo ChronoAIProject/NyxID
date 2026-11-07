@@ -1974,14 +1974,24 @@ async fn dispatch_operation_scopes(
                     "Specialists may read only their own operation scopes".into(),
                 ));
             }
-            (
-                json!({"services": if args["guests"].as_bool() == Some(true) {
-                    Box::pin(crate::services::agent_operation_scope_service::guest_options(db, owner, &agent.id)).await?
-                } else {
-                    Box::pin(crate::services::agent_operation_scope_service::options(db, &state.node_ws_manager, owner, &agent.id)).await?
-                }}),
-                false,
+            let request = serde_json::from_value(args.clone())
+                .map_err(|_| AppError::ValidationError("Invalid discovery page".into()))?;
+            match Box::pin(
+                crate::services::agent_operation_scope_service::options_page(
+                    db, chat, &agent.id, &request,
+                ),
             )
+            .await
+            {
+                Ok(page) => (page, false),
+                Err(error @ AppError::Conflict(_)) => (
+                    json!({"error":error.error_key(),"error_code":error.error_code(),
+                        "reason":"discovery_snapshot_changed",
+                        "message":"Operation discovery changed or the cursor belongs to another caller/filter. Discard collected pages and restart get_agent_operations without cursor. No acknowledgement is needed."}),
+                    true,
+                ),
+                Err(error) => return Err(error),
+            }
         }
         "set_agent_operations" => {
             let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
