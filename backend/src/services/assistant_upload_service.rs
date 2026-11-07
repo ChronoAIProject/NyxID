@@ -802,6 +802,7 @@ async fn tool_image_bytes(
     tool_image_for_chat(db, chat, id)
         .await?
         .ok_or_else(missing)?;
+    super::assistant_platform_model::record_image_read(db, chat, id, &bytes).await?;
     Ok(Some((row.content_type, bytes)))
 }
 
@@ -838,6 +839,9 @@ pub async fn chat_bytes(
     if chat.collaboration_thread {
         // Membership, the exact request and guest opt-in may change during decryption.
         for_chat(db, chat, id).await?;
+    }
+    if image_only {
+        super::assistant_platform_model::record_image_read(db, chat, id, &bytes.1).await?;
     }
     Ok(bytes)
 }

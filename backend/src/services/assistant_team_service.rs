@@ -1087,6 +1087,23 @@ pub async fn resolve_each_target(
             ));
             continue;
         }
+        // Logical model grants use public IDs, never private provider routes.
+        // Selection does not create these grants implicitly.
+        if target.starts_with("nyxid/") {
+            super::assistant_platform_model::require_ready(db).await?;
+            let model = super::platform_model_service::authorized_model(db, actor, target).await?;
+            let id = model
+                .billing_service_id
+                .ok_or_else(super::assistant_platform_model::unavailable)?;
+            resolved
+                .ids_by_request
+                .insert(target.to_owned(), id.clone());
+            if !resolved.platform_service_ids.contains(&id) {
+                resolved.platform_service_ids.push(id);
+                resolved.slugs.push(target.to_owned());
+            }
+            continue;
+        }
         let Some(service) = catalog
             .services
             .iter()
@@ -1738,6 +1755,16 @@ pub async fn set_agent_policy(
     if let Some(model) = policy.model {
         if !super::assistant_nyxagent::valid_model(model) {
             return Err(AppError::AssistantModelUnavailable);
+        }
+        if model.starts_with("nyxid/") {
+            super::assistant_platform_model::validate_selection(
+                db,
+                &actor.user_id,
+                &current,
+                model,
+                false,
+            )
+            .await?;
         }
         set.insert("model", model);
     }
@@ -2712,6 +2739,7 @@ pub struct AgentSummary {
     pub created_by: String,
     /// NyxAgent model for new threads.
     pub model: String,
+    pub model_unavailable: bool,
     /// The agent's own access mode; absent follows the owner's workspace mode.
     pub access_mode_override: Option<crate::models::assistant_settings::AccessMode>,
     pub channel_checking_notice: bool,
@@ -2858,6 +2886,7 @@ pub async fn request_summaries(
 async fn slug_names(
     db: &Database,
     agents: &[AssistantAgent],
+    viewer: &str,
 ) -> AppResult<HashMap<String, String>> {
     let user_services: Vec<String> = agents
         .iter()
@@ -2871,6 +2900,7 @@ async fn slug_names(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
+    let mut platform_ids = Vec::new();
     let mut names = HashMap::new();
     for (collection, ids) in [
         (crate::models::user_service::COLLECTION_NAME, user_services),
@@ -2882,11 +2912,38 @@ async fn slug_names(
         let mut cursor = db
             .collection::<bson::Document>(collection)
             .find(doc! {"_id": {"$in": &ids}})
-            .projection(doc! {"slug": 1})
+            .projection(doc! {"slug": 1, "platform_key.purpose":1})
             .await?;
         while let Some(row) = cursor.try_next().await? {
             if let (Ok(id), Ok(slug)) = (row.get_str("_id"), row.get_str("slug")) {
                 names.insert(id.to_owned(), slug.to_owned());
+                if row
+                    .get_document("platform_key")
+                    .ok()
+                    .and_then(|p| p.get_str("purpose").ok())
+                    == Some("model_offering")
+                {
+                    // An absent/deleted model must not fall back to its internal offering slug.
+                    names.insert(id.to_owned(), String::new());
+                    platform_ids.push(id.to_owned());
+                }
+            }
+        }
+    }
+    if !platform_ids.is_empty() {
+        let mut models = db
+            .collection::<crate::models::platform_model::PlatformModel>(
+                crate::models::platform_model::COLLECTION_NAME,
+            )
+            .find(doc! {"billing_service_id":{"$in":platform_ids}})
+            .await?;
+        while let Some(model) = models.try_next().await? {
+            if let Some(id) = model.billing_service_id {
+                names.insert(
+                    id,
+                    super::assistant_platform_model::public_selection(db, viewer, &model.public_id)
+                        .await?,
+                );
             }
         }
     }
@@ -2972,7 +3029,7 @@ pub(crate) async fn summaries_for_agents(
     rows: Vec<AssistantAgent>,
     reply_chars: usize,
 ) -> AppResult<Vec<AgentSummary>> {
-    let names = slug_names(db, &rows).await?;
+    let names = slug_names(db, &rows, owner).await?;
     let requests = pending_requests(db, owner).await?;
     let by_thread = request_agents(db, owner, &requests, &rows).await?;
     let running = running_agents(db, owner).await?;
@@ -3028,6 +3085,8 @@ pub(crate) async fn summaries_for_agents(
             (0, _) | (_, None) => None,
             (chars, Some(home)) => last_reply(db, owner, home, chars).await?,
         };
+        let public_model =
+            super::assistant_platform_model::public_selection(db, owner, &agent.model).await?;
         out.push(AgentSummary {
             share_role: None,
             owner_id: agent.user_id.clone(),
@@ -3044,8 +3103,9 @@ pub(crate) async fn summaries_for_agents(
                 .service_ids
                 .iter()
                 .chain(&agent.grants.platform_service_ids)
+                .filter(|id| names.get(*id).is_none_or(|name| !name.is_empty()))
                 .map(|id| {
-                    if org_owned {
+                    if org_owned && !names.get(id).is_some_and(|s| s.starts_with("nyxid/")) {
                         id.clone()
                     } else {
                         names.get(id).cloned().unwrap_or_else(|| id.clone())
@@ -3058,7 +3118,7 @@ pub(crate) async fn summaries_for_agents(
                 .service_ids
                 .iter()
                 .chain(&agent.grants.platform_service_ids)
-                .filter(|_| !org_owned)
+                .filter(|id| !org_owned && names.get(*id).is_none_or(|name| !name.is_empty()))
                 .map(|id| {
                     let name = names.get(id).cloned().unwrap_or_else(|| id.clone());
                     let level = agent.guest_access.get(id).copied().unwrap_or_default();
@@ -3083,7 +3143,8 @@ pub(crate) async fn summaries_for_agents(
             description: agent.description.clone(),
             specialty: agent.specialty.clone(),
             created_by: agent.created_by.clone(),
-            model: agent.model.clone(),
+            model: public_model.clone(),
+            model_unavailable: agent.model.starts_with("nyxid/") && public_model.is_empty(),
             access_mode_override: agent.access_mode_override,
             channel_checking_notice: agent.channel_checking_notice,
             home_conversation_id: home_id,

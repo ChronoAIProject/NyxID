@@ -111,6 +111,21 @@ pub(crate) struct ManagedBillingAdmission {
 }
 
 impl BillingRouteContext {
+    /// Platform inference is funded at the inner gateway. Keep distinct non-token
+    /// orchestration prices, but never charge the outer copy of model usage.
+    pub(crate) fn with_platform_model_orchestration(
+        mut self,
+        _proof: &crate::services::assistant_platform_model::Orchestration,
+    ) -> Self {
+        if self.platform_metric.is_token_family() || self.platform_metric == BillingMetric::Images {
+            self.platform_billable = false;
+            self.service_platform_billable = false;
+        }
+        self.platform_components
+            .retain(|c| !c.metric.is_token_family() && c.metric != BillingMetric::Images);
+        self
+    }
+
     /// Called after normal resource authorization/payer resolution, before
     /// reservation. Personal-agent guests consume their owner's budget even
     /// for org connections; the typed org-channel guest instead retains its
@@ -518,6 +533,7 @@ mod tests {
     fn guest_1995_payer_is_agent_owner_and_owner_resource_billing_is_unchanged() {
         use crate::services::assistant_acknowledgement_service::ChatAuthority;
         let mut chat = ChatAuthority {
+            platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
             execution_unsupported: false,
@@ -595,6 +611,7 @@ mod tests {
     fn shared_recipient_never_uses_guest_owner_payer_override() {
         use crate::services::assistant_acknowledgement_service::ChatAuthority;
         let chat = ChatAuthority {
+            platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
             execution_unsupported: false,

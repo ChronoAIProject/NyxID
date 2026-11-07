@@ -5,7 +5,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 fn fixture_value(plan: &Plan) -> Value {
     serde_json::from_str(certification::image_fixture(&plan.routes[0].target).unwrap()).unwrap()
 }
-pub(super) fn image_plan(plan: &mut Plan, split: bool) -> Request {
+pub(crate) fn image_plan(plan: &mut Plan, split: bool) -> Request {
     let fixture = certification::image_fixture(&plan.routes[0].target).unwrap();
     let value: Value = serde_json::from_str(fixture).unwrap();
     plan.model
@@ -559,7 +559,11 @@ fn image_request_and_translated_bytes_obey_ingress_and_tariff_limits() {
     );
     let too_large = json!({"messages":[],"x":"a".repeat(images::MAX_REQUEST)});
     assert!(images::json_size(&too_large).is_err());
-    assert!(images::reserve(images::MAX_REQUEST + 1).is_err());
+    assert!(
+        images::decode_budget()
+            .reserve("bounds-test", images::MAX_REQUEST + 1)
+            .is_err()
+    );
 }
 
 #[tokio::test]

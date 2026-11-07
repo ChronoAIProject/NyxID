@@ -1145,6 +1145,9 @@ async fn gateway_request_inner(
     auth_user
         .ensure_live_assistant_turn(&state.db, "llm.gateway")
         .await?;
+    if path == "assistant-model-context" {
+        return super::assistant_platform_models::context(&state, &auth_user, request).await;
+    }
     let billing_egress_permit = enforce_llm_billing_classification(
         &request,
         crate::services::billing::BillingIngress::LlmGateway,
@@ -2748,8 +2751,6 @@ pub(super) async fn check_llm_approval(
     operation_guest: bool,
     method_override: bool,
 ) -> AppResult<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>> {
-    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
-    let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
     let mut operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
     operation_descriptor::apply_inference_contract(
         &mut operation,
@@ -2761,6 +2762,35 @@ pub(super) async fn check_llm_approval(
             .as_deref()
             .is_some_and(|chat| chat.guest && chat.turn_live),
     );
+    check_llm_approval_descriptor(
+        state,
+        auth_user,
+        service_id,
+        &service.name,
+        &service.slug,
+        operation,
+        service_owner_user_id,
+        is_auto_connected,
+        operation_guest,
+    )
+    .await
+}
+
+/// Shared policy/card path; the caller supplies its verified operation descriptor.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn check_llm_approval_descriptor(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    service_name: &str,
+    service_slug: &str,
+    operation: operation_descriptor::OperationDescriptor,
+    service_owner_user_id: Option<&str>,
+    is_auto_connected: bool,
+    operation_guest: bool,
+) -> AppResult<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>> {
+    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
+    let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
     let (approval_outcome, automatic) = crate::services::execution_permission_dispatch::approval(
         auth_user.execution_permission.as_ref(),
         &state.db,
@@ -2828,8 +2858,8 @@ pub(super) async fn check_llm_approval(
         state.apns_auth.as_deref(),
         &pending.primary_owner_user_id,
         service_id,
-        &service.name,
-        &service.slug,
+        service_name,
+        service_slug,
         &pending.requester_type,
         &pending.requester_id,
         None,

@@ -3031,6 +3031,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/direct/skills", get(handlers::assistant_direct::skills))
         .route("/direct/models", get(handlers::assistant_direct::models))
+        .route(
+            "/nyxagent/platform-models",
+            get(handlers::assistant_platform_models::list),
+        )
         .route("/direct/efforts", get(handlers::assistant_direct::efforts))
         .route(
             "/actions/key-create",

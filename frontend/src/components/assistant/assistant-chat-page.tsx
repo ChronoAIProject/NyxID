@@ -1334,6 +1334,7 @@ function NyxAgentThreadPage() {
           />
           {selectedAgent?.share_role && selectedId ? <div className="mx-auto max-h-64 max-w-3xl overflow-y-auto px-4"><SharedConsentCards agentId={selectedAgent.id} conversationId={selectedId} /></div> : null}
           <NyxAgentComposer
+            agentId={headerAgent?.id}
             onVoiceSettings={voiceEnabled && !destroyed && !channelPlatform ? () => setVoiceSettingsOpen(true) : undefined}
             onVoicePrepare={() => {
               if (!nyxBotSettings.data?.voice || nyxBotSettings.isError || nyxBotSettings.isPending) {

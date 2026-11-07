@@ -10137,6 +10137,7 @@ mod tests {
         role: crate::models::assistant_conversation::AgentRole,
     ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
             execution_unsupported: false,

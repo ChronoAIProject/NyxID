@@ -126,9 +126,27 @@ impl ToolImages {
         if self.rounds >= MAX_IMAGE_ROUNDS {
             return Ok(false);
         }
-        if self.model_unsupported
-            || model_support(state, egress, authority, &row.model, policy).await == Some(false)
-        {
+        let platform = if row.model.starts_with("nyxid/") {
+            Some(
+                crate::services::assistant_platform_model::selection_plan(
+                    state,
+                    &row.user_id,
+                    &row.model,
+                )
+                .await
+                .map_err(super::proxy_turn_error)?,
+            )
+        } else {
+            None
+        };
+        let model_text_only = self.model_unsupported
+            || match platform.as_ref() {
+                Some(plan) => plan.image_limits().is_none(),
+                None => {
+                    model_support(state, egress, authority, &row.model, policy).await == Some(false)
+                }
+            };
+        if model_text_only {
             for item in &items {
                 mark(
                     state,
@@ -156,6 +174,13 @@ impl ToolImages {
         }
         let capabilities =
             upstream_capabilities(state, egress, authority, credential, policy).await;
+        let capabilities = match platform.as_ref() {
+            Some(plan) => crate::services::assistant_platform_model::image_capabilities(
+                capabilities,
+                plan.image_limits().as_ref(),
+            ),
+            None => capabilities,
+        };
         let (parts, omitted) =
             uploads::tool_image_plan(&items, &capabilities, &state.config.base_url);
         if parts.is_empty() {

@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
-import { nyxBotQueryKeys, useConnectNyxBotChannel, useRetryNyxBotChannelGateway, useCreateNyxBotAgent, useNyxBotAgents } from "./use-nyxbot-agents";
+import { nyxBotQueryKeys, useConnectNyxBotChannel, useRetryNyxBotChannelGateway, useCreateNyxBotAgent, useNyxBotAgents, useNyxAgentModels } from "./use-nyxbot-agents";
 import { useNyxAgentLive } from "./use-nyxagent-live";
 import { resetNyxAgentLiveForTests } from "@/lib/assistant/nyxagent-live";
 import { useAuthStore } from "@/stores/auth-store";
@@ -119,4 +119,33 @@ it("2183 refreshes actual transport and activation after a retry", async () => {
   expect(nyxBotApi.retryChannelGateway).toHaveBeenCalledWith("channel");
   expect(invalidate).toHaveBeenCalledWith({ queryKey: nyxBotQueryKeys.channels(undefined) });
   unmount();
+});
+
+
+it("loads all entitled platform pages only when enabled, with context and certified images", async () => {
+  rosterFixture();
+  const legacy = vi.spyOn(nyxBotApi, "models").mockResolvedValue([{ id: "nyxagent/chat", label: "Legacy", available: true }]);
+  const platform = vi.spyOn(nyxBotApi, "platformModels").mockImplementation(async (_context, after): ReturnType<typeof nyxBotApi.platformModels> => ({
+    models: [{ id: after ? "nyxid/gpt-next" : "nyxid/gpt-5", display_name: "Public model", description: "", availability: "request_dependent",
+      capabilities: { protocols: ["openai_chat"], input_modalities: ["image"], output_modalities: ["text"] },
+      retail_prices: [{ variant: {}, available: true, components: [{ metric: "input_tokens", selector: { kind: "input_uncached" }, credits_per_unit: "0.001", explicit_free: false }],
+        image_input: after ? null : { mime_types: ["image/png"], max_images: 10, max_file_bytes: 100, max_total_file_bytes: 200, max_request_bytes: 300, accounting: "inclusive" } }, ...(after ? [{ variant: { tier: "alternate" }, available: true, components: [],
+        image_input: { mime_types: ["image/png"], max_images: 10, max_file_bytes: 100, max_total_file_bytes: 200, max_request_bytes: 300, accounting: "inclusive" } }] : [])],
+    }], next_after: after ? null : "nyxid/gpt-5",
+  }));
+  const view = renderHook(() => useNyxAgentModels(true, { agentId: "specialist" }), { wrapper });
+  await waitFor(() => expect(view.result.current.data?.length).toBe(1));
+  expect(legacy).toHaveBeenCalledOnce();
+  expect(platform).not.toHaveBeenCalled();
+  act(() => { useAuthStore.setState((state) => ({ user: { ...state.user!, capabilities: { ...state.user!.capabilities, enabled_features: ["inference:platform-models"] } } })); });
+  await waitFor(() => expect(view.result.current.data?.length).toBe(3));
+  expect(platform).toHaveBeenNthCalledWith(1, { agentId: "specialist" }, undefined);
+  expect(platform).toHaveBeenNthCalledWith(2, { agentId: "specialist" }, "nyxid/gpt-5");
+  expect(view.result.current.data?.[1]?.input_modalities).toEqual(["text", "image"]);
+  expect(view.result.current.data?.[2]?.input_modalities).toEqual(["text"]);
+  expect(view.result.current.data?.[1]?.description).toContain("input tokens: 0.001 credits / unit");
+  expect(view.result.current.data?.[1]?.description).not.toContain("input_uncached");
+  act(() => { useAuthStore.setState((state) => ({ user: { ...state.user!, capabilities: { ...state.user!.capabilities, enabled_features: [] } } })); });
+  await waitFor(() => expect(view.result.current.data?.map((m) => m.id)).toEqual(["nyxagent/chat"]));
+  view.unmount();
 });

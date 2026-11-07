@@ -700,10 +700,31 @@ async fn request(
     credential: &AssistantCredential,
     method: &str,
     path: &str,
-    body: Option<Value>,
+    mut body: Option<Value>,
     request_id: Option<&str>,
     policy: Option<BillingRoutePolicy>,
 ) -> AppResult<axum::response::Response> {
+    if let Some(body) = body
+        .as_mut()
+        .filter(|b| b["model"].as_str().is_some_and(|m| m.starts_with("nyxid/")))
+    {
+        let contract::NyxAgentExecutionContext::Owner { user_id, turn, .. } = authority else {
+            return Err(AppError::AssistantModelUnavailable);
+        };
+        let row = _state.db.collection::<AssistantConversation>("assistant_conversations")
+            .find_one(doc! {"_id":&turn.conversation_id,"user_id":user_id,"credential_api_key_id":&credential.api_key_id,
+                "active_turn.turn_id":&turn.turn_id,"active_turn.stop_requested":false}).await?
+            .ok_or(AppError::AssistantTurnRequired)?;
+        let handle = row
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.platform_model_context.as_deref())
+            .ok_or(AppError::AssistantModelUnavailable)?;
+        if row.guest_turn || body["model"] != row.model {
+            return Err(AppError::AssistantModelUnavailable);
+        }
+        body["nyxid_model_context"] = json!({"version":1,"handle":handle});
+    }
     let method = method
         .parse()
         .map_err(|_| AppError::Internal("Invalid assistant method".into()))?;
@@ -1450,6 +1471,35 @@ async fn execute_turn_inner(
     instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
     tool_images: &mut images::ToolImages,
 ) -> Result<TurnResult, TurnError> {
+    let platform_plan = if row.model.starts_with("nyxid/") {
+        if row.guest_turn {
+            return Err(TurnError::new("model_unavailable"));
+        }
+        super::assistant_platform_model::require_ready(&state.db)
+            .await
+            .map_err(proxy_turn_error)?;
+        let capability = upstream_capabilities(
+            state,
+            egress,
+            authority,
+            credential,
+            Some(super::assistant_platform_model::CAPABILITY_POLICY),
+        )
+        .await;
+        if !super::assistant_platform_model::bridge_ready(&capability) {
+            return Err(TurnError::new("model_unavailable"));
+        }
+        super::assistant_platform_model::activate_bridge(&state.db, row, &capability)
+            .await
+            .map_err(proxy_turn_error)?;
+        Some(
+            super::assistant_platform_model::selection_plan(state, &row.user_id, &row.model)
+                .await
+                .map_err(proxy_turn_error)?,
+        )
+    } else {
+        None
+    };
     let media_context = if row.active_turn.as_ref().is_some_and(|turn| {
         turn.channel_event_id.is_some() || turn.events.iter().any(|e| !e.media_event_ids.is_empty())
     }) {
@@ -1769,7 +1819,13 @@ async fn execute_turn_inner(
         .iter()
         .any(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"));
     let model_text_only = has_images
-        && images::model_support(state, egress, authority, &row.model, policy).await == Some(false);
+        && match platform_plan.as_ref() {
+            Some(plan) => plan.image_limits().is_none(),
+            None => {
+                images::model_support(state, egress, authority, &row.model, policy).await
+                    == Some(false)
+            }
+        };
     let mut listing = if row.guest_turn && row.collaboration.is_none() {
         // Never suggest attachment or machine tools to a channel guest.
         String::new()
@@ -1781,6 +1837,13 @@ async fn execute_turn_inner(
         upstream_capabilities(state, egress, authority, credential, policy).await
     } else {
         Value::Null
+    };
+    let capabilities = match platform_plan.as_ref() {
+        Some(plan) => super::assistant_platform_model::image_capabilities(
+            capabilities,
+            plan.image_limits().as_ref(),
+        ),
+        None => capabilities,
     };
     let image_notice = if model_text_only {
         crate::services::assistant_upload_service::MODEL_IMAGE_FALLBACK

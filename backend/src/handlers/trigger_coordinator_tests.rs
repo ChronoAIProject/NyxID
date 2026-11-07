@@ -594,6 +594,7 @@ fn authority(
 ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
     let turn = row.active_turn.as_ref().unwrap();
     crate::services::assistant_acknowledgement_service::ChatAuthority {
+        platform_model_context: None,
         automation_work: turn.automation_work.clone(),
         execution_group_id: None,
         execution_unsupported: true,

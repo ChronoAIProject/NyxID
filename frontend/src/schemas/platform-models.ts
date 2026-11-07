@@ -33,6 +33,10 @@ export const publicModelSchema = z.object({
         variant: z.record(z.string(), z.string()),
         available: z.boolean(),
         components: z.array(retailComponentSchema),
+        image_input: z.object({
+          mime_types: z.array(z.string()), max_images: z.number(), max_file_bytes: z.number(),
+          max_total_file_bytes: z.number(), max_request_bytes: z.number(), accounting: z.string(),
+        }).nullish(),
       }),
     )
     .default([]),

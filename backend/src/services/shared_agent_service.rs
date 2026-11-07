@@ -1672,6 +1672,8 @@ pub async fn summaries(
         let home = threads
             .iter()
             .find(|r| r.agent_id.as_deref() == Some(&a.id));
+        let public_model =
+            super::assistant_platform_model::public_selection(db, actor, &a.model).await?;
         result.push(super::assistant_team_service::AgentSummary {
             share_role: Some(access.role()),
             owner_id: a.user_id.clone(),
@@ -1703,7 +1705,8 @@ pub async fn summaries(
             description: a.description.clone(),
             specialty: a.specialty.clone(),
             created_by: a.created_by.clone(),
-            model: a.model.clone(),
+            model: public_model.clone(),
+            model_unavailable: a.model.starts_with("nyxid/") && public_model.is_empty(),
             access_mode_override: None,
             channel_checking_notice: false,
             home_conversation_id: home.map(|r| r.id.clone()),
@@ -1721,6 +1724,8 @@ pub async fn summaries(
         if result.iter().any(|a| a.id == id) {
             continue;
         }
+        let public_model =
+            super::assistant_platform_model::public_selection(db, actor, &thread.model).await?;
         result.push(super::assistant_team_service::AgentSummary {
             id: id.into(), share_role: Some(ShareRole::User), owner_id: thread.agent_owner_id.clone().unwrap_or_default(),
             owner_name: None, owner_slug: None, owner_kind: "person", org_role: None, can_use: false, can_maintain: false,
@@ -1729,7 +1734,8 @@ pub async fn summaries(
             kind: crate::models::assistant_agent::AgentKind::Specialist, name: "Shared agent".into(),
             display_name: Some("Shared agent · access ended".into()), persona: None, specialty: None,
             description: "Your retained chats remain private and readable. Ask the owner to share this agent again to continue.".into(),
-            created_by: "user".into(), model: thread.model.clone(), access_mode_override: None, channel_checking_notice: false,
+            created_by: "user".into(), model: public_model.clone(),
+            model_unavailable: thread.model.starts_with("nyxid/") && public_model.is_empty(), access_mode_override: None, channel_checking_notice: false,
             home_conversation_id: Some(thread.id.clone()), memory_count: 0, created_at: thread.created_at,
             last_active_at: thread.updated_at, destroyed_at: None,
         });

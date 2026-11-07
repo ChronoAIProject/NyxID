@@ -1,4 +1,4 @@
-mod images_tests;
+pub(crate) mod images_tests;
 use super::adapters::Native;
 use super::*;
 use crate::{

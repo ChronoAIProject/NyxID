@@ -1,7 +1,11 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { ServiceGrantPicker } from "./nyxbot-agent-forms";
+
+const platform = vi.hoisted(() => ({ models: [] as { id: string; display_name: string }[] }));
+vi.mock("@/hooks/use-platform-models", () => ({ usePlatformModels: () => ({ data: { pages: [{ models: platform.models }] }, hasNextPage: false }) }));
+afterEach(() => { platform.models = []; });
 
 vi.mock("@/hooks/use-keys", () => ({
   useKeys: () => ({
@@ -59,4 +63,14 @@ it("keeps an offline service selectable and shows an availability advisory", asy
   expect(row).toBeEnabled();
   await userEvent.setup().click(row);
   expect(change).toHaveBeenCalledWith([]);
+});
+
+
+it("offers entitled logical models alongside connections using public IDs", async () => {
+  platform.models = [{ id: "nyxid/gpt-5", display_name: "GPT-5" }];
+  const change = vi.fn();
+  render(<ServiceGrantPicker org="team" value={["first"]} onChange={change} />);
+  await userEvent.setup().click(screen.getByRole("checkbox", { name: /GPT-5/ }));
+  expect(change).toHaveBeenCalledWith(["first", "nyxid/gpt-5"]);
+  expect(screen.getAllByRole("checkbox", { name: /Calendar/ })).toHaveLength(2);
 });

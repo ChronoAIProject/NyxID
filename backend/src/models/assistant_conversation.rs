@@ -365,6 +365,9 @@ pub struct StreamReply {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// Server-created binding for the paired platform-model bridge; never bearer authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_model_context: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automation_work: Option<super::trigger_run::AutomationWork>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

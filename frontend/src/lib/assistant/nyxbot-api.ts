@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { publicModelListSchema } from "@/schemas/platform-models";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import {
   guestReadinessSettingsSchema,
@@ -96,6 +97,13 @@ export const nyxBotApi = {
   /** Models NyxAgent offers; `available: false` rows cannot be selected. */
   async models() {
     return z.array(nyxAgentModelSchema).parse(await assistantJson(`${ROOT}/models`));
+  },
+  async platformModels(context?: { agentId?: string; conversationId?: string }, after?: string) {
+    const query = new URLSearchParams({ limit: "100" });
+    if (context?.conversationId) query.set("conversation_id", context.conversationId);
+    else if (context?.agentId) query.set("agent_id", context.agentId);
+    if (after) query.set("after", after);
+    return publicModelListSchema.parse(await assistantJson(`${ROOT}/platform-models?${query}`));
   },
   /** Select the model for one thread; its context restarts on the new model. */
   async changeModel(conversationId: string, model: string) {
