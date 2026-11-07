@@ -27,6 +27,7 @@ export const FEATURE_FLAG = {
   BILLING: "experimental:billing",
   CMA_SANDBOX_BILLING: "experimental:cma-sandbox-billing",
   CMA_SANDBOX_RATE_SYNC: "experimental:cma-sandbox-rate-sync",
+  INFERENCE_PLATFORM_MODELS: "inference:platform-models",
   SERVICE_MONITORING: "services:monitoring",
   REMOTE_MACHINES: "experimental:remote-machines",
   AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",

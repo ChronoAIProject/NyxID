@@ -155,3 +155,5 @@ pub mod billing_executions;
 pub(crate) mod billing_support;
 mod managed_billing;
 pub mod nyxbot;
+
+pub mod models;

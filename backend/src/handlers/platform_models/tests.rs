@@ -88,7 +88,8 @@ async fn admin_writes_operator_reads_and_private_projection() {
             "capabilities",
             "description",
             "display_name",
-            "id"
+            "id",
+            "retail_prices"
         ]
     );
     for field in [
@@ -457,5 +458,269 @@ async fn model_tariff_handlers_keep_writes_admin_only_and_reads_private() {
         .unwrap(),
         axum::http::StatusCode::NO_CONTENT
     );
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn retail_projection_matches_billing_and_never_exposes_private_tariff_data() {
+    use crate::{
+        models::{
+            billing_rate_cache::BillingRateCache, downstream_service::DownstreamService,
+            platform_model_tariff::ModelTariff,
+        },
+        services::billing::model_tariffs,
+    };
+    let (state, admin, _, _) = setup().await;
+    let Json(created) = create(
+        State(state.clone()),
+        admin,
+        Json(CreateRequest {
+            public_id: "nyxid/gpt-test".into(),
+            family: ModelFamily::Openai,
+            display_name: "GPT test".into(),
+            ..input()
+        }),
+    )
+    .await
+    .unwrap();
+    let mut model = registry::get(&state.db, &created.id).await.unwrap();
+    let (mut service, mut tariff, rates) = model_tariffs::tests::fixture();
+    model.billing_service_id = Some(service.id.clone());
+    let previous_components = tariff.components.clone();
+    tariff.model_id = model.id.clone();
+    model_tariffs::validate(&mut tariff, &service.slug).unwrap();
+    let rates: std::collections::HashMap<_, _> = tariff
+        .components
+        .iter()
+        .map(|component| {
+            let previous = previous_components
+                .iter()
+                .find(|p| p.key == component.key)
+                .unwrap();
+            let mut rate = rates[&previous.lago_metric_code].clone();
+            rate.id = BillingRateCache::cache_id(&component.lago_metric_code, None);
+            rate.lago_metric_code = component.lago_metric_code.clone();
+            (component.lago_metric_code.clone(), rate)
+        })
+        .collect();
+    service
+        .billing
+        .as_mut()
+        .unwrap()
+        .platform_key_pricing
+        .as_mut()
+        .unwrap()
+        .model_prices[0]
+        .model_id = model.id.clone();
+    // An unrequested model sharing the same billing service must not trigger a
+    // private tariff read, even if its row cannot be decoded by this replica.
+    service
+        .billing
+        .as_mut()
+        .unwrap()
+        .platform_key_pricing
+        .as_mut()
+        .unwrap()
+        .model_prices
+        .push(crate::models::platform_model_tariff::ModelPriceBinding {
+            model_id: Uuid::new_v4().to_string(),
+            allowance_metrics: vec![],
+            variant: Default::default(),
+            active_tariff_id: Some("unrequested-private-tariff".into()),
+            pending_tariff_id: None,
+        });
+    state
+        .db
+        .collection::<bson::Document>("platform_model_tariffs")
+        .insert_one(doc! {"_id":"unrequested-private-tariff","status":"unknown-future-version"})
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<DownstreamService>("downstream_services")
+        .insert_one(&service)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<ModelTariff>("platform_model_tariffs")
+        .insert_one(&tariff)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<BillingRateCache>("billing_rate_cache")
+        .insert_many(rates.values())
+        .await
+        .unwrap();
+    let mut results =
+        registry::retail_explanations(&state.db, std::slice::from_ref(&model), 900, true)
+            .await
+            .unwrap();
+    let actual: Vec<RetailPrice> = results
+        .remove(&model.id)
+        .unwrap()
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let expected: Vec<RetailPrice> = model_tariffs::explain(
+        &service,
+        std::slice::from_ref(&tariff),
+        &rates,
+        chrono::Utc::now(),
+        900,
+        true,
+    )
+    .into_iter()
+    .filter(|p| p.model_id == model.id)
+    .map(Into::into)
+    .collect();
+    let actual = serde_json::to_value(actual).unwrap();
+    assert_eq!(actual, serde_json::to_value(expected).unwrap());
+    assert_eq!(actual[0]["available"], true);
+    assert_eq!(
+        actual[0]["components"][0]["credits_per_unit"],
+        "0.000001000001"
+    );
+    let json = actual.to_string();
+    for (index, private_field) in [
+        &service.id,
+        &tariff.id,
+        &tariff.source,
+        &tariff.components[0].lago_metric_code,
+        "fixture_sha256",
+        "max_quantity",
+        "sync_error",
+        "service_id",
+        "model_id",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(
+            !json.contains(private_field),
+            "private field #{index} leaked into the public projection"
+        );
+    }
+    // Missing/stale economics never appear as free or fall back to 999 base credits.
+    state
+        .db
+        .collection::<BillingRateCache>("billing_rate_cache")
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    let mut result =
+        registry::retail_explanations(&state.db, std::slice::from_ref(&model), 900, true)
+            .await
+            .unwrap();
+    let price = RetailPrice::from(result.remove(&model.id).unwrap().remove(0));
+    assert!(!price.available);
+    assert!(price.components.is_empty());
+    state.db.drop().await.unwrap();
+}
+
+#[test]
+fn unavailable_retail_price_hides_components_even_when_billing_is_disabled() {
+    use crate::services::billing::model_tariffs;
+    let (service, tariff, rates) = model_tariffs::tests::fixture();
+    let price = RetailPrice::from(
+        model_tariffs::explain(&service, &[tariff], &rates, chrono::Utc::now(), 900, false)
+            .remove(0),
+    );
+    assert!(!price.available);
+    assert!(price.components.is_empty());
+}
+
+#[tokio::test]
+async fn public_retail_metadata_is_projected_only_after_live_entitlement_and_flag_checks() {
+    use crate::{
+        models::{downstream_service::DownstreamService, platform_model_tariff::ModelTariff},
+        services::billing::model_tariffs,
+    };
+    let (state, admin, _, person) = setup().await;
+    let Json(created) = create(
+        State(state.clone()),
+        admin,
+        Json(CreateRequest {
+            public_id: "nyxid/gpt-test".into(),
+            family: ModelFamily::Openai,
+            ..input()
+        }),
+    )
+    .await
+    .unwrap();
+    let mut model = registry::get(&state.db, &created.id).await.unwrap();
+    let (mut service, mut tariff, _) = model_tariffs::tests::fixture();
+    service.platform_key.as_mut().unwrap().enabled = true;
+    model.billing_service_id = Some(service.id.clone());
+    model.lifecycle = Lifecycle::Active;
+    model.enabled = true;
+    tariff.model_id = model.id.clone();
+    model_tariffs::validate(&mut tariff, &service.slug).unwrap();
+    service
+        .billing
+        .as_mut()
+        .unwrap()
+        .platform_key_pricing
+        .as_mut()
+        .unwrap()
+        .model_prices[0]
+        .model_id = model.id.clone();
+    state
+        .db
+        .collection::<DownstreamService>("downstream_services")
+        .insert_one(&service)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<ModelTariff>("platform_model_tariffs")
+        .insert_one(&tariff)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<PlatformModel>(COLLECTION_NAME)
+        .replace_one(doc! {"_id":&model.id}, &model)
+        .await
+        .unwrap();
+    let read = || {
+        public_list(
+            State(state.clone()),
+            person.clone(),
+            Query(ListQuery {
+                after: None,
+                limit: Some(50),
+            }),
+        )
+    };
+    // Test-only activation bypasses the future execution gate, as registry ACL tests do.
+    state.db.collection::<bson::Document>(crate::models::feature_flag_override::COLLECTION_NAME).insert_one(doc! {
+        "_id":Uuid::new_v4().to_string(),"org_user_id":bson::Bson::Null,"flag_key":registry::FLAG,"target_kind":"global","target_key":bson::Bson::Null,
+        "enabled":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),"updated_by":person.user_id.to_string()
+    }).await.unwrap();
+    assert!(read().await.unwrap().0.models.is_empty());
+    state
+        .db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&model.id},
+            doc! {"$set":{"entitlements.all_people":true}},
+        )
+        .await
+        .unwrap();
+    let result = read().await.unwrap().0;
+    assert_eq!(result.models.len(), 1);
+    assert_eq!(result.models[0].id, "nyxid/gpt-test");
+    assert_eq!(result.models[0].retail_prices.len(), 1);
+    assert!(!result.models[0].retail_prices[0].available);
+    assert!(result.models[0].retail_prices[0].components.is_empty());
+    state
+        .db
+        .collection::<bson::Document>(crate::models::feature_flag_override::COLLECTION_NAME)
+        .update_many(doc! {}, doc! {"$set":{"enabled":false}})
+        .await
+        .unwrap();
+    assert!(read().await.unwrap().0.models.is_empty());
     state.db.drop().await.unwrap();
 }

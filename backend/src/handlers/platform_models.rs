@@ -21,6 +21,7 @@ pub struct PublicModel {
     pub description: String,
     pub capabilities: Capabilities,
     pub availability: &'static str,
+    pub retail_prices: Vec<RetailPrice>,
 }
 impl From<&PlatformModel> for PublicModel {
     fn from(row: &PlatformModel) -> Self {
@@ -30,6 +31,43 @@ impl From<&PlatformModel> for PublicModel {
             description: row.description.clone(),
             capabilities: row.capabilities.clone(),
             availability: "unavailable",
+            retail_prices: vec![],
+        }
+    }
+}
+/// Explicit public economics, never the private tariff, billing binding or route.
+#[derive(Serialize)]
+pub struct RetailPrice {
+    pub variant: std::collections::BTreeMap<String, String>,
+    pub available: bool,
+    pub components: Vec<RetailComponent>,
+}
+#[derive(Serialize)]
+pub struct RetailComponent {
+    pub metric: crate::models::service_billing::BillingMetric,
+    pub selector: crate::models::platform_model_tariff::Selector,
+    pub credits_per_unit: String,
+    pub explicit_free: bool,
+}
+impl From<crate::services::billing::model_tariffs::Explanation> for RetailPrice {
+    fn from(price: crate::services::billing::model_tariffs::Explanation) -> Self {
+        Self {
+            variant: price.variant,
+            available: price.available,
+            components: if price.available {
+                price
+                    .components
+                    .into_iter()
+                    .map(|c| RetailComponent {
+                        metric: c.metric,
+                        selector: c.selector,
+                        credits_per_unit: c.credits_per_unit,
+                        explicit_free: c.explicit_free,
+                    })
+                    .collect()
+            } else {
+                vec![]
+            },
         }
     }
 }
@@ -349,8 +387,27 @@ pub async fn public_list(
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
     let next_after = more.then(|| rows.last().unwrap().public_id.clone());
+    let mut prices = registry::retail_explanations(
+        &state.db,
+        &rows,
+        state.config.billing_rate_cache_ttl_secs,
+        state.billing.billing_enabled(),
+    )
+    .await?;
     Ok(Json(PublicList {
-        models: rows.iter().map(PublicModel::from).collect(),
+        models: rows
+            .iter()
+            .map(|row| {
+                let mut model = PublicModel::from(row);
+                model.retail_prices = prices
+                    .remove(&row.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Into::into)
+                    .collect();
+                model
+            })
+            .collect(),
         next_after,
     }))
 }

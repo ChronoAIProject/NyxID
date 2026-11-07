@@ -5,9 +5,9 @@ This is the approved platform-model contract for
 public-name, credential and first-release scope decisions. It supersedes the
 design's earlier brand-neutral naming and keyless-first recommendations.
 
-**Current implementation: PRs 1–2, registry, authorization and model tariffs.**
+**Current implementation: PRs 1, 2 and 4 — registry, authorization, model tariffs, admin/customer surfaces and CLI.**
 It stores configuration, evaluates live entitlement metadata and publishes
-complete immutable model tariffs through the existing billing path. It does
+complete immutable model tariffs through the existing billing path. Web and CLI surfaces inspect and administer these contracts. It does
 **not** execute inference, mint Google tokens, decrypt route credentials or
 modify NyxAgent selection.
 No models, credentials, prices, connections or cloud resources are seeded.
@@ -160,9 +160,8 @@ alternate/internal credential consumer and writer. Use the existing immutable
 optional/defaulted serialization alone is not a security rollout guarantee.
 Old binaries must not rejoin after restricted credential records are enabled.
 
-Later PRs add complete model tariffs and exact usage classes, bounded admission
-and the four serving families, admin/user UI and CLI, and the paired NyxAgent
-contract. Prices never fall back silently to legacy lanes. No execution is
+Remaining PRs add bounded admission and the four serving families, and the
+paired NyxAgent contract. Prices never fall back silently to legacy lanes. No execution is
 unlocked by this PR's metadata API or a manually inserted flag. Ordinary services,
 pools and billing retain their existing paths with the flag off.
 
@@ -341,7 +340,7 @@ Existing products retain their current payer rules.
 | 1 (this foundation) | Registry, readers, public/private DTOs, CAS/lifecycle, typed routes, credential confinement, entitlements, default-off flag/readiness. No executable capability. |
 | 2 | Immutable complete tariffs, strict units/evidence, shared explain selector, Lago synchronization and compatible usage/rollup readers. No legacy-price fallback. |
 | 3 | All four first-release serving families, GCP token provider, bounded atomic admission, opaque transport, retries, stream/cancel and recovery. |
-| 4 | Admin model/route/access/rate tools; public discovery, CLI and billing/execution labels. |
+| 4 (implemented) | Admin model/route/access/rate tools; public discovery, CLI and public-model billing/usage labels. No inference execution. |
 | 5 | Paired NyxAgent/internal-consumer actor-bound integration, selection, revocation and single inference charging. Required for release. |
 | 6 | Additional certified protocols/families and stateful/media/tool/storage/BYOK lifecycles, one bounded contract at a time. |
 
@@ -505,3 +504,92 @@ Lago emission handle finalized vectors. Disabling the feature does not discard
 those obligations. PR 3 must provide bounded adapter recovery and diagnostics
 for provider-accepted work without recoverable final evidence; this PR does not
 activate a transport or claim that every provider supplies usage lookup.
+
+## Admin, customer and CLI surfaces (PR 4)
+
+Admin → **Platform Models** lists disabled drafts, active models and retired IDs
+in stable cursor pages. Administrators edit the public contract, private same-model
+routes, person/org/group access, and immutable tariffs; operators inspect them.
+The UI is read-only while `inference:platform-models` is off for the signed-in
+person. Backend administrative disable/revoke controls remain available during
+rollout. Feature access never bypasses entitlement or execution readiness.
+No page sends a provider probe or creates credentials.
+
+Public IDs and families cannot be edited. Contract/route/access writes include the
+model's `expected_revision`; tariff create/retire includes its current `revision`.
+A 409 preserves the form and requires explicit reload/discard; there is no blind
+retry. The enable switch remains unavailable while execution is not ready.
+Readiness is reported independently of lifecycle and rate sync. The PR 1/2 stack
+continues to report `execution_not_implemented` until the execution work lands.
+
+Access starts with default deny. Rules select people, organizations or groups,
+with a searchable target picker or UUID input. Every matching deny overrides
+allows, including All people. **Explain access for a person** performs the existing
+live entitlement evaluation and reports policy, feature and model readiness
+separately; it neither impersonates that person nor calls a model.
+
+Price revisions show exact decimal-string credits per base unit, explicit free
+components, TTL-qualified cache units, sync errors and active/pending readiness.
+A new revision takes an administrator-supplied certified usage contract, fixture
+digest and request bounds (advanced JSON fields), verification source, finite
+public price variant, and editable components. No certification is invented by
+the UI. **Publish / retry rate sync** calls the existing logical billing service
+resync endpoint. Reconciliation also publishes pending revisions when all rates
+are synced. Retirement is confirmed and revision-fenced. The history shows the
+latest 100 revisions; the effective billing view reports the selected revision.
+
+The customer **Platform Models** page is hidden with the flag off and makes no
+model request. When on, it uses only `GET /api/v1/llm/models`, including its existing
+`after`/`limit` pagination. The additive `retail_prices` field contains only public
+variant, availability, and components (`metric`, `selector`, `credits_per_unit`,
+`explicit_free`). Readers default absent prices to unavailable for old servers.
+Selection uses the billing admission/explain selector over batched authorized
+models and their platform-key tariffs. Missing/stale/disabled prices are unavailable,
+never free or a legacy-rate fallback. Public DTOs omit tariff IDs, verification
+sources, bounds, metric codes, private sync errors, billing-service bindings,
+upstreams, routes, projects and regions. Price availability does not imply that
+model execution is enabled. Price-variant labels are public metadata and must
+never encode route identity.
+
+Usage and execution records continue to use the public `nyxid/...` model string;
+existing model breakdown/labels render it without substituting private native
+model names. Administrative billing explanations link model tariff readiness to
+its registry editor. This PR adds no inference path, assistant model selection,
+new billing semantics or paid probe.
+
+### CLI
+
+`nyxid models list [--limit 50] [--after nyxid/last-model]` lists entitled public
+metadata and exact retail prices. `nyxid models show nyxid/model-name` follows
+public pages to find that exact entitled model; unknown and inaccessible models
+both report unavailable. Neither command accesses private administration routes,
+and both JSON/table output use an explicit public-field projection.
+
+Administrative commands require a human login and **model UUIDs**:
+
+```sh
+nyxid admin models list
+nyxid admin models show MODEL_UUID
+nyxid admin models create --file public-contract.json
+nyxid admin models update MODEL_UUID --revision 4 --file mutable-contract.json
+nyxid admin models retire MODEL_UUID --revision 5
+nyxid admin models routes show MODEL_UUID
+nyxid admin models routes set MODEL_UUID --revision 4 --file routes.json
+nyxid admin models access show MODEL_UUID
+nyxid admin models access set MODEL_UUID --revision 5 --file access.json
+nyxid admin models access explain MODEL_UUID --user PERSON_UUID
+nyxid admin models prices list MODEL_UUID
+nyxid admin models prices create MODEL_UUID --revision 6 --file tariff.json
+nyxid admin models prices verify MODEL_UUID
+nyxid admin models prices publish MODEL_UUID
+nyxid admin models prices resync MODEL_UUID
+nyxid admin models prices retire MODEL_UUID TARIFF_UUID --revision 7
+```
+
+Manifests mirror the API bodies above, excluding revision (passed only by the
+flag). Route files wrap `routes`; access files wrap `entitlements`; create/update
+use their complete contract body. Price components use quoted decimal strings,
+never floating-point numbers. `verify` is read-only and shows the same effective
+billing/readiness selection; `publish`/`resync` use the existing billing resync
+route. Writes never auto-retry a conflict or uncertain response. Future unknown
+billing units retain their labels and exact prices in CLI output.

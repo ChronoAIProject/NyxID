@@ -113,6 +113,8 @@ const TAB_SECTIONS: Readonly<Record<string, TabSection>> = {
 };
 
 const PAGE_LABELS: Record<string, string> = {
+  "/models": "Platform Models",
+  "/admin/platform-models": "Platform Models",
   "/dashboard": "Dashboard",
   "/billing": "Billing & Usage",
   "/keys": "Services & Credentials",
@@ -251,6 +253,10 @@ export function buildStudioBreadcrumbs(
     ]);
   }
   if (PAGE_LABELS[path]) return [{ label: PAGE_LABELS[path] }];
+
+  if (/^\/admin\/platform-models\/[^/]+$/.test(path)) {
+    return finish([page("/admin/platform-models"), named(path, "Model")]);
+  }
 
   const apiKey = path.match(/^\/keys\/api-key\/[^/]+$/);
   if (apiKey) {
