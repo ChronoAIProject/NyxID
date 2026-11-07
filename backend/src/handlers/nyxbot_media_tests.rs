@@ -2558,3 +2558,6 @@ async fn channel_media_follow_post_owner_guest_and_unaddressed_photo_preserve_fl
 
 #[path = "nyxbot_relay_media_v2_tests.rs"]
 mod relay_v2_tests;
+
+#[path = "nyxbot_guest_media_tests.rs"]
+mod guest_media_tests;

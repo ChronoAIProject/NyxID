@@ -345,6 +345,9 @@ pub struct EventMediaItem {
 /// Native media admission identity, selectors and interruption notice lifecycle.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct EventMedia {
+    /// Fixed at admission; a later identity change must not recast this media.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub guest: bool,
     /// Captured route identity; no credential material is retained here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority: Option<MediaAuthority>,

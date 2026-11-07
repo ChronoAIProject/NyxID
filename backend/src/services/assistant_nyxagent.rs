@@ -3448,7 +3448,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         &uploads.iter().map(|a| a.id.clone()).collect::<Vec<_>>(),
     ))
     .await?;
-    let mut media_event_ids = if start.guest || start.origin == TurnOrigin::Trigger {
+    let mut media_event_ids = if start.origin == TurnOrigin::Trigger {
         Vec::new()
     } else {
         start.media_event_ids.clone()
@@ -3461,6 +3461,27 @@ pub(crate) async fn begin_owner_turn_in_session(
                 }
             }
         }
+    }
+    if start.guest {
+        // The only guest input is the server-admitted source of this exact
+        // channel turn. Never adopt owner pending events or caller upload IDs.
+        let mut allowed = Vec::new();
+        if start.origin == TurnOrigin::Channel
+            && row
+                .channel
+                .as_ref()
+                .is_some_and(|o| o.org_execution.is_none())
+        {
+            for event in &media_event_ids {
+                if start.channel_event_id.as_ref() == Some(event)
+                    && db.collection::<bson::Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
+                        .find_one(doc! {"_id":event,"user_id":user_id,"conversation_id":&id,"turn_id":turn_id,
+                            "media.guest":true,"delivery.guest":true,"custom_binding_id":bson::Bson::Null})
+                        .session(&mut *session).await?.is_some()
+                { allowed.push(event.clone()); }
+            }
+        }
+        media_event_ids = allowed;
     }
     let mut media_declared = 0usize;
     for event in &media_event_ids {
@@ -4407,8 +4428,17 @@ artifact_recovery_target: None,
                 Box::pin(super::assistant_channel_media::finalize_in_session(&db,session,&row.user_id,&row.id,&turn_id,media_reason)).await?;
                 let continuations = current.active_turn.as_ref().map_or(0, |t| t.continuations);
                 super::trigger_run_images::accumulate_in_session(&db, session, &current).await?;
+                let channel_guest_media = current.guest_turn && current.collaboration.is_none()
+                    && current.channel.as_ref().is_some_and(|o| o.org_execution.is_none())
+                    && db.collection::<bson::Document>(MESSAGES)
+                        .find_one(doc! {"user_id":&row.user_id,"conversation_id":&row.id,"turn_id":&turn_id,
+                            "role":{"$ne":"assistant"},"media_event_ids.0":{"$exists":true}})
+                        .projection(doc! {"_id":1}).session(&mut *session).await?.is_some();
                 let settled_turn = current.active_turn.take();
-                if error.as_ref().is_some_and(|e| !e.preserves_session()) || !credential_alive {
+                // A disposable upstream session may retain fetched pixels or
+                // injected document text. Never carry it into another guest's
+                // turn; only the ordinary transcript survives settlement.
+                if channel_guest_media || error.as_ref().is_some_and(|e| !e.preserves_session()) || !credential_alive {
                     current.nyxagent_session_id = None;
                     current.nyxagent_instruction_binding = None;
                     current.nyxagent_last_response_id = None;
@@ -4417,6 +4447,7 @@ artifact_recovery_target: None,
                         match error.as_ref().map(|e| e.code) {
                             Some("cancelled") => "stopped",
                             Some(_) => "turn_failed",
+                            None if channel_guest_media => "guest_media_turn",
                             None => "credential_replaced",
                         }
                         .into(),

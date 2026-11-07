@@ -143,6 +143,25 @@ async fn provider(state: &AppState, row: &NyxbotChannel) -> MockServer {
             .mount(&server)
             .await;
     }
+    if row.platform == "telegram" {
+        for (id, bytes) in [("456", native_png()), ("457", vec![0xff, 0, 0xfe, 1])] {
+            Mock::given(method("GET"))
+                .and(path("/botapp:secret/getFile"))
+                .and(query_param("file_id", id))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(
+                        json!({"ok":true,"result":{"file_path":format!("media/{id}")}}),
+                    ),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/file/botapp:secret/media/{id}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+                .mount(&server)
+                .await;
+        }
+    }
     let adapter: Arc<dyn PlatformAdapter> = match row.platform.as_str() {
         "discord" => Arc::new(adapters::discord::DiscordAdapter::media_test_adapter(
             &server.uri(),
@@ -151,6 +170,9 @@ async fn provider(state: &AppState, row: &NyxbotChannel) -> MockServer {
             &server.uri(),
         )),
         "whatsapp" => Arc::new(WhatsAppFetch(server.uri())),
+        "telegram" => Arc::new(adapters::telegram::TelegramAdapter::media_test_adapter(
+            &server.uri(),
+        )),
         "x" => Arc::new(adapters::x::XAdapter {
             api_base: Some(server.uri()),
         }),
@@ -178,6 +200,8 @@ async fn saved_source(
             } else {
                 "333333333333333333"
             }
+        } else if row.platform == "telegram" {
+            "444"
         } else {
             sender
         }
@@ -185,6 +209,8 @@ async fn saved_source(
     );
     source.platform_conversation_id = Some(if row.platform == "discord" {
         "222222222222222222".into()
+    } else if row.platform == "telegram" {
+        "444".into()
     } else {
         format!("oc_{sender}")
     });
@@ -198,6 +224,9 @@ async fn saved_source(
             "download/"
         }
     );
+    if row.platform == "telegram" {
+        image.provider_ref = "456".into();
+    }
     image.image_key = None;
     image.file_key = Some("456".into());
     image.filename = None; // WhatsApp images commonly have no filename.
@@ -227,7 +256,7 @@ async fn callback(state: &AppState, row: &NyxbotChannel, source: &ChannelMessage
         "sender":{"platform_id":source.sender_platform_id},"content":{"type":"image","text":""},
         // Descriptors/URLs in the callback must never override stored selectors.
         "attachments":[{"url":"https://untrusted.invalid/not-the-source","download_url":"https://untrusted.invalid/image.png"}],
-        "raw_platform_data":{},"timestamp":"2026-11-06T00:00:00Z"
+        "raw_platform_data":if row.platform == "telegram" {json!({"message":{"message_id":1,"from":{"id":444,"is_bot":false},"chat":{"id":444,"type":"private"}}})} else {json!({})},"timestamp":"2026-11-06T00:00:00Z"
     });
     let bytes = serde_json::to_vec(&body).unwrap();
     let token = crate::crypto::jwt::generate_relay_callback_token(
@@ -702,4 +731,92 @@ async fn channel_media_v2_owner_group_topic_stays_out_of_home() {
             .contains("input_image")
     );
     server.abort();
+}
+
+#[tokio::test]
+async fn channel_guest_media_relay_adapters_and_gateway_relay_retain_only_current_guest_inputs() {
+    for name in ["discord", "slack", "whatsapp", "x", "telegram"] {
+        for transport in ["direct", "gateway"] {
+            let (state, mut row, key, calls, server) =
+                media_fixture(&format!("guest_v2_{name}_{transport}"), transport).await;
+            platform(&state, &mut row, name).await;
+            super::guest_media_tests::enable_guest(&state).await;
+            if transport == "gateway" {
+                gateway_ready(&state, &key).await;
+            }
+            let provider = provider(&state, &row).await;
+            let source = saved_source(&state, &row, &provider, "guest-media", "visitor").await;
+            deliver(&state, &row, &key, &source).await;
+            let event = state
+                .db
+                .collection::<NyxbotEvent>(EVENTS)
+                .find_one(doc! {"event_id":&source.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                event.media.as_ref().is_some_and(|m| m.guest),
+                "{name}/{transport}"
+            );
+            let conversation = event.conversation_id.as_ref().unwrap();
+            let messages = engine::messages(&state.db, OWNER, conversation, 100, None)
+                .await
+                .unwrap();
+            let input = messages
+                .iter()
+                .find(|m| !m.attachments.is_empty())
+                .unwrap_or_else(|| panic!("{name}/{transport}: {:?}", messages));
+            assert_eq!(
+                input.attachments.len(),
+                2,
+                "{name}/{transport}: {:?}",
+                input.media_bound
+            );
+            assert_eq!(input.attachments[0].content_type, "image/png");
+            assert_eq!(
+                uploads::owner_read(
+                    &state.db,
+                    &state.encryption_keys,
+                    OWNER,
+                    conversation,
+                    &input.attachments[0].id
+                )
+                .await
+                .unwrap()
+                .1,
+                native_png()
+            );
+            let captured = calls.lock().await.last().unwrap().to_string();
+            assert!(
+                captured.contains("input_image"),
+                "{name}/{transport}: {captured}"
+            );
+            assert!(captured.contains(crate::services::assistant_channel_media::guest::INPUT_NOTE));
+            assert!(!captured.contains(&provider.uri()));
+            let downloads = provider.received_requests().await.unwrap().len();
+            let count = calls.lock().await.len();
+            if transport == "direct" {
+                assert!(callback(&state, &row, &source).await.is_success());
+            } else {
+                let reply = respond(&state, &key, &provider_event(&row, &source), "retry").await;
+                assert_eq!(reply.status(), StatusCode::OK);
+                let _ = body_text(reply).await;
+            }
+            assert_eq!(calls.lock().await.len(), count);
+            assert_eq!(provider.received_requests().await.unwrap().len(), downloads);
+            engine::delete(&state.db, OWNER, conversation)
+                .await
+                .unwrap();
+            assert_eq!(
+                state
+                    .db
+                    .collection::<bson::Document>(crate::models::assistant_upload::COLLECTION_NAME)
+                    .count_documents(doc! {"conversation_id":conversation})
+                    .await
+                    .unwrap(),
+                0
+            );
+            server.abort();
+        }
+    }
 }

@@ -1447,7 +1447,12 @@ the cancelled run. Guests receive the fixed note `attachments from guests are
 not shared with the assistant` and cause no download or upload. Media-bearing
 messages never answer approval/text decisions or coalesce by question digest.
 See [Inbound channel media](10-uploads.md#inbound-channel-media) for item/byte/time
-limits, dedup horizons, queued expiry and the admin drain/rollback procedure.
+limits, dedup horizons, queued expiry and the admin drain/rollback procedure. The default-off
+`assistant:channel-guest-media` exception admits personal-agent guests' own
+current-message media into their channel private/shared thread, never the owner
+home. Human-owner retention reads and exact-current-turn untrusted model input
+are described in [uploads](10-uploads.md#personal-channel-guest-media); org
+specialist guests remain attachment-free.
 
 ## Drafting agent skills
 

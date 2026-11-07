@@ -83,6 +83,8 @@ function RasterAttachment({ image }: { readonly image: ChatImage }) {
         <p role="status" className="max-w-sm text-13 text-muted-foreground">
           {image.imageInputReason === "model_text_only" || image.imageInputReason === "image_input_unsupported"
             ? "This model can’t view images. Choose an image-capable model or describe the image in text."
+            : image.imageInputReason === "guest_media_unavailable"
+              ? "This guest image was saved in this chat but was unavailable to the model in that turn."
             : image.origin === "tool" ? "The agent couldn't view this image." : <>
             Image received. This agent version cannot view it, or it exceeds its
             image limits. Ask your agent to save it to a machine, or try a smaller image.

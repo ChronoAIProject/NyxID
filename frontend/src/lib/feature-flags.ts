@@ -52,6 +52,7 @@ export const FEATURE_FLAG = {
   GENERATED_ARTIFACTS: "assistant:generated-artifacts",
   GUEST_OPERATION_SCOPES: "assistant:guest-operation-scopes",
   CHANNEL_MEDIA: "assistant:channel-media",
+  CHANNEL_GUEST_MEDIA: "assistant:channel-guest-media",
   ATTACHMENT_WRITES: "assistant:attachment-writes",
   AGENT_LEARNING: "assistant:agent-learning",
   SKILL_PIN_DISABLE: "assistant:skill-pin-disable",

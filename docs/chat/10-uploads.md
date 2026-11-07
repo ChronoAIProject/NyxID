@@ -76,10 +76,53 @@ NyxID's relay adapters, gated by the all-replica `assistant:channel-media-v2`
 readiness capability. This includes relay-through-CMA events when CMA admits
 and delivers the `nyxid_relay` activity; it does not add a CMA raw-event verifier.
 Native CMA Discord/WhatsApp downloads remain on hold for CMA#1402. Lark/Feishu
-audio/video and Aurinko keep their existing behavior. Platform/channel guests never download media or
+audio/video and Aurinko keep their existing behavior. By default, platform/channel guests never download media or
 create uploads; their admitted turn receives the fixed note
-`attachments from guests are not shared with the assistant`. Media-bearing messages cannot answer
+`attachments from guests are not shared with the assistant`. The opt-in guest scope below is the only exception. Media-bearing messages cannot answer
 approval cards or text decisions and do not enter duplicate-question coalescing.
+
+### Personal channel guest media
+
+The default-off `assistant:channel-guest-media` flag is evaluated for the linking
+person alongside `assistant:channel-media`. Enable it only after the fleet reports
+both `assistant:channel-media-v2` and `assistant:channel-guest-media` ready, with
+old workers drained. Stage A replicas do not advertise the guest capability.
+This admits personal-agent guest media from authenticated relay selectors on
+Lark/Feishu, Discord, Slack, WhatsApp, X and Telegram, including relay-through-CMA.
+Native Discord/WhatsApp retrieval remains deferred to CMA#1402. Org-specialist
+guest media and org public transcript attachments are not enabled by this flag.
+
+Guest files bind after admission to the guest's private channel conversation or
+the existing shared group/topic conversation. They never bind to the owner's
+home. The human owner can view them through the ordinary authorized upload GETs,
+with exactly the existing image/document retention, settlement and erasure rules.
+No platform guest gains a human download/history API.
+
+An optional server-authored `source.guest` on each upload pins version, channel,
+source event and sender; `source.turn_id`, the bound message and immutable receipt
+pin the consuming turn and exact attachment allowlist. Model image GETs use a
+separate live guest validator before and after decryption: current key/turn,
+flags/readiness, source route/identity, audience/follow rules, and retention must
+still agree. Earlier owner or guest images in the same shared thread are denied.
+Ordinary attachment read/list/egress tools remain unavailable to guests, and
+retained guest bytes cannot be read by a subsequent owner model turn either.
+
+Images use the existing capability and selected-model modality gate. Current
+message documents supply at most 16,000 extracted characters across ten files,
+quoted as untrusted guest data; unsupported originals remain downloadable by the
+human owner with an explicit model limitation. Files, image text and names never
+confer identity, instructions, approval, tools or owner memory. Inputs are
+rechecked before model requests and continuations. Settlement clears the disposable
+upstream session so another guest cannot inherit previously fetched image/document
+context; the ordinary transcript remains. Failed or revoked inputs get
+an explicit unavailable notice, never an implicit claim that they were read.
+
+The existing cold-model setup wait retains only media event IDs and revalidates
+on resume. Busy guest messages still receive the existing busy/retry response;
+they do not enter the owner pending-event queue. Turning the guest flag off stops
+new guest downloads and model reads, including waiting work. Already retained
+human-owner reads continue until normal expiry. Drain admitted work before a
+binary rollback; do not run old replicas against enabled guest-media traffic.
 
 Admission records source selectors, not bytes. Gateway source IDs are accepted
 only from `nyxid_relay` activities on these supported relay platforms and must match NyxID's own inbound

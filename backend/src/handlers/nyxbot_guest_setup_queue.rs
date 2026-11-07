@@ -6,6 +6,8 @@ use crate::services::assistant_guest_model_setup as setup;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct WaitingGuest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    media_event_ids: Vec<String>,
     #[serde(default)]
     channel_context: Option<crate::models::assistant_conversation::ChannelTurnContext>,
     conversation: String,
@@ -94,6 +96,7 @@ pub(super) async fn wait(
         .or(start.new_id.as_deref())
         .ok_or(AppError::AssistantTurnRequired)?;
     let payload = WaitingGuest {
+        media_event_ids: start.media_event_ids.clone(),
         channel_context: start.channel_context.clone(),
         conversation: conversation.into(),
         agent: agent_id.into(),
@@ -342,6 +345,7 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
     });
     start.new_id = (!exists).then_some(payload.conversation);
     start.guest = true;
+    start.media_event_ids = payload.media_event_ids;
     start.org_access = org_access;
     start.origin = TurnOrigin::Channel;
     start.channel = Some(payload.origin);

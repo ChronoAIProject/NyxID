@@ -214,3 +214,13 @@ fleet capabilities are implemented and ready. Reads and disabling remain usable.
 Upgrade and drain every credential consumer before enabling model-only catalog
 records: old replicas ignore their additive purpose field. The restriction remains
 enforced when the flag is off. See [the registry contract](PLATFORM_MODELS.md).
+
+### Channel guest media
+
+`assistant:channel-guest-media` is a separate default-off flag and replica
+capability. Its readers also require `assistant:channel-media-v2`: Stage A alone
+is insufficient to enforce the exact-current-turn guest boundary. Deploy all API
+and async workers, drain older workers, inspect both readiness reports, then
+opt in a linking person before broader rollout. Flag-off denies new guest
+fetch/model reads, including model-setup waits, without deleting retained
+human-owner uploads. Retention and erasure continue normally.
