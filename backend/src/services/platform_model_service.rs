@@ -901,5 +901,81 @@ pub async fn resolve_route_metadata(
     Ok(AuthorizedRouteMetadata { model, routing })
 }
 
+/// Batch only already-authorized models. Uses the admission/explain price selector;
+/// callers must project these private explanations into their public DTO.
+pub async fn retail_explanations(
+    db: &Database,
+    models: &[PlatformModel],
+    ttl: u64,
+    billing_enabled: bool,
+) -> AppResult<HashMap<String, Vec<super::billing::model_tariffs::Explanation>>> {
+    use super::billing::model_tariffs;
+    use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as RATES};
+    let ids: Vec<&str> = models
+        .iter()
+        .filter_map(|m| m.billing_service_id.as_deref())
+        .collect();
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut services: Vec<DownstreamService> = db
+        .collection(crate::models::downstream_service::COLLECTION_NAME)
+        .find(doc! {"_id":{"$in":ids}})
+        .await?
+        .try_collect()
+        .await?;
+    // A billing service can host more models than this authorized page. Do not
+    // load their private tariffs/rates (or let a malformed unrelated row break discovery).
+    let model_ids: HashSet<&str> = models.iter().map(|m| m.id.as_str()).collect();
+    for service in &mut services {
+        if let Some(billing) = service.billing.as_mut() {
+            if let Some(lane) = billing.platform_key_pricing.as_mut() {
+                lane.model_prices
+                    .retain(|binding| model_ids.contains(binding.model_id.as_str()));
+            }
+            if let Some(lane) = billing.byok_pricing.as_mut() {
+                lane.model_prices.clear();
+            }
+        }
+    }
+    let tariffs = model_tariffs::load_for(db, &services).await?;
+    let rate_ids: Vec<String> = tariffs
+        .iter()
+        .flat_map(|t| &t.components)
+        .map(|c| BillingRateCache::cache_id(&c.lago_metric_code, None))
+        .collect();
+    let rates = if rate_ids.is_empty() {
+        HashMap::new()
+    } else {
+        db.collection::<BillingRateCache>(RATES)
+            .find(doc! {"_id":{"$in":rate_ids}})
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .map(|rate| (rate.lago_metric_code.clone(), rate))
+            .collect()
+    };
+    let now = Utc::now();
+    Ok(models
+        .iter()
+        .filter_map(|model| {
+            let service = services
+                .iter()
+                .find(|s| Some(&s.id) == model.billing_service_id.as_ref())?;
+            let prices =
+                model_tariffs::explain(service, &tariffs, &rates, now, ttl, billing_enabled)
+                    .into_iter()
+                    .filter(|p| {
+                        p.model_id == model.id
+                            && p.lane
+                                == crate::models::platform_model_tariff::TariffLane::PlatformKey
+                    })
+                    .collect();
+            Some((model.id.clone(), prices))
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests;

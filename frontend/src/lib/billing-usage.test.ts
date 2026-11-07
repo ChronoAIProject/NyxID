@@ -74,3 +74,8 @@ it("shows strict model token units in the token usage and allowance group", () =
     expect(metricFamily(metric)).toBe("Tokens");
   }
 });
+
+it("labels platform-model usage with the exact public model ID", () => {
+  const rows = ["nyxid/gemini-3-pro", "nyxid/claude-opus-5-5"].map((model) => billingUsageRowSchema.parse(billingRow({ model, service_slug: "logical-model-offering" })));
+  expect(groupRows([], rows, "model").map((g) => g.name).sort()).toEqual(["nyxid/claude-opus-5-5", "nyxid/gemini-3-pro"]);
+});

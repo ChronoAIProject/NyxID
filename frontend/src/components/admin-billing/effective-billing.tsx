@@ -1,3 +1,6 @@
+import { titleCase } from "@/schemas/platform-models";
+import { Link } from "@tanstack/react-router";
+import { PriceRows } from "@/components/platform-models/shared";
 import { Badge } from "@/components/ui/badge";
 import { useAdminBillingService } from "@/hooks/use-admin-billing";
 import { metricLabel } from "@/schemas/billing-metrics";
@@ -182,6 +185,11 @@ export function EffectiveBilling({
           group={group}
         />
       ))}
+      {service.effective.model_prices?.map((price, i) => <section key={i} className="rounded-lg border border-border/40 p-3 space-y-2">
+        <Link to="/admin/platform-models/$modelId" params={{ modelId: price.model_id }} className="type-row-title text-primary">Model tariff · {titleCase(price.lane)}</Link>
+        <p className="type-secondary">{price.available ? "Prices ready" : `Unavailable: ${titleCase(price.blocking_reason ?? "unknown")}`}</p>
+        {price.available && <PriceRows components={price.components} />}
+      </section>)}
       {resale.configured && (
         <p className="flex items-center gap-1.5 text-13 text-muted-foreground">
           Resale{" "}
