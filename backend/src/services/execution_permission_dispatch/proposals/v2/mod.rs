@@ -305,6 +305,7 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         .into_iter()
         .map(|(id, label, validity)| {
             Ok(Choice {
+                conversation_scope: None,
                 id: id.into(),
                 label: label.into(),
                 digest: fingerprint(&json!({"scope":contract,"choice":validity}))?,
@@ -365,6 +366,7 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
     };
     let request = ApprovalRequest {
         execution_proposal: Some(ExecutionProposal {
+            v3: None,
             version: 2,
             v1: None,
             v2: Some(p),

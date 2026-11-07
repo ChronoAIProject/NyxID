@@ -18,6 +18,7 @@ use tower::ServiceExt;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any as any_request};
 
 pub(super) struct Fixture {
+    heartbeat: Option<tokio::task::JoinHandle<()>>,
     pub(super) state: crate::AppState,
     pub(super) owner: String,
     pub(super) key: String,
@@ -29,7 +30,8 @@ pub(super) struct Fixture {
 impl Fixture {
     async fn new(name: &str) -> Self {
         let db = test_utils::connect_transaction_test_database(name).await;
-        super::super::security_readiness_service::ready_test_replica(&db).await;
+        let heartbeat =
+            super::super::security_readiness_service::controlled_ready_test_replica(&db).await;
         let owner = Uuid::new_v4().to_string();
         db.collection("users")
             .insert_one(test_utils::test_user(&owner, UserType::Person))
@@ -110,6 +112,7 @@ impl Fixture {
             .unwrap();
         let state = test_utils::test_app_state(db);
         Self {
+            heartbeat: Some(heartbeat),
             state,
             owner,
             key: created.id,
@@ -323,6 +326,10 @@ impl Fixture {
         .expect("covering permission")
     }
     pub(super) async fn cleanup(self) {
+        if let Some(heartbeat) = self.heartbeat {
+            heartbeat.abort();
+            let _ = heartbeat.await;
+        }
         self.state.db.drop().await.unwrap();
     }
 }

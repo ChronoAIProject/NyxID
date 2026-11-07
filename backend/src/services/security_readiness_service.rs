@@ -57,6 +57,7 @@ pub const CAPABILITIES: &[&str] = &[
     super::execution_permission_enrollment::READINESS,
     "permissions:execution-authoring-v2",
     super::execution_permission_dispatch::machine::READINESS,
+    super::execution_permission_dispatch::proposals::v3::READINESS,
     super::feature_flag_service::HOSTED_CONNECT_INTENT_FLAG_KEY,
     "approval:required-web-v1",
     // Older transport writers do not wait for relay sockets before remote setup.
@@ -359,16 +360,24 @@ pub async fn require_platform(db: &Database, local_required: bool) -> AppResult<
 
 #[cfg(test)]
 pub(crate) async fn ready_test_replica(db: &Database) {
-    ready_test_replica_inner(db, false).await;
+    drop(ready_test_replica_inner(db, false).await);
 }
 
 #[cfg(test)]
 pub(crate) async fn ready_automation_test_replica(db: &Database) {
-    ready_test_replica_inner(db, true).await;
+    drop(ready_test_replica_inner(db, true).await);
 }
 
 #[cfg(test)]
-async fn ready_test_replica_inner(db: &Database, automation_enabled: bool) {
+pub(crate) async fn controlled_ready_test_replica(db: &Database) -> tokio::task::JoinHandle<()> {
+    ready_test_replica_inner(db, false).await
+}
+
+#[cfg(test)]
+async fn ready_test_replica_inner(
+    db: &Database,
+    automation_enabled: bool,
+) -> tokio::task::JoinHandle<()> {
     let local = Runtime {
         identity: ReplicaIdentity {
             instance_name: "test-backend".into(),
@@ -422,7 +431,7 @@ async fn ready_test_replica_inner(db: &Database, automation_enabled: bool) {
             .await
             .expect("test replica heartbeat");
         }
-    });
+    })
 }
 
 #[cfg(test)]

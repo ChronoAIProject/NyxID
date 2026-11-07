@@ -12,8 +12,10 @@ use zeroize::Zeroizing;
 mod lifecycle;
 mod resume;
 pub(crate) mod v2;
+pub(crate) mod v3;
 pub(crate) use lifecycle::{cancel_in_session, sweep};
 pub(crate) use resume::{Resume, result_for_human, resume_turn};
+use v3::{AssistantVersion, assistant_selector};
 pub(crate) const READINESS: &str = "permissions:execution-authoring-v1";
 pub(crate) const MAX_PAYLOAD: usize = 256 * 1024;
 
@@ -362,10 +364,11 @@ pub(super) async fn create(
             ),
         ]);
     }
-    let choices = choices
+    let mut choices = choices
         .into_iter()
         .map(|(id, label, validity)| {
             Ok(Choice {
+                conversation_scope: None,
                 id: id.into(),
                 label: label.into(),
                 digest: fingerprint(&json!({"scope":contract,"choice":validity}))?,
@@ -373,6 +376,10 @@ pub(super) async fn create(
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
+    let version = v3::choose_version(db, &contract, reusable).await?;
+    if version == AssistantVersion::V3 {
+        choices.push(v3::choice(&contract)?);
+    }
     let p = Proposal {
         revision: 1,
         gap_key: gap_key.clone(),
@@ -424,11 +431,7 @@ pub(super) async fn create(
     )
     .await?;
     let request = ApprovalRequest {
-        execution_proposal: Some(ExecutionProposal {
-            v2: None,
-            version: VERSION,
-            v1: Some(p),
-        }),
+        execution_proposal: Some(version.envelope(p)),
         assistant_group: group_binding,
         id,
         user_id: chat.user_id.clone(),
@@ -468,17 +471,18 @@ pub(super) async fn create(
         let result:AppResult<ApprovalRequest>=async {
             require_enrolled(db,&chat.user_id,Some(session)).await?;
             let p=proposal(request)?;
+            AssistantVersion::of(request)?.require(db).await?;
             tasks::fence(db,session,&p.task).await?;
             let (row,_,_)=Box::pin(acks::fence(db,chat,session)).await?;
             super::super::assistant_access_policy::require_same_live_turn(chat,&row)?;
             snapshot.fence(db,session).await?;
             fence_endpoint(db,session,p).await?;
             let collection=db.collection::<ApprovalRequest>(REQUESTS);
-            if let Some(existing)=collection.find_one(doc!{"execution_proposal.v1.gap_key":&p.gap_key}).sort(doc!{"created_at":-1}).session(&mut *session).await? {
+            if let Some(existing)=collection.find_one(assistant_selector(doc!{"execution_proposal.v1.gap_key":&p.gap_key})).sort(doc!{"created_at":-1}).session(&mut *session).await? {
                 // Denial is task-bound. A pending or dispatched effect is never queued twice.
                 return Ok(existing);
             }
-            if collection.count_documents(doc!{"user_id":&chat.user_id,"execution_proposal.v1.task.task":bson::to_bson(&p.task.task).map_err(encoding)?}).session(&mut *session).await?>=32 {return Err(AppError::Forbidden("Too many permission requests for this task".into()));}
+            if collection.count_documents(assistant_selector(doc!{"user_id":&chat.user_id,"execution_proposal.v1.task.task":bson::to_bson(&p.task.task).map_err(encoding)?})).session(&mut *session).await?>=32 {return Err(AppError::Forbidden("Too many permission requests for this task".into()));}
             collection.insert_one(*request).session(&mut *session).await?;
             audit(db,session,&chat.user_id,"execution_permission_requested",&request.id).await?;
             Ok((*request).clone())
@@ -488,10 +492,13 @@ pub(super) async fn create(
 }
 
 pub(crate) fn proposal(row: &ApprovalRequest) -> AppResult<&Proposal> {
+    let version = AssistantVersion::of(row)?;
     row.execution_proposal
         .as_ref()
-        .filter(|p| p.version == VERSION)
-        .and_then(|p| p.v1.as_ref())
+        .and_then(|p| match version {
+            AssistantVersion::V1 => p.v1.as_ref(),
+            AssistantVersion::V3 => p.v3.as_ref(),
+        })
         .ok_or_else(conflict)
 }
 async fn audit(
@@ -551,7 +558,7 @@ pub(crate) async fn decide(
     let row = state
         .db
         .collection::<ApprovalRequest>(REQUESTS)
-        .find_one(doc! {"_id":id,"user_id":actor,"execution_proposal.version":{"$in":[1,2]}})
+        .find_one(doc! {"_id":id,"user_id":actor,"execution_proposal.version":{"$in":[1,2,3]}})
         .await?
         .ok_or_else(missing)?;
     if row
@@ -562,12 +569,14 @@ pub(crate) async fn decide(
         return v2::decide(state, actor, id, input).await;
     }
     let p = proposal(&row)?;
+    let version = AssistantVersion::of(&row)?;
+    version.require(&state.db).await?;
     if row.status != "pending" {
         return replay(&row, input);
     }
     if let Err(error) = tasks::check(&state.db, &p.task).await {
         if error.is_forbidden() {
-            expire_pending(&state.db, actor, id, "task_unavailable").await?;
+            expire_pending(&state.db, version, actor, id, "task_unavailable").await?;
         }
         return Err(error);
     }
@@ -582,13 +591,13 @@ pub(crate) async fn decide(
         Ok(snapshot) => snapshot,
         Err(error) => {
             if error.is_forbidden() {
-                expire_pending(&state.db, actor, id, "authority_unavailable").await?;
+                expire_pending(&state.db, version, actor, id, "authority_unavailable").await?;
             }
             return Err(error);
         }
     };
     if snapshot.digest() != p.authority_digest {
-        expire_pending(&state.db, actor, id, "authority_changed").await?;
+        expire_pending(&state.db, version, actor, id, "authority_changed").await?;
         return Err(conflict());
     }
     let grant_id = Uuid::new_v4().to_string();
@@ -599,6 +608,8 @@ pub(crate) async fn decide(
             let collection=db.collection::<ApprovalRequest>(REQUESTS);
             let mut row=collection.find_one(doc!{"_id":*id,"user_id":*actor}).session(&mut *session).await?.ok_or_else(missing)?;
             let p=proposal(&row)?.clone();
+            let version=AssistantVersion::of(&row)?;
+            version.require(db).await?;
             if row.status!="pending" {
                 return replay(&row,input);
             }
@@ -620,13 +631,13 @@ pub(crate) async fn decide(
             let mut updated=p.clone();
             if input.approved {
                 let choice=p.choices.iter().find(|c|Some(&c.id)==input.choice_id.as_ref()&&Some(&c.digest)==input.choice_digest.as_ref()).ok_or_else(conflict)?;
-                let mut contract=p.contract.clone();contract.validity=choice.validity.clone();
+                let contract=v3::selected_contract(version,&p,choice)?;
                 let grant=ApprovalGrant{execution_use:None,execution_review:Some(p.review.clone()),execution_last_used_at:None,execution:Some(ExecutionPermission{version:VERSION,v1:Some(contract.clone())}),id:(*grant_id).clone(),user_id:actor.to_string(),service_id:row.service_id.clone(),service_name:row.service_name.clone(),requester_type:row.requester_type.clone(),requester_id:row.requester_id.clone(),requester_label:row.requester_label.clone(),approval_request_id:row.id.clone(),scope:Some(LEGACY_SCOPE.into()),granted_at:now,expires_at:contract::legacy_expiry(&contract.validity),revoked:false,org_scoped:false};
                 db.collection::<ApprovalGrant>("approval_grants").insert_one(grant).session(&mut *session).await?;
                 updated.grant_id=Some((*grant_id).clone());updated.selected_choice=input.choice_id.clone();updated.selected_choice_digest=input.choice_digest.clone();updated.state="queued".into();updated.wake_at=Some(now);
             }else{updated.state="denied".into();updated.payload=None;}
-            row.status=if input.approved{"approved"}else{"rejected"}.into();row.decided_at=Some(now);row.decision_channel=Some("web".into());row.decision_idempotency_key=Some(input.idempotency_key.clone());row.execution_proposal=Some(ExecutionProposal { v2: None, version:VERSION,v1:Some(updated)});
-            if collection.replace_one(doc!{"_id":&row.id,"status":"pending","execution_proposal.v1.revision":p.revision},&row).session(&mut *session).await?.matched_count!=1{return Err(conflict());}
+            row.status=if input.approved{"approved"}else{"rejected"}.into();row.decided_at=Some(now);row.decision_channel=Some("web".into());row.decision_idempotency_key=Some(input.idempotency_key.clone());row.execution_proposal=Some(version.envelope(updated));
+            if collection.replace_one(version.selector(doc!{"_id":&row.id,"status":"pending","execution_proposal.v1.revision":p.revision}),&row).session(&mut *session).await?.matched_count!=1{return Err(conflict());}
             let mut event=super::super::assistant_team_service::event("permission_decided",if input.approved{"An execution permission was saved. NyxID will execute the retained operation and report its result; do not reconstruct or repeat it."}else{"The person denied the execution permission. Nothing was sent; do not repeat this request."}.into(),None).bound_to(p.report_to.as_deref()).for_invocation(p.invocation_id.as_deref());
             event.execution_task=Some(p.task.clone());event.id=format!("execution-decision:{}",row.id);
             let entry=bson::to_bson(&event).map_err(encoding)?;
@@ -662,6 +673,8 @@ pub struct ChoiceView {
     pub digest: String,
     pub label: String,
     pub valid_until: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_scope: Option<&'static str>,
 }
 pub(crate) fn view(row: &ApprovalRequest) -> Option<ProposalView> {
     let envelope = row.execution_proposal.as_ref()?;
@@ -699,6 +712,13 @@ pub(crate) fn view(row: &ApprovalRequest) -> Option<ProposalView> {
             p.choices
                 .iter()
                 .map(|c| ChoiceView {
+                    context_scope: (envelope.version == 3).then_some(
+                        if c.conversation_scope == Some(ConversationScope::SameAudience) {
+                            "private_conversations"
+                        } else {
+                            "current_conversation"
+                        },
+                    ),
                     id: c.id.clone(),
                     digest: c.digest.clone(),
                     label: c.label.clone(),
@@ -851,7 +871,7 @@ pub(super) async fn existing_effect(
     frontend_url: &str,
 ) -> AppResult<()> {
     let task = chat.execution_task.as_ref().ok_or_else(refused)?;
-    if let Some(row)=db.collection::<ApprovalRequest>(REQUESTS).find_one(doc!{
+    if let Some(row)=db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(doc!{
         "user_id":&chat.user_id,"execution_proposal.v1.key_id":&chat.api_key_id,
         "execution_proposal.v1.conversation_id":&chat.conversation_id,"execution_proposal.v1.task.task":bson::to_bson(&task.task).map_err(encoding)?,
         "execution_proposal.v1.task.epoch":task.epoch,"execution_proposal.v1.contract.binding.connection_id":connection,
@@ -860,7 +880,7 @@ pub(super) async fn existing_effect(
             {"execution_proposal.v1.delivered_turn_id":null},
             {"execution_proposal.v1.source_turn_id":&chat.turn_id},
             {"execution_proposal.v1.resume_turn_id":&chat.turn_id}]
-    }).await? {
+    })).await? {
         return Err(if row.status=="pending"&&row.expires_at>Utc::now(){AppError::ApprovalRequired{request_id:row.id}}else{
             AppError::ApprovalFailed{request_id:row.id,reason:"This task already has a decision for this operation. Its retained effect will not be repeated; review its status.".into(),approve_url:approve_url(frontend_url)}
         });
@@ -1012,8 +1032,14 @@ fn existing_permissions(grants: &[ApprovalGrant], gaps: &[contract::Gap]) -> Str
     format!("{} Missing coverage: {reasons}. Saved permissions are not enlarged; this decision adds the exact displayed scope.",if grants.is_empty(){"No saved execution permission for this agent and account.".into()}else{format!("Saved permissions ({} total): {scopes}.",grants.len())}).chars().take(4096).collect()
 }
 
-async fn expire_pending(db: &Database, actor: &str, id: &str, reason: &str) -> AppResult<()> {
-    db.collection::<Document>(REQUESTS).update_one(doc!{"_id":id,"user_id":actor,"status":"pending","execution_proposal.version":VERSION as i32,"execution_proposal.v1.state":"pending"},doc!{"$set":{"status":"expired","execution_proposal.v1.state":"expired","execution_proposal.v1.failure_code":reason},"$unset":{"execution_proposal.v1.payload":""}}).await?;
+async fn expire_pending(
+    db: &Database,
+    version: AssistantVersion,
+    actor: &str,
+    id: &str,
+    reason: &str,
+) -> AppResult<()> {
+    db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":id,"user_id":actor,"status":"pending","execution_proposal.v1.state":"pending"}),version.update(doc!{"$set":{"status":"expired","execution_proposal.v1.state":"expired","execution_proposal.v1.failure_code":reason},"$unset":{"execution_proposal.v1.payload":""}})).await?;
     Ok(())
 }
 

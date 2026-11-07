@@ -33,6 +33,7 @@ pub(crate) fn view(row: &ApprovalRequest) -> ProposalView {
             p.choices
                 .iter()
                 .map(|c| ChoiceView {
+                    context_scope: None,
                     id: c.id.clone(),
                     digest: c.digest.clone(),
                     label: c.label.clone(),
