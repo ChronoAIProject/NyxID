@@ -336,7 +336,27 @@ async fn execute_with_runtime(
     let person = auth.user_id.to_string();
     let public_id = value["model"].as_str().ok_or_else(registry::unavailable)?;
     registry::authorized_model(&state.db, &person, public_id).await?;
-    let request = execution::Request::parse(&method, &path, value)?;
+    if body.len() > state.config.llm_max_body_size || body.len() > execution::images::MAX_REQUEST {
+        return Err(AppError::RequestBodyTooLarge {
+            max_bytes: state
+                .config
+                .llm_max_body_size
+                .min(execution::images::MAX_REQUEST),
+            context: "Platform model gateway".into(),
+        });
+    }
+    // Check before any decoder reservation/base64 work. Plan and dispatch
+    // retain their checks to fence readiness changes after this entrance.
+    if execution::images::contains_images(&value) {
+        crate::services::security_readiness_service::require(
+            &state.db,
+            execution::images::READINESS,
+        )
+        .await?;
+    }
+    let request = execution::Request::parse_async(method.clone(), path.clone(), value, &person)
+        .await?
+        .with_ingress_limit(state.config.llm_max_body_size);
     let path = format!(
         "/v1/{}",
         path.trim_start_matches('/')
@@ -363,6 +383,14 @@ async fn execute_with_runtime(
         &request,
     )
     .await?;
+    if request.has_images()
+        && access.body.len() as i64 > plan.tariff.tariff().bounds.max_request_bytes
+    {
+        return Err(AppError::RequestBodyTooLarge {
+            max_bytes: plan.tariff.tariff().bounds.max_request_bytes as usize,
+            context: "Platform model request".into(),
+        });
+    }
     execution::Authority::check(&access, &plan).await?;
     // Reuse ordinary approval policy and its bounded notification/wait path.
     super::llm_gateway::check_llm_approval(
@@ -456,6 +484,12 @@ mod tests {
     };
 
     async fn enabled() -> (AppState, execution::Plan, execution::Request, AuthUser) {
+        enabled_with_readiness(true).await
+    }
+
+    async fn enabled_with_readiness(
+        ready: bool,
+    ) -> (AppState, execution::Plan, execution::Request, AuthUser) {
         let (state, mut plan, request) = fixture(Native::Responses, false).await;
         let actor = "00000000-0000-4000-8000-000000000001";
         state
@@ -467,7 +501,9 @@ mod tests {
             ))
             .await
             .unwrap();
-        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+        if ready {
+            crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+        }
         let routes = RoutingRevision {
             id: uuid::Uuid::new_v4().to_string(),
             model_id: plan.model.id.clone(),
@@ -491,6 +527,207 @@ mod tests {
         state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc!{"_id":uuid::Uuid::new_v4().to_string(),"org_user_id":bson::Bson::Null,"flag_key":registry::FLAG,"target_kind":"global","target_key":bson::Bson::Null,"enabled":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),"updated_by":actor}).await.unwrap();
         let auth = test_utils::test_auth_user(actor);
         (state, plan, request, auth)
+    }
+
+    async fn enabled_image(
+        ready: bool,
+    ) -> (
+        AppState,
+        execution::Plan,
+        execution::Request,
+        AuthUser,
+        HeaderMap,
+    ) {
+        use crate::models::api_key::ApiKey;
+        let (state, mut plan, _, _) = enabled_with_readiness(ready).await;
+        let request = execution::tests::images_tests::image_plan(&mut plan, false);
+        state
+            .db
+            .collection::<PlatformModel>(COLLECTION_NAME)
+            .replace_one(doc! {"_id": &plan.model.id}, &plan.model)
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<crate::models::platform_model_tariff::ModelTariff>(
+                crate::models::platform_model_tariff::COLLECTION_NAME,
+            )
+            .replace_one(doc! {"_id": &plan.tariff.tariff().id}, plan.tariff.tariff())
+            .await
+            .unwrap();
+        // Isolate the person even when multiple fixture databases run in this
+        // process: the production decode limit is keyed by authenticated ID.
+        let person = uuid::Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<crate::models::user::User>("users")
+            .insert_one(test_utils::test_user(
+                &person,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let raw = "nyxid_ag_image_decode_fixture";
+        let key: ApiKey = bson::from_document(doc! {
+            "_id": uuid::Uuid::new_v4().to_string(), "user_id": &person,
+            "name": "Image decode fixture", "key_prefix": "nyxid_ag_image",
+            "key_hash": crate::crypto::token::hash_token(raw), "scopes": "read proxy",
+            "is_active": true, "created_at": bson::DateTime::now(),
+            "allow_all_services": true,
+        })
+        .unwrap();
+        state
+            .db
+            .collection::<ApiKey>("api_keys")
+            .insert_one(&key)
+            .await
+            .unwrap();
+        let auth = crate::mw::auth::api_key_auth_user(&state.db, &key, None, None, None)
+            .await
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            format!("Bearer {raw}").parse().unwrap(),
+        );
+        (state, plan, request, auth, headers)
+    }
+
+    #[tokio::test]
+    async fn image_approval_wait_does_not_retain_decode_capacity() {
+        use crate::models::approval_request::ApprovalRequest;
+        let (state, plan, request, auth, headers) = enabled_image(true).await;
+        let person = auth.user_id.to_string();
+        test_utils::set_test_approval_preference(&state.db, &person, true).await;
+        let server = MockServer::start().await;
+        let body = request.body.clone();
+        let waiting = execute_with_runtime(
+            state.clone(),
+            auth,
+            "chat/completions".into(),
+            Method::POST,
+            None,
+            headers,
+            bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body.clone(),
+            CancellationToken::new(),
+            std::sync::Arc::new(execution::Runtime::mocked(&server.uri())),
+        );
+        tokio::pin!(waiting);
+        let pending = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            tokio::select! {
+                result = &mut waiting => panic!("gateway completed before approval; error code: {:?}", result.err().map(|error| error.error_code())),
+                pending = async {
+                    loop {
+                        if let Some(row) = state.db.collection::<ApprovalRequest>("approval_requests")
+                            .find_one(doc! {"user_id": &person, "service_id": &plan.offering.id, "status": "pending"})
+                            .await.unwrap() {
+                            break row;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                } => pending,
+            }
+        }).await.expect("image request reaches the real human approval wait");
+        // The first Request is alive inside the gateway and waiting for a
+        // human. The same person can nevertheless validate another image.
+        let another =
+            execution::Request::parse_async(Method::POST, "chat/completions".into(), body, &person)
+                .await
+                .unwrap();
+        assert!(another.has_images());
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>("usage_meter")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
+        let axum::Json(decision) = crate::handlers::approvals::decide_request(
+            axum::extract::State(state.clone()),
+            test_utils::test_auth_user(&person),
+            axum::extract::Path(pending.id),
+            Default::default(),
+            HeaderMap::new(),
+            axum::Json(crate::handlers::approvals::DecideRequest {
+                approved: false,
+                duration_sec: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(decision.status, "rejected");
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(10), waiting)
+                .await
+                .unwrap(),
+            Err(AppError::ApprovalFailed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn unready_images_refuse_before_reservation_decode_credentials_or_funding() {
+        let (state, plan, request, auth, headers) = enabled_image(false).await;
+        let heartbeat =
+            crate::services::security_readiness_service::controlled_ready_test_replica(&state.db)
+                .await;
+        heartbeat.abort();
+        let _ = heartbeat.await;
+        state
+            .db
+            .collection::<bson::Document>(crate::models::security_replica::COLLECTION_NAME)
+            .update_many(
+                doc! {},
+                doc! {"$pull": {"capabilities": execution::images::READINESS}},
+            )
+            .await
+            .unwrap();
+        registry::authorized_model(&state.db, &auth.user_id.to_string(), &plan.model.public_id)
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>("downstream_services")
+            .delete_one(doc! {"_id": &plan.test_routes()[0].credential_service_id})
+            .await
+            .unwrap();
+        let server = MockServer::start().await;
+        // Reservation before readiness would return 429; decoding before it
+        // would reject this invalid raster. Neither may mask the readiness gate.
+        let person = auth.user_id.to_string();
+        let _occupied = execution::images::hold_decode_for_test(&person);
+        let mut body = request.body;
+        body["messages"][0]["content"][1]["image_url"]["url"] = json!("data:image/png;base64,AAAA");
+        let result = execute_with_runtime(
+            state.clone(),
+            auth,
+            "chat/completions".into(),
+            Method::POST,
+            None,
+            headers,
+            bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body,
+            CancellationToken::new(),
+            std::sync::Arc::new(execution::Runtime::mocked(&server.uri())),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(AppError::SecurityReadinessUnavailable)
+        ));
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>("usage_meter")
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
     #[tokio::test]
     async fn gateway_uses_public_model_billing_identity_and_opaque_headers() {

@@ -607,9 +607,10 @@ billing units retain their labels and exact prices in CLI output.
 `POST /api/v1/llm/gateway/v1/chat/completions` accepts a `nyxid/<model>` plus
 `messages` and an explicit positive `max_tokens` or `max_completion_tokens`.
 The gateway reserves the namespace before ordinary provider-name inference.
-Only stateless text and function tools, one candidate and at most one model
-invocation per attempt are enabled. `stream: true` returns Chat SSE. Native
-caller protocols, images/audio, hosted tools, cache creation, provider state,
+Stateless text and function tools, one candidate and at most one model
+invocation per attempt are enabled. PR 3b adds the separately certified image
+subset described below. `stream: true` returns Chat SSE. Native
+caller protocols, uncertified images, audio, hosted tools, cache creation, provider state,
 continuations and arbitrary passthrough fields are refused, not silently removed.
 The registry may describe future capabilities; that does not enable an adapter.
 Direct OpenAI Responses requires an output bound of at least 16; smaller bounds
@@ -713,3 +714,94 @@ do not claim a live provider canary.
 
 The direct Responses output bound, terminal SSE and usage fields were checked
 against [OpenAI's Responses reference](https://developers.openai.com/api/reference/resources/responses/methods/create).
+
+## PR 3b: certified raster image input
+
+The ordinary stateless Chat entrance also accepts ordered **user** `text` and
+`image_url` parts, where `image_url.url` is a raster **data URI** and optional
+`detail` is `auto`. System/developer instructions, assistant messages and tool
+results remain text/function-only. Remote URLs, paths, provider file IDs,
+unknown content fields and other detail modes are refused locally. NyxID never
+fetches an image URL, resizes an image, selects an animation frame, or drops a
+part. Existing tool-call/result correspondence and public response projections
+are unchanged. This does not enable assistant calls: the PR 5 actor-bound guard
+and attachment-authority work remain separate.
+
+The closed certification lookup binds an exact native model, transport,
+accounting version and immutable fixture digest. The initial cohort is:
+
+| Native model | Transport | Image accounting |
+| --- | --- | --- |
+| `gemini-2.5-flash` | Vertex Google `inlineData` | Aggregate input/cache, or exact `ImageInput` and `CachedModality(Image)` partitions |
+| `claude-sonnet-4-5` | Vertex and direct Anthropic base64 image blocks | Aggregate input/cache only |
+| `gpt-5` | Direct OpenAI Responses `input_image` | Aggregate input/cache only |
+| `gpt-oss-120b-maas` | Vertex MaaS | Text only; images refused |
+
+No registry metadata alone certifies an adapter. Unknown models or transports
+fail closed. Existing text fixture files and hashes are unchanged; historical
+text tariffs retain their economic identity. New image tariffs use the SHA-256
+of the corresponding `*-images-v1.json` fixture. Claude uses the SHA-256 of the
+**concatenated bytes of `claude-vertex-images-v1.json` followed by
+`claude-direct-images-v1.json`**, binding both same-model transports to one tariff.
+All files live under `backend/src/services/platform_model_execution/fixtures/`.
+They contain sanitized synthetic request/response/SSE examples, including a
+missing-evidence response and a certified zero-consumption refusal. They are
+protocol regression fixtures, not evidence of a live canary or account access.
+No credentials, prices or models are seeded.
+
+Before reserving image decode capacity, decoding, image execution or image-tariff
+authoring, the fleet must additionally pass `inference:platform-model-images-v1`.
+The gateway checks after flag/entitlement authorization and before image parsing;
+the planner and dispatcher recheck readiness. Existing platform flag, entitlement,
+registry, billing and execution gates remain required. Old replicas cannot send
+an image under a text digest; do not author/activate the new image contracts until
+all serving replicas advertise readiness. Reads and disabling remain available.
+No new persisted field or environment variable is required.
+
+Validation covers the whole request/history: PNG, JPEG and static WebP only,
+byte-sniffed against the declared MIME type, at most 10 images, 8 MiB/file,
+16 MiB total file bytes, 32 million pixels/image and 64 million pixels total.
+Claude further limits each file to 5 MiB and either dimension to 8,000 pixels.
+`tariff.bounds.max_images` can lower the count. Each raster is fully decoded and
+discarded in sequence, with a 128 MiB decoder allocation limit and checked output
+size; malformed/truncated inputs, animation and multi-image JPEG containers are
+refused. A 384 MiB process-wide budget covers transient decode work, weighted at
+twice the serialized request size plus the 128 MiB decode and 8 MiB file bounds.
+Each authenticated person gets at most one active decode and at most half that
+budget. Two people with requests at the legal file/JSON ceilings can decode
+concurrently. Exhaustion returns `ServiceConcurrencyLimited` (429), without a
+queued wait or spending. CPU decoding runs on the blocking pool after acquiring
+the permit; cancellation leaves it with the decoder until that work exits.
+Both the byte reservation and person slot are released before parsing returns,
+including on failure. `Request` and its clones hold no decode permit during
+human approval, funding, provider I/O or streaming. Retained request bodies keep
+the existing ingress/tariff size bounds; there is no separate dispatch permit.
+
+Non-image content remains capped at 1 MiB. The existing configured LLM body limit
+is enforced by bounded ingress before JSON allocation; the platform entrance
+also enforces 32 MiB. The tariff, configured ingress limit and platform ceiling
+bound the actual serialized request and translated native body. Public
+`retail_prices[].image_input`, when present, reports the intersected limits and
+`included_in_input_tokens` or `exact_image_and_cache_partition`. It contains no
+route, project, credential, tariff ID or native model information. Absent means
+no certified executable image contract has been established for that caller.
+
+Image-token billing uses existing selectors and complete immutable tariffs.
+`contract.images` / `Images` still mean generated-image charges and are not used
+for image input. When Gemini reports prompt 1,000, image 300, cached 200 and
+cached-image 100, the exact partition is ordinary input 600, image input 200,
+ordinary cache 100 and image cache 100. A missing intersection cannot be guessed;
+a split tariff retains the unsettled obligation. Aggregate tariffs include image
+tokens in their aggregate input/cache quantities and advertise that fact.
+No pixel-based billable estimate, base-price fallback or extra image fee is added.
+
+All candidate routes must satisfy the entire image/tariff contract before
+credential materialization or admission. Fallback remains limited to proven
+unsent requests or certified zero consumption. Atomic allowance/grant/wallet
+admission, wallet tax, immutable usage evidence, ledger, Lago residues and recovery
+use the existing coordinator. Missing usage, interrupted streams and cancellation
+after send retain their forwarded obligations; they cannot become zero usage.
+
+Protocol references: [Gemini image understanding](https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/image-understanding),
+[Anthropic vision](https://platform.claude.com/docs/en/build-with-claude/vision),
+and [OpenAI image inputs](https://developers.openai.com/api/docs/guides/images-vision).
