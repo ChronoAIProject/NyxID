@@ -1968,167 +1968,185 @@ impl NodeWsManager {
         expected_connection_id: Option<&str>,
         _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
-        let request_body_len = request.body.as_ref().map_or(0, Vec::len);
-        if request.target_id.is_some() || request_body_len > LEGACY_NODE_PROXY_MAX_BODY_SIZE {
-            self.await_capability_resolution(node_id, std::time::Duration::from_millis(500))
-                .await;
-        }
-        let conn = self
-            .connection_for(node_id, expected_connection_id)
-            .map_err(NodeProxyFailure::before_dispatch)?;
-        if request.target_id.is_some() {
-            let capable = conn
-                .capabilities
-                .lock()
-                .is_ok_and(|caps| caps.http_signature_v2);
-            if !capable || prepared_signature.is_none() {
-                return Err(NodeProxyFailure::before_dispatch(
-                    AppError::NodeHttpSignatureUnsupported,
-                ));
+        let mut operation = crate::turn_trace::Operation::start(
+            crate::turn_trace::TurnContext::current(),
+            crate::turn_trace::Stage::NodeHeaders,
+        );
+        let result: Result<ProxyResponseType, NodeProxyFailure> = async {
+            let request_body_len = request.body.as_ref().map_or(0, Vec::len);
+            if request.target_id.is_some() || request_body_len > LEGACY_NODE_PROXY_MAX_BODY_SIZE {
+                self.await_capability_resolution(node_id, std::time::Duration::from_millis(500))
+                    .await;
             }
-            if super::destination_routing::normalize_origin(&request.base_url)
-                .as_ref()
-                .ok()
-                != Some(&request.base_url)
-            {
-                return Err(NodeProxyFailure::before_dispatch(
-                    AppError::ValidationError(
-                        "Target-selected node request requires an exact normalized origin".into(),
-                    ),
-                ));
-            }
-        }
-        let node_body_limit = conn
-            .capabilities
-            .lock()
-            .ok()
-            .and_then(|capabilities| capabilities.proxy_max_body_size)
-            .unwrap_or(LEGACY_NODE_PROXY_MAX_BODY_SIZE);
-        if request_body_len > node_body_limit {
-            return Err(NodeProxyFailure::before_dispatch(
-                AppError::RequestBodyTooLarge {
-                    max_bytes: node_body_limit,
-                    context: "Node proxy".to_string(),
-                },
-            ));
-        }
-        let request_id = request.request_id.clone();
-        let dispatch_gate = conn.proxy_dispatch_gate.clone();
-        let _dispatch_guard = dispatch_gate.lock().map_err(|_| {
-            NodeProxyFailure::before_dispatch(AppError::Internal(
-                "Node proxy dispatch gate is unavailable".to_string(),
-            ))
-        })?;
-        if self.take_proxy_cancellation(node_id, &request_id) {
-            return Err(NodeProxyFailure::before_dispatch(
-                AppError::ClientDisconnected,
-            ));
-        }
-
-        // Create oneshot channel for response correlation. The response may be a
-        // complete payload or a live streaming receiver.
-        let (resp_tx, resp_rx) = oneshot::channel();
-        conn.pending
-            .insert(request_id.clone(), PendingRequest::Awaiting(resp_tx));
-
-        // Build headers as JSON object
-        let headers_map: serde_json::Map<String, serde_json::Value> = request
-            .headers
-            .iter()
-            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-            .collect();
-
-        let body_b64 = request.body.as_ref().map(|b| {
-            use base64::Engine;
-            base64::engine::general_purpose::STANDARD.encode(b)
-        });
-
-        let (timestamp, nonce, signature) = prepared_signature
-            .map(|prepared| {
-                (
-                    Some(prepared.timestamp),
-                    Some(prepared.nonce),
-                    Some(prepared.signature),
-                )
-            })
-            .unwrap_or((None, None, None));
-
-        // Build WS message
-        let ws_msg = WsProxyRequest {
-            signature_version: request.target_id.as_ref().map(|_| 2),
-            target_id: request.target_id,
-            msg_type: "proxy_request",
-            request_id: request_id.clone(),
-            service_id: request.service_id,
-            service_slug: request.service_slug,
-            base_url: request.base_url,
-            method: request.method,
-            path: request.path,
-            query: request.query,
-            headers: SecretJson(serde_json::Value::Object(headers_map)),
-            body: body_b64,
-            timestamp,
-            nonce,
-            signature,
-        };
-
-        let msg_json = crate::crypto::secret_json::to_secret_string(&ws_msg).map_err(|e| {
-            conn.pending.remove(&request_id);
-            NodeProxyFailure::before_dispatch(AppError::Internal(format!(
-                "Failed to serialize proxy request: {e}"
-            )))
-        })?;
-
-        // H4: Use try_send on bounded channel. If the channel is full, the node
-        // is not keeping up (slow or malicious) — treat as offline.
-        match conn.tx.try_send(NodeOutboundMessage::Text(msg_json)) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                conn.pending.remove(&request_id);
-                return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
-                    format!("Node {node_id} write buffer full"),
-                )));
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                conn.pending.remove(&request_id);
-                return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
-                    format!("Node {node_id} connection closed"),
-                )));
-            }
-        }
-
-        let mut cancellation_guard = PendingProxyGuard::new(&conn, &request_id);
-        drop(_dispatch_guard);
-
-        // Drop the connection ref before awaiting
-        drop(conn);
-
-        // Wait for response with timeout
-        let timeout = std::time::Duration::from_secs(self.proxy_timeout_secs);
-        match tokio::time::timeout(timeout, resp_rx).await {
-            Ok(Ok(NodeProxyOutcome::Response(response))) => {
-                cancellation_guard.armed = false;
-                Ok(response)
-            }
-            Ok(Ok(NodeProxyOutcome::RetryableFailure { message, reason })) => {
-                let error = map_retryable_node_failure(message, reason.as_deref());
-                if matches!(error, AppError::NodeCredentialMissing(_)) {
-                    // The node resolves its local credential before building or
-                    // sending the downstream request, so this reason proves the
-                    // mutation never crossed the downstream dispatch boundary.
-                    Err(NodeProxyFailure::before_dispatch(error))
-                } else {
-                    Err(NodeProxyFailure::after_dispatch(error))
+            let conn = self
+                .connection_for(node_id, expected_connection_id)
+                .map_err(NodeProxyFailure::before_dispatch)?;
+            if request.target_id.is_some() {
+                let capable = conn
+                    .capabilities
+                    .lock()
+                    .is_ok_and(|caps| caps.http_signature_v2);
+                if !capable || prepared_signature.is_none() {
+                    return Err(NodeProxyFailure::before_dispatch(
+                        AppError::NodeHttpSignatureUnsupported,
+                    ));
+                }
+                if super::destination_routing::normalize_origin(&request.base_url)
+                    .as_ref()
+                    .ok()
+                    != Some(&request.base_url)
+                {
+                    return Err(NodeProxyFailure::before_dispatch(
+                        AppError::ValidationError(
+                            "Target-selected node request requires an exact normalized origin"
+                                .into(),
+                        ),
+                    ));
                 }
             }
-            Ok(Err(_)) => Err(NodeProxyFailure::after_dispatch(AppError::NodeOffline(
-                format!("Node {node_id} disconnected during request"),
-            ))),
-            Err(_) => {
-                // The guard removes pending and sends cancellation to the node.
-                Err(NodeProxyFailure::after_dispatch(AppError::NodeProxyTimeout))
+            let node_body_limit = conn
+                .capabilities
+                .lock()
+                .ok()
+                .and_then(|capabilities| capabilities.proxy_max_body_size)
+                .unwrap_or(LEGACY_NODE_PROXY_MAX_BODY_SIZE);
+            if request_body_len > node_body_limit {
+                return Err(NodeProxyFailure::before_dispatch(
+                    AppError::RequestBodyTooLarge {
+                        max_bytes: node_body_limit,
+                        context: "Node proxy".to_string(),
+                    },
+                ));
+            }
+            let request_id = request.request_id.clone();
+            let dispatch_gate = conn.proxy_dispatch_gate.clone();
+            let _dispatch_guard = dispatch_gate.lock().map_err(|_| {
+                NodeProxyFailure::before_dispatch(AppError::Internal(
+                    "Node proxy dispatch gate is unavailable".to_string(),
+                ))
+            })?;
+            if self.take_proxy_cancellation(node_id, &request_id) {
+                return Err(NodeProxyFailure::before_dispatch(
+                    AppError::ClientDisconnected,
+                ));
+            }
+
+            // Create oneshot channel for response correlation. The response may be a
+            // complete payload or a live streaming receiver.
+            let (resp_tx, resp_rx) = oneshot::channel();
+            conn.pending
+                .insert(request_id.clone(), PendingRequest::Awaiting(resp_tx));
+
+            // Build headers as JSON object
+            let headers_map: serde_json::Map<String, serde_json::Value> = request
+                .headers
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                .collect();
+
+            let body_b64 = request.body.as_ref().map(|b| {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(b)
+            });
+
+            let (timestamp, nonce, signature) = prepared_signature
+                .map(|prepared| {
+                    (
+                        Some(prepared.timestamp),
+                        Some(prepared.nonce),
+                        Some(prepared.signature),
+                    )
+                })
+                .unwrap_or((None, None, None));
+
+            // Build WS message
+            let ws_msg = WsProxyRequest {
+                signature_version: request.target_id.as_ref().map(|_| 2),
+                target_id: request.target_id,
+                msg_type: "proxy_request",
+                request_id: request_id.clone(),
+                service_id: request.service_id,
+                service_slug: request.service_slug,
+                base_url: request.base_url,
+                method: request.method,
+                path: request.path,
+                query: request.query,
+                headers: SecretJson(serde_json::Value::Object(headers_map)),
+                body: body_b64,
+                timestamp,
+                nonce,
+                signature,
+            };
+
+            let msg_json = crate::crypto::secret_json::to_secret_string(&ws_msg).map_err(|e| {
+                conn.pending.remove(&request_id);
+                NodeProxyFailure::before_dispatch(AppError::Internal(format!(
+                    "Failed to serialize proxy request: {e}"
+                )))
+            })?;
+
+            // H4: Use try_send on bounded channel. If the channel is full, the node
+            // is not keeping up (slow or malicious) — treat as offline.
+            match conn.tx.try_send(NodeOutboundMessage::Text(msg_json)) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    conn.pending.remove(&request_id);
+                    return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
+                        format!("Node {node_id} write buffer full"),
+                    )));
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    conn.pending.remove(&request_id);
+                    return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
+                        format!("Node {node_id} connection closed"),
+                    )));
+                }
+            }
+
+            let mut cancellation_guard = PendingProxyGuard::new(&conn, &request_id);
+            drop(_dispatch_guard);
+
+            // Drop the connection ref before awaiting
+            drop(conn);
+
+            // Wait for response with timeout
+            let timeout = std::time::Duration::from_secs(self.proxy_timeout_secs);
+            match tokio::time::timeout(timeout, resp_rx).await {
+                Ok(Ok(NodeProxyOutcome::Response(response))) => {
+                    cancellation_guard.armed = false;
+                    Ok(response)
+                }
+                Ok(Ok(NodeProxyOutcome::RetryableFailure { message, reason })) => {
+                    let error = map_retryable_node_failure(message, reason.as_deref());
+                    if matches!(error, AppError::NodeCredentialMissing(_)) {
+                        // The node resolves its local credential before building or
+                        // sending the downstream request, so this reason proves the
+                        // mutation never crossed the downstream dispatch boundary.
+                        Err(NodeProxyFailure::before_dispatch(error))
+                    } else {
+                        Err(NodeProxyFailure::after_dispatch(error))
+                    }
+                }
+                Ok(Err(_)) => Err(NodeProxyFailure::after_dispatch(AppError::NodeOffline(
+                    format!("Node {node_id} disconnected during request"),
+                ))),
+                Err(_) => {
+                    // The guard removes pending and sends cancellation to the node.
+                    Err(NodeProxyFailure::after_dispatch(AppError::NodeProxyTimeout))
+                }
             }
         }
+        .await;
+        operation.finish(
+            if result.is_ok() {
+                crate::turn_trace::Outcome::Completed
+            } else {
+                crate::turn_trace::Outcome::Failed
+            },
+            None,
+            None,
+        );
+        result
     }
 
     /// Signed opening metadata followed by bounded binary upload frames. Unlike
@@ -2139,6 +2157,11 @@ impl NodeWsManager {
         body: axum::body::Body,
         expected_connection_id: Option<&str>,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
+        let mut operation = crate::turn_trace::Operation::start(
+            crate::turn_trace::TurnContext::current(),
+            crate::turn_trace::Stage::NodeHeaders,
+        );
+        let result: Result<ProxyResponseType, NodeProxyFailure> = async {
         use futures::StreamExt;
         let header_timeout = if request.operation == nyxid_machine::Operation::ProxyUpload
             && request.parameters["git"] == true
@@ -2273,6 +2296,18 @@ impl NodeWsManager {
             }
             _ => Err(NodeProxyFailure::after_dispatch(AppError::NodeProxyTimeout)),
         }
+
+        }.await;
+        operation.finish(
+            if result.is_ok() {
+                crate::turn_trace::Outcome::Completed
+            } else {
+                crate::turn_trace::Outcome::Failed
+            },
+            None,
+            None,
+        );
+        result
     }
 
     /// Open an SSH tunnel on a connected node and await the open acknowledgement.

@@ -160,6 +160,7 @@ async fn accept(
     let now = Utc::now();
     let event_key = sha256_hex(format!("native-response:{}", response_id));
     let event = NyxbotEvent {
+        trace_request_id: crate::turn_trace::ingress_request_id(),
         id: event_key.clone(),
         channel_id: row.id.clone(),
         user_id: row.user_id.clone(),
@@ -299,7 +300,7 @@ async fn accept(
     let task_row = row.clone();
     let task_stored = stored.clone();
     let task_context = context.clone();
-    tokio::spawn(async move {
+    crate::turn_trace::spawn(async move {
         // Keep the provider dispatch future off the Tokio worker stack. It
         // nests channel admission, Mongo transactions and platform history,
         // and native tests exercise it with the CI-sized 1.5 MiB stack.
@@ -443,8 +444,15 @@ pub async fn snapshot(
         return error.into_response();
     }
     match current(&state, &row, &id).await {
-        Ok(Some((_, body))) => {
-            ([("cache-control", "no-store")], Json(body.snapshot)).into_response()
+        Ok(Some((_, body, trace))) => {
+            if let Some(trace) = trace {
+                crate::turn_trace::associate(trace);
+            }
+            crate::turn_trace::response(trace, crate::turn_trace::Stage::Replay, async {
+                Ok(([("cache-control", "no-store")], Json(body.snapshot)).into_response())
+            })
+            .await
+            .unwrap_or_else(IntoResponse::into_response)
         }
         Ok(None) => problem(StatusCode::NOT_FOUND, "response_not_found"),
         Err(e) => e.into_response(),
@@ -468,7 +476,10 @@ pub async fn events(
         return error.into_response();
     }
     match current(&state, &row, &id).await {
-        Ok(Some((_, body))) if after.is_none_or(|n| n < body.frames.len() as u64) => {
+        Ok(Some((_, body, trace))) if after.is_none_or(|n| n < body.frames.len() as u64) => {
+            if let Some(trace) = trace {
+                crate::turn_trace::associate(trace);
+            }
             stream(state, row, headers, id, after)
         }
         Ok(Some(_)) => problem(StatusCode::BAD_REQUEST, "invalid_replay_cursor"),
@@ -480,7 +491,13 @@ async fn current(
     state: &AppState,
     row: &NyxbotChannel,
     id: &str,
-) -> AppResult<Option<(StoredResponse, recovery::Payload)>> {
+) -> AppResult<
+    Option<(
+        StoredResponse,
+        recovery::Payload,
+        Option<crate::turn_trace::TurnContext>,
+    )>,
+> {
     if row.transport != "gateway"
         || row.status != "active"
         || (row.gateway_source.is_some() && !source::ready(row))
@@ -490,20 +507,25 @@ async fn current(
     let Some(stored) = recovery::load(&state.db, row, id).await? else {
         return Ok(None);
     };
-    if let Some(event) = state
+    let event = state
         .db
         .collection::<NyxbotEvent>(EVENTS)
         .find_one(doc! {"_id":&stored.event_key})
-        .await?
+        .await?;
+    let trace = event
+        .as_ref()
+        .and_then(|event| event.turn_id.as_deref())
+        .and_then(crate::turn_trace::TurnContext::for_turn);
+    if let Some(event) = event.as_ref()
         && let (Some(delivery), Some(conversation)) = (&event.delivery, &event.conversation_id)
     {
         let history = engine::get(
             &state.db,
-            crate::services::org_channel_service::event_actor(&event),
+            crate::services::org_channel_service::event_actor(event),
             conversation,
         )
         .await?;
-        if late_delivery::eligible(state, &event, delivery, &history)
+        if late_delivery::eligible(state, event, delivery, &history)
             .await?
             .is_none()
         {
@@ -519,6 +541,7 @@ async fn current(
             return Ok(None);
         }
     }
+    drop(event);
     let event_key = &stored.event_key;
     recovery::refresh(
         &state.db,
@@ -553,7 +576,7 @@ async fn current(
             relay_responses::suppress_output(&mut payload);
         }
     }
-    Ok(Some((stored, payload)))
+    Ok(Some((stored, payload, trace)))
 }
 pub(super) fn stream(
     state: AppState,
@@ -568,6 +591,7 @@ pub(super) fn stream(
         let _observer = observer;
         let deadline=tokio::time::Instant::now()+Duration::from_secs(if row.gateway_source.is_some() {55} else {570});
         let mut next=after.map_or(0,|n|n+1);
+        let mut trace_operation: Option<crate::turn_trace::Operation> = None;
         loop {
             // Recheck the fresh key and binding, including while a stream waits.
             let live=provider_channel(&state,&headers).await;
@@ -576,7 +600,10 @@ pub(super) fn stream(
                 _=>Err(AppError::OAuthAuthorityUnavailable),
             };
             match result {
-                Ok(Some((stored,mut body)))=>{
+                Ok(Some((stored,mut body, trace)))=>{
+                    if trace_operation.is_none() && trace.is_some() {
+                        trace_operation = Some(crate::turn_trace::Operation::start(trace, crate::turn_trace::Stage::Replay));
+                    }
                     if stored.terminal && !relay_responses::stream_output(&state, &row, &stored, body.snapshot["status"].as_str().unwrap_or("failed")).await.unwrap_or(false) {
                         relay_responses::suppress_output(&mut body);
                     }
@@ -586,7 +613,12 @@ pub(super) fn stream(
                         yield Ok::<_,Infallible>(axum::response::sse::Event::default()
                             .id(seq.to_string()).event(frame["type"].as_str().unwrap_or_default()).data(frame.to_string()));
                     }
-                    if stored.terminal {break;}
+                    if stored.terminal {
+                        if let Some(operation) = &mut trace_operation {
+                            operation.finish(crate::turn_trace::Outcome::Streamed, Some(200), None);
+                        }
+                        break;
+                    }
                 },
                 _=>{yield Ok(axum::response::sse::Event::default().event("error").data("{\"type\":\"error\",\"code\":\"provider_unavailable\"}"));break;},
             }
@@ -666,112 +698,143 @@ async fn send_update_impl(
         "_id":&response.event_key,"user_id":&row.user_id,"conversation_id":conversation,
         "created_at":{"$gt":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::minutes(29))},
     }).await?.ok_or_else(unavailable)?;
-    if event
-        .delivery
-        .as_ref()
-        .is_none_or(|d| d.origin != *origin || d.transport != "gateway")
-    {
-        return Err(unavailable());
-    }
-    let history = engine::get(
-        &state.db,
-        crate::services::org_channel_service::event_actor(&event),
-        conversation,
-    )
-    .await?;
-    if late_delivery::eligible(
-        state,
-        &event,
-        event.delivery.as_ref().ok_or_else(unavailable)?,
-        &history,
-    )
-    .await?
-    .is_none()
-    {
-        return Err(unavailable());
-    }
-    let ciphertext = event
-        .event_context_ciphertext
-        .as_ref()
-        .ok_or_else(unavailable)?;
-    let context: Value = serde_json::from_slice(&Zeroizing::new(
-        state.encryption_keys.decrypt(ciphertext).await?,
-    ))
-    .map_err(|_| unavailable())?;
-    if !source::provider_context(row, &context) {
-        return Err(unavailable());
-    }
-    let reference = context["event_ref"].as_str().ok_or_else(unavailable)?;
-    let key = decrypt_agent_key(state, row)
-        .await?
-        .ok_or_else(unavailable)?;
-    let reply_parts = if matches!(
-        row.gateway_source.as_ref(),
-        Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
-    ) {
-        let reply = crate::services::channel_platform::OutboundReply {
-            attachments: Vec::new(),
-            text: Some(text.to_owned()),
-            reply_to_platform_message_id: None,
-            metadata: None,
-        };
-        crate::services::whatsapp_native::text_reply(&reply)?;
-        crate::services::channel_reply_plan::text_parts(&reply, "whatsapp")?
-    } else {
-        vec![crate::services::channel_platform::OutboundReply {
-            attachments: Vec::new(),
-            text: Some(bounded_reply(text)),
-            reply_to_platform_message_id: None,
-            metadata: None,
-        }]
-    };
-    let mut outcome = "reply_confirmed";
-    for (index, part) in reply_parts.into_iter().enumerate() {
-        let mut body = json!({"text":part.text.unwrap_or_default()});
-        // A local followed reply chain is not necessarily a Discord thread.
-        // CMA accepts native-thread mode only for the original thread channel.
-        if context["activity"]["conversation"]["thread_id"].is_string() {
-            body["thread_reply"] = json!(true);
+    let trace = event
+        .turn_id
+        .as_deref()
+        .and_then(crate::turn_trace::TurnContext::for_turn);
+    let mut operation =
+        crate::turn_trace::Operation::start(trace, crate::turn_trace::Stage::Channel);
+    let result: AppResult<&'static str> = crate::turn_trace::scope(operation.context(), async {
+        if event
+            .delivery
+            .as_ref()
+            .is_none_or(|d| d.origin != *origin || d.transport != "gateway")
+        {
+            return Err(unavailable());
         }
-        let idempotency = occurrence.map(|id| format!("{id}:{index}"));
-        let result = gateway_call(
-            state,
-            reqwest::Method::POST,
-            &format!("/events/{}/replies", urlencode(reference)),
-            &key,
-            Some(&body),
-            idempotency.as_deref(),
+        let history = engine::get(
+            &state.db,
+            crate::services::org_channel_service::event_actor(&event),
+            conversation,
         )
-        .await;
-        // Transport success alone is not a platform send receipt. Do not retry
-        // an unknown outcome or report a rejected send as successful.
-        outcome = match &result {
-            Ok(result) if (200..300).contains(&result.status) => {
-                match result.body["delivery"]["outcome"].as_str() {
-                    Some("confirmed") => "reply_confirmed",
-                    Some("rejected") => "reply_rejected",
-                    Some("unsupported") => "reply_unsupported",
-                    Some("rate_limited") => "reply_rate_limited",
-                    _ => "reply_unknown",
-                }
-            }
-            Ok(result) if (500..600).contains(&result.status) => "reply_unknown",
-            Ok(_) => "reply_refused",
-            Err(_) => "reply_unknown",
+        .await?;
+        if late_delivery::eligible(
+            state,
+            &event,
+            event.delivery.as_ref().ok_or_else(unavailable)?,
+            &history,
+        )
+        .await?
+        .is_none()
+        {
+            return Err(unavailable());
+        }
+        let ciphertext = event
+            .event_context_ciphertext
+            .as_ref()
+            .ok_or_else(unavailable)?;
+        let context: Value = serde_json::from_slice(&Zeroizing::new(
+            state.encryption_keys.decrypt(ciphertext).await?,
+        ))
+        .map_err(|_| unavailable())?;
+        if !source::provider_context(row, &context) {
+            return Err(unavailable());
+        }
+        let reference = context["event_ref"].as_str().ok_or_else(unavailable)?;
+        let key = decrypt_agent_key(state, row)
+            .await?
+            .ok_or_else(unavailable)?;
+        let reply_parts = if matches!(
+            row.gateway_source.as_ref(),
+            Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
+        ) {
+            let reply = crate::services::channel_platform::OutboundReply {
+                attachments: Vec::new(),
+                text: Some(text.to_owned()),
+                reply_to_platform_message_id: None,
+                metadata: None,
+            };
+            crate::services::whatsapp_native::text_reply(&reply)?;
+            crate::services::channel_reply_plan::text_parts(&reply, "whatsapp")?
+        } else {
+            vec![crate::services::channel_platform::OutboundReply {
+                attachments: Vec::new(),
+                text: Some(bounded_reply(text)),
+                reply_to_platform_message_id: None,
+                metadata: None,
+            }]
         };
-        if outcome != "reply_confirmed" {
-            break;
+        let mut outcome = "reply_confirmed";
+        for (index, part) in reply_parts.into_iter().enumerate() {
+            let mut part_trace = crate::turn_trace::Operation::part(
+                crate::turn_trace::TurnContext::current(), index,
+            );
+            let mut body = json!({"text":part.text.unwrap_or_default()});
+            // A local followed reply chain is not necessarily a Discord thread.
+            // CMA accepts native-thread mode only for the original thread channel.
+            if context["activity"]["conversation"]["thread_id"].is_string() {
+                body["thread_reply"] = json!(true);
+            }
+            let idempotency = occurrence.map(|id| format!("{id}:{index}"));
+            let result = crate::turn_trace::scope(part_trace.context(), gateway_call(
+                state,
+                reqwest::Method::POST,
+                &format!("/events/{}/replies", urlencode(reference)),
+                &key,
+                Some(&body),
+                idempotency.as_deref(),
+            ))
+            .await;
+            // Transport success alone is not a platform send receipt. Do not retry
+            // an unknown outcome or report a rejected send as successful.
+            outcome = match &result {
+                Ok(result) if (200..300).contains(&result.status) => {
+                    match result.body["delivery"]["outcome"].as_str() {
+                        Some("confirmed") => "reply_confirmed",
+                        Some("rejected") => "reply_rejected",
+                        Some("unsupported") => "reply_unsupported",
+                        Some("rate_limited") => "reply_rate_limited",
+                        _ => "reply_unknown",
+                    }
+                }
+                Ok(result) if (500..600).contains(&result.status) => "reply_unknown",
+                Ok(_) => "reply_refused",
+                Err(_) => "reply_unknown",
+            };
+            part_trace.finish(
+                match outcome {
+                    "reply_confirmed" => crate::turn_trace::Outcome::Confirmed,
+                    "reply_rejected" | "reply_unsupported" | "reply_rate_limited" | "reply_refused" => crate::turn_trace::Outcome::Rejected,
+                    _ => crate::turn_trace::Outcome::Unknown,
+                },
+                None,
+                None,
+            );
+            if outcome != "reply_confirmed" {
+                break;
+            }
         }
-    }
-    state.db.collection::<NyxbotChannel>(CHANNELS).update_one(
-        doc! {"_id":&row.id,"binding_id":&row.binding_id,"transport":"gateway","gateway_native_phase":"ready"},
-        doc! {"$set":{"gateway_native_delivery":outcome}},
-    ).await?;
-    Ok(match outcome {
-        "reply_confirmed" => "confirmed",
-        "reply_rejected" | "reply_unsupported" | "reply_rate_limited" | "reply_refused" => {
-            "rejected"
-        }
-        _ => "unknown",
+        state.db.collection::<NyxbotChannel>(CHANNELS).update_one(
+            doc! {"_id":&row.id,"binding_id":&row.binding_id,"transport":"gateway","gateway_native_phase":"ready"},
+            doc! {"$set":{"gateway_native_delivery":outcome}},
+        ).await?;
+        Ok(match outcome {
+            "reply_confirmed" => "confirmed",
+            "reply_rejected" | "reply_unsupported" | "reply_rate_limited" | "reply_refused" => {
+                "rejected"
+            }
+            _ => "unknown",
+        })
     })
+    .await;
+    operation.finish(
+        match &result {
+            Ok("confirmed") => crate::turn_trace::Outcome::Confirmed,
+            Ok("rejected") => crate::turn_trace::Outcome::Rejected,
+            _ => crate::turn_trace::Outcome::Unknown,
+        },
+        None,
+        None,
+    );
+    result
 }

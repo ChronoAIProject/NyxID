@@ -176,6 +176,11 @@ impl NyxAgentEgress for Egress {
         credential: &RuntimeCredential,
         request: NyxAgentRequest,
     ) -> AppResult<Response> {
+        let turn = match authority {
+            NyxAgentExecutionContext::Owner { turn, .. } => &turn.turn_id,
+            NyxAgentExecutionContext::Public(context) => &context.turn.turn_id,
+        };
+        crate::turn_trace::response(crate::turn_trace::TurnContext::for_turn(turn), crate::turn_trace::Stage::Engine, async {
         if self.model_setup && !matches!(authority, NyxAgentExecutionContext::Owner { .. }) {
             return Err(AppError::AssistantTurnRequired);
         }
@@ -609,6 +614,8 @@ impl NyxAgentEgress for Egress {
             Some(lease) => lease.hold_response(response),
             None => response,
         })
+
+        }).await
     }
 }
 

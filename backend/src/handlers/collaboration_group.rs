@@ -75,6 +75,7 @@ pub(crate) fn advance(
                 let audit_result=crate::services::audit_service::log_actor_event(state.db.clone(),
                 &crate::services::audit_service::AuditActor {user_id:started.admission.requester().into(),ip_address:None,user_agent:None,api_key_id:None,api_key_name:None},
                 "assistant_collaboration_turn_admitted",Some(serde_json::json!({
+                    "turn_id":started.claim.conversation.active_turn.as_ref().map(|turn| &turn.turn_id),
                     "actor_user_id":started.admission.requester(),"agent_owner_id":authority.owner_id,
                     "execution_user_id":started.claim.conversation.user_id,"execution_mode":authority.lane,
                     "group_id":request.group_id,"request_id":started.admission.request_id(),"agent_id":agent,

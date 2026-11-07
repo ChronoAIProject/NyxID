@@ -1742,6 +1742,16 @@ async fn send_claimed(
     identity: Arc<dyn ManagerIdentityProducer>,
     public: Option<Arc<dyn PublicTurnProducer>>,
 ) -> AppResult<DeliveryOutcome> {
+    let turn = match &row.reference {
+        DeliveryReference::Reply { turn_id, .. }
+        | DeliveryReference::PublicReply { turn_id, .. } => Some(turn_id.as_str()),
+        _ => row.origin_turn_id.as_deref(),
+    };
+    let mut operation = crate::turn_trace::Operation::start(
+        turn.and_then(crate::turn_trace::TurnContext::for_turn),
+        crate::turn_trace::Stage::Channel,
+    );
+    let result: AppResult<DeliveryOutcome> = crate::turn_trace::scope(operation.context(), async {
     use super::channel_text_delivery as journal;
     use crate::models::channel_text_delivery::TextPartState;
     if !matches!(
@@ -1877,6 +1887,7 @@ async fn send_claimed(
                 return Ok(DeliveryOutcome::Uncertain);
             }
         };
+        let mut part_trace = crate::turn_trace::Operation::part(crate::turn_trace::TurnContext::current(), index);
         let result = if let Some(token) = &credential {
             telegram_part(api, token, scope::actor_string(&row.sender).as_str(), &part).await
         } else if let CapturedMaterial::Native(authority) = &material {
@@ -1899,6 +1910,11 @@ async fn send_claimed(
         } else {
             return Err(refused());
         };
+        part_trace.finish(match &result {
+            PartResult::Sent(_) => crate::turn_trace::Outcome::Confirmed,
+            PartResult::Refused | PartResult::Retry(_) => crate::turn_trace::Outcome::Rejected,
+            PartResult::Uncertain => crate::turn_trace::Outcome::Unknown,
+        }, None, None);
         match result {
             PartResult::Sent(id) => {
                 journal::finish(
@@ -1976,6 +1992,20 @@ async fn send_claimed(
             platform_message_ids: platform_ids,
         }
     })
+
+    }).await;
+    operation.finish(
+        match &result {
+            Ok(DeliveryOutcome::Sent { .. } | DeliveryOutcome::NativeSent { .. }) => {
+                crate::turn_trace::Outcome::Confirmed
+            }
+            Ok(DeliveryOutcome::Refused(_)) => crate::turn_trace::Outcome::Rejected,
+            _ => crate::turn_trace::Outcome::Unknown,
+        },
+        None,
+        None,
+    );
+    result
 }
 
 async fn pace_part(state: &AppState, row: &Delivery, claim: &str) -> AppResult<()> {

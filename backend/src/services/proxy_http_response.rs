@@ -56,7 +56,7 @@ pub(crate) fn relay_response<'a>(
         // non-SSE bodies with an explicit cap/deadline, including chunked JSON.
         context.should_stream = context.is_sse;
         Box::pin(async move {
-            tokio::spawn(async move {
+            crate::turn_trace::spawn(async move {
                 Box::pin(relay_response_inner(&state, context, downstream_response)).await
             })
             .await
@@ -117,7 +117,7 @@ async fn relay_response_inner(
             let model_protocol = crate::services::assistant_model_observer::protocol(path);
             let model_request = model_request.clone().filter(|_| status.is_success());
 
-            tokio::spawn(async move {
+            crate::turn_trace::spawn(async move {
                 let mut exchange_diagnostics = ProxyStreamDiagnostics::new(exchange_diagnostics);
                 let mut usage_accumulator =
                     llm_usage_service::ReportedLlmUsageAccumulator::default();
@@ -611,7 +611,7 @@ async fn relay_response_inner(
             // Poll funding separately from the deep proxy stack, and await its
             // durable release before allowing the provider retry.
             let billing = state.billing.clone();
-            let settlement = tokio::spawn(async move {
+            let settlement = crate::turn_trace::spawn(async move {
                 Box::pin(billing.settle(
                     &metered,
                     PlatformUsage::default(),
@@ -700,7 +700,7 @@ pub(crate) async fn observe_model_response(
     let protocol = crate::services::assistant_model_observer::protocol(path);
     let (parts, body) = response.into_parts();
     let (tx, rx) = tokio::sync::mpsc::channel(1);
-    tokio::spawn(async move {
+    crate::turn_trace::spawn(async move {
         let mut body = body.into_data_stream();
         let mut observer = crate::services::assistant_model_observer::StreamObserver::new(protocol);
         let mut provider_fault_recorded = false;
@@ -820,6 +820,7 @@ pub(crate) struct ProxyExchangeDiagnostics {
     response_mode: &'static str,
     trace_id: String,
     request_id: String,
+    turn_context: Option<crate::turn_trace::TurnContext>,
 }
 
 impl ProxyExchangeDiagnostics {
@@ -843,11 +844,26 @@ impl ProxyExchangeDiagnostics {
             response_mode,
             trace_id: sanitized_trace_id(headers).unwrap_or_default(),
             request_id: sanitized_request_id(headers).unwrap_or_default(),
+            turn_context: crate::turn_trace::TurnContext::current(),
         }
     }
 
     pub(crate) fn emit(&self, termination: &'static str) {
         let body_ms = elapsed_ms(self.headers_at);
+        if let Some(context) = self.turn_context {
+            crate::turn_trace::milestone(
+                &context.turn_id(),
+                crate::turn_trace::Stage::ProxyBody,
+                Some(body_ms),
+                Some(match termination {
+                    "complete" | "completed" | "eof" if self.status < 400 => {
+                        crate::turn_trace::Outcome::Completed
+                    }
+                    "client_disconnect" => crate::turn_trace::Outcome::Cancelled,
+                    _ => crate::turn_trace::Outcome::Failed,
+                }),
+            );
+        }
         let downstream_headers_available = self.downstream_headers_ms.is_some();
         let downstream_headers_ms = self.downstream_headers_ms.unwrap_or(0);
         tracing::info!(

@@ -256,6 +256,9 @@ fn provider_stream_inner(
                 } else if delivery::claim_stream(&state.db, &event_key, status).await.unwrap_or(false) {
                     guard.disarm();
                     if let Ok(Some(event)) = state.db.collection::<NyxbotEvent>(EVENTS).find_one(doc! {"_id":&event_key}).await {
+                        if let Some(turn) = &event.turn_id {
+                            crate::turn_trace::milestone(turn, crate::turn_trace::Stage::Channel, None, Some(crate::turn_trace::Outcome::Streamed));
+                        }
                         audit(&state, &event.user_id, "nyxbot_channel_answer_delivery", json!({"event_id":event.id,
                             "conversation_id":event.conversation_id,"turn_id":event.turn_id,"transport":"gateway",
                             "outcome":"streamed","reason":"platform_delivery_unconfirmed"})).await;
@@ -419,6 +422,11 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     let Some(event) = events.find_one(filter).await? else {
         return Ok(());
     };
+    let trace = event
+        .turn_id
+        .as_deref()
+        .and_then(crate::turn_trace::TurnContext::for_turn);
+    crate::turn_trace::scope(trace, async {
     let Some(mut d) = event.delivery.clone() else {
         return Ok(());
     };
@@ -462,6 +470,7 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     }).await? else { return Ok(()); };
     if successful_silence(&message) {
         if delivery::silence(&state.db, event_id).await? {
+            crate::turn_trace::milestone(turn_id, crate::turn_trace::Stage::Channel, None, Some(crate::turn_trace::Outcome::Silent));
             audit(
                 state,
                 &event.user_id,
@@ -533,6 +542,7 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         Ok(true) => "sent",
         Ok(false) | Err(_) => "unknown",
     };
+    crate::turn_trace::milestone(turn_id, crate::turn_trace::Stage::Channel, None, Some(if status == "sent" { crate::turn_trace::Outcome::Confirmed } else { crate::turn_trace::Outcome::Unknown }));
     delivery::finish(&state.db, event_id, &claim, status).await?;
     events.update_one(doc! {"_id": event_id}, doc! {"$set": {"status": if message.status == "completed" { "completed" } else { "failed" }}}).await?;
     audit(
@@ -548,6 +558,7 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     )
     .await;
     Ok(())
+    }).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -892,82 +903,102 @@ pub(super) async fn dispatch_occurrence(
     text: &str,
     occurrence: Option<&str>,
 ) -> AppResult<&'static str> {
-    if d.origin.thread.is_some() && d.transport == "direct" {
-        thread_follow::send(
+    let mut operation = crate::turn_trace::Operation::start(
+        event
+            .turn_id
+            .as_deref()
+            .and_then(crate::turn_trace::TurnContext::for_turn),
+        crate::turn_trace::Stage::Channel,
+    );
+    let result: AppResult<&'static str> = crate::turn_trace::scope(operation.context(), async {
+        if d.origin.thread.is_some() && d.transport == "direct" {
+            thread_follow::send(
+                state,
+                &event.user_id,
+                &d.origin,
+                &conversation.id,
+                text,
+                None,
+            )
+            .await?;
+            return Ok("confirmed");
+        }
+        if d.transport == "direct" {
+            // Route-key auth rechecks the current route; an expired callback token
+            // never extends the sender's authority. The exact inbound preserves topics.
+            direct_reply(state, channel, &event.event_id, text, None).await?;
+            return Ok("confirmed");
+        }
+        let Some(key) = decrypt_agent_key(state, channel).await? else {
+            return Ok("rejected");
+        };
+        let (path, idempotency) = if let Some(ciphertext) = &d.target_ciphertext {
+            if d.target_expires_at.is_none_or(|t| t <= Utc::now()) {
+                return Ok("rejected");
+            }
+            let reference = Zeroizing::new(
+                String::from_utf8(state.encryption_keys.decrypt(ciphertext).await?)
+                    .map_err(|_| AppError::Internal("Channel target unavailable".into()))?,
+            );
+            (
+                Zeroizing::new(format!("/reply-targets/{}/messages", urlencode(&reference))),
+                Some(occurrence.unwrap_or(event.id.as_str())),
+            )
+        } else {
+            // Compatibility with gateways predating reply targets: the original
+            // short-lived event is safe once, but never replaced by a newer event.
+            if event.created_at + ChronoDuration::minutes(29) <= Utc::now() {
+                return Ok("rejected");
+            }
+            let reference = event_reference(state, event).await?;
+            (
+                Zeroizing::new(format!("/events/{}/replies", urlencode(&reference))),
+                occurrence,
+            )
+        };
+        let mut message = json!({"text": text});
+        if d.origin.thread.is_some() {
+            message["thread_reply"] = json!(true);
+        }
+        let response = gateway_call(
             state,
-            &event.user_id,
-            &d.origin,
-            &conversation.id,
-            text,
-            None,
+            reqwest::Method::POST,
+            &path,
+            &key,
+            Some(&message),
+            idempotency,
         )
         .await?;
-        return Ok("confirmed");
-    }
-    if d.transport == "direct" {
-        // Route-key auth rechecks the current route; an expired callback token
-        // never extends the sender's authority. The exact inbound preserves topics.
-        direct_reply(state, channel, &event.event_id, text, None).await?;
-        return Ok("confirmed");
-    }
-    let Some(key) = decrypt_agent_key(state, channel).await? else {
-        return Ok("rejected");
-    };
-    let (path, idempotency) = if let Some(ciphertext) = &d.target_ciphertext {
-        if d.target_expires_at.is_none_or(|t| t <= Utc::now()) {
-            return Ok("rejected");
+        if !(200..300).contains(&response.status) {
+            // A gateway failure can follow a platform send; it is not proof of rejection.
+            return Ok(if (500..600).contains(&response.status) {
+                "unknown"
+            } else {
+                "rejected"
+            });
         }
-        let reference = Zeroizing::new(
-            String::from_utf8(state.encryption_keys.decrypt(ciphertext).await?)
-                .map_err(|_| AppError::Internal("Channel target unavailable".into()))?,
-        );
-        (
-            Zeroizing::new(format!("/reply-targets/{}/messages", urlencode(&reference))),
-            Some(occurrence.unwrap_or(event.id.as_str())),
-        )
-    } else {
-        // Compatibility with gateways predating reply targets: the original
-        // short-lived event is safe once, but never replaced by a newer event.
-        if event.created_at + ChronoDuration::minutes(29) <= Utc::now() {
-            return Ok("rejected");
-        }
-        let reference = event_reference(state, event).await?;
-        (
-            Zeroizing::new(format!("/events/{}/replies", urlencode(&reference))),
-            occurrence,
-        )
-    };
-    let mut message = json!({"text": text});
-    if d.origin.thread.is_some() {
-        message["thread_reply"] = json!(true);
-    }
-    let response = gateway_call(
-        state,
-        reqwest::Method::POST,
-        &path,
-        &key,
-        Some(&message),
-        idempotency,
-    )
-    .await?;
-    if !(200..300).contains(&response.status) {
-        // A gateway failure can follow a platform send; it is not proof of rejection.
-        return Ok(if (500..600).contains(&response.status) {
-            "unknown"
-        } else {
-            "rejected"
-        });
-    }
-    let outcome = response
-        .body
-        .pointer("/delivery/outcome")
-        .or_else(|| response.body.pointer("/message/delivery/outcome"))
-        .and_then(Value::as_str);
-    Ok(match outcome {
-        Some("confirmed") => "confirmed",
-        Some("rejected") => "rejected",
-        _ => "unknown",
+        let outcome = response
+            .body
+            .pointer("/delivery/outcome")
+            .or_else(|| response.body.pointer("/message/delivery/outcome"))
+            .and_then(Value::as_str);
+        Ok(match outcome {
+            Some("confirmed") => "confirmed",
+            Some("rejected") => "rejected",
+            _ => "unknown",
+        })
     })
+    .await;
+    operation.finish(
+        match &result {
+            Ok("confirmed") => crate::turn_trace::Outcome::Confirmed,
+            Ok("rejected") => crate::turn_trace::Outcome::Rejected,
+            _ => crate::turn_trace::Outcome::Unknown,
+        },
+        None,
+        None,
+    );
+    result
 }
 
 fn successful_silence(message: &AssistantMessage) -> bool {

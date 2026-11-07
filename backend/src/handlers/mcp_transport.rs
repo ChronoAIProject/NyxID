@@ -1760,15 +1760,20 @@ pub async fn mcp_post(
                 Err(r) => return r,
             };
             let sse_capable = accepts_sse(&headers);
-            handle_tools_call(
-                &state,
-                &auth,
-                sid.as_deref(),
-                &request,
-                sse_capable,
-                billing_egress_permit,
-            )
-            .await
+            let trace = crate::turn_trace::TurnContext::for_request(
+                &headers,
+                auth.chat.as_ref().and_then(|chat| chat.turn_id.as_deref()),
+            );
+            trace
+                .scope(handle_tools_call(
+                    &state,
+                    &auth,
+                    sid.as_deref(),
+                    &request,
+                    sse_capable,
+                    billing_egress_permit,
+                ))
+                .await
         }
 
         "ping" => rpc_success(request.id, serde_json::json!({})),
@@ -1786,6 +1791,13 @@ async fn handle_public_rpc(
     request: &JsonRpcRequest,
     authority: &crate::services::platform_public_tools::PublicMcpAuthority,
 ) -> Response {
+    let trace = crate::turn_trace::TurnContext::for_request(
+        headers,
+        (request.method == "tools/call").then_some(authority.context().turn.turn_id.as_str()),
+    );
+    let mut operation =
+        crate::turn_trace::Operation::start(trace.context(), crate::turn_trace::Stage::Mcp);
+    let response = trace.scope(crate::turn_trace::scope(operation.context(), async {
     use crate::services::platform_public_tools as public;
     if let Err(error) = authority.validate_callback_headers(headers) {
         return app_error_to_rpc(request.id.clone(), &error);
@@ -1868,6 +1880,18 @@ async fn handle_public_rpc(
         }
         _ => rpc_error(request.id.clone(), -32601, "Public method not allowed"),
     }
+
+    })).await;
+    operation.finish(
+        if tool_succeeded(&response) {
+            crate::turn_trace::Outcome::Completed
+        } else {
+            crate::turn_trace::Outcome::Failed
+        },
+        Some(response.status().as_u16()),
+        None,
+    );
+    response
 }
 
 /// Translate an `AppError` into a JSON-RPC response. Used when callers hold the
@@ -2540,30 +2564,47 @@ async fn handle_tools_call(
     client_accepts_sse: bool,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Response {
-    // Ineligible callers do not resolve the flag or add a database command.
-    let enabled = match auth.chat.as_ref() {
-        Some(chat) if crate::services::generated_artifacts::eligible(chat) => {
-            crate::services::generated_artifacts::enabled(&state.db, &chat.user_id)
-                .await
-                .unwrap_or(false)
-        }
-        _ => false,
-    };
-    let cell = tokio::sync::OnceCell::new();
-    let _ = cell.set(enabled);
-    GENERATED_ARTIFACTS_ENABLED
-        .scope(
-            cell,
-            handle_tools_call_inner(
-                state,
-                auth,
-                session_id,
-                request,
-                client_accepts_sse,
-                billing_egress_permit,
-            ),
-        )
-        .await
+    let mut operation = crate::turn_trace::Operation::start(
+        crate::turn_trace::TurnContext::current(),
+        crate::turn_trace::Stage::Mcp,
+    );
+    let response = crate::turn_trace::scope(operation.context(), async {
+        // Ineligible callers do not resolve the flag or add a database command.
+        let enabled = match auth.chat.as_ref() {
+            Some(chat) if crate::services::generated_artifacts::eligible(chat) => {
+                crate::services::generated_artifacts::enabled(&state.db, &chat.user_id)
+                    .await
+                    .unwrap_or(false)
+            }
+            _ => false,
+        };
+        let cell = tokio::sync::OnceCell::new();
+        let _ = cell.set(enabled);
+        GENERATED_ARTIFACTS_ENABLED
+            .scope(
+                cell,
+                handle_tools_call_inner(
+                    state,
+                    auth,
+                    session_id,
+                    request,
+                    client_accepts_sse,
+                    billing_egress_permit,
+                ),
+            )
+            .await
+    })
+    .await;
+    operation.finish(
+        if tool_succeeded(&response) {
+            crate::turn_trace::Outcome::Completed
+        } else {
+            crate::turn_trace::Outcome::Failed
+        },
+        Some(response.status().as_u16()),
+        None,
+    );
+    response
 }
 async fn handle_tools_call_inner(
     state: &AppState,
@@ -12028,3 +12069,77 @@ mod broad_enrollment_tests {
 #[cfg(test)]
 #[path = "memory_write_tests.rs"]
 mod memory_write_tests;
+
+#[cfg(test)]
+mod turn_trace_parity_tests {
+    use super::*;
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
+
+    #[tokio::test]
+    async fn mcp_activity_and_error_command_count_parity() {
+        let mut measured = Vec::new();
+        for enabled in [false, true] {
+            let mut f =
+                crate::services::assistant_authority_tests::orchestrator_fixture("turn_trace_mcp")
+                    .await;
+            let auth = super::machine_mcp_tests::authenticated_machine_chat(&f).await;
+            let commands = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
+            let recorded = commands.clone();
+            let handler = EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event {
+                    let collection = event.command.get_str(&event.command_name).unwrap_or("");
+                    *recorded
+                        .lock()
+                        .unwrap()
+                        .entry(format!("{}:{collection}", event.command_name))
+                        .or_default() += 1;
+                }
+            });
+            let monitored =
+                crate::test_utils::connect_transaction_test_database_with_command_handler(
+                    "turn_trace_monitor",
+                    handler,
+                )
+                .await;
+            f.state.db = monitored.client().database(f.state.db.name());
+            commands.lock().unwrap().clear();
+            let trace = enabled.then(|| {
+                crate::turn_trace::TurnContext::for_turn(f.chat.turn_id.as_deref().unwrap())
+                    .unwrap()
+            });
+            let response = crate::turn_trace::scope(
+                trace,
+                Box::pin(handle_tools_call(
+                    &f.state,
+                    &auth,
+                    None,
+                    &JsonRpcRequest {
+                        jsonrpc: JSONRPC_VERSION.into(),
+                        id: Some(serde_json::json!(1)),
+                        method: "tools/call".into(),
+                        params: Some(serde_json::json!({"name":"nyx__call_tool","arguments":{}})),
+                    },
+                    false,
+                    crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+                )),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!tool_succeeded(&response));
+            measured.push(commands.lock().unwrap().clone());
+            f.state.db.drop().await.unwrap();
+            monitored.drop().await.unwrap();
+        }
+        assert_eq!(measured[0], measured[1]);
+        assert!(
+            measured[0]
+                .keys()
+                .any(|key| key.starts_with("update:") || key.starts_with("findAndModify:"))
+        );
+        eprintln!("turn trace MCP command parity: {:?}", measured[0]);
+    }
+}

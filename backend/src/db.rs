@@ -733,6 +733,8 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     )
     .await?;
 
+    crate::services::admin_audit_service::ensure_turn_trace_index(db).await?;
+
     // Bounded machine metadata pages, with and without an agent filter.
     for keys in [
         doc! {"event_type":1,"event_data.node_id":1,"created_at":-1,"_id":-1},

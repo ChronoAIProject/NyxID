@@ -209,7 +209,25 @@ pub fn settled(
     error: Option<&TurnError>,
     now: DateTime<Utc>,
 ) {
+    crate::turn_trace::milestone(
+        &turn.turn_id,
+        crate::turn_trace::Stage::Execution,
+        Some((now - turn.started_at).num_milliseconds().max(0) as u64),
+        Some(match error {
+            Some(error) if error.code == "cancelled" => crate::turn_trace::Outcome::Cancelled,
+            Some(_) => crate::turn_trace::Outcome::Failed,
+            None => crate::turn_trace::Outcome::Completed,
+        }),
+    );
     let data = metadata(turn, now);
+    if let Some(wait) = data.capacity_wait_ms.filter(|wait| *wait > 0) {
+        crate::turn_trace::milestone(
+            &turn.turn_id,
+            crate::turn_trace::Stage::CapacityWait,
+            Some(wait),
+            None,
+        );
+    }
     let worker = super::assistant_engine_worker::instance();
     let failure = error
         .and_then(|error| error.metadata.as_ref())
@@ -326,9 +344,18 @@ pub fn capacity_message(wait_ms: Option<u64>) -> String {
 /// One write on the first semantic model output, never on every SSE chunk.
 pub async fn first_output(db: &Database, row: &AssistantConversation) -> AppResult<()> {
     let turn = row.active_turn.as_ref().expect("claimed turn");
-    db.collection::<bson::Document>(COLLECTION_NAME).update_one(
+    let elapsed = (Utc::now() - turn.started_at).num_milliseconds().max(0);
+    let saved = db.collection::<bson::Document>(COLLECTION_NAME).update_one(
         doc! {"_id":&row.id,"active_turn.turn_id":&turn.turn_id,"active_turn.timing.first_output_ms":bson::Bson::Null},
-        doc! {"$set":{"active_turn.timing.first_output_ms":(Utc::now()-turn.started_at).num_milliseconds().max(0)}},
+        doc! {"$set":{"active_turn.timing.first_output_ms":elapsed}},
     ).await?;
+    if saved.modified_count == 1 {
+        crate::turn_trace::milestone(
+            &turn.turn_id,
+            crate::turn_trace::Stage::FirstOutput,
+            Some(elapsed as u64),
+            None,
+        );
+    }
     Ok(())
 }

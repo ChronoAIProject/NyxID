@@ -744,6 +744,11 @@ pub(crate) async fn run_owner_turn(
     mut permit: DirectChatPermit,
     mut events: Events,
 ) -> Option<OwnerTurnSettlement> {
+    let trace = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| crate::turn_trace::TurnContext::for_turn(&turn.turn_id));
+    crate::turn_trace::scope(trace, async move {
     let _typing = egress.channel_typing(&row).map(AbortOnDropHandle::new);
     if row
         .active_turn
@@ -998,6 +1003,8 @@ pub(crate) async fn run_owner_turn(
         }),
         SettledExecution::Deleted | SettledExecution::Unconfirmed => None,
     }
+
+    }).await
 }
 
 /// Bound on the queue's own writes: a stalled write must not hold capacity.

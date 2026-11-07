@@ -284,3 +284,86 @@ async fn complete_reply_waits_for_all_acceptance_even_beyond_cma_five_second_dea
     server.verify().await;
     cleanup(fixture).await;
 }
+
+#[tokio::test]
+async fn turn_trace_multipart_relay_command_count_parity() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
+    let mut measured = Vec::new();
+    for enabled in [false, true] {
+        let (mut fixture, server) = setup().await;
+        Mock::given(path("/botbot-token/sendMessage"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok":true,"result":{"message_id":43}})),
+            )
+            .expect(3)
+            .mount(&server)
+            .await;
+        let counts = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
+        let observed = counts.clone();
+        let handler = EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                let collection = event.command.get_str(&event.command_name).unwrap_or("");
+                *observed
+                    .lock()
+                    .unwrap()
+                    .entry(format!("{}:{collection}", event.command_name))
+                    .or_default() += 1;
+            }
+        });
+        let monitored = crate::test_utils::connect_transaction_test_database_with_command_handler(
+            "turn_trace_relay_monitor",
+            handler,
+        )
+        .await;
+        fixture.state.db = monitored.client().database(fixture.state.db.name());
+        counts.lock().unwrap().clear();
+        let trace = enabled.then(|| {
+            crate::turn_trace::TurnContext::for_turn(&uuid::Uuid::new_v4().to_string()).unwrap()
+        });
+        let (response, records) = crate::turn_trace::capture(crate::turn_trace::scope(
+            trace,
+            post(
+                &fixture,
+                &valid_reply_token(&fixture),
+                payload(&fixture, &"a".repeat(9000)),
+            ),
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        measured.push(counts.lock().unwrap().clone());
+        if enabled {
+            assert_eq!(
+                records
+                    .iter()
+                    .filter(|r| r["stage"] == "channel_part"
+                        && r["phase"] == "end"
+                        && r["outcome"] == "confirmed")
+                    .count(),
+                3
+            );
+            assert!(
+                records
+                    .iter()
+                    .any(|r| r["stage"] == "channel" && r["outcome"] == "confirmed")
+            );
+        }
+        server.verify().await;
+        cleanup(fixture).await;
+        monitored.drop().await.unwrap();
+    }
+    assert_eq!(measured[0], measured[1]);
+    assert!(
+        measured[0]
+            .keys()
+            .any(|key| key.contains("channel_reply_deliveries"))
+    );
+    eprintln!(
+        "turn trace multipart relay command parity: {:?}",
+        measured[0]
+    );
+}

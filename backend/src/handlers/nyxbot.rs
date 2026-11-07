@@ -5078,6 +5078,7 @@ async fn custom_responses(
     };
     let now = Utc::now();
     let event = NyxbotEvent {
+        trace_request_id: crate::turn_trace::ingress_request_id(),
         source_media_declared: None,
         media: None,
         native_bot_budget_claimed: false,
@@ -5455,6 +5456,7 @@ async fn responses_with_producers_impl(
         ChronoDuration::hours(EVENT_RETENTION_HOURS)
     };
     let admitted = NyxbotEvent {
+        trace_request_id: crate::turn_trace::ingress_request_id(),
         media,
         source_media_declared: Some(source_media_declared),
         native_bot_budget_claimed: false,
@@ -5530,7 +5532,7 @@ async fn responses_with_producers_impl(
         let task_state = state.clone();
         let task_row = row.clone();
         let task_response = response_id.clone();
-        tokio::spawn(async move {
+        crate::turn_trace::spawn(async move {
             let _ = Box::pin(dispatch_relay_response(
                 task_state,
                 task_row,
@@ -6191,98 +6193,107 @@ pub async fn deliver_to(
     text: &str,
     images: Option<&images::ImageSendPlan>,
 ) {
-    // Boxed: the image and platform sends make this future large, and it is
-    // awaited deep inside turn settlement.
-    let result: AppResult<()> = Box::pin(async {
-        if origin.thread.is_some() {
-            let image_turn = images.and_then(|plan| {
-                row.active_turn.as_ref().map(|turn| images::ImageTurn {
-                    plan,
-                    turn_id: &turn.turn_id,
-                    app_visible: !row.guest_turn && row.channel.is_none(),
-                })
-            });
-            return thread_follow::send(state, &row.user_id, origin, &row.id, text, image_turn)
-                .await;
-        }
-        let Some((channel, thread)) = delivery_target(state, row, origin).await? else {
-            return Ok(());
-        };
-        if origin.native_event_id.is_some() && channel.gateway_source.is_none() {
-            return Err(AppError::NotFound("Native reply source unavailable".into()));
-        }
-        let mut reply = bounded_reply(text);
-        if let Some(plan) = images
-            && let Some(turn) = row.active_turn.as_ref()
-        {
-            let report = images::report_or_failure(
-                state,
-                images::ImageSendContext {
-                    owner: &row.user_id,
-                    conversation_id: &row.id,
-                    turn_id: &turn.turn_id,
-                    channel: &channel,
-                    thread: &thread,
-                    anchor: images::thread_anchor(&channel, &thread),
-                    audience: images::ImageAudience {
-                        owner_private: !row.guest_turn
-                            && (row.channel.is_none()
-                                || (thread.kind.as_deref() == Some("private")
-                                    && thread.owner_chat)),
-                    },
-                    deadline: None,
-                    initiated: None,
-                    fence: None,
-                },
-                plan,
-            )
-            .await;
-            reply = images::append_failure(&reply, &report);
-        }
-        if reply.trim().is_empty() {
-            return Ok(());
-        }
-        if channel.gateway_source.is_some() {
-            return native_responses::send_update(state, &channel, origin, &row.id, &reply).await;
-        }
-        // A chat from before its bot moved to the gateway has no gateway
-        // reference yet: it is answered through NyxID's relay, as before.
-        let relay_era = thread.event_ref_ciphertext.is_none() && thread.last_message_id.is_some();
-        if channel.transport == "gateway" && !relay_era {
-            let (Some(ciphertext), Some(expires_at)) = (
-                thread.event_ref_ciphertext.as_ref(),
-                thread.event_ref_expires_at,
-            ) else {
+    let trace = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| crate::turn_trace::TurnContext::for_turn(&turn.turn_id));
+    crate::turn_trace::scope(trace, async {
+        // Boxed: the image and platform sends make this future large, and it is
+        // awaited deep inside turn settlement.
+        let result: AppResult<()> = Box::pin(async {
+            if origin.thread.is_some() {
+                let image_turn = images.and_then(|plan| {
+                    row.active_turn.as_ref().map(|turn| images::ImageTurn {
+                        plan,
+                        turn_id: &turn.turn_id,
+                        app_visible: !row.guest_turn && row.channel.is_none(),
+                    })
+                });
+                return thread_follow::send(state, &row.user_id, origin, &row.id, text, image_turn)
+                    .await;
+            }
+            let Some((channel, thread)) = delivery_target(state, row, origin).await? else {
                 return Ok(());
             };
-            if expires_at <= Utc::now() {
+            if origin.native_event_id.is_some() && channel.gateway_source.is_none() {
+                return Err(AppError::NotFound("Native reply source unavailable".into()));
+            }
+            let mut reply = bounded_reply(text);
+            if let Some(plan) = images
+                && let Some(turn) = row.active_turn.as_ref()
+            {
+                let report = images::report_or_failure(
+                    state,
+                    images::ImageSendContext {
+                        owner: &row.user_id,
+                        conversation_id: &row.id,
+                        turn_id: &turn.turn_id,
+                        channel: &channel,
+                        thread: &thread,
+                        anchor: images::thread_anchor(&channel, &thread),
+                        audience: images::ImageAudience {
+                            owner_private: !row.guest_turn
+                                && (row.channel.is_none()
+                                    || (thread.kind.as_deref() == Some("private")
+                                        && thread.owner_chat)),
+                        },
+                        deadline: None,
+                        initiated: None,
+                        fence: None,
+                    },
+                    plan,
+                )
+                .await;
+                reply = images::append_failure(&reply, &report);
+            }
+            if reply.trim().is_empty() {
                 return Ok(());
             }
-            let event_ref = Zeroizing::new(
-                String::from_utf8(state.encryption_keys.decrypt(ciphertext).await?)
-                    .map_err(|_| AppError::Internal("Event reference unavailable".into()))?,
-            );
-            let Some(agent_key) = decrypt_agent_key(state, &channel).await? else {
-                return Ok(());
-            };
-            gateway_call(
-                state,
-                reqwest::Method::POST,
-                &format!("/events/{}/replies", urlencode(&event_ref)),
-                &agent_key,
-                Some(&json!({"text": reply})),
-                None,
-            )
-            .await?;
-        } else if let Some(message_id) = thread.last_message_id.as_deref() {
-            direct_reply(state, &channel, message_id, &reply, None).await?;
+            if channel.gateway_source.is_some() {
+                return native_responses::send_update(state, &channel, origin, &row.id, &reply)
+                    .await;
+            }
+            // A chat from before its bot moved to the gateway has no gateway
+            // reference yet: it is answered through NyxID's relay, as before.
+            let relay_era =
+                thread.event_ref_ciphertext.is_none() && thread.last_message_id.is_some();
+            if channel.transport == "gateway" && !relay_era {
+                let (Some(ciphertext), Some(expires_at)) = (
+                    thread.event_ref_ciphertext.as_ref(),
+                    thread.event_ref_expires_at,
+                ) else {
+                    return Ok(());
+                };
+                if expires_at <= Utc::now() {
+                    return Ok(());
+                }
+                let event_ref = Zeroizing::new(
+                    String::from_utf8(state.encryption_keys.decrypt(ciphertext).await?)
+                        .map_err(|_| AppError::Internal("Event reference unavailable".into()))?,
+                );
+                let Some(agent_key) = decrypt_agent_key(state, &channel).await? else {
+                    return Ok(());
+                };
+                gateway_call(
+                    state,
+                    reqwest::Method::POST,
+                    &format!("/events/{}/replies", urlencode(&event_ref)),
+                    &agent_key,
+                    Some(&json!({"text": reply})),
+                    None,
+                )
+                .await?;
+            } else if let Some(message_id) = thread.last_message_id.as_deref() {
+                direct_reply(state, &channel, message_id, &reply, None).await?;
+            }
+            Ok(())
+        })
+        .await;
+        if let Err(error) = result {
+            tracing::debug!(%error, "NyxBot channel update not delivered");
         }
-        Ok(())
     })
-    .await;
-    if let Err(error) = result {
-        tracing::debug!(%error, "NyxBot channel update not delivered");
-    }
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -6530,6 +6541,7 @@ pub async fn relay_callback(
         ChronoDuration::hours(EVENT_RETENTION_HOURS)
     };
     let admitted = NyxbotEvent {
+        trace_request_id: crate::turn_trace::ingress_request_id(),
         media,
         source_media_declared: Some(source_media_declared),
         native_bot_budget_claimed: false,
@@ -6629,7 +6641,7 @@ pub async fn relay_callback(
     } else {
         None
     };
-    tokio::spawn(async move {
+    crate::turn_trace::spawn(async move {
         let result: AppResult<()> = async {
             use crate::models::channel_thread::ThreadSenderKind;
             if sender_kind == ThreadSenderKind::Unknown {
