@@ -51,7 +51,10 @@ import {
   pushContent,
 } from "./workspaceNavigationTestHarness";
 import { dismissWorkspaceSheetAction } from "./navigationHierarchy";
-import { workspaceContentAnimation } from "../components/workspace/workspacePushState";
+import {
+  workspaceContentAnimation,
+  workspaceSidebarLayout,
+} from "../components/workspace/workspacePushState";
 
 /** Extract actual declarations so App's splash/network/push startup effects never execute. */
 function shellSource() {
@@ -76,13 +79,15 @@ function shellSource() {
   );
 }
 
-function setup(deferFade = false) {
+function setup(deferFade = false, initialWidth = 390) {
   const fades: (() => void)[] = [];
   const sequence: string[] = [];
   let timerId = 0;
   const timers = new Map<number, { callback: () => void; delay: number }>();
   let rootState = fixture();
   let authenticated = true;
+  let width = initialWidth;
+  let navigationBlocked = false;
   let authEpoch = 0;
   let ready = true;
   let rootReads = 0;
@@ -188,6 +193,9 @@ function setup(deferFade = false) {
     useTheme: () => ({ mode: "dark" }),
     useSafeAreaInsets: () => ({ top: 40 }),
     useAuthSession: () => ({ isAuthenticated: authenticated }),
+    useWindowDimensions: () => ({ width, height: 1024 }),
+    workspaceSidebarLayout,
+    findNodeHandle: () => 300,
     ...Object.fromEntries(
       [
         "NavigationContainer",
@@ -242,6 +250,7 @@ function setup(deferFade = false) {
           setCurrentRouteName: () => {},
           flushPendingChallengeTapNavigation: () => {},
           onNavigationGuardChange: () => {},
+          navigationBlocked,
           pushToast: null,
         });
       }
@@ -345,6 +354,16 @@ function setup(deferFade = false) {
     },
     readiness: (next: boolean) => {
       ready = next;
+    },
+    resize: (next: number) => {
+      width = next;
+      dirty = true;
+      flush();
+    },
+    blockNavigation: (blocked: boolean) => {
+      navigationBlocked = blocked;
+      dirty = true;
+      flush();
     },
     hasDrawer: () =>
       elements(rendered).some((item) => item.type === "WorkspaceDrawer"),
@@ -845,4 +864,102 @@ test("destination fades old root before the animation:none swap and reveals only
   assert.equal(env.shell().props.visible, false);
   env.paint();
   assert.equal(env.sequence.filter((step) => step === "fade in").length, 1);
+});
+
+test("wide windows show the sidebar immediately and allow consecutive guarded destination selections", () => {
+  const x = setup(false, 1194);
+  assert.equal(x.drawer().props.visible, true);
+  assert.equal(x.shell().props.presented, false);
+  assert.equal(x.navigator().props.suppressWorkspaceAnimation, true);
+  x.drawer().props.onNavigate("Machines");
+  x.flush();
+  assert.equal(x.dispatched.length, 1);
+  assert.equal(x.watchdogs().length, 0);
+  assert.equal(x.sequence.includes("fade out"), false);
+  x.commitLast();
+  x.drawer().props.onNavigate("Plugins");
+  x.flush();
+  assert.equal(x.dispatched.length, 2);
+  assert.equal(x.drawer().props.visible, true);
+  x.blockNavigation(true);
+  x.drawer().props.onNavigate("Machines");
+  assert.equal(
+    x.dispatched.length,
+    2,
+    "a critical write still blocks sidebar navigation",
+  );
+  x.blockNavigation(false);
+  x.drawer().props.onNavigate("Activity");
+  assert.equal(x.dispatched.length, 3);
+});
+
+test("iPad resizing fences an unfinished compact selection and returns to a closed drawer", () => {
+  const x = setup(true, 820);
+  x.open();
+  x.drawer().props.onNavigate("Machines");
+  x.flush();
+  assert.equal(x.watchdogs().length, 1);
+  x.resize(1194);
+  assert.equal(x.drawer().props.visible, true);
+  assert.equal(x.shell().props.visible, false);
+  assert.equal(x.shell().props.presented, false);
+  assert.equal(x.watchdogs().length, 0);
+  x.finishFade();
+  x.flush();
+  assert.equal(
+    x.dispatched.length,
+    0,
+    "the old fade cannot change the resized navigator",
+  );
+  x.drawer().props.onNavigate("Plugins");
+  x.commitLast();
+  x.resize(507);
+  assert.equal(x.drawer().props.visible, false);
+  assert.equal(x.shell().props.presented, false);
+  assert.equal(x.navigator().props.suppressWorkspaceAnimation, false);
+  x.open();
+  assert.equal(x.shell().props.visible, true);
+});
+
+test("persistent sidebar opens account sheets without hiding or resetting the selected chat", () => {
+  const x = setup(false, 1024);
+  x.drawer().props.onNavigate("AccountSettings");
+  x.commitLast();
+  assert.equal(x.shell().props.obscured, true);
+  assert.equal(x.drawer().props.visible, true);
+  assert.equal(x.shell().props.presented, false);
+  x.authenticate(false);
+  assert.equal(x.hasDrawer(), false);
+});
+
+test("deferred persistent menu focus cannot land on a compact or sheet-covered sidebar", () => {
+  const resized = setup(false, 1194);
+  resized.navigator().props.onOpenMenu();
+  resized.resize(507);
+  resized.flushFocus();
+  assert.deepEqual(resized.focused, []);
+
+  const covered = setup(false, 1194);
+  covered.navigator().props.onOpenMenu();
+  covered.drawer().props.onNavigate("AccountSettings");
+  covered.commitLast();
+  covered.flushFocus();
+  assert.deepEqual(covered.focused, []);
+
+  const active = setup(false, 1194);
+  active.navigator().props.onOpenMenu();
+  active.flushFocus();
+  assert.deepEqual(active.focused, [300]);
+});
+
+test("critical writes block persistent sidebar Settings and QR/terminal sheet shortcuts", () => {
+  const x = setup(false, 1194);
+  x.blockNavigation(true);
+  x.drawer().props.onNavigate("AccountSettings");
+  x.drawer().props.onQuickAction("scanner");
+  x.drawer().props.onQuickAction("terminal");
+  assert.equal(x.dispatched.length, 0);
+  x.blockNavigation(false);
+  x.drawer().props.onNavigate("AccountSettings");
+  assert.equal(x.dispatched.length, 1);
 });

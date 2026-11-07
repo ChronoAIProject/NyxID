@@ -11,7 +11,10 @@ import {
   View,
 } from "react-native";
 import { ChevronLeft, KeyRound, UserRound } from "lucide-react-native";
-import { SettingsGroup, SettingsRow } from "../../components/settings/SettingsList";
+import {
+  SettingsGroup,
+  SettingsRow,
+} from "../../components/settings/SettingsList";
 import type { SheetScreenProps } from "../../app/navigationTypes";
 import { workspaceNavigateAction } from "../../app/navigationHierarchy";
 import { ScreenContainer } from "../../components/ScreenContainer";
@@ -306,7 +309,10 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
           behavior={Platform.OS === "ios" ? "padding" : undefined}
         >
           <ScrollView
-            contentContainerStyle={styles.content}
+            contentContainerStyle={[
+              styles.content,
+              !inWorkspaceSheet && styles.rootContent,
+            ]}
             keyboardShouldPersistTaps="handled"
           >
             {stepUp.prompt}
@@ -322,7 +328,11 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
         <ScrollView
-          contentContainerStyle={[styles.content, { gap: 16 }]}
+          contentContainerStyle={[
+            styles.content,
+            !inWorkspaceSheet && styles.rootContent,
+            { gap: 16 },
+          ]}
           keyboardShouldPersistTaps="handled"
         >
           {!inWorkspaceSheet && (

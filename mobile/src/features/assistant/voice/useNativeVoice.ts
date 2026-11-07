@@ -217,12 +217,12 @@ export function useNativeVoice(
           )
             setHolding(false);
           setSnapshot(value);
-          setStarting(value.session.state === "starting");
-          setConnected(
-            value.session.state === "active" ||
-              value.session.state === "closing",
-          );
           refresh();
+        },
+        onReady: () => {
+          if (!valid() || current.current !== next) return;
+          setStarting(false);
+          setConnected(true);
         },
         onError: (message, nextRecovery) => {
           if (valid()) reportError(message, nextRecovery);
@@ -370,6 +370,11 @@ export function useNativeVoice(
     },
     resumeAudio() {
       if (!sameScope()) return;
+      if (
+        current.current &&
+        error === "Tap Resume audio to hear the assistant."
+      )
+        reportError();
       return current.current?.resumeAudio();
     },
     stopTask,

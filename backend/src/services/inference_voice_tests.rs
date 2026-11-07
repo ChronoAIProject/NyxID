@@ -2,6 +2,227 @@ use super::{inference_service as inference, inference_voice as voice};
 use crate::models::downstream_service::{test_helpers::dummy_service, *};
 use mongodb::bson::{self, doc};
 
+// Frozen pre-correction seed: compare the complete stored array, including
+// labels and order, rather than deriving history from today's defaults.
+fn legacy_openai_voice_choices() -> Vec<VoiceChoice> {
+    [
+        ("marin", "Marin"),
+        ("alloy", "Alloy"),
+        ("ash", "Ash"),
+        ("aube", "Aube"),
+        ("ballad", "Ballad"),
+        ("beacon", "Beacon"),
+        ("bossa", "Bossa"),
+        ("brise", "Brise"),
+        ("cedar", "Cedar"),
+        ("cinder", "Cinder"),
+        ("coral", "Coral"),
+        ("delta", "Delta"),
+        ("echo", "Echo"),
+        ("flitz", "Flitz"),
+        ("gleam", "Gleam"),
+        ("harema", "Harema"),
+        ("juni", "Juni"),
+        ("meridian", "Meridian"),
+        ("nira", "Nira"),
+        ("noeul", "Noeul"),
+        ("nuri", "Nuri"),
+        ("quartz", "Quartz"),
+        ("ripple", "Ripple"),
+        ("sage", "Sage"),
+        ("shimmer", "Shimmer"),
+        ("shitan", "Shitan"),
+        ("sillage", "Sillage"),
+        ("stone", "Stone"),
+        ("tempo", "Tempo"),
+        ("verse", "Verse"),
+        ("vesper", "Vesper"),
+        ("willow", "Willow"),
+    ]
+    .into_iter()
+    .map(|(id, label)| VoiceChoice {
+        id: id.into(),
+        label: label.into(),
+    })
+    .collect()
+}
+
+#[test]
+fn openai_voice_seed_matches_provider_choices_without_restricting_admin_additions() {
+    let mut metadata = voice::default_voice("llm-openai").unwrap();
+    assert_eq!(metadata.voices.len(), 31);
+    assert_eq!(metadata.voices[0].id, "marin");
+    assert_eq!(metadata.voices[0].label, "Marin");
+    assert_eq!(
+        metadata
+            .voices
+            .iter()
+            .map(|choice| &choice.id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        31
+    );
+    assert!(
+        metadata
+            .voices
+            .iter()
+            .any(|choice| { choice.id == "shida" && choice.label == "Shida" })
+    );
+    for removed in ["aube", "shitan"] {
+        assert!(!metadata.voices.iter().any(|choice| choice.id == removed));
+        assert!(
+            super::voice::selected_voice(&metadata, &metadata.models[0].id, Some(removed)).is_err()
+        );
+    }
+    assert_eq!(
+        super::voice::selected_voice(&metadata, &metadata.models[0].id, None).unwrap(),
+        "marin"
+    );
+    assert_eq!(
+        super::voice::selected_voice(&metadata, &metadata.models[0].id, Some("shida")).unwrap(),
+        "shida"
+    );
+
+    metadata.voices.push(VoiceChoice {
+        id: "admin-added-voice".into(),
+        label: "Admin voice".into(),
+    });
+    voice::validate(&metadata).unwrap();
+    assert_eq!(
+        super::voice::selected_voice(&metadata, &metadata.models[0].id, Some("admin-added-voice"))
+            .unwrap(),
+        "admin-added-voice"
+    );
+}
+
+#[tokio::test]
+async fn voice_backfill_repairs_only_exact_unmodified_legacy_openai_choices() {
+    let db = crate::test_utils::connect_transaction_test_database("voice_choices_repair").await;
+    let rows = db.collection::<bson::Document>(COLLECTION_NAME);
+    let legacy = legacy_openai_voice_choices();
+    assert_eq!(legacy.len(), 32);
+    let corrected = bson::to_bson(&voice::default_voice("llm-openai").unwrap().voices).unwrap();
+    let mut fixtures = Vec::new();
+    for (id, should_migrate) in [
+        ("legacy-unmodified", true),
+        ("legacy-missing-admin-flag", true),
+        ("legacy-admin-modified", false),
+        ("custom-label", false),
+        ("custom-order", false),
+        ("custom-added", false),
+        ("custom-removed", false),
+        ("custom-only", false),
+        ("other-slug", false),
+        ("other-protocol", false),
+    ] {
+        let mut service = dummy_service();
+        service.id = id.into();
+        service.slug = "llm-openai".into();
+        service.inference_admin_modified = id == "legacy-admin-modified";
+        service.inference = inference::default_inference("llm-openai");
+        let metadata = service.inference.as_mut().unwrap();
+        // Existing backfill owns metrics and missing delegation. Use canonical
+        // populated values so this test isolates the voices-only correction.
+        metadata.model_list = false;
+        metadata.realtime = false;
+        let voice = metadata.voice.as_mut().unwrap();
+        voice.voices = legacy.clone();
+        voice.models.push(VoiceModel {
+            id: "preserved-admin-model".into(),
+            label: "Preserved model".into(),
+            default: false,
+        });
+        match id {
+            "custom-label" => voice.voices[3].label = "Custom Aube label".into(),
+            "custom-order" => voice.voices.swap(0, 1),
+            "custom-added" => voice.voices.push(VoiceChoice {
+                id: "custom-added-voice".into(),
+                label: "Custom added voice".into(),
+            }),
+            "custom-removed" => {
+                voice.voices.remove(3);
+            }
+            "custom-only" => {
+                voice.voices = vec![VoiceChoice {
+                    id: "custom-only-voice".into(),
+                    label: "Custom only voice".into(),
+                }];
+            }
+            "other-protocol" => {
+                voice.protocol = VoiceProtocol::XaiRealtime;
+                voice.usage_source = VoiceUsageSource::ServerMeasured;
+                voice.delegation_model = None;
+            }
+            _ => {}
+        }
+        if id == "other-slug" {
+            service.slug = "custom-openai-catalog".into();
+        }
+        let mut before = bson::to_document(&service).unwrap();
+        if id == "legacy-missing-admin-flag" {
+            before.remove("inference_admin_modified");
+        }
+        // Raw, unknown fields also survive a targeted migration.
+        before.insert(
+            "preserved_migration_metadata",
+            doc! {"note":"keep", "revision":7},
+        );
+        before
+            .get_document_mut("inference")
+            .unwrap()
+            .get_document_mut("voice")
+            .unwrap()
+            .insert("preserved_voice_metadata", doc! {"enabled":true});
+        rows.insert_one(&before).await.unwrap();
+        fixtures.push((id, should_migrate, before));
+    }
+
+    inference::backfill(&db).await.unwrap();
+    let mut after_first = Vec::new();
+    for (id, should_migrate, before) in &fixtures {
+        let after = rows.find_one(doc! {"_id":*id}).await.unwrap().unwrap();
+        let mut expected = before.clone();
+        if *should_migrate {
+            expected
+                .get_document_mut("inference")
+                .unwrap()
+                .get_document_mut("voice")
+                .unwrap()
+                .insert("voices", corrected.clone());
+        }
+        assert_eq!(
+            after, expected,
+            "migration changed unexpected fields for {id}"
+        );
+
+        let mut untouched_before = before.clone();
+        let mut untouched_after = after.clone();
+        for document in [&mut untouched_before, &mut untouched_after] {
+            document
+                .get_document_mut("inference")
+                .unwrap()
+                .get_document_mut("voice")
+                .unwrap()
+                .remove("voices");
+        }
+        assert_eq!(
+            untouched_after, untouched_before,
+            "only inference.voice.voices may change for {id}"
+        );
+        after_first.push((*id, after));
+    }
+
+    inference::backfill(&db).await.unwrap();
+    for (id, expected) in after_first {
+        assert_eq!(
+            rows.find_one(doc! {"_id":id}).await.unwrap().unwrap(),
+            expected,
+            "repeated migration must be idempotent for {id}"
+        );
+    }
+    db.drop().await.unwrap();
+}
+
 #[test]
 fn voice_metadata_derivation_validation_and_rolling_compatibility() {
     for slug in ["llm-openai", "llm-xai"] {

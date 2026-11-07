@@ -101,7 +101,9 @@ function setup(
   input: {
     active?: boolean;
     source?: VoiceOption;
-    saved?: VoicePreferences;
+    saved?: VoicePreferences | null;
+    settingsPending?: boolean;
+    optionsPending?: boolean;
     snapshot?: VoiceSnapshot;
     error?: string;
     recovery?: VoiceStartRecovery;
@@ -111,6 +113,7 @@ function setup(
   } = {},
 ) {
   const events: unknown[][] = [];
+  const savedPreferences: VoicePreferences[] = [];
   let focused = true;
   let online = true;
   let browserFails = false;
@@ -120,6 +123,7 @@ function setup(
     api: {
       savePreferences: async (preferences: VoicePreferences) => {
         events.push(["save", preferences.input_mode]);
+        savedPreferences.push(preferences);
       },
     },
   };
@@ -174,15 +178,19 @@ function setup(
   const query = {
     options: {
       data: { options: [input.source ?? source] },
-      isSuccess: true,
-      isPending: false,
+      isSuccess: !input.optionsPending,
+      isPending: !!input.optionsPending,
       error: null as Error | null,
       refetch: async () => {},
     },
     settings: {
-      data: { voice: input.saved ?? saved },
-      isSuccess: true,
-      isPending: false,
+      data: (input.settingsPending
+        ? undefined
+        : { voice: input.saved === undefined ? saved : input.saved }) as
+        | { voice: VoicePreferences | null }
+        | undefined,
+      isSuccess: !input.settingsPending,
+      isPending: !!input.settingsPending,
       error: null as Error | null,
       refetch: async () => {},
     },
@@ -335,6 +343,7 @@ function setup(
   return {
     harness,
     events,
+    savedPreferences,
     voice,
     levels,
     query,
@@ -375,6 +384,131 @@ test("voice setup starts with the exact saved source, voice, input mode and noti
   assert.equal(f.events[0]?.[0], "start");
   assert.deepEqual(JSON.parse(JSON.stringify(f.events[0]?.[1])), saved);
   assert.equal(f.events[0]?.[2], "openai_live");
+  f.harness.unmount();
+});
+
+test("a saved own-key source wins over an available platform default when starting or changing mode", async () => {
+  const own = {
+    ...source,
+    key_source: "own" as const,
+    connection_id: sessionId,
+    model: "saved-model",
+    default_model: false,
+  };
+  const preferences = {
+    ...saved,
+    key_source: own.key_source,
+    connection_id: own.connection_id,
+    model: own.model,
+  };
+  const f = setup({ saved: preferences });
+  f.query.options.data.options.push(own);
+  f.harness.render();
+  await f.button("Start voice").props.onPress();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.events[0]?.[1])), preferences);
+  f.button("Hold to talk mode").props.onPress();
+  await f.harness.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.savedPreferences)), [
+    { ...preferences, input_mode: "push_to_talk" },
+  ]);
+  f.harness.unmount();
+});
+
+test("pending options or settings cannot start or save a source before the saved source arrives", async () => {
+  for (const pending of ["settings", "options"] as const) {
+    const f = setup({
+      settingsPending: pending === "settings",
+      optionsPending: pending === "options",
+    });
+    assert.equal(f.button("Start voice").props.disabled, true);
+    await f.button("Start voice").props.onPress();
+    assert.equal(
+      f
+        .all()
+        .some((row) => row.props.accessibilityLabel === "Hold to talk mode"),
+      false,
+    );
+    assert.deepEqual(f.events, []);
+    const own = {
+      ...source,
+      key_source: "own" as const,
+      connection_id: sessionId,
+      default_model: false,
+    };
+    f.query.options.data.options.push(own);
+    f.query.options.isPending = false;
+    f.query.options.isSuccess = true;
+    const preferences = {
+      ...saved,
+      key_source: own.key_source,
+      connection_id: own.connection_id,
+    };
+    f.query.settings.data = { voice: preferences };
+    f.query.settings.isPending = false;
+    f.query.settings.isSuccess = true;
+    f.harness.render();
+    assert.equal(f.button("Start voice").props.disabled, false);
+    await f.button("Start voice").props.onPress();
+    assert.deepEqual(JSON.parse(JSON.stringify(f.events[0]?.[1])), preferences);
+    f.harness.unmount();
+  }
+});
+
+test("options or settings failures with cached data prevent starting and source changes", async () => {
+  for (const failed of ["options", "settings"] as const) {
+    const f = setup();
+    f.query[failed].isSuccess = false;
+    f.query[failed].error = new Error("Voice settings could not load");
+    f.harness.render();
+    assert.equal(f.button("Start voice").props.disabled, true);
+    await f.button("Start voice").props.onPress();
+    assert.equal(
+      f
+        .all()
+        .some((row) => row.props.accessibilityLabel === "Hold to talk mode"),
+      false,
+    );
+    assert.deepEqual(f.events, []);
+    f.harness.unmount();
+  }
+});
+
+test("a removed saved voice blocks start and mode saves until Settings explicitly replaces it", async () => {
+  const f = setup({ saved: { ...saved, voice: "aube" } });
+  assert.equal(f.button("Start voice").props.disabled, true);
+  assert.equal(f.button("Hold to talk mode").props.disabled, true);
+  assert.equal(
+    f
+      .all()
+      .some(
+        (row) =>
+          row.type === "Notice" &&
+          /saved voice \(aube\).*no longer available.*Settings > Voice/.test(
+            row.props.message ?? "",
+          ),
+      ),
+    true,
+  );
+  await f.button("Start voice").props.onPress();
+  f.button("Hold to talk mode").props.onPress();
+  await f.harness.settle();
+  assert.deepEqual(f.events, []);
+  assert.deepEqual(f.savedPreferences, []);
+
+  // The Voice Settings picker updates this shared settings query after saving.
+  f.query.settings.data = { voice: { ...saved, voice: "marin" } };
+  f.harness.render();
+  assert.equal(f.button("Start voice").props.disabled, false);
+  await f.button("Start voice").props.onPress();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.events[0]?.[1])), {
+    ...saved,
+    voice: "marin",
+  });
+  f.button("Hold to talk mode").props.onPress();
+  await f.harness.settle();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.savedPreferences)), [
+    { ...saved, voice: "marin", input_mode: "push_to_talk" },
+  ]);
   f.harness.unmount();
 });
 
@@ -486,15 +620,46 @@ test("Grok forces Hold to talk even when the saved microphone mode was automatic
   f.harness.unmount();
 });
 
-test("unavailable defaults cannot start and display clear guidance", () => {
-  const f = setup({ source: { ...source, available: false } });
-  assert.equal(f.button("Start voice").props.disabled, true);
-  assert.deepEqual(f.events, []);
-  f.harness.unmount();
+test("missing or unavailable saved sources never start or write an available replacement", async () => {
+  for (const available of [false, "missing"] as const) {
+    const unavailable = {
+      ...source,
+      model: "saved-model",
+      available: false,
+      unavailable_reason: "Reconnect the saved provider.",
+    };
+    const f = setup({ saved: { ...saved, model: unavailable.model } });
+    if (available === false) f.query.options.data.options.push(unavailable);
+    f.harness.render();
+    assert.equal(f.button("Start voice").props.disabled, true);
+    await f.button("Start voice").props.onPress();
+    const mode = f
+      .all()
+      .find((row) => row.props.accessibilityLabel === "Hold to talk mode");
+    if (mode) {
+      assert.equal(mode.props.disabled, true);
+      mode.props.onPress();
+    }
+    const notice = f.all().find((row) => row.type === "Notice");
+    assert.match(
+      notice?.props.message ?? "",
+      available === false
+        ? /Reconnect the saved provider/
+        : /saved voice source.*no longer available/,
+    );
+    assert.deepEqual(f.events, []);
+    assert.deepEqual(f.savedPreferences, []);
+    f.harness.unmount();
+  }
 });
 
-test("voice never exposes source or configuration selectors, and starts with the available default", async () => {
-  const f = setup();
+test("without saved preferences, voice starts with the platform default and exposes no source selector", async () => {
+  const f = setup({ saved: null });
+  f.query.options.data.options.unshift({
+    ...source,
+    key_source: "own",
+    connection_id: sessionId,
+  });
   f.query.options.data.options.unshift({
     ...source,
     model: "old",
@@ -523,6 +688,11 @@ test("voice never exposes source or configuration selectors, and starts with the
     (f.events.find((event) => event[0] === "start")?.[1] as VoicePreferences)
       ?.model,
     source.model,
+  );
+  assert.equal(
+    (f.events.find((event) => event[0] === "start")?.[1] as VoicePreferences)
+      ?.key_source,
+    "platform",
   );
   f.harness.unmount();
 });
@@ -653,7 +823,9 @@ test("hold to talk names itself under the mic, mutes with a mute symbol and runs
     "no call length while waiting to talk",
   );
   const nodes = walkie.all();
-  const hold = nodes.findIndex((row) => row.props?.accessibilityLabel === "Hold to talk");
+  const hold = nodes.findIndex(
+    (row) => row.props?.accessibilityLabel === "Hold to talk",
+  );
   const hint = nodes.findIndex(
     (row, index) =>
       index > hold &&
@@ -661,24 +833,44 @@ test("hold to talk names itself under the mic, mutes with a mute symbol and runs
       [row.props.children].flat().includes("Hold to talk"),
   );
   assert.ok(hold >= 0 && hint > hold, "the instruction follows the microphone");
-  const mute = nodes.find((row) => row.props?.accessibilityLabel === "Mute microphone")!;
+  const mute = nodes.find(
+    (row) => row.props?.accessibilityLabel === "Mute microphone",
+  )!;
   assert.ok(
-    [mute.props.children].flat(Infinity).some((child: any) => child?.type === "MicOff"),
+    [mute.props.children]
+      .flat(Infinity)
+      .some((child: any) => child?.type === "MicOff"),
     "the left control is a mute symbol, not a second mic",
   );
-  assert.doesNotMatch(walkie.text(), /Audio is sent only/, "details stay collapsed");
+  assert.doesNotMatch(
+    walkie.text(),
+    /Audio is sent only/,
+    "details stay collapsed",
+  );
   walkie.harness.unmount();
   const phone = setup({ active: true });
   assert.ok(
     phone
       .all()
-      .some((row) => String(row.props?.accessibilityLabel ?? "").startsWith("Call time")),
+      .some((row) =>
+        String(row.props?.accessibilityLabel ?? "").startsWith("Call time"),
+      ),
   );
-  assert.ok(phone.all().some((row) => row.type === "PhoneOff"), "End hangs up");
-  assert.doesNotMatch(phone.text(), /Talk any time|Resume audio/, "no helpers once connected");
+  assert.ok(
+    phone.all().some((row) => row.type === "PhoneOff"),
+    "End hangs up",
+  );
+  assert.doesNotMatch(
+    phone.text(),
+    /Talk any time|Resume audio/,
+    "no helpers once connected",
+  );
   phone.button("Call options").props.onPress();
   phone.harness.render();
-  assert.ok(phone.button("No sound? Resume audio"), "helpers live in the ⋯ menu");
+  assert.ok(
+    phone.button("No sound? Resume audio"),
+    "helpers live in the ⋯ menu",
+  );
   phone.harness.unmount();
 });
 
@@ -829,8 +1021,16 @@ test("in a call tasks are tucked into a chip that opens the full list", () => {
       ],
     },
   });
-  assert.match(f.text(), /Needs your OK/, "the chip flags the task waiting on you");
-  assert.doesNotMatch(f.text(), /Agent tasks · 2/, "the list stays tucked away");
+  assert.match(
+    f.text(),
+    /Needs your OK/,
+    "the chip flags the task waiting on you",
+  );
+  assert.doesNotMatch(
+    f.text(),
+    /Agent tasks · 2/,
+    "the list stays tucked away",
+  );
   assert.equal(
     f.all().some((row) => row.props.label === "Stop task"),
     false,
@@ -856,10 +1056,16 @@ test("a call without tasks shows no tasks tray", () => {
 
 test("voice is a composer with the animated bubble on top, not a page over the chat", () => {
   const idle = setup();
-  assert.equal(idle.all().some((row) => row.type === "Modal"), false);
+  assert.equal(
+    idle.all().some((row) => row.type === "Modal"),
+    false,
+  );
   const frame = idle.all().find((row) => row.type === "ComposerFrame")!;
   assert.ok(frame, "it takes the message composer's place");
-  assert.ok(idle.all().some((row) => row.type === "VoiceAura"), "the aura around the composer");
+  assert.ok(
+    idle.all().some((row) => row.type === "VoiceAura"),
+    "the aura around the composer",
+  );
   assert.match(idle.text(), /我的助手/);
   assert.equal(idle.button("Start voice").props.disabled, false);
   idle.harness.unmount();
@@ -871,10 +1077,12 @@ test("voice is a composer with the animated bubble on top, not a page over the c
   f.harness.unmount();
 });
 
-
 test("the call switches between Hands-free and Hold to talk in place and remembers it", async () => {
   const f = setup({ active: true });
-  assert.equal(f.button("Hands-free mode").props.accessibilityState.selected, true);
+  assert.equal(
+    f.button("Hands-free mode").props.accessibilityState.selected,
+    true,
+  );
   f.button("Hold to talk mode").props.onPress();
   f.harness.render();
   await f.harness.settle();
@@ -898,7 +1106,11 @@ test("Grok keeps Hold to talk and offers no mode toggle", () => {
     active: true,
     source: {
       ...source,
-      voice: { ...source.voice, protocol: "xai_realtime", usage_source: "server_measured" },
+      voice: {
+        ...source.voice,
+        protocol: "xai_realtime",
+        usage_source: "server_measured",
+      },
     },
   });
   assert.equal(

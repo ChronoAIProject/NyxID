@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { StyleSheet } from "react-native";
 import { WebView } from "react-native-webview";
+import { createNativeOpenAIMedia } from "./createNativeOpenAIMedia";
 import type {
   VoiceMediaAdapter,
   VoiceMediaEvent,
@@ -43,10 +44,24 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
   private listeners = new Set<(event: VoiceMediaEvent) => void>();
   private telemetry = { playback_ms: 0, playback_audible: false };
   private diagnostics: MediaDiagnostic[] = [];
+  private native?: VoiceMediaAdapter & {
+    getDiagnostics?(): readonly MediaDiagnostic[];
+  };
+  private unsubscribeNative?: () => void;
+
+  constructor(
+    private readonly createOpenAI:
+      | (() => VoiceMediaAdapter | undefined)
+      | null = createNativeOpenAIMedia,
+  ) {}
+
+  get usesNativeMedia(): boolean {
+    return !!this.native;
+  }
 
   /** Bounded capability diagnostics only; never SDP, candidates, IPs, or audio. */
   getDiagnostics(): readonly MediaDiagnostic[] {
-    return this.diagnostics.map((row) => ({
+    return (this.native?.getDiagnostics?.() ?? this.diagnostics).map((row) => ({
       ...row,
       ...(row.counts ? { counts: { ...row.counts } } : {}),
     }));
@@ -63,6 +78,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
   }
 
   receive(raw: string): void {
+    if (this.native) return;
     if (typeof raw !== "string" || raw.length > 200000) {
       this.unavailable();
       return;
@@ -105,6 +121,18 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
         "loopback_sender_ice",
         "loopback_receiver_ice",
         "loopback_receiver_track",
+        "input_track",
+        "input_source",
+        "openai_peer",
+        "openai_ice",
+        "openai_datachannel",
+        "openai_context",
+        "openai_play",
+        "openai_playback",
+        "openai_stats",
+        "openai_rtp_outbound",
+        "openai_rtp_inbound",
+        "openai_audio_source",
       ]);
       const names = new Set([
         "pending",
@@ -128,6 +156,13 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
         "completed",
         "failed",
         "closed",
+        "open",
+        "closing",
+        "running",
+        "suspended",
+        "interrupted",
+        "unavailable",
+        "ended",
       ]);
       if (
         typeof event.stage === "string" &&
@@ -151,19 +186,67 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
           "opaque_location_origin",
           "document_visible",
         ];
+        const metricLimits: Record<
+          string,
+          { max: number; fractional?: boolean }
+        > = {
+          audio_tracks: { max: 16 },
+          enabled_tracks: { max: 16 },
+          live_tracks: { max: 16 },
+          muted_tracks: { max: 16 },
+          input_requested: { max: 1 },
+          mock_capture: { max: 1 },
+          audio_reports: { max: 16 },
+          sample: { max: 1_000_000 },
+          bytes: { max: Number.MAX_SAFE_INTEGER },
+          packets: { max: Number.MAX_SAFE_INTEGER },
+          total_audio_energy: { max: 1e9, fractional: true },
+          total_samples_duration: { max: 1e9, fractional: true },
+          audio_level: { max: 1, fractional: true },
+          paused: { max: 1 },
+          muted: { max: 1 },
+          volume: { max: 1, fractional: true },
+          ready_state: { max: 4 },
+          current_time_ms: { max: 1_830_000 },
+        };
         if (event.counts && typeof event.counts === "object") {
           for (const [key, value] of Object.entries(event.counts)) {
+            const limit: { max: number; fractional?: boolean } | undefined =
+              allowedCounts.includes(key)
+                ? { max: 256 }
+                : Object.prototype.hasOwnProperty.call(metricLimits, key)
+                  ? metricLimits[key]
+                  : undefined;
             if (
-              allowedCounts.includes(key) &&
-              Number.isSafeInteger(value) &&
-              (value as number) >= 0 &&
-              (value as number) <= 256
+              limit &&
+              typeof value === "number" &&
+              Number.isFinite(value) &&
+              value >= 0 &&
+              value <= limit.max &&
+              (limit.fractional || Number.isSafeInteger(value))
             )
-              counts[key] = value as number;
+              counts[key] = value;
           }
         }
+        // Low-frequency snapshots retain their latest value without evicting
+        // startup/playback failures merely because a call remains connected.
+        const snapshots = new Set([
+          "input_track",
+          "openai_peer",
+          "openai_ice",
+          "openai_datachannel",
+          "openai_context",
+          "openai_playback",
+          "openai_stats",
+          "openai_rtp_outbound",
+          "openai_rtp_inbound",
+          "openai_audio_source",
+        ]);
+        const previous = snapshots.has(event.stage)
+          ? this.diagnostics.filter((row) => row.stage !== event.stage)
+          : this.diagnostics;
         this.diagnostics = [
-          ...this.diagnostics.slice(-31),
+          ...previous.slice(-31),
           {
             stage: event.stage,
             name: event.name,
@@ -181,6 +264,8 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
       else request.resolve(event.result);
     } else if (event.type === "provider-ready") {
       this.emit({ type: "provider-ready" });
+    } else if (event.type === "playback-blocked") {
+      this.emit({ type: "playback-blocked" });
     } else if (event.type === "pcm") {
       try {
         if (
@@ -228,6 +313,8 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
         "Voice playback could not be verified.",
         "WebRTC negotiation failed.",
         "Voice ended when the app left the foreground.",
+        "Microphone access ended. Start a new call when it is available.",
+        "A test microphone is active. Select a real microphone and try again.",
       ]);
       this.unavailable(
         typeof event.message === "string" && allowed.has(event.message)
@@ -308,6 +395,20 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
     signal.addEventListener("abort", aborted, { once: true });
     try {
       if (signal.aborted) throw closedError();
+      const native =
+        protocol === "openai_live" ? this.createOpenAI?.() : undefined;
+      if (native) {
+        this.native = native;
+        this.unsubscribeNative = native.subscribe((event) => {
+          if (this.native !== native || this.closed) return;
+          this.emit(event);
+          if (event.type === "error") this.close();
+        });
+        const offer = await native.prepare(protocol, signal);
+        if (signal.aborted || this.closed || generation !== this.generation)
+          throw closedError();
+        return offer;
+      }
       if (!this.ready) {
         await new Promise<void>((resolve, reject) => {
           const waiter = {
@@ -355,22 +456,28 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
   async answer(sdp: string): Promise<void> {
     if (this.closed) return;
     if (!sdp || sdp.length > 131072) throw new Error("Invalid voice answer.");
+    if (this.native) return this.native.answer(sdp);
     await this.request({ type: "answer", sdp });
   }
   setInput(enabled: boolean): void {
+    if (this.native) return this.native.setInput(enabled);
     this.command({ type: "input", enabled });
   }
   hold(pressed: boolean): void {
+    if (this.native) return this.native.hold(pressed);
     this.command({ type: "hold", pressed });
   }
   muteSpeaker(muted: boolean): void {
+    if (this.native) return this.native.muteSpeaker(muted);
     this.command({ type: "speaker", muted });
   }
   async resume(): Promise<void> {
+    if (this.native) return this.native.resume();
     if (!this.closed) await this.request({ type: "resume" });
   }
   enqueue(bytes: ArrayBuffer, endMs: number): void {
     if (this.closed) return;
+    if (this.native) return this.native.enqueue(bytes, endMs);
     if (!Number.isSafeInteger(endMs) || endMs < 0 || endMs > 1830000) {
       this.unavailable();
       return;
@@ -386,14 +493,21 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
     }
   }
   flush(): void {
+    if (this.native) return this.native.flush();
     this.command({ type: "flush" });
   }
   playback(): { playback_ms: number; playback_audible: boolean } {
-    return { ...this.telemetry };
+    return this.native ? this.native.playback() : { ...this.telemetry };
   }
   close(): void {
-    const active = !this.closed && this.ready;
+    const active = !this.native && !this.closed && this.ready;
     this.closed = true;
+    this.unsubscribeNative?.();
+    this.unsubscribeNative = undefined;
+    const native = this.native;
+    this.diagnostics = [...(native?.getDiagnostics?.() ?? this.diagnostics)];
+    this.native = undefined;
+    native?.close();
     if (microphoneOwner === this) microphoneOwner = undefined;
     if (active) {
       try {
@@ -463,9 +577,11 @@ export function VoiceMediaBridge({
         loaded.current = true;
       }}
       onMessage={({ nativeEvent }) => media.receive(nativeEvent.data)}
-      onError={() => media.unavailable()}
-      onContentProcessDidTerminate={() => media.unavailable()}
-      onRenderProcessGone={() => media.unavailable()}
+      onError={() => !media.usesNativeMedia && media.unavailable()}
+      onContentProcessDidTerminate={() =>
+        !media.usesNativeMedia && media.unavailable()
+      }
+      onRenderProcessGone={() => !media.usesNativeMedia && media.unavailable()}
     />
   );
 }

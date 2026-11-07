@@ -960,7 +960,17 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   opaque slab in a single 300ms ease-out. Only the 24pt root edge reveals it;
   only the exposed slab sliver closes it. Finger releases spring; reduced motion
   has no travel. The pinned controls have a measured bottom content spacer.
-- Drawer top is the window's safe-area top plus 10pt. Top corners are 24pt; the
+- At window widths of 900pt and above, a persistent 300pt sidebar sits beside
+  the same retained content navigator. Both columns remain touch- and
+  accessibility-accessible; the sidebar does not own modal focus or a closing
+  scrim. Narrower windows use the push interaction above, with the sidebar capped
+  at 360pt. Resizing changes layout without replacing the chat or its draft.
+- Drawer top is the window's safe-area top plus 10pt. On windows at least 768pt
+  wide, it becomes a centered card up to 720×860pt with 24pt plus safe-area margins
+  and rounded bottom corners. The keyboard resizes the measured available host;
+  the panel fits that space without remounting navigation. Settings content stays
+  within a centered 720pt column, and row wrapping uses actual measured row width.
+  Top corners are 24pt; the
   centered 36×4pt handle has a 44pt drag region. A dedicated translucent scrim
   stays fixed over retained chat and fades independently while the panel slides.
   Sidebar and content headers share a 60pt row below the same safe-area inset.
@@ -1074,8 +1084,8 @@ something to submit and then takes the primary gradient. One-time login codes si
 30pt, letter-spaced) with Copy, a live "Expires in m:ss · works once" line and
 the terminal command in a monospace chip.
 
-Native support remains portrait iPhone on iOS and Android phone, with wide
-Android windows as a secondary layout. Eligible private chats expose a
+Native supports portrait iPhone, native iPad portrait/landscape and multitasking
+windows, and Android phone with wide Android windows as a secondary layout. Eligible private chats expose a
 voice-conversation mode in the trailing composer button when the server enables
 `assistant:voice`: an empty composer shows the waveform, text or attachments
 show Send, and an active reply shows Stop. Voice mode is a composer, not a
@@ -1118,5 +1128,6 @@ web handoffs. Desktop entries from machine detail and private-chat tool cards
 open a full-screen route with machine, conversation, context and display
 selectors preserved. The viewer requires native privacy protection and a
 compatible server; live-frame, performance and app-switcher verification remain
-release gates. This describes mobile behavior only. iPad, additional
-orientations and RN-web remain outside native support.
+release gates. On iPad the viewer follows the current window without acquiring
+a full-screen orientation lock; iPhone retains landscape entry and portrait
+restoration. RN-web remains outside native support.

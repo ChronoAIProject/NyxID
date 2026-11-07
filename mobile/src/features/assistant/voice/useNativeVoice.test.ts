@@ -95,6 +95,7 @@ function setup(context: TestContext) {
     control: async (): Promise<unknown> => session({ state: "closed" }),
     active: async (): Promise<any> => ({ session: null }),
     cancel: async (): Promise<void> => {},
+    resume: async (_client: Client): Promise<void> => {},
     hold: (pressed: boolean) => pressed,
   };
   const api = {
@@ -173,6 +174,7 @@ function setup(context: TestContext) {
     }
     async resumeAudio() {
       this.resumed++;
+      return responses.resume(this);
     }
     async stopTask(id: string) {
       this.stops.push(id);
@@ -220,6 +222,7 @@ function setup(context: TestContext) {
   const connect = async () => {
     await start();
     clients.at(-1)!.options.onSnapshot(snapshot());
+    clients.at(-1)!.options.onReady?.();
     return harness.flush();
   };
   return {
@@ -273,6 +276,96 @@ test("duplicate Start presses share the same pending preflight and create one cl
   assert.equal(e.counts().permissionCalls, 1);
   assert.equal(e.clients.length, 1);
   assert.equal(e.clients[0]!.starts, 1);
+});
+
+test("active control metadata stays Connecting until the client confirms media and control readiness", async (context) => {
+  const e = setup(context);
+  const initial = await e.start();
+  assert.equal(initial.starting, true);
+  assert.equal(initial.connected, false);
+  const client = e.clients[0]!;
+  client.options.onSnapshot(snapshot());
+  const waiting = e.harness.flush();
+  assert.equal(waiting.snapshot?.session.state, "active");
+  assert.equal(waiting.starting, true);
+  assert.equal(waiting.connected, false);
+  client.options.onReady?.();
+  const connected = e.harness.flush();
+  assert.equal(connected.starting, false);
+  assert.equal(connected.connected, true);
+  assert.equal(connected.holding, false);
+  client.options.onSnapshot(snapshot({ muted: true, input_muted: true }));
+  assert.equal(e.harness.flush().connected, true);
+});
+
+test("a readiness timeout ends Connecting and late readiness cannot restore the closed client", async (context) => {
+  const e = setup(context);
+  await e.start();
+  const client = e.clients[0]!;
+  client.options.onSnapshot(snapshot());
+  client.options.onError(
+    "Voice connection timed out. Start a new call to reconnect.",
+  );
+  client.closed();
+  let state = e.harness.flush();
+  assert.equal(state.starting, false);
+  assert.equal(state.connected, false);
+  assert.match(state.error!, /timed out/);
+  client.options.onReady?.();
+  state = e.harness.flush();
+  assert.equal(state.starting, false);
+  assert.equal(state.connected, false);
+});
+
+for (const change of ["end", "thread", "account", "background"] as const) {
+  test(`late readiness after ${change} cannot connect an obsolete call attempt`, async (context) => {
+    const e = setup(context);
+    await e.start();
+    const old = e.clients[0]!;
+    if (change === "end") await e.harness.value().end();
+    else if (change === "thread") e.replaceScope(secondThread);
+    else if (change === "account") e.replaceScope(firstThread, 2);
+    else e.appState("background");
+    old.options.onReady?.();
+    let state = e.harness.flush();
+    assert.equal(state.starting, false);
+    assert.equal(state.connected, false);
+    if (change === "background") e.appState("active");
+    await e.start();
+    old.options.onReady?.();
+    state = e.harness.flush();
+    assert.equal(state.starting, true);
+    assert.equal(state.connected, false);
+    e.clients[1]!.options.onReady?.();
+    assert.equal(e.harness.flush().connected, true);
+  });
+}
+
+test("Resume clears the playback warning locally and a blocked retry keeps the same call usable", async (context) => {
+  const e = setup(context);
+  await e.connect();
+  const client = e.clients[0]!;
+  client.options.onError("Tap Resume audio to hear the assistant.");
+  let state = e.harness.flush();
+  assert.equal(state.connected, true);
+  assert.equal(state.starting, false);
+  await state.resumeAudio();
+  state = e.harness.flush();
+  assert.equal(state.error, undefined);
+  assert.equal(state.connected, true);
+  client.options.onError("Tap Resume audio to hear the assistant.");
+  state = e.harness.flush();
+  e.responses.resume = async (current) => {
+    current.options.onError("Tap Resume audio to hear the assistant.");
+  };
+  await state.resumeAudio();
+  state = e.harness.flush();
+  assert.equal(state.error, "Tap Resume audio to hear the assistant.");
+  assert.equal(state.connected, true);
+  assert.equal(client.resumed, 2);
+  assert.equal(client.ends, 0);
+  assert.equal(e.clients.length, 1);
+  assert.deepEqual(e.controls, []);
 });
 
 for (const change of ["thread", "account", "unmount"] as const) {

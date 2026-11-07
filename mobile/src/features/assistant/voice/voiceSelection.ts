@@ -12,9 +12,22 @@ export function voiceOptionKey(option: VoiceOption | VoicePreferences) {
   ]);
 }
 
-/** Same automatic default as the web composer; native exposes no source chooser. */
-export function chooseVoiceOption(options: readonly VoiceOption[]) {
+/** Preserve a saved source; only first use chooses the web composer's default. */
+export function chooseVoiceOption(
+  options: readonly VoiceOption[],
+  saved?: VoicePreferences | null,
+) {
+  if (saved) {
+    const savedKey = voiceOptionKey(saved);
+    return options.find((option) => voiceOptionKey(option) === savedKey);
+  }
   return (
+    options.find(
+      (option) =>
+        option.available &&
+        option.default_model &&
+        option.key_source === "platform",
+    ) ??
     options.find((option) => option.available && option.default_model) ??
     options.find((option) => option.available)
   );

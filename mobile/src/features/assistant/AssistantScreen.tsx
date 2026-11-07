@@ -48,7 +48,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { useNavigation } from "@react-navigation/native";
+import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { useQuery } from "@tanstack/react-query";
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import * as WebBrowser from "expo-web-browser";
@@ -154,6 +154,7 @@ export function AssistantScreen({
   contextual = false,
 }: AssistantScreenProps) {
   const navigation = useNavigation<WorkspaceNavigationProp>();
+  const focused = useIsFocused();
   const linkHost = useContext(AssistantLinkContext);
   const { colors, mode, bubblePalette } = useTheme();
   const bubble = chatBubbleColors(mode, bubblePalette);
@@ -211,7 +212,7 @@ export function AssistantScreen({
   const transcriptScroll = useTranscriptScrollFollow(
     transcript,
     assistant.conversationId,
-    { reducedMotion },
+    { reducedMotion, focused },
   );
   const conversation = assistant.history?.conversation;
   const currentAgent = assistant.agent ?? conversation?.agent;
