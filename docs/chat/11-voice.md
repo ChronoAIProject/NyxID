@@ -52,7 +52,7 @@ Live/Realtime guides; their Realtime examples are a different protocol.
 | OpenAI browser connection | [WebRTC guide][oa-webrtc]: trusted server calls `POST /v1/live/sessions` with `{session:{model,instructions,delegation:{type:"responses",responses:{model:catalog.delegation_model,...}},...},transport:{type:"webrtc",sdp}}`; answer is `transport.sdp`, identity is `session.id`. Browser channel label is `oai-events`. Wait for `session.started`; do not send `session.start` again. No ephemeral token is necessary. |
 | OpenAI sideband | [Server controls][oa-controls]: attach to `wss://api.openai.com/v1/live/sessions/{session_id}/attach` with the creating project's authentication and required connection headers. It receives subsequent events, including reflected audio. Attach before releasing the answer to the browser; discard reflected audio immediately without persistence. No documented replay guarantee for events before attachment. |
 | Browser control permissions | [Live sideband reference][oa-sideband] describes `session.client.data_channel.allowed_client_events` and `allowed_server_events`. Omission allows all. Explicitly restrict them at creation; see §5. Trusted sideband permissions are unaffected. |
-| Responses delegation | [Delegation][oa-delegation]: Live prepares conversational context for the catalog-selected Responses model. Its only function is `request_nyxbot({request})`. Complete function items become tasks only after a successful `response.completed`; caption pauses, fragments and offsets never select task text. Appends use `delegation_id:null` and remain bounded to 500 tokens. |
+| Responses delegation | [Delegation][oa-delegation]: Live prepares conversational context for the catalog-selected Responses model. `request_nyxbot({request})` submits work; `get_task_status({})` reads bounded status for tasks already accepted in the same call. Complete function items become tasks only after a successful `response.completed`; caption pauses, fragments and offsets never select task text. Appends use `delegation_id:null` and remain bounded to 500 tokens. |
 | OpenAI configuration/usage | [Session guide][oa-sessions]: model, voice, input, store and delegation mode are startup choices. `session.update` only updates supported Responses delegation settings, not arbitrary Live configuration. `session.usage.updated.usage.seconds` is cumulative; `session.closed` contains final usage. Appended acknowledgements describe context injection, not speech completion. There is no client-delegation cancel event. |
 | OpenAI pricing/storage | [Model][oa-model] lists $0.05/minute billed per second, backend work separate. [Cost guide][oa-cost] says silence, mute and backend waiting count. WebRTC creation bills 15 initialization seconds credited against running duration: a 90-second session is 90, not 105. `store:false` is explicit; no recording download, forking or raw-audio storage. Provider retention policy is separate from NyxID retention. |
 | xAI model/transport | [Voice guide][xai-voice] now redirects to Speech to Speech: `wss://api.x.ai/v1/realtime?model=grok-voice-think-fast-2.0`; `grok-voice-latest` currently aliases it. Server Bearer authentication, bidirectional WebSocket, PCM and other codecs, JSON or binary audio transport. |
@@ -134,6 +134,12 @@ Choose the simple option for the first release:
   turn, including "read my calendar", "remember this" and "turn on the light".
 * Session controls (mute/end/Stop/queue inspection) are closed coordinator
   operations. The displayed task list is not a general account-data fast path.
+  The OpenAI Responses delegation exposes `get_task_status({})` for progress
+  questions. It revalidates the call's current authority and returns at most
+  eight task records, prioritizing pending work, scoped to the exact call,
+  person and conversation. It exposes task state and verified progress only,
+  accepts no caller-selected identity or task ID, and does not submit, cancel
+  or approve work.
 * Disable xAI built-in `web_search`, `x_search`, `file_search` and `mcp`. Otherwise
   voice would bypass the thread's grants, scopes, approval and metering path.
 
@@ -394,8 +400,9 @@ bounded recap on its first turn, so references to earlier chat context remain
 available without merging execution histories.
 
 1. Live supplies conversation context to the catalog-selected Responses model.
-   Its only function accepts `request`, a complete self-contained task preserving
-   all requested outcomes and relevant references. Bind nested events to the
+   Its task function accepts `request`, a complete self-contained task preserving
+   all requested outcomes and relevant references. A separate status function
+   accepts only an empty object and reads already accepted work. Bind nested events to the
    observed delegation, response and call IDs. Ignore argument deltas/done events
    as execution triggers; wait for a complete function item and a successful
    terminal response. Reject unknown tools/fields, oversized or empty tasks,

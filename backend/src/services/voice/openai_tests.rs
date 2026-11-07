@@ -17,9 +17,11 @@ async fn fixture_session_restricts_browser_and_finalizes_only_on_provider_close(
         let delegation=&body["session"]["delegation"];
         assert_eq!(delegation["type"],"responses");
         assert_eq!(delegation["responses"]["model"],"catalog-task-model");
-        assert_eq!(delegation["responses"]["tools"].as_array().unwrap().len(),1);
+        assert_eq!(delegation["responses"]["tools"].as_array().unwrap().len(),2);
         assert_eq!(delegation["responses"]["tools"][0]["name"],"request_nyxbot");
         assert_eq!(delegation["responses"]["tools"][0]["parameters"]["required"],json!(["request"]));
+        assert_eq!(delegation["responses"]["tools"][1]["name"],"get_task_status");
+        assert_eq!(delegation["responses"]["tools"][1]["parameters"],json!({"type":"object","properties":{},"required":[],"additionalProperties":false}));
         assert_eq!(body["session"]["client"]["data_channel"]["allowed_client_events"],json!([]));
         assert!(body["session"].get("tools").is_none());
         assert_eq!(body["session"]["audio"]["output"]["voice"], "marin");
