@@ -422,6 +422,33 @@ describe("voice media boundaries", () => {
     await client.end();
   });
 
+  it("discards an incomplete Grok audio pair before control recovery", async () => {
+    const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+    await client.start(
+      { ...preferences, input_mode: "push_to_talk" },
+      "xai_realtime",
+    );
+    const first = Socket.current;
+    first.snapshot();
+    first.onmessage?.({
+      data: JSON.stringify({ type: "audio", generation: 1, end_ms: 120 }),
+    });
+    first.onmessage?.({ data: new ArrayBuffer(3) });
+    expect(first.close).toHaveBeenCalled();
+    expect(mocks.post).not.toHaveBeenCalled();
+    first.onclose?.();
+    await vi.advanceTimersByTimeAsync(1000);
+    Socket.current.snapshot();
+    Socket.current.onmessage?.({
+      data: JSON.stringify({ type: "audio", generation: 1, end_ms: 160 }),
+    });
+    const pcm = new ArrayBuffer(2);
+    Socket.current.onmessage?.({ data: pcm });
+    expect(mocks.enqueue).toHaveBeenLastCalledWith(pcm, 160);
+    expect(client.isClosed).toBe(false);
+    await client.end();
+  });
+
   it("releases local media after retry exhaustion without sending a user End", async () => {
     const closed = vi.fn();
     const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn(), closed);

@@ -464,6 +464,8 @@ export class AssistantVoiceClient {
     socket.onclose = () => {
       if (this.closed || socket !== this.controlSocket) return;
       if (this.heartbeat) clearInterval(this.heartbeat);
+      this.audioEnd = undefined;
+      this.grok?.flush();
       this.controlsReady = false;
       this.held = false;
       this.updateInput();
@@ -513,6 +515,8 @@ export class AssistantVoiceClient {
     if (this.closed || socket !== this.controlSocket) return;
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = undefined;
+    this.audioEnd = undefined;
+    this.grok?.flush();
     this.controlsReady = false;
     this.held = false;
     this.updateInput();
