@@ -35,7 +35,7 @@ export const nyxAgentAttachmentSchema = z.object({
   pages: z.number().int().nonnegative().nullable().optional(),
   expired: z.boolean().optional(),
   image_input: z.enum(["sent", "unavailable"]).nullable().optional(),
-  image_input_reason: z.enum(["agent_unsupported", "model_text_only", "image_input_unsupported"]).nullish().catch(undefined),
+  image_input_reason: z.enum(["agent_unsupported", "model_text_only", "image_input_unsupported", "guest_media_unavailable"]).nullish().catch(undefined),
   size: z.number().int().nonnegative(),
   label: z.string(),
 });

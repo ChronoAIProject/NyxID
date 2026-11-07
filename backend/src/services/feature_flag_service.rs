@@ -268,6 +268,12 @@ const ASSISTANT_CHANNEL_MEDIA_FLAG: FeatureFlagDef = FeatureFlagDef {
     description: "Admit owner Lark/Feishu media after every replica supports channel uploads.",
     default_enabled: false,
 };
+pub const ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY: &str = "assistant:channel-guest-media";
+const ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY,
+    description: "Allow personal channel guests' current-message media after all replicas support exact-turn guest media authority.",
+    default_enabled: false,
+};
 pub const ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY: &str = "assistant:attachment-writes";
 const ASSISTANT_ATTACHMENT_WRITES_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
@@ -453,6 +459,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
+    ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
     ASSISTANT_INVOCATIONS_FLAG,
@@ -512,6 +519,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
+    ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG,
     ASSISTANT_ATTACHMENT_WRITES_FLAG,
     ASSISTANT_LIVE_TURN_GATE_FLAG,
     ASSISTANT_INVOCATIONS_FLAG,
@@ -3143,6 +3151,7 @@ mod tests {
                 "assistant:generated-artifacts",
                 "assistant:guest-operation-scopes",
                 "assistant:channel-media",
+                "assistant:channel-guest-media",
                 "assistant:attachment-writes",
                 "assistant:live-turn-gate",
                 "assistant:owner-invocations",
@@ -3852,6 +3861,7 @@ mod tests {
         for key in [
             ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
             ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
+            ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY,
             ASSISTANT_ATTACHMENT_WRITES_FLAG_KEY,
         ] {
             let flag = FEATURE_FLAGS.iter().find(|flag| flag.key == key).unwrap();

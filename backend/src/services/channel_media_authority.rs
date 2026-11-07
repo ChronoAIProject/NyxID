@@ -1,4 +1,4 @@
-//! Owner-only authority for relay channel media. Provider handles come solely
+//! Source authority for relay channel media. Provider handles come solely
 //! from authenticated NyxID ingress metadata, never from a gateway attachment.
 use crate::{
     errors::{AppError, AppResult},
@@ -56,6 +56,7 @@ impl std::fmt::Debug for MediaRequest {
 pub struct AuthorizedMedia {
     pub source: ChannelMessage,
     pub bot: ChannelBot,
+    pub guest: bool,
 }
 impl std::fmt::Debug for AuthorizedMedia {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -71,7 +72,9 @@ fn refused() -> AppError {
 /// decision. It does not authorize downloads.
 pub async fn source(db: &Database, request: &MediaRequest) -> AppResult<ChannelMessage> {
     let channel = &request.channel;
-    if !supported_relay(&channel.platform) || channel.gateway_source.is_some() {
+    if !(supported_relay(&channel.platform) || channel.platform == "telegram")
+        || channel.gateway_source.is_some()
+    {
         return Err(refused());
     }
     let mut filter = doc! {
@@ -116,6 +119,8 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
     {
         return Err(refused());
     }
+    let guest =
+        channel.org_specialist.is_none() && !channel.owner_sender_ids.contains(&request.sender_id);
     let member = if channel.org_specialist.is_some() {
         super::org_channel_service::enabled(db, &channel.user_id).await?;
         let (identity, _) = super::org_channel_service::sender(
@@ -155,7 +160,7 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
         }
         Some(identity)
     } else {
-        if !channel.owner_sender_ids.contains(&request.sender_id) {
+        if guest && !super::assistant_channel_media::guest::enabled(db, &channel.user_id).await? {
             return Err(refused());
         }
         None
@@ -220,7 +225,7 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
             requires_nyxbot = effective.is_none();
         }
         if let Some(binding) = origin.thread.as_deref() {
-            if binding.guest
+            if binding.guest != guest
                 || request.agent_id.as_deref() != Some(binding.agent_id.as_str())
                 || binding.source_message_id != source.id
                 || binding.sender_id != request.sender_id
@@ -261,5 +266,5 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
             return Err(refused());
         }
     }
-    Ok(AuthorizedMedia { source, bot })
+    Ok(AuthorizedMedia { source, bot, guest })
 }

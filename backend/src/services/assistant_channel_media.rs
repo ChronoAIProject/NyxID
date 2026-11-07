@@ -1,5 +1,6 @@
-//! Late owner-media ingestion. Admission and queueing never fetch provider bytes.
+//! Late source-authorized media ingestion. Admission and queueing never fetch provider bytes.
 mod binding;
+pub mod guest;
 pub mod queue;
 #[cfg(test)]
 pub(crate) mod test_hooks;
@@ -312,6 +313,10 @@ async fn fetch_item(
     item: &crate::models::nyxbot_channel::EventMediaItem,
 ) -> AppResult<(String, bool)> {
     let request = request(&state.db, row, event).await?;
+    let guest_media = event.media.as_ref().is_some_and(|m| m.guest);
+    if guest_media != row.guest_turn {
+        return Err(AppError::ChannelAttachmentNotFound);
+    }
     let maximum = state
         .config
         .channel_media_max_bytes
@@ -320,7 +325,14 @@ async fn fetch_item(
     for (attempt, limit) in [initial, maximum].into_iter().enumerate() {
         uploads::admit(&state.db, &row.user_id).await?;
         let reservation = uploads::byte_budget::reserve(limit).await?;
+        if guest_media {
+            let live = super::assistant_nyxagent::get(&state.db, &row.user_id, &row.id).await?;
+            guest::validate_event(&state.db, &live, event).await?;
+        }
         let authorized = Box::pin(authority::resolve(&state.db, &request)).await?;
+        if authorized.guest != guest_media {
+            return Err(AppError::ChannelAttachmentNotFound);
+        }
         let selector = if item.embedded {
             &authorized.source.embedded_attachments
         } else {
@@ -349,10 +361,29 @@ async fn fetch_item(
             }
             Err(error) => return Err(error),
             Ok(fetched) => {
+                if guest_media {
+                    let live =
+                        super::assistant_nyxagent::get(&state.db, &row.user_id, &row.id).await?;
+                    guest::validate_event(&state.db, &live, event).await?;
+                    if !Box::pin(authority::resolve(&state.db, &request))
+                        .await?
+                        .guest
+                    {
+                        return Err(AppError::ChannelAttachmentNotFound);
+                    }
+                }
                 let name = selector.filename.as_deref().unwrap_or("attachment");
                 let bytes = fetched.bytes.to_vec();
                 drop(fetched);
                 let source = UploadSource {
+                    guest: guest_media.then(|| {
+                        crate::models::assistant_channel_media::GuestSource {
+                            version: 1,
+                            channel_id: event.channel_id.clone(),
+                            event_id: event.id.clone(),
+                            sender_id: request.sender_id.clone(),
+                        }
+                    }),
                     turn_id: row
                         .active_turn
                         .as_ref()
@@ -364,7 +395,7 @@ async fn fetch_item(
                     embedded: item.embedded,
                     declared: event.media.as_ref().expect("media event").declared,
                 };
-                let upload = if authority::expanded_relay(&authorized.bot.platform) {
+                let upload = if authority::expanded_relay(&authorized.bot.platform) || guest_media {
                     // Custody or membership can change while the network is in flight.
                     Box::pin(authority::resolve(&state.db, &request)).await?;
                     Box::pin(uploads::upload_channel_original_authorized(
@@ -390,6 +421,7 @@ async fn fetch_item(
                     ))
                     .await?
                 };
+
                 drop(reservation);
                 let original_only = upload.content_type == "application/octet-stream"
                     || upload.content_type.starts_with("audio/")
@@ -525,7 +557,51 @@ async fn collect(
             }));
         }
     }
+    // Revocation during extraction/storage must not bind guest bytes. The
+    // existing finalizer removes unbound roots, including late unknown commits.
+    if row.guest_turn {
+        let mut kept = Vec::new();
+        for item in receipt.ok.drain(..) {
+            let authorized = async {
+                let live = super::assistant_nyxagent::get(&state.db, &row.user_id, &row.id).await?;
+                let event = state
+                    .db
+                    .collection::<NyxbotEvent>(EVENTS)
+                    .find_one(source_filter(row, &item.event_id, Some(&message.turn_id)))
+                    .await?
+                    .ok_or(AppError::ChannelAttachmentNotFound)?;
+                if event.media.as_ref().is_some_and(|m| m.guest) {
+                    guest::validate_event(&state.db, &live, &event).await?;
+                    if !Box::pin(authority::resolve(
+                        &state.db,
+                        &request(&state.db, &live, &event).await?,
+                    ))
+                    .await?
+                    .guest
+                    {
+                        return Err(AppError::ChannelAttachmentNotFound);
+                    }
+                }
+                Ok::<_, AppError>(())
+            }
+            .await;
+            if authorized.is_ok() {
+                kept.push(item);
+            } else {
+                receipt.failed.push(MediaOutcome {
+                    status: "source_unavailable".into(),
+                    upload_id: None,
+                    ..item
+                });
+            }
+        }
+        receipt.ok = kept;
+    }
     receipt.context = context(&receipt, &order);
+    if row.guest_turn && !guest::enabled(&state.db, &row.user_id).await? {
+        receipt.context.push('\n');
+        receipt.context.push_str(GUEST_NOTE);
+    }
     // Preserve the parser's cap signal even when input was independently rendered.
     if message.text.contains("[post truncated]") {
         receipt.context.push_str("\n[post truncated]");

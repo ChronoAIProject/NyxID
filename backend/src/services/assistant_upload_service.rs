@@ -726,6 +726,9 @@ pub async fn for_chat(db: &Database, chat: &ChatAuthority, id: &str) -> AppResul
         .find_one(filter.clone())
         .await?;
     if let Some(row) = row {
+        if row.source.as_ref().is_some_and(|s| s.guest.is_some()) {
+            return Err(missing());
+        }
         return Ok(row);
     }
     Box::pin(super::assistant_upload_retention::require_available(
@@ -812,11 +815,26 @@ pub async fn chat_bytes(
     if image_only && let Some(image) = tool_image_bytes(db, keys, chat, id).await? {
         return Ok(image);
     }
-    let row = for_chat(db, chat, id).await?;
+    let channel_guest = image_only && chat.guest && !chat.collaboration_thread;
+    let row = if channel_guest {
+        super::assistant_channel_media::guest::for_chat(db, chat, id).await?
+    } else {
+        for_chat(db, chat, id).await?
+    };
     if image_only && !row.content_type.starts_with("image/") {
         return Err(missing());
     }
     let bytes = payload(db, keys, &row).await?;
+    if channel_guest {
+        #[cfg(test)]
+        super::assistant_channel_media::test_hooks::reach(
+            db,
+            chat.turn_id.as_deref().unwrap_or_default(),
+            "guest_decrypted",
+        )
+        .await;
+        super::assistant_channel_media::guest::for_chat(db, chat, id).await?;
+    }
     if chat.collaboration_thread {
         // Membership, the exact request and guest opt-in may change during decryption.
         for_chat(db, chat, id).await?;

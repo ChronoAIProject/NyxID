@@ -300,7 +300,7 @@ async fn org_specialist_provider_uses_confirmed_member_thread_dedup_and_live_aut
     state.db.drop().await.unwrap();
 }
 
-async fn org_channel(
+pub(super) async fn org_channel(
     state: &AppState,
     native: bool,
 ) -> (

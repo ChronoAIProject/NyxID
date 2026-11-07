@@ -282,6 +282,7 @@ test("context reset, steering, model interruption and billing notices match web 
     "The agent configuration changed; the assistant context was refreshed.",
   );
   assert.match(contextResetCopy("stopped"), /fresh context with a recap/);
+  assert.equal(contextResetCopy("guest_media_turn"), "The assistant context was refreshed to keep guest attachments limited to their own turn.");
   assert.equal(
     steeringNotice(null, "applied"),
     "Guidance applied to this reply.",

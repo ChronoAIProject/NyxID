@@ -3666,8 +3666,18 @@ async fn start_chat_turn(
     };
     // Required identity and sender guidance are structured turn-local input,
     // independent of the prose note's length budget and editable display data.
+    let media_event_ids = if had_media
+        && guest
+        && (execution.is_some()
+            || !crate::services::assistant_channel_media::guest::enabled(&state.db, &row.user_id)
+                .await?)
+    {
+        Vec::new()
+    } else {
+        media_event_ids
+    };
     let mut note = String::new();
-    if had_media && guest {
+    if had_media && guest && media_event_ids.is_empty() {
         note.push(' ');
         note.push_str(crate::services::assistant_channel_media::GUEST_NOTE);
     }
@@ -3770,11 +3780,7 @@ async fn start_chat_turn(
         channel_context: Some(source_context.clone()),
         owner_instruction_source: (!guest && private)
             .then_some(engine::OwnerInstructionSource::VerifiedPrivateChannel),
-        media_event_ids: if guest {
-            Vec::new()
-        } else {
-            media_event_ids.clone()
-        },
+        media_event_ids: media_event_ids.clone(),
         channel_uploads: telegram_input.uploads,
         invocation_id: None,
         acknowledgement_id: None,
@@ -5340,7 +5346,11 @@ async fn responses_with_producers_impl(
         text
     };
     let (source_media_declared, media) = if (media_text.is_some()
-        || crate::services::channel_media_authority::expanded_relay(&row.platform))
+        || crate::services::channel_media_authority::expanded_relay(&row.platform)
+        || (row.platform == "telegram"
+            && activity["actor"]["id"]
+                .as_str()
+                .is_some_and(|sender| !row.owner_sender_ids.iter().any(|owner| owner == sender))))
         && activity["source"]["type"] == "nyxid_relay"
         && activity["source"]["platform"].as_str() == Some(row.platform.as_str())
         && activity["actor"]["kind"] == "human"

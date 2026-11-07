@@ -1,4 +1,4 @@
-//! Native media acceptance and crash disposition. Admission never downloads.
+//! Relay media acceptance and crash disposition. Admission never downloads.
 use super::{
     channel_media_authority::{self as authority, MediaRequest},
     feature_flag_service as flags,
@@ -25,8 +25,8 @@ use sha2::{Digest, Sha256};
 pub const INTERRUPTED_NOTE: &str = "A previous photo or file in this chat was interrupted before the assistant could process it. It was not processed; please resend it if it is still needed.";
 const BATCH: i64 = 50;
 
-/// Presence is independent of owner eligibility. Existing accepted media keeps
-/// draining after flag disable; guests only get presence, never a claim.
+/// Presence is independent of eligibility. Owner claims drain after flag disable;
+/// guest claims require the separate live guest flag at download and model read.
 pub async fn for_turn(
     db: &Database,
     channel: &crate::models::nyxbot_channel::NyxbotChannel,
@@ -86,7 +86,12 @@ pub async fn presence(
     request: &MediaRequest,
     missing_media: bool,
 ) -> AppResult<usize> {
-    if !authority::supported_relay(&request.channel.platform)
+    if !(authority::supported_relay(&request.channel.platform)
+        || (request.channel.platform == "telegram"
+            && !request
+                .channel
+                .owner_sender_ids
+                .contains(&request.sender_id)))
         || !flags::personal_flag_enabled(
             db,
             &request.channel.user_id,
@@ -123,10 +128,16 @@ pub async fn presence(
     }
 }
 
-/// Source presence is computed for every sender. Only a verified owner with
-/// live authority can acquire a media claim. No gateway handles enter this API.
+/// Source presence is computed for every sender. Owner/member claims and opted-in
+/// personal guest claims bind live authority. No gateway handles enter this API.
 pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Option<EventMedia>> {
-    if !authority::supported_relay(&request.channel.platform) {
+    if !(authority::supported_relay(&request.channel.platform)
+        || (request.channel.platform == "telegram"
+            && !request
+                .channel
+                .owner_sender_ids
+                .contains(&request.sender_id)))
+    {
         return Ok(None);
     }
     let source = match authority::source(db, request).await {
@@ -138,11 +149,6 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
         + source.embedded_attachments.len()
         + source.embedded_attachments_omitted;
     if declared == 0
-        || (request.channel.org_specialist.is_none()
-            && !request
-                .channel
-                .owner_sender_ids
-                .contains(&request.sender_id))
         || !flags::personal_flag_enabled(
             db,
             &request.channel.user_id,
@@ -208,6 +214,7 @@ pub async fn admission(db: &Database, request: &MediaRequest) -> AppResult<Optio
     .take(10)
     .collect();
     Ok(Some(EventMedia {
+        guest: authorized.guest,
         authority: Some(crate::models::nyxbot_channel::MediaAuthority {
             route_api_key_id: request.channel.route_api_key_id.clone(),
             route_id: request.channel.route_id.clone(),
@@ -377,7 +384,7 @@ pub async fn note_in_session(
         // Native identity survives rebuilding a bot's channel. Keep the owner
         // fence while consuming interruptions from that same bot/platform/chat.
         let filter = doc! {"user_id":owner,
-        "media.key":{"$type":"string"},"media.platform_chat_id":chat_id,"media.noted":{"$ne":true},
+        "media.key":{"$type":"string"},"media.guest":{"$ne":true},"media.platform_chat_id":chat_id,"media.noted":{"$ne":true},
         "$and":[{"$or":[{"channel_id":&origin.nyxbot_channel_id},
             {"media.channel_bot_id":&channel.channel_bot_id,"media.platform":&channel.platform}]},
         {"$or":[{"media.interrupted":true},

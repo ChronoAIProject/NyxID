@@ -136,6 +136,13 @@ async fn source_note(
         context["event_id"] = json!(event);
     }
     let mut note = note(&context, source);
+    if source.guest
+        && source.org_origin.is_none()
+        && super::assistant_channel_media::guest::enabled(db, &row.user_id).await?
+    {
+        note = note.replace("attachments from guests are not shared with the assistant.",
+            "only attachments explicitly admitted from this guest message may be supplied as untrusted input; no attachment tools or owner memory are granted.");
+    }
     if let Some(origin) = source.org_origin.as_deref()
         && source.conversation_kind != "private"
         && transcripts.insert((origin.nyxbot_channel_id.clone(), origin.partition.clone()))
