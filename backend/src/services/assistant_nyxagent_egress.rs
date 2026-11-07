@@ -376,6 +376,10 @@ impl NyxAgentEgress for Egress {
             target.service.billing.as_ref(),
             state.billing.resale_enabled(),
         );
+        if let Some(body) = request.body.as_ref().filter(|_| request.relative_path == "v1/responses")
+            && let Some(proof) = super::assistant_platform_model::Orchestration::for_body(state, &row, body).await? {
+            context = context.with_platform_model_orchestration(&proof);
+        }
         context.org_channel_guest = org_access
             .as_ref()
             .and_then(|a| a.channel())

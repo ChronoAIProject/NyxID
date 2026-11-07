@@ -976,6 +976,9 @@ fn prefixed_hex(id: &str, prefix: &str) -> bool {
     })
 }
 pub fn valid_model(model: &str) -> bool {
+    valid_legacy_model(model) || super::assistant_platform_model::valid_id(model)
+}
+pub fn valid_legacy_model(model: &str) -> bool {
     model.strip_prefix("nyxagent/").is_some_and(|name| {
         !name.is_empty()
             && name.len() <= 64
@@ -3050,6 +3053,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         row.invocation_controlled = true;
     }
     row.active_turn = Some(ActiveTurn {
+        platform_model_context: None,
         automation_work: automation_work.clone(),
         artifact_watch_id: None,
         execution_task: retry.as_ref().and_then(|r| r.execution_task.clone()),
@@ -3350,6 +3354,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         _ => {}
     }
     row.updated_at = now;
+    Box::pin(super::assistant_platform_model::bind_in_session(
+        db, session, &mut row,
+    ))
+    .await?;
     Box::pin(super::assistant_service_execution::bind_owner_selection(
         db, session, &row, start, &text,
     ))
@@ -3927,6 +3935,17 @@ pub async fn change_model(
     let current = get(db, user_id, id).await?;
     if current.active_turn.is_some() {
         return Err(AppError::AssistantTurnActive);
+    }
+    if model.starts_with("nyxid/") {
+        let agent = super::assistant_team_service::agent_for_conversation(db, &current).await?;
+        super::assistant_platform_model::validate_selection(
+            db,
+            user_id,
+            &agent,
+            model,
+            current.guest_turn,
+        )
+        .await?;
     }
     if super::assistant_team_service::agent_for_conversation(db, &current)
         .await?

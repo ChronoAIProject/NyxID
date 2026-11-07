@@ -5,11 +5,11 @@ This is the approved platform-model contract for
 public-name, credential and first-release scope decisions. It supersedes the
 design's earlier brand-neutral naming and keyless-first recommendations.
 
-**Current implementation: PRs 1–4 — registry, authorization, tariffs, bounded execution, and admin/customer/CLI surfaces.**
-It stores configuration, evaluates live entitlements and executes the stateless
-Chat text/function subset below through complete immutable model tariffs and
-the existing billing path. Web and CLI surfaces inspect and administer these
-contracts. NyxAgent selection and actor-bound internal execution remain PR 5;
+**Current implementation: PRs 1–5 on the NyxID side — registry, authorization, tariffs, bounded execution, admin/customer/CLI surfaces, and the assistant Chat adapter.**
+It stores configuration, evaluates live entitlements and executes the certified
+stateless Chat text/image/function subset through complete immutable model tariffs
+and the existing billing path. Web and CLI surfaces inspect and administer these
+contracts. The paired NyxAgent bridge and real-runtime certification remain open;
 this does not yet satisfy the real-conversation acceptance of #2274.
 No models, credentials, prices, connections or cloud resources are seeded.
 
@@ -95,9 +95,9 @@ pagination, so cursors do not disclose inaccessible model names.
 The logical offering retains existing service/key and org-resource ceilings.
 Restricted keys must name an active authorized connection, respecting live
 membership, inherited resource scope, `admin_only` and stored operation scopes.
-Entitlements do not fund usage or broaden a specialist's service grants. PR 5 will
-add the paired NyxAgent actor-bound inference contract; service-account, relay and
-delegated discovery are not activated by this foundation.
+Entitlements do not fund usage or broaden a specialist's service grants. PR 5 adds
+the paired NyxAgent actor-bound inference contract; service-account, relay and
+non-assistant delegated discovery remain excluded.
 
 ## Private routes and credentials
 
@@ -145,9 +145,11 @@ This foundation does not claim that merely storing JSON certifies a GCP key.
 `inference:platform-models` is a code-declared, default-off flag using existing
 person/org/global overrides. No new environment variable is introduced.
 
-PRs 1–4 advertise `inference:platform-model-registry-v1`,
-`billing:model-prices-v1` and `inference:platform-models-v1`. They do not advertise
-`assistant:platform-models-v1`. Flag enable and active-model publication fail
+The registry, billing and executor advertise `inference:platform-model-registry-v1`,
+`billing:model-prices-v1` and `inference:platform-models-v1`. PR 3b adds
+`inference:platform-model-images-v1`; the PR 5 adapter adds
+`assistant:platform-models-v1` and separately requires the live paired NyxAgent
+bridge handshake. Flag enable and active-model publication fail
 closed until this binary **and** the whole declared fleet support execution and
 billing. Fabricating future capabilities in heartbeat rows cannot make a PR 1
 binary activate. NyxAgent exposure additionally needs the paired assistant
@@ -341,7 +343,7 @@ Existing products retain their current payer rules.
 | 2 | Immutable complete tariffs, strict units/evidence, shared explain selector, Lago synchronization and compatible usage/rollup readers. No legacy-price fallback. |
 | 3 | All four first-release serving families, GCP token provider, bounded atomic admission, opaque transport, retries, stream/cancel and recovery. |
 | 4 (implemented) | Admin model/route/access/rate tools; public discovery, CLI and public-model billing/usage labels. No inference execution. |
-| 5 | Paired NyxAgent/internal-consumer actor-bound integration, selection, revocation and single inference charging. Required for release. |
+| 5 (NyxID side implemented) | Paired NyxAgent actor-bound integration, selection, revocation and single inference charging. Real NyxAgent bridge/certification remains required for release. |
 | 6 | Additional certified protocols/families and stateful/media/tool/storage/BYOK lifecycles, one bounded contract at a time. |
 
 Each PR merges safely with the flag off. Do not advertise readiness before its
@@ -392,8 +394,8 @@ Gemini Enterprise Agent Platform documentation while retaining the Vertex API.
 
 ## PR 2: immutable tariffs and exact units
 
-PR 2 introduced `billing:model-prices-v1`; PR 3 adds execution readiness, while
-the paired assistant capability remains absent. Upgrade **all** API, worker and reader binaries and confirm the
+PR 2 introduced `billing:model-prices-v1`; PR 3 adds execution readiness. PR 5's
+separate paired assistant gate is described below. Upgrade **all** API, worker and reader binaries and confirm the
 existing drained-fleet readiness roster before authoring tariffs or allowances
 using the new units. No new environment variable, price, model or rate is seeded.
 The platform-model flag stays default-off; inference requires the PR 3 execution
@@ -619,11 +621,11 @@ are refused before admission, following its documented native minimum.
 The ordinary entrance accepts personal sessions, access tokens and general API
 keys. Live token/session/key authority, original and current connection/operation
 ceilings, model entitlements, the offering policy and route credential version
-are checked again after waits and before send. Actor-bound assistant, service
-account, delegated, relay and execution-permission-enrolled transports are
-refused here pending their private-model adapter; an HTTP approval cannot replace
-an enrolled one-use permission fence. PR 5 must bind those internal occurrences
-before enabling them. API-key checks use live enrollment resolution as well as
+are checked again after waits and before send. Service-account, delegated, relay
+and ordinary execution-permission-enrolled transports remain refused here; an
+HTTP approval cannot replace an enrolled one-use permission fence. Assistant
+credentials branch only into the separately gated PR 5 adapter described below,
+which binds internal occurrences to the exact key and admitted turn. API-key checks use live enrollment resolution as well as
 authentication hints, so a cold/stale process snapshot cannot bypass that fence.
 Public discovery's `request_dependent` availability means
 that execution checks the concrete request, configuration and funding; it is not
@@ -724,8 +726,9 @@ results remain text/function-only. Remote URLs, paths, provider file IDs,
 unknown content fields and other detail modes are refused locally. NyxID never
 fetches an image URL, resizes an image, selects an animation frame, or drops a
 part. Existing tool-call/result correspondence and public response projections
-are unchanged. This does not enable assistant calls: the PR 5 actor-bound guard
-and attachment-authority work remain separate.
+are unchanged. This image certification alone does not enable assistant calls:
+those additionally require the PR 5 turn binding, attachment authority and paired
+runtime gate below.
 
 The closed certification lookup binds an exact native model, transport,
 accounting version and immutable fixture digest. The initial cohort is:
@@ -805,3 +808,109 @@ after send retain their forwarded obligations; they cannot become zero usage.
 Protocol references: [Gemini image understanding](https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/image-understanding),
 [Anthropic vision](https://platform.claude.com/docs/en/build-with-claude/vision),
 and [OpenAI image inputs](https://developers.openai.com/api/docs/guides/images-vision).
+
+## Assistant Chat bridge (PR 5)
+
+The NyxID adapter supports owner, authenticated org-member and shared-recipient
+turns. It remains behind the default-off `inference:platform-models` flag and
+requires full-fleet `assistant:platform-models-v1`, registry, tariff, execution
+and certified-image readiness. Guest turns, external delegated/OAuth principals,
+service accounts and device-key/live voice remain excluded. Guest saved defaults
+are refused with `model_unavailable`; there is no silent owner-funded fallback.
+Legacy `nyxagent/` selections retain their existing behavior and read budget.
+
+**Release gate remains open:** NyxAgent must implement NxyAgent#16. Contract mocks
+are not real runtime certification. Enable only after paired long-conversation,
+function-loop, image delivery, stop/revocation and compaction tests pass on the
+actual NyxAgent release, with all replicas upgraded and old workers drained.
+
+### Selection and public discovery
+
+`GET /api/v1/assistant/nyxagent/platform-models` is a first-party human companion
+to the unchanged legacy model array. It accepts `after`, `limit`, and either
+`agent_id` or `conversation_id`. It returns entitled public metadata and retail
+prices, with certified image bounds; it never returns route, credential, region,
+project or upstream model identifiers. The picker pages this list alongside
+legacy profiles. Inaccessible saved model selections project an empty `model`
+and additive `model_unavailable: true`, displayed as “Model unavailable”.
+Missing, stale or unknown readiness degrades discovery: entitled metadata and
+prices remain readable, models are unavailable and image limits are omitted.
+The list does not probe NyxAgent when fleet readiness is absent. Execution still
+enforces every readiness gate; database failures remain errors.
+
+Thread changes, specialist defaults and turn admissions use the same live
+entitlement and offering-grant validator. Invocation admissions use that same
+turn path. Specialists explicitly grant logical offerings using their public
+`nyxid/…` names in the existing service editor; choosing a model does not add a
+grant. Internal provider routes cannot be granted as tools. An org admin's
+selection confers no entitlement or funding on a different executing person.
+
+### Exact turn binding and paired protocol
+
+The admitted turn transaction stores a versioned, expiring model binding in
+`assistant_service_execution`, with an additive `ActiveTurn.platform_model_context`
+handle. It pins the actor, agent, exact conversation credential, turn, public
+model/revisions, offering and original operation scopes. The runtime activates
+callbacks only after NyxAgent advertises this capability object:
+
+```json
+{"platform_models":{"protocol":"nyxagent-platform-models-v1","version":1,
+ "text":true,"function_tools":true,"image_input":true,"streaming":true,"compaction":true}}
+```
+
+The outer Responses request carries only
+`nyxid_model_context: {version: 1, handle: "opaque UUID"}`. This is protocol
+metadata, never prompt prose or bearer authority. The bridge uses the exact
+conversation key to read
+`GET /api/v1/llm/gateway/v1/assistant-model-context`, passing
+`X-NyxID-Model-Context`. The manifest contains the pinned public model and bounded
+context/output/request/image capabilities, without an actor or private route.
+
+Each inner Chat request goes to the fixed
+`POST /api/v1/llm/gateway/v1/chat/completions`, with the same key and context,
+plus a fresh UUID `X-NyxID-Model-Occurrence` per actual inference step (including
+compaction). Occurrences are durably claimed once. A duplicate, lost-response or
+uncertain occurrence never starts a second executor invocation: the bridge must
+retain/recover its own output and must not regenerate a lost response. Reserved
+adapter headers are consumed locally and never forwarded to providers.
+
+Every callback and dispatch rechecks current key/turn/Stop, original and current
+scopes, live shared/org/collaboration authority, public entitlement and revisions.
+A context cannot survive settlement, key rotation, membership loss or revocation,
+or migrate to another conversation, actor or turn. Metadata expires through the
+existing execution-record TTL and is deleted with its conversation/owner.
+Existing approval denials, cards and personal service approvals remain in force.
+A parsed, certified stateless model request is read-class for Auto/Ask and the
+default Writes-only policy. Explicit All-requests or service-specific approval
+requirements still use the existing bounded wait/card path; explicit deny wins.
+Connection-bound execution permissions are not aliased to a fabricated connection
+for a logical model offering; their existing gap/approval fallback is preserved.
+
+### Images, usage and billing
+
+The bridge translates Responses `input_image` parts to Chat `image_url` data
+parts, preserving order and bytes. Fetches use existing authenticated attachment
+URLs. NyxID records only content digests and attachment references bound to the
+turn; each model image must match an authorized read, and retention/source fences
+are rechecked before dispatch. This includes current collaboration-request image
+fences. Arbitrary inline images and another turn's provenance do not confer image
+authority. Initial images and tool-image continuations intersect the bridge's
+limits with PR 3b certification, MIME/size/count bounds and tariff accounting.
+Existing omitted/expired notes and image-delivery receipts remain authoritative.
+The assistant adapter introduces no separate image permit and does not access
+PR 3b's internal permit fields. PR 3b's decode reservation is released before approvals and dispatch;
+the parser uses the authenticated original acting person for its decode budget.
+
+Each inner call uses the PR 3 planner/executor and one PR 2 tariff settlement,
+charged to the original acting person's benefits/wallet, including org members
+and shared recipients. No sharer or organization wallet is borrowed. A trusted
+server-only billing marker suppresses copied inference token/image charges on
+the outer `llm-nyx` hop while preserving an explicitly configured distinct
+Requests or other non-token orchestration fee. User headers cannot set this
+marker; legacy outer billing is unchanged.
+
+Rollout is readers first, then the paired bridge and all API/worker replicas,
+then readiness and per-person flag activation. Disable the flag to stop new
+platform execution; retained legacy histories and legacy model selections remain
+readable. Drain platform turns and replace saved platform selections before
+returning old workers: old replicas cannot execute the new `nyxid/` contract.

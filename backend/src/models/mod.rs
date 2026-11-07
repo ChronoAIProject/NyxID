@@ -154,6 +154,7 @@ pub mod assistant_group_collaboration;
 pub mod assistant_message;
 pub mod assistant_message_feedback;
 pub mod assistant_onboarding;
+pub mod assistant_platform_model;
 pub mod assistant_profile_route;
 pub mod assistant_settings;
 pub mod assistant_skill_draft_attempt;

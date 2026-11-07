@@ -51,6 +51,9 @@ pub(crate) struct Plan {
     routes: Vec<ModelRoute>,
 }
 impl Plan {
+    pub(crate) fn image_limits(&self) -> Option<images::PublicLimits> {
+        images::public_limits(&self.model, &self.routes, self.tariff.tariff())
+    }
     #[cfg(test)]
     pub(crate) fn test_routes(&self) -> Vec<ModelRoute> {
         self.routes.clone()

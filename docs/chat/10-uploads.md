@@ -631,3 +631,20 @@ readable until expiry. Re-enabling restores exposure/recovery. Keep upgraded
 binaries for draining and the compatible frontend floor; disabling does not make
 old binaries safe against newly admitted generated state. Real Sandbox-to-Web
 acceptance, including video playback and exact-byte recovery, is a pre-enable gate.
+
+### Platform-model assistant bridge
+
+Platform-selected assistant turns reuse the existing image plan, authenticated
+attachment URLs, delivery receipts and omitted/expired notices. Their initial
+and tool-image bounds also intersect the certified model/tariff limits from
+[PLATFORM_MODELS.md](../PLATFORM_MODELS.md#assistant-chat-bridge-pr-5). The NyxAgent
+bridge converts delivered Responses image parts into bounded Chat data parts;
+NyxID accepts those bytes only after an authorized attachment read for the exact
+live turn and rechecks retention/source authority before dispatch. The retained
+proof contains a content digest and attachment ID, never image bytes. An earlier
+turn's proof is not reusable. Collaboration guests keep legacy models; they do
+not acquire platform inference through their public attachment access.
+
+This integration stays disabled pending the paired NyxAgent bridge release and
+real-runtime image/long-conversation/compaction certification. It does not change
+the canonical image-origin check or silently replace undeliverable images.

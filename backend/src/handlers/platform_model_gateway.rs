@@ -306,7 +306,7 @@ pub(super) async fn execute(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn execute_with_runtime(
+pub(super) async fn execute_with_runtime(
     state: AppState,
     auth: AuthUser,
     path: String,
@@ -318,6 +318,12 @@ async fn execute_with_runtime(
     cancel: CancellationToken,
     runtime: std::sync::Arc<execution::Runtime>,
 ) -> AppResult<Response> {
+    if auth.assistant_chat.is_some() {
+        return super::assistant_platform_models::execute(
+            state, auth, path, method, query, headers, body, value, cancel, runtime,
+        )
+        .await;
+    }
     if !matches!(
         auth.auth_method,
         AuthMethod::Session | AuthMethod::AccessToken | AuthMethod::ApiKey
@@ -470,7 +476,7 @@ async fn execute_with_runtime(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::{
         models::platform_model::*,
@@ -483,7 +489,7 @@ mod tests {
         matchers::{method, path},
     };
 
-    async fn enabled() -> (AppState, execution::Plan, execution::Request, AuthUser) {
+    pub(crate) async fn enabled() -> (AppState, execution::Plan, execution::Request, AuthUser) {
         enabled_with_readiness(true).await
     }
 

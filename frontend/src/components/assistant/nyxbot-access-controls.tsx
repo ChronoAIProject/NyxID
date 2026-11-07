@@ -137,8 +137,12 @@ export function ModelSelect({
   label = "Model",
   className,
   grouped = false,
+  agentId,
+  conversationId,
 }: {
   readonly grouped?: boolean;
+  readonly agentId?: string;
+  readonly conversationId?: string;
   readonly value: string | undefined;
   readonly onChange: (model: string) => void;
   readonly disabled?: boolean;
@@ -146,7 +150,7 @@ export function ModelSelect({
   readonly className?: string;
 }) {
   const Trigger = grouped ? GroupedSelectTrigger : SelectTrigger;
-  const models = useNyxAgentModels();
+  const models = useNyxAgentModels(true, { agentId, conversationId });
   const options = modelOptions(models.data, value);
   return (
     <Select
@@ -157,7 +161,7 @@ export function ModelSelect({
       <Trigger aria-label={label} className={className}>
         <SelectValue
           placeholder={
-            models.isPending ? "Loading models..." : "Choose a model"
+            models.isPending ? "Loading models..." : value === "" ? "Model unavailable" : "Choose a model"
           }
         />
       </Trigger>
@@ -167,6 +171,9 @@ export function ModelSelect({
             {row.available
               ? modelDisplayName(row)
               : `${modelDisplayName(row)} (unavailable)`}
+            {row.id.startsWith("nyxid/") && row.description && (
+              <span className="block text-13 text-text-tertiary">{row.description}</span>
+            )}
             {modelCannotViewImages(row) && (
               <span className="ml-2 text-13 text-text-tertiary">
                 Can’t view images

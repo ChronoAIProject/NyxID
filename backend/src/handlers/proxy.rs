@@ -4354,6 +4354,13 @@ async fn execute_resolved_proxy_inner<'a>(
         target.service.billing.as_ref(),
         state.billing.resale_enabled(),
     );
+    if nyxagent_admission
+        && let Some(proof) = request
+            .extensions()
+            .get::<crate::services::assistant_platform_model::Orchestration>()
+    {
+        billing_ctx = billing_ctx.with_platform_model_orchestration(proof);
+    }
     billing_ctx = billing_ctx.with_assistant_payer(auth_user.assistant_chat.as_deref());
     billing_ctx = billing_ctx.with_assistant_provenance(
         auth_user.assistant_turn_fence.is_some(),
