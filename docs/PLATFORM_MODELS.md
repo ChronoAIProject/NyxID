@@ -749,8 +749,10 @@ missing-evidence response and a certified zero-consumption refusal. They are
 protocol regression fixtures, not evidence of a live canary or account access.
 No credentials, prices or models are seeded.
 
-Before image execution or image-tariff authoring, the fleet must additionally
-pass `inference:platform-model-images-v1`. Existing platform flag, entitlement,
+Before reserving image decode capacity, decoding, image execution or image-tariff
+authoring, the fleet must additionally pass `inference:platform-model-images-v1`.
+The gateway checks after flag/entitlement authorization and before image parsing;
+the planner and dispatcher recheck readiness. Existing platform flag, entitlement,
 registry, billing and execution gates remain required. Old replicas cannot send
 an image under a text digest; do not author/activate the new image contracts until
 all serving replicas advertise readiness. Reads and disabling remain available.
@@ -763,9 +765,17 @@ Claude further limits each file to 5 MiB and either dimension to 8,000 pixels.
 `tariff.bounds.max_images` can lower the count. Each raster is fully decoded and
 discarded in sequence, with a 128 MiB decoder allocation limit and checked output
 size; malformed/truncated inputs, animation and multi-image JPEG containers are
-refused. Weighted process-wide memory permits cover request copies and decoding;
-capacity exhaustion returns the existing concurrency error before spending.
-CPU decoding runs on the blocking pool after acquiring the permit.
+refused. A 384 MiB process-wide budget covers transient decode work, weighted at
+twice the serialized request size plus the 128 MiB decode and 8 MiB file bounds.
+Each authenticated person gets at most one active decode and at most half that
+budget. Two people with requests at the legal file/JSON ceilings can decode
+concurrently. Exhaustion returns `ServiceConcurrencyLimited` (429), without a
+queued wait or spending. CPU decoding runs on the blocking pool after acquiring
+the permit; cancellation leaves it with the decoder until that work exits.
+Both the byte reservation and person slot are released before parsing returns,
+including on failure. `Request` and its clones hold no decode permit during
+human approval, funding, provider I/O or streaming. Retained request bodies keep
+the existing ingress/tariff size bounds; there is no separate dispatch permit.
 
 Non-image content remains capped at 1 MiB. The existing configured LLM body limit
 is enforced by bounded ingress before JSON allocation; the platform entrance

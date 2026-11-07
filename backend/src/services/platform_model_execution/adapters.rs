@@ -120,17 +120,22 @@ pub(crate) struct Request {
     pub max_output: i64,
     ingress_limit: usize,
     pub(super) images: super::images::Summary,
-    _image_memory: Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
 }
 impl Request {
     #[cfg(test)]
     pub fn parse(method: &http::Method, path: &str, body: Value) -> AppResult<Self> {
-        let memory = Self::image_memory(&body)?;
+        let memory = Self::image_memory(
+            &body,
+            &uuid::Uuid::new_v4().to_string(),
+            &super::images::decode_budget(),
+        )?;
         Self::parse_inner(method, path, body, memory)
     }
     fn image_memory(
         body: &Value,
-    ) -> AppResult<Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>> {
+        person: &str,
+        budget: &std::sync::Arc<super::images::DecodeBudget>,
+    ) -> AppResult<Option<super::images::DecodePermit>> {
         if super::images::contains_images(body) {
             let size = super::images::json_size(body)?;
             let parts = body["messages"]
@@ -153,13 +158,30 @@ impl Request {
             if count > super::images::MAX_IMAGES || size.saturating_sub(uri_bytes) > 1024 * 1024 {
                 return Err(unsupported());
             }
-            Ok(Some(super::images::reserve(size)?))
+            Ok(Some(budget.reserve(person, size)?))
         } else {
             Ok(None)
         }
     }
-    pub async fn parse_async(method: http::Method, path: String, body: Value) -> AppResult<Self> {
-        let memory = Self::image_memory(&body)?;
+    /// `person` is the authenticated acting person, never a client selector or
+    /// shared credential owner. Its decode slot ends before this method returns.
+    /// The caller checks image readiness before invoking this CPU-bound parser.
+    pub async fn parse_async(
+        method: http::Method,
+        path: String,
+        body: Value,
+        person: &str,
+    ) -> AppResult<Self> {
+        Self::parse_with_budget(method, path, body, person, &super::images::decode_budget()).await
+    }
+    async fn parse_with_budget(
+        method: http::Method,
+        path: String,
+        body: Value,
+        person: &str,
+        budget: &std::sync::Arc<super::images::DecodeBudget>,
+    ) -> AppResult<Self> {
+        let memory = Self::image_memory(&body, person, budget)?;
         if memory.is_none() {
             return Self::parse_inner(&method, &path, body, memory);
         }
@@ -173,7 +195,7 @@ impl Request {
         method: &http::Method,
         path: &str,
         body: Value,
-        memory: Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
+        _memory: Option<super::images::DecodePermit>,
     ) -> AppResult<Self> {
         if method != http::Method::POST
             || !matches!(
@@ -274,7 +296,6 @@ impl Request {
             max_output,
             ingress_limit: super::images::MAX_REQUEST,
             images,
-            _image_memory: memory,
         })
     }
     pub fn with_ingress_limit(mut self, limit: usize) -> Self {
@@ -829,3 +850,7 @@ pub(super) fn chunk(delta: Value, finish: Option<&str>, model: &str, id: &str) -
         })
     ))
 }
+
+#[cfg(test)]
+#[path = "decode_tests.rs"]
+mod decode_tests;

@@ -5,8 +5,9 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use image::{ImageDecoder, ImageFormat, ImageReader};
 use serde_json::Value;
 use std::{
+    collections::HashSet,
     io::Cursor,
-    sync::{Arc, LazyLock},
+    sync::{Arc, LazyLock, Mutex},
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -18,13 +19,11 @@ pub(crate) const MAX_IMAGES: usize = 10;
 const MAX_PIXELS: u64 = 32_000_000;
 const MAX_TOTAL_PIXELS: u64 = 64_000_000;
 const MAX_DECODE: u64 = 128 * 1024 * 1024;
-// Same weighted-permit pattern as attachment byte_budget. Account for original
-// bytes, JSON, validation serialization, translated JSON and HTTP bytes as well
-// as one sequential decoder. No semaphore wait may accumulate decoded images.
-static MEMORY: LazyLock<Arc<Semaphore>> =
-    LazyLock::new(|| Arc::new(Semaphore::new(384 * 1024 * 1024)));
+const DECODE_BUDGET: usize = 384 * 1024 * 1024;
+const PERSON_DECODE_BUDGET: usize = DECODE_BUDGET / 2;
+static MEMORY: LazyLock<Arc<DecodeBudget>> = LazyLock::new(|| Arc::new(DecodeBudget::new()));
 
-pub(super) fn contains_images(body: &Value) -> bool {
+pub(crate) fn contains_images(body: &Value) -> bool {
     body["messages"].as_array().is_some_and(|messages| {
         messages.iter().any(|m| {
             m["content"]
@@ -33,20 +32,71 @@ pub(super) fn contains_images(body: &Value) -> bool {
         })
     })
 }
-pub(super) fn reserve(size: usize) -> AppResult<Arc<OwnedSemaphorePermit>> {
-    if size > MAX_REQUEST {
-        return Err(unsupported());
+pub(super) struct DecodeBudget {
+    memory: Arc<Semaphore>,
+    people: Mutex<HashSet<String>>,
+}
+
+impl DecodeBudget {
+    pub(super) fn new() -> Self {
+        Self {
+            memory: Arc::new(Semaphore::new(DECODE_BUDGET)),
+            people: Mutex::new(HashSet::new()),
+        }
     }
-    let weight = size
-        .checked_mul(5)
-        .and_then(|n| n.checked_add(MAX_DECODE as usize + MAX_FILE))
-        .and_then(|n| u32::try_from(n).ok())
-        .ok_or_else(unsupported)?;
-    MEMORY
-        .clone()
-        .try_acquire_many_owned(weight)
-        .map(Arc::new)
-        .map_err(|_| AppError::ServiceConcurrencyLimited)
+
+    pub(super) fn reserve(self: &Arc<Self>, person: &str, size: usize) -> AppResult<DecodePermit> {
+        if size > MAX_REQUEST {
+            return Err(unsupported());
+        }
+        // Validation copies are temporary and precede raster decoding. During
+        // decode retain the ingress bytes/JSON, one decoded file and one pixel
+        // buffer; translated requests and dispatch are outside this lifetime.
+        let weight = size
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(MAX_DECODE as usize + MAX_FILE))
+            .ok_or_else(unsupported)?;
+        let mut people = self.people.lock().unwrap_or_else(|e| e.into_inner());
+        if weight > PERSON_DECODE_BUDGET || people.contains(person) {
+            return Err(AppError::ServiceConcurrencyLimited);
+        }
+        let memory = self
+            .memory
+            .clone()
+            .try_acquire_many_owned(weight as u32)
+            .map_err(|_| AppError::ServiceConcurrencyLimited)?;
+        // Only active decodes enter this set, so its cardinality is bounded by
+        // the global budget. Refused callers never leave an identity behind.
+        people.insert(person.to_owned());
+        Ok(DecodePermit {
+            budget: self.clone(),
+            person: person.to_owned(),
+            memory: Some(memory),
+        })
+    }
+}
+
+pub(super) struct DecodePermit {
+    budget: Arc<DecodeBudget>,
+    person: String,
+    memory: Option<OwnedSemaphorePermit>,
+}
+
+impl Drop for DecodePermit {
+    fn drop(&mut self) {
+        let mut people = self.budget.people.lock().unwrap_or_else(|e| e.into_inner());
+        drop(self.memory.take());
+        people.remove(&self.person);
+    }
+}
+
+pub(super) fn decode_budget() -> Arc<DecodeBudget> {
+    MEMORY.clone()
+}
+
+#[cfg(test)]
+pub(crate) fn hold_decode_for_test(person: &str) -> impl Send {
+    decode_budget().reserve(person, 0).unwrap()
 }
 
 #[derive(Clone, Default)]
@@ -337,4 +387,47 @@ pub(crate) fn public_limits(
         max_request_bytes: MAX_REQUEST.min(usize::try_from(tariff.bounds.max_request_bytes).ok()?),
         detail: "auto",
     })
+}
+
+#[cfg(test)]
+mod decode_budget_tests {
+    use super::*;
+
+    #[test]
+    fn one_person_cannot_exhaust_capacity_or_leave_refused_identities() {
+        let budget = Arc::new(DecodeBudget::new());
+        // Even two requests at the legal total-file and non-image ceilings fit
+        // together. Base64 padding/URI overhead is included conservatively.
+        let size = MAX_FILES.div_ceil(3) * 4 + MAX_IMAGES * 128 + 1024 * 1024;
+        let a = budget.reserve("person-a", size).unwrap();
+        for _ in 0..100 {
+            assert!(matches!(
+                budget.reserve("person-a", 0),
+                Err(AppError::ServiceConcurrencyLimited)
+            ));
+        }
+        let b = budget.reserve("person-b", size).unwrap();
+        assert!(matches!(
+            budget.reserve("person-c", 0),
+            Err(AppError::ServiceConcurrencyLimited)
+        ));
+        assert_eq!(budget.people.lock().unwrap().len(), 2);
+        drop(a);
+        let c = budget.reserve("person-c", 0).unwrap();
+        drop((b, c));
+        assert_eq!(budget.memory.available_permits(), DECODE_BUDGET);
+        assert!(budget.people.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn per_person_weight_and_invalid_size_fail_without_reserving() {
+        let budget = Arc::new(DecodeBudget::new());
+        assert!(matches!(
+            budget.reserve("person", MAX_REQUEST),
+            Err(AppError::ServiceConcurrencyLimited)
+        ));
+        assert!(budget.reserve("person", MAX_REQUEST + 1).is_err());
+        assert_eq!(budget.memory.available_permits(), DECODE_BUDGET);
+        assert!(budget.people.lock().unwrap().is_empty());
+    }
 }
