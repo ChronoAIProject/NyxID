@@ -501,6 +501,20 @@ const ALLOWLIST: &[Verifier] = &[
          grant; active service account/user; org agent key; session fallback only for \
          session_fallback_allowed sessions",
     ),
+    // Platform model gateway live recheck (#2274 PR 3).
+    v(
+        "handlers/platform_model_gateway.rs",
+        "scope",
+        "verify_token",
+        1,
+        "Bearer/DPoP access token already admitted by AuthUser on /llm nyxid/ model \
+         requests; re-read for live recheck after waits and funding",
+        "subject must equal the authenticated person; \
+         oauth_token_authority_service::validate_claims_for_route (consent revision, \
+         delegation, source session; outage -> 503); live sid session; assistant, \
+         delegated, relay, service-account and execution-permission callers refused \
+         before this point",
+    ),
     // OAuth endpoints.
     v(
         "handlers/oauth.rs",
