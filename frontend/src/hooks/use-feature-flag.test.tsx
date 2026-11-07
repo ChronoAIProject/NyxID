@@ -132,6 +132,7 @@ describe("feature flag catalog", () => {
       AGENT_OPERATION_SCOPES: "assistant:operation-scopes",
       GUEST_OPERATION_SCOPES: "assistant:guest-operation-scopes",
       CHANNEL_MEDIA: "assistant:channel-media",
+      CHANNEL_GUEST_MEDIA: "assistant:channel-guest-media",
       GENERATED_ARTIFACTS: "assistant:generated-artifacts",
       ATTACHMENT_WRITES: "assistant:attachment-writes",
       AGENT_LEARNING: "assistant:agent-learning",
