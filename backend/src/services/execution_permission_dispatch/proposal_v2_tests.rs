@@ -3,13 +3,26 @@ use super::*;
 use crate::models::approval_request::ApprovalRequest;
 
 async fn row(f: &Fixture) -> ApprovalRequest {
-    f.state
+    let row = f
+        .state
         .db
         .collection::<ApprovalRequest>("approval_requests")
         .find_one(doc! {"execution_proposal.version":2})
         .await
         .unwrap()
-        .expect("one v2 proposal")
+        .expect("one v2 proposal");
+    let envelope = row.execution_proposal.as_ref().unwrap();
+    assert!(envelope.v3.is_none());
+    assert!(!bson::to_document(envelope).unwrap().contains_key("v3"));
+    for choice in &v2::proposal(&row).unwrap().choices {
+        assert!(choice.conversation_scope.is_none());
+        assert!(
+            !bson::to_document(choice)
+                .unwrap()
+                .contains_key("conversation_scope")
+        );
+    }
+    row
 }
 fn choice(row: &ApprovalRequest, id: &str) -> Decision {
     let p = v2::proposal(row).unwrap();

@@ -1336,7 +1336,7 @@ async fn snapshot_in_session(
     let mut permission_work = 0;
     if row.execution_task.is_some() {
         let requests:Vec<crate::models::approval_request::ApprovalRequest>=db.collection("approval_requests")
-            .find(doc!{"user_id":owner,"$or":[{"execution_proposal.v1.invocation_id":&row.id,"execution_proposal.v1.state":{"$in":["pending","queued","preparing","dispatched","waiting"]}},{"execution_proposal.v2.invocation_id":&row.id,"execution_proposal.v2.state":{"$in":["pending","queued","preparing","dispatched","waiting"]}}]})
+            .find(super::execution_permission_dispatch::proposals::v3::source_selector(doc!{"user_id":owner,"execution_proposal.v1.invocation_id":&row.id,"execution_proposal.v1.state":{"$in":["pending","queued","preparing","dispatched","waiting"]}}))
             .limit(33).session(&mut *session).await?.stream(&mut *session).try_collect().await?;
         for request in requests {
             if request.status == "pending" && request.expires_at > Utc::now() {

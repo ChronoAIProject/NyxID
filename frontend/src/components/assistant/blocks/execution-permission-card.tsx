@@ -5,6 +5,7 @@ import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
 import {
   executionProposalSchema,
+  executionContextLabel,
   type ExecutionProposal,
 } from "@/schemas/execution-proposal";
 import type { ApprovalRequestItem } from "@/types/approvals";
@@ -168,6 +169,11 @@ export function ExecutionPermissionCard({
               </Label>
             ))}
           </fieldset>
+          {choice?.context_scope && (
+            <p className="text-12 text-muted-foreground">
+              Applies to: {executionContextLabel(choice.context_scope)}
+            </p>
+          )}
           {current.review?.reusable_unavailable && (
             <p className="text-12 text-muted-foreground">
               {current.review.reusable_unavailable}

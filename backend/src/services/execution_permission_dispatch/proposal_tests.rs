@@ -85,7 +85,7 @@ async fn proposal(f: &Fixture) -> ApprovalRequest {
     f.state
         .db
         .collection::<ApprovalRequest>("approval_requests")
-        .find_one(doc! {"execution_proposal.version":1})
+        .find_one(doc! {"execution_proposal.version":{"$in":[1,3]}})
         .await
         .unwrap()
         .unwrap()
@@ -163,7 +163,13 @@ async fn execution_proposal_proxy_card_human_decision_resume_and_receipt_are_exa
         let p = proposals::proposal(&request).unwrap();
         assert_eq!(
             p.choices.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-            ["operation", "task", "window", "persistent"]
+            [
+                "operation",
+                "task",
+                "window",
+                "persistent",
+                "persistent_private_conversations"
+            ]
         );
         assert!(
             p.contract
@@ -418,7 +424,9 @@ async fn execution_proposal_crash_after_barrier_reports_unknown_and_never_retrie
         .collection::<Document>("approval_requests")
         .update_one(
             doc! {"_id":&request.id},
-            doc! {"$set":{"execution_proposal.v1.state":"dispatched"}},
+            proposals::v3::AssistantVersion::of(&request)
+                .unwrap()
+                .update(doc! {"$set":{"execution_proposal.v1.state":"dispatched"}}),
         )
         .await
         .unwrap();
@@ -666,7 +674,9 @@ async fn execution_proposal_recovery_requeues_missing_wake_and_retains_one_effec
         .collection::<Document>("approval_requests")
         .update_one(
             doc! {"_id":&request.id},
-            doc! {"$unset":{"execution_proposal.v1.wake_at":""}},
+            proposals::v3::AssistantVersion::of(&request)
+                .unwrap()
+                .update(doc! {"$unset":{"execution_proposal.v1.wake_at":""}}),
         )
         .await
         .unwrap();
@@ -911,7 +921,9 @@ async fn execution_proposal_notification_claim_is_once_and_preserves_absent_sett
         .collection::<Document>("approval_requests")
         .update_one(
             doc! {"_id":&request.id},
-            doc! {"$unset":{"execution_proposal.v1.maintenance_at":""}},
+            proposals::v3::AssistantVersion::of(&request)
+                .unwrap()
+                .update(doc! {"$unset":{"execution_proposal.v1.maintenance_at":""}}),
         )
         .await
         .unwrap();
@@ -1184,7 +1196,9 @@ async fn execution_proposal_org_instruction_remains_separate_and_resumes_once() 
             .collection::<Document>("approval_requests")
             .update_one(
                 doc! {"_id":&request.id},
-                doc! {"$unset":{"execution_proposal.v1.wake_at":""}},
+                proposals::v3::AssistantVersion::of(&request)
+                    .unwrap()
+                    .update(doc! {"$unset":{"execution_proposal.v1.wake_at":""}}),
             )
             .await
             .unwrap();
@@ -1361,10 +1375,10 @@ async fn execution_proposal_recovers_a_matching_operation_reservation_before_sen
     finish(&f, &row, "Waiting").await;
     let resumed = event_turn(&f, &row).await;
     let old = Utc::now() - chrono::Duration::minutes(3);
-    f.state.db.collection::<Document>("approval_requests").update_one(doc!{"_id":&request.id},doc!{"$set":{
+    f.state.db.collection::<Document>("approval_requests").update_one(doc!{"_id":&request.id},proposals::v3::AssistantVersion::of(&request).unwrap().update(doc!{"$set":{
         "execution_proposal.v1.state":"preparing","execution_proposal.v1.claim_id":"lost-preparer",
         "execution_proposal.v1.claimed_at":bson::DateTime::from_chrono(old)
-    }}).await.unwrap();
+    }})).await.unwrap();
     f.state.db.collection::<Document>("approval_grants").update_one(doc!{"_id":&p.grant_id},doc!{"$set":{"execution_use":bson::to_bson(&ExecutionUse{
         version:VERSION,operation_id:p.effect_id.clone(),prepared_digest:p.prepared_digest.clone(),claim_id:"lost-reservation".into(),
         state:ExecutionUseState::Claimed,claimed_at:old,dispatched_at:None,completed_at:None,
@@ -1431,3 +1445,6 @@ async fn execution_proposal_personal_policy_coverage_never_satisfies_an_org_or_o
     assert!(f.server.received_requests().await.unwrap().is_empty());
     f.cleanup().await;
 }
+
+#[path = "proposal_private_conversations_tests.rs"]
+mod private_conversations;
