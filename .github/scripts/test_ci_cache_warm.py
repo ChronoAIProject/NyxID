@@ -171,6 +171,22 @@ class CacheWarmTests(unittest.TestCase):
         self.assertEqual(set(upload["with"]["path"].split()), {"coverage-cli.json", "coverage-cli.lcov"})
         self.assertIn("coverage-cli-summary", jobs["coverage-comment"]["needs"])
 
+    def test_cli_coverage_drops_stale_objects_before_no_report_measurement(self):
+        steps = self.ci["jobs"]["coverage-cli"]["steps"]
+        cache = next(i for i, step in enumerate(steps)
+                     if step.get("uses") == CACHE_ACTION)
+        clean = next(i for i, step in enumerate(steps)
+                     if step.get("run") == "cargo llvm-cov clean --workspace")
+        build = next(i for i, step in enumerate(steps)
+                     if "cargo llvm-cov --package nyxid-cli --no-report" in step.get("run", ""))
+        report = next(i for i, step in enumerate(steps)
+                      if "cargo llvm-cov report --package nyxid-cli --lcov" in step.get("run", ""))
+        self.assertLess(cache, clean)
+        self.assertLess(clean, build)
+        self.assertLess(build, report)
+        self.assertNotIn("if", steps[clean])
+        self.assertFalse(steps[clean].get("continue-on-error", False))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -310,3 +310,364 @@ fn admin_list_shows_uuid_and_revision_needed_for_subsequent_cas_edits() {
     assert!(output.contains("Revision"));
     assert!(output.contains('7'));
 }
+
+// Check the typed parse result, not merely that clap accepted the spelling.
+fn parsed_fields(command: &Commands) -> (&'static str, Value, &AuthArgs) {
+    let model = |args: &ModelArgs| json!({"model":args.model});
+    let page = |args: &PageArgs| json!({"limit":args.limit,"after":args.after});
+    let set =
+        |args: &SetArgs| json!({"model":args.model,"revision":args.revision,"file":args.file});
+    match command {
+        Commands::Models {
+            command: ModelCommands::List(args),
+        } => ("list", page(args), &args.auth),
+        Commands::Models {
+            command: ModelCommands::Show { model, auth },
+        } => ("show", json!({"model":model}), auth),
+        Commands::Admin {
+            command: crate::cli::AdminCommands::Models { command },
+        } => match command {
+            AdminModelCommands::List(args) => ("admin list", page(args), &args.auth),
+            AdminModelCommands::Show(args) => ("admin show", model(args), &args.auth),
+            AdminModelCommands::Create { file, auth } => {
+                ("admin create", json!({"file":file}), auth)
+            }
+            AdminModelCommands::Update(args) => ("admin update", set(args), &args.auth),
+            AdminModelCommands::Retire {
+                model,
+                revision,
+                auth,
+            } => (
+                "admin retire",
+                json!({"model":model,"revision":revision}),
+                auth,
+            ),
+            AdminModelCommands::Routes { command } => match command {
+                RoutesCommands::Show(args) => ("routes show", model(args), &args.auth),
+                RoutesCommands::Set(args) => ("routes set", set(args), &args.auth),
+            },
+            AdminModelCommands::Access { command } => match command {
+                AccessCommands::Show(args) => ("access show", model(args), &args.auth),
+                AccessCommands::Set(args) => ("access set", set(args), &args.auth),
+                AccessCommands::Explain { model, user, auth } => {
+                    ("access explain", json!({"model":model,"user":user}), auth)
+                }
+            },
+            AdminModelCommands::Prices { command } => match command {
+                PriceCommands::List(args) => ("prices list", model(args), &args.auth),
+                PriceCommands::Create(args) => ("prices create", set(args), &args.auth),
+                PriceCommands::Publish(args) => ("prices publish", model(args), &args.auth),
+                PriceCommands::Resync(args) => ("prices resync", model(args), &args.auth),
+                PriceCommands::Verify(args) => ("prices verify", model(args), &args.auth),
+                PriceCommands::Retire {
+                    model,
+                    tariff,
+                    revision,
+                    auth,
+                } => (
+                    "prices retire",
+                    json!({"model":model,"tariff":tariff,"revision":revision}),
+                    auth,
+                ),
+            },
+        },
+        _ => panic!("expected a model command"),
+    }
+}
+
+#[test]
+fn every_model_subcommand_parses_its_arguments_and_flattened_auth() {
+    let _lock = env_lock().lock().unwrap();
+    let contract = "model contract.json";
+    let target = json!({"model":ID});
+    let set = json!({"model":ID,"revision":7,"file":contract});
+    let cases = [
+        (
+            vec!["models", "list", "--limit", "100", "--after", "nyxid/last"],
+            "list",
+            json!({"limit":100,"after":"nyxid/last"}),
+        ),
+        (
+            vec!["models", "show", "nyxid/test"],
+            "show",
+            json!({"model":"nyxid/test"}),
+        ),
+        (
+            vec![
+                "admin",
+                "models",
+                "list",
+                "--limit",
+                "1",
+                "--after",
+                "nyxid/previous",
+            ],
+            "admin list",
+            json!({"limit":1,"after":"nyxid/previous"}),
+        ),
+        (
+            vec!["admin", "models", "show", ID],
+            "admin show",
+            target.clone(),
+        ),
+        (
+            vec!["admin", "models", "create", "--file", contract],
+            "admin create",
+            json!({"file":contract}),
+        ),
+        (
+            vec![
+                "admin",
+                "models",
+                "update",
+                ID,
+                "--revision",
+                "7",
+                "--file",
+                contract,
+            ],
+            "admin update",
+            set.clone(),
+        ),
+        (
+            vec!["admin", "models", "retire", ID, "--revision", "7"],
+            "admin retire",
+            json!({"model":ID,"revision":7}),
+        ),
+        (
+            vec!["admin", "models", "routes", "show", ID],
+            "routes show",
+            target.clone(),
+        ),
+        (
+            vec![
+                "admin",
+                "models",
+                "routes",
+                "set",
+                ID,
+                "--revision",
+                "7",
+                "--file",
+                contract,
+            ],
+            "routes set",
+            set.clone(),
+        ),
+        (
+            vec!["admin", "models", "access", "show", ID],
+            "access show",
+            target.clone(),
+        ),
+        (
+            vec![
+                "admin",
+                "models",
+                "access",
+                "set",
+                ID,
+                "--revision",
+                "7",
+                "--file",
+                contract,
+            ],
+            "access set",
+            set.clone(),
+        ),
+        (
+            vec![
+                "admin",
+                "models",
+                "access",
+                "explain",
+                ID,
+                "--user",
+                "00000000-0000-4000-8000-000000000002",
+            ],
+            "access explain",
+            json!({"model":ID,"user":"00000000-0000-4000-8000-000000000002"}),
+        ),
+        (
+            vec!["admin", "models", "prices", "list", ID],
+            "prices list",
+            target.clone(),
+        ),
+        (
+            vec![
+                "admin",
+                "models",
+                "prices",
+                "create",
+                ID,
+                "--revision",
+                "7",
+                "--file",
+                contract,
+            ],
+            "prices create",
+            set,
+        ),
+        (
+            vec!["admin", "models", "prices", "publish", ID],
+            "prices publish",
+            target.clone(),
+        ),
+        (
+            vec!["admin", "models", "prices", "resync", ID],
+            "prices resync",
+            target.clone(),
+        ),
+        (
+            vec!["admin", "models", "prices", "verify", ID],
+            "prices verify",
+            target,
+        ),
+        (
+            vec![
+                "admin",
+                "models",
+                "prices",
+                "retire",
+                ID,
+                "00000000-0000-4000-8000-000000000003",
+                "--revision",
+                "7",
+            ],
+            "prices retire",
+            json!({"model":ID,"tariff":"00000000-0000-4000-8000-000000000003","revision":7}),
+        ),
+    ];
+    for (args, name, expected) in cases {
+        for output in ["json", "table"] {
+            let cli =
+                Cli::try_parse_from(std::iter::once("nyxid").chain(args.iter().copied()).chain([
+                    "--base-url",
+                    "http://127.0.0.1:7777",
+                    "--access-token",
+                    "explicit-session",
+                    "--access-token-env",
+                    "MODEL_TEST_TOKEN",
+                    "--profile",
+                    "model-test",
+                    "--output",
+                    output,
+                ]))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            let (actual_name, fields, auth) = parsed_fields(&cli.command);
+            assert_eq!(actual_name, name);
+            assert_eq!(fields, expected, "{name}");
+            assert_eq!(auth.base_url.as_deref(), Some("http://127.0.0.1:7777"));
+            assert_eq!(auth.access_token.as_deref(), Some("explicit-session"));
+            assert_eq!(auth.access_token_env, "MODEL_TEST_TOKEN");
+            assert_eq!(auth.profile.as_deref(), Some("model-test"));
+            assert_eq!(
+                matches!(auth.output, crate::cli::OutputFormat::Json),
+                output == "json"
+            );
+        }
+    }
+}
+
+#[test]
+fn model_pagination_defaults_and_required_arguments_are_stable() {
+    let _lock = env_lock().lock().unwrap();
+    for args in [vec!["models", "list"], vec!["admin", "models", "list"]] {
+        let cli = Cli::try_parse_from(std::iter::once("nyxid").chain(args)).unwrap();
+        let (_, fields, auth) = parsed_fields(&cli.command);
+        assert_eq!(fields, json!({"limit":50,"after":null}));
+        assert!(matches!(auth.output, crate::cli::OutputFormat::Table));
+    }
+    let cases = [
+        vec!["models", "show"],
+        vec!["admin", "models", "show"],
+        vec!["admin", "models", "create"],
+        vec!["admin", "models", "update", ID, "--file", "model.json"],
+        vec!["admin", "models", "update", ID, "--revision", "7"],
+        vec!["admin", "models", "retire", ID],
+        vec!["admin", "models", "routes", "show"],
+        vec![
+            "admin",
+            "models",
+            "routes",
+            "set",
+            ID,
+            "--file",
+            "routes.json",
+        ],
+        vec!["admin", "models", "access", "show"],
+        vec!["admin", "models", "access", "set", ID, "--revision", "7"],
+        vec!["admin", "models", "access", "explain", ID],
+        vec!["admin", "models", "prices", "list"],
+        vec![
+            "admin",
+            "models",
+            "prices",
+            "create",
+            ID,
+            "--file",
+            "price.json",
+        ],
+        vec!["admin", "models", "prices", "publish"],
+        vec!["admin", "models", "prices", "resync"],
+        vec!["admin", "models", "prices", "verify"],
+        vec!["admin", "models", "prices", "retire", ID, ID],
+        vec!["admin", "models", "prices", "retire", ID, "--revision", "7"],
+    ];
+    for args in cases {
+        let Err(error) = Cli::try_parse_from(std::iter::once("nyxid").chain(args.clone())) else {
+            panic!("accepted incomplete command: {args:?}");
+        };
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "{args:?}"
+        );
+    }
+    for root in [vec!["models"], vec!["admin", "models"]] {
+        for limit in ["0", "101", "not-a-number"] {
+            let Err(error) = Cli::try_parse_from(
+                std::iter::once("nyxid")
+                    .chain(root.iter().copied())
+                    .chain(["list", "--limit", limit]),
+            ) else {
+                panic!("accepted invalid limit: {limit}");
+            };
+            assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+        }
+    }
+}
+
+#[test]
+fn model_command_help_advertises_actual_nested_commands_and_revision_flags() {
+    let _lock = env_lock().lock().unwrap();
+    for (args, expected) in [
+        (vec!["models"], vec!["list", "show"]),
+        (
+            vec!["admin", "models"],
+            vec!["create", "update", "retire", "routes", "access", "prices"],
+        ),
+        (vec!["admin", "models", "routes"], vec!["show", "set"]),
+        (
+            vec!["admin", "models", "access"],
+            vec!["show", "set", "explain"],
+        ),
+        (
+            vec!["admin", "models", "prices"],
+            vec!["list", "create", "publish", "resync", "verify", "retire"],
+        ),
+        (
+            vec!["admin", "models", "update"],
+            vec!["--file", "--revision", "--profile", "--output"],
+        ),
+    ] {
+        let Err(help) = Cli::try_parse_from(std::iter::once("nyxid").chain(args).chain(["--help"]))
+        else {
+            panic!("help must exit without dispatch");
+        };
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        let text = help.to_string();
+        for required in expected {
+            assert!(text.contains(required), "missing {required}: {text}");
+        }
+    }
+}
