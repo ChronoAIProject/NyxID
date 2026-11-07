@@ -739,6 +739,162 @@ fn native_state() -> super::super::responses::Responses {
 }
 
 #[tokio::test]
+async fn native_voice_status_is_bounded_scoped_and_never_resubmits_work() {
+    Box::pin(async {
+        let (state, _, mut call) = super::super::tests::setup("voice_native_task_status").await;
+        call = session::write(
+            &state.db,
+            &call,
+            doc! {"responses_model":"catalog-task-model","responses_reserved":true},
+        )
+        .await
+        .unwrap();
+        let (mut socket, server, events) = fixture_socket().await;
+        let mut native = native_state();
+        for event in [
+            native_created(),
+            native_item(json!({"request":"Perform a long task"})),
+            native_completed(),
+        ] {
+            native
+                .event(&state, &mut call, &mut socket, &event, false)
+                .await
+                .unwrap();
+        }
+        let original = state
+            .db
+            .collection::<VoiceRequest>(REQUESTS)
+            .find_one(doc! {"session_id":&call.id})
+            .await
+            .unwrap()
+            .unwrap();
+        // More recent finished work must not hide an older pending task.
+        for i in 1..=10 {
+            let mut finished = original.clone();
+            finished.id = uuid::Uuid::new_v4().to_string();
+            finished.source_id = finished.id.clone();
+            finished.message_seq = original.message_seq + i;
+            finished.state = RequestState::Completed;
+            state
+                .db
+                .collection(REQUESTS)
+                .insert_one(finished)
+                .await
+                .unwrap();
+        }
+        for field in ["session", "user", "conversation"] {
+            let mut foreign = original.clone();
+            foreign.id = uuid::Uuid::new_v4().to_string();
+            foreign.source_id = foreign.id.clone();
+            match field {
+                "session" => foreign.session_id = uuid::Uuid::new_v4().to_string(),
+                "user" => foreign.user_id = uuid::Uuid::new_v4().to_string(),
+                _ => foreign.conversation_id = uuid::Uuid::new_v4().to_string(),
+            }
+            state
+                .db
+                .collection(REQUESTS)
+                .insert_one(foreign)
+                .await
+                .unwrap();
+        }
+        let count = state
+            .db
+            .collection::<VoiceRequest>(REQUESTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+        let mut created = native_created();
+        created["event"]["response"]["id"] = json!("status-response");
+        let mut item = native_item(json!({}));
+        item["event"]["item"]["name"] = json!("get_task_status");
+        item["event"]["item"]["call_id"] = json!("status-call");
+        let mut completed = native_completed();
+        completed["event"]["response"]["id"] = json!("status-response");
+        // A pending approval must not turn this read into approval or a new task.
+        for event in [created, item, completed.clone(), completed] {
+            native
+                .event(&state, &mut call, &mut socket, &event, true)
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while events.lock().await.len() < 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let commands = events.lock().await;
+        let status: Value =
+            serde_json::from_str(commands[2]["item"]["output"].as_str().unwrap()).unwrap();
+        assert_eq!(status["type"], "task_status");
+        assert_eq!(status["has_more"], true);
+        assert_eq!(status["tasks"].as_array().unwrap().len(), 8);
+        assert_eq!(status["tasks"][0]["task_id"], original.id);
+        assert_eq!(status["tasks"][0]["state"], "queued");
+        assert_eq!(status["tasks"][0]["title"], "Perform a long task");
+        assert_eq!(status["tasks"][0]["progress"]["stage"], "queued");
+        assert!(
+            status["tasks"][0]["progress"]
+                .get("completed_steps")
+                .is_none()
+        );
+        assert_eq!(status["tasks"][0]["result_available"], false);
+        assert_eq!(
+            state
+                .db
+                .collection::<VoiceRequest>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            count
+        );
+        server.abort();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn native_voice_status_rejects_caller_selected_identity_or_task_ids() {
+    Box::pin(async {
+        let (state, _, mut call) = super::super::tests::setup("voice_status_arguments").await;
+        let (mut socket, server, _) = fixture_socket().await;
+        for arguments in [
+            json!({"session_id":"foreign"}),
+            json!({"task_id":"foreign"}),
+            json!({"request":"Do work"}),
+            json!(null),
+        ] {
+            let mut native = native_state();
+            native
+                .event(&state, &mut call, &mut socket, &native_created(), false)
+                .await
+                .unwrap();
+            let mut item = native_item(arguments);
+            item["event"]["item"]["name"] = json!("get_task_status");
+            assert!(
+                native
+                    .event(&state, &mut call, &mut socket, &item, false)
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            state
+                .db
+                .collection::<VoiceRequest>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        server.abort();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn native_voice_task_preserves_complete_model_request_without_captions_and_dedupes() {
     Box::pin(async {
         let (state, _, mut call) = super::super::tests::setup("voice_native_complete_task").await;

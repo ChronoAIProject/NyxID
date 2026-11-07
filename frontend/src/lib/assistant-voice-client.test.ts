@@ -322,6 +322,140 @@ describe("voice media boundaries", () => {
     expect(status).toHaveBeenLastCalledWith("ready");
     await client.end();
   });
+
+  it("keeps media live when a newer server sends incompatible presentation rows", async () => {
+    const error = vi.fn();
+    const snapshots = vi.fn();
+    const client = new AssistantVoiceClient("thread", snapshots, error);
+    await client.start(preferences);
+    Peer.current.channel.onmessage?.({
+      data: JSON.stringify({ type: "session.started" }),
+    });
+    const first = Socket.current;
+    first.onmessage?.({
+      data: JSON.stringify({
+        type: "snapshot",
+        session,
+        captions: [
+          {
+            id: "valid",
+            speaker: "assistant",
+            text: "Working",
+            sealed: true,
+            complete: true,
+          },
+          { speaker: "new-role" },
+        ],
+        // A newer server may add a task state before this client is updated.
+        tasks: [{ id: crypto.randomUUID(), state: "running" }],
+      }),
+    });
+    expect(first.close).not.toHaveBeenCalled();
+    expect(track.enabled).toBe(true);
+    expect(snapshots).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        captions: [expect.objectContaining({ id: "valid", text: "Working" })],
+        tasks: [],
+      }),
+    );
+    expect(error).not.toHaveBeenCalled();
+    expect(client.isClosed).toBe(false);
+    expect(mocks.post).not.toHaveBeenCalledWith(
+      expect.stringContaining(session.id),
+      expect.objectContaining({ action: "end" }),
+    );
+    await client.end();
+  });
+
+  it("reconnects an invalid session snapshot without sending End", async () => {
+    const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+    await client.start(preferences);
+    const first = Socket.current;
+    first.onmessage?.({
+      data: JSON.stringify({
+        type: "snapshot",
+        session: {},
+        captions: [],
+        tasks: [],
+      }),
+    });
+    expect(first.close).toHaveBeenCalled();
+    expect(client.isClosed).toBe(false);
+    expect(mocks.post).not.toHaveBeenCalled();
+    first.onclose?.();
+    await vi.advanceTimersByTimeAsync(1000);
+    Socket.current.snapshot();
+    expect(client.isClosed).toBe(false);
+    await client.end();
+  });
+
+  it.each(["{", "null"])(
+    "recovers from invalid control JSON: %s",
+    async (data) => {
+      const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+      await client.start(preferences);
+      const first = Socket.current;
+      first.onmessage?.({ data });
+      expect(first.close).toHaveBeenCalled();
+      expect(client.isClosed).toBe(false);
+      expect(mocks.post).not.toHaveBeenCalled();
+      first.onclose?.();
+      await vi.advanceTimersByTimeAsync(1000);
+      Socket.current.snapshot();
+      await client.end();
+    },
+  );
+
+  it("ignores new control event types without interrupting media", async () => {
+    const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+    await client.start(preferences);
+    Peer.current.channel.onmessage?.({
+      data: JSON.stringify({ type: "session.started" }),
+    });
+    Socket.current.snapshot();
+    Socket.current.onmessage?.({
+      data: JSON.stringify({ type: "future_event" }),
+    });
+    expect(track.enabled).toBe(true);
+    expect(Socket.current.close).not.toHaveBeenCalled();
+    expect(mocks.post).not.toHaveBeenCalled();
+    await client.end();
+  });
+
+  it("releases local media after retry exhaustion without sending a user End", async () => {
+    const closed = vi.fn();
+    const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn(), closed);
+    await client.start(preferences);
+    Socket.current.snapshot();
+    for (const delay of [1000, 2000, 4000, 8000, 15000, 30000]) {
+      Socket.current.onclose?.();
+      await vi.advanceTimersByTimeAsync(delay);
+    }
+    Socket.current.onclose?.();
+    expect(client.isClosed).toBe(true);
+    expect(closed).toHaveBeenCalled();
+    expect(track.stop).toHaveBeenCalled();
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+
+  it.each(["closed", "failed"])(
+    "obeys an explicit server %s state without sending End",
+    async (state) => {
+      const client = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+      await client.start(preferences);
+      Socket.current.onmessage?.({
+        data: JSON.stringify({
+          type: "snapshot",
+          session: { ...session, state },
+          captions: null,
+          tasks: {},
+        }),
+      });
+      expect(client.isClosed).toBe(true);
+      expect(track.stop).toHaveBeenCalled();
+      expect(mocks.post).not.toHaveBeenCalled();
+    },
+  );
 });
 
 it("Grok relays only held PCM, pairs bounded output, and commits before mic mute", async () => {

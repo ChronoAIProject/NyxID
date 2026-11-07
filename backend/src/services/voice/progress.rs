@@ -22,6 +22,75 @@ pub fn pending(r: &VoiceRequest) -> bool {
     )
 }
 
+/// A closed coordinator read: only this authorized call's own task metadata,
+/// never another call, hidden transcript, tool output or new execution.
+pub(super) async fn task_status(
+    db: &Database,
+    call: &VoiceSession,
+) -> AppResult<serde_json::Value> {
+    use crate::models::assistant_voice::REQUESTS;
+    crate::services::assistant_voice::thread(db, &call.user_id, &call.conversation_id).await?;
+    let scope = doc! {"session_id":&call.id,"user_id":&call.user_id,"conversation_id":&call.conversation_id};
+    let mut active = scope.clone();
+    active.insert(
+        "state",
+        doc! {"$in":["queued","claimed","awaiting_confirmation"]},
+    );
+    let mut requests: Vec<VoiceRequest> = db
+        .collection(REQUESTS)
+        .find(active)
+        .sort(doc! {"message_seq":-1})
+        .limit(9)
+        .await?
+        .try_collect()
+        .await?;
+    if requests.len() < 9 {
+        let mut settled = scope;
+        settled.insert("state", doc! {"$in":["completed","cancelled"]});
+        settled.insert(
+            "_id",
+            doc! {"$nin":requests.iter().map(|r|r.id.clone()).collect::<Vec<_>>()},
+        );
+        let recent: Vec<VoiceRequest> = db
+            .collection(REQUESTS)
+            .find(settled)
+            .sort(doc! {"message_seq":-1})
+            .limit((9 - requests.len()) as i64)
+            .await?
+            .try_collect()
+            .await?;
+        requests.extend(recent);
+    }
+    let has_more = requests.len() > 8;
+    requests.truncate(8);
+    refresh(db, call, &mut requests).await?;
+    let sources: Vec<crate::models::assistant_message::AssistantMessage> = db
+        .collection(crate::models::assistant_message::COLLECTION_NAME)
+        .find(
+            doc! {"_id":{"$in":requests.iter().map(|r|r.message_id.clone()).collect::<Vec<_>>()},
+            "user_id":&call.user_id,"conversation_id":&call.conversation_id},
+        )
+        .await?
+        .try_collect()
+        .await?;
+    let titles: HashMap<_, _> = sources
+        .into_iter()
+        .map(|m| (m.id, m.text.chars().take(120).collect::<String>()))
+        .collect();
+    Ok(serde_json::json!({
+        "type":"task_status","observed_at":Utc::now(),"has_more":has_more,
+        "tasks":requests.iter().map(|r| serde_json::json!({
+            "task_id":r.id,"state":r.state,
+            "title":titles.get(&r.message_id),
+            "outcome":crate::services::assistant_voice::request_outcome(r),
+            "progress":r.progress.as_ref().map(|p|serde_json::json!({
+                "stage":p.stage,"detail":p.detail,"last_completed_step":p.last_completed_step,"updated_at":p.updated_at,
+            })),
+            "result_available":r.result_message_id.is_some(),
+        })).collect::<Vec<_>>()
+    }))
+}
+
 // Exact protocol identifiers, not intent/permission classification. Unknown
 // activities stay in telemetry without becoming generic spoken progress.
 pub fn activity_label(label: &str) -> Option<&'static str> {

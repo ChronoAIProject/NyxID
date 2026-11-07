@@ -83,6 +83,35 @@ fn turn(id: Option<&str>, text: &str) -> engine::TurnRequest {
         access_mode: None,
     }
 }
+#[tokio::test]
+async fn voice_idle_warning_only_applies_to_a_live_active_call() {
+    use crate::models::assistant_voice_session::SessionState;
+    let (state, _, mut call) = setup("voice_idle_warning_lifecycle").await;
+    call.last_user_at = chrono::Utc::now() - chrono::Duration::seconds(170);
+    for phase in [
+        SessionState::Starting,
+        SessionState::Active,
+        SessionState::Closing,
+        SessionState::Closed,
+        SessionState::Failed,
+    ] {
+        call.state = phase;
+        assert_eq!(
+            application::SessionResponse::from(call.clone()).idle_warning,
+            phase == SessionState::Active
+        );
+    }
+    call.state = SessionState::Active;
+    call.end_requested = true;
+    assert!(!application::SessionResponse::from(call.clone()).idle_warning);
+    call.end_requested = false;
+    call.live_slot = false;
+    assert!(!application::SessionResponse::from(call.clone()).idle_warning);
+    call.live_slot = true;
+    call.last_work_at = Some(chrono::Utc::now());
+    assert!(!application::SessionResponse::from(call).idle_warning);
+    state.db.drop().await.unwrap();
+}
 #[test]
 fn transcripts_dedupe_reorder_and_never_seal_a_disconnected_tail_as_actionable() {
     let mut buffer = transcript::Transcripts::default();
