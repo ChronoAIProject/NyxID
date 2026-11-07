@@ -815,7 +815,7 @@ or `everyone`: anyone who messages the bot privately gets their own thread, as a
 guest.
 
 The linked channel also has `private_chat_posts` (absent/false by default).
-The owner can enable it in **Chats and who can talk**, through the human-only
+The owner can enable it in **Chats and posting**, through the human-only
 channel PATCH, or through NyxBot's `nyxid__update_channel_access`. New private
 customer chats then start with `allow_posts: true` when a verified message
 registers them. It does not open private-chat access, contact someone who has

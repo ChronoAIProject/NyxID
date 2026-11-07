@@ -436,12 +436,12 @@ for (const width of [320, 390, 768, 1024, 1280]) {
       await expect(assigned).toHaveText(/NyxBot/);
       await expectUsable(
         connected.getByRole("button", {
-          name: "Chats and who can talk",
+          name: "Chats and posting",
           exact: true,
         }),
       );
       await connected
-        .getByRole("button", { name: "Chats and who can talk", exact: true })
+        .getByRole("button", { name: "Chats and posting", exact: true })
         .click();
       const chats = page.getByRole("list", {
         name: "Chats of NyxID Approvals",
@@ -479,6 +479,7 @@ for (const width of [320, 390, 768, 1024, 1280]) {
           exact: true,
         }),
       );
+      await page.getByRole("button", { name: "Back to Channels", exact: true }).click();
       await expectUsable(
         page.getByRole("combobox", {
           name: "Who can talk to NyxID Approvals in private chats",

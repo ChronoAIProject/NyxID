@@ -21,6 +21,7 @@ import {
 import { useOrgSpecialistChannel } from "@/hooks/use-org-specialist-channel";
 import { useSetNyxBotPrivateChats } from "@/hooks/use-nyxbot-agents";
 import { botAudienceDescription } from "@/lib/assistant/bot-audience";
+import { useDrawerSearchTarget } from "@/lib/drawer-search";
 import { useGroupedDraftGuard } from "@/lib/grouped-drafts";
 import { GuestReadiness } from "./guest-readiness";
 import { changeList, describeChanges } from "@/lib/grouped-form-changes";
@@ -49,8 +50,17 @@ export function BotAudienceSettings({
 }) {
   const live = channel.status === "active";
   const drafts = useGroupedDraftGuard();
+  const searchId = `channel-audience-${channel.id}`;
+  const searchTarget = useDrawerSearchTarget({
+    id: searchId,
+    title: "Who can talk to this bot",
+    breadcrumb: `Channels › ${channel.bot_label}`,
+    keywords: "Guests guest access private chats audience daily budget delegated services billing",
+  });
   return (
     <section
+      ref={searchTarget}
+      data-drawer-search-target={searchId}
       aria-label={`Who can talk to this bot · ${channel.bot_label}`}
       className="space-y-3"
     >

@@ -432,7 +432,7 @@ export function ChannelBotsManager({
                     </GroupedRow>
                   )}
                 </GroupedList>
-                <BotAudienceSettings channel={row} agent={agents.find((candidate) => candidate.id === agentOf(row))}
+                <BotAudienceSettings channel={row} agent={agent?.id === agentOf(row) ? agent : agents.find((candidate) => candidate.id === agentOf(row))}
                   canManage={canManage} busy={busy || !target}
                   onReconnect={() => { if (target) void requestLink(row.channel_bot_id, target.id); }} />
                 {row.org_specialist && live ? (

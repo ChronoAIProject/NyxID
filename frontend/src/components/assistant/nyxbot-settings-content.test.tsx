@@ -549,7 +549,7 @@ it("opens a bot's chats and saves who can talk and how it answers", async () => 
     name: "Connected channel bots",
   });
   const toggle = within(connected).getByRole("button", {
-    name: "Chats and who can talk",
+    name: "Chats and posting",
   });
   await user.click(toggle);
   expect(
@@ -602,8 +602,13 @@ it("opens a bot's chats and saves who can talk and how it answers", async () => 
       body: { allow_posts: true },
     }),
   );
+  await user.click(within(page).getByRole("button", { name: "Back to Channels" }));
+  const audience = within(page).getByRole("region", {
+    name: "Who can talk to this bot · Home bot",
+  });
+  expect(audience).toBeVisible();
   await user.click(
-    within(page).getByRole("combobox", {
+    within(audience).getByRole("combobox", {
       name: "Who can talk to Home bot in private chats",
     }),
   );
@@ -782,7 +787,7 @@ it("defaults new private chat posting off on legacy responses and saves without 
     name: "Connected channel bots",
   });
   await user.click(
-    within(connected).getByRole("button", { name: "Chats and who can talk" }),
+    within(connected).getByRole("button", { name: "Chats and posting" }),
   );
   const toggle = screen.getByRole("switch", {
     name: "Allow posts in new private chats with Home bot",
@@ -826,7 +831,7 @@ it("keeps the posting switch unchanged and exposes a save failure", async () => 
     name: "Connected channel bots",
   });
   await user.click(
-    within(connected).getByRole("button", { name: "Chats and who can talk" }),
+    within(connected).getByRole("button", { name: "Chats and posting" }),
   );
   const toggle = screen.getByRole("switch", {
     name: "Allow posts in new private chats with Home bot",

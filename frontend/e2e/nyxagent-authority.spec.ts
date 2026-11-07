@@ -383,8 +383,8 @@ test("a bot's chats: who can talk, how it answers, and posting are set per chat"
   const settings = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
   await settings.getByRole("button", { name: "Connect NyxID Approvals" }).click();
   const connected = settings.getByRole("list", { name: "Connected channel bots" });
-  await connected.getByRole("button", { name: "Chats and who can talk" }).click();
-  const chats = connected.getByRole("list", { name: "Chats of NyxID Approvals" });
+  await connected.getByRole("button", { name: "Chats and posting" }).click();
+  const chats = settings.getByRole("list", { name: "Chats of NyxID Approvals" });
   await expect(chats.getByRole("listitem")).toHaveCount(2);
   const replies = chats.getByRole("combobox", { name: "Replies in Team chat" });
   await expect(replies).toContainText("When mentioned");
@@ -397,7 +397,9 @@ test("a bot's chats: who can talk, how it answers, and posting are set per chat"
   await expect(posts).toBeChecked();
   // Private chats have no reply mode; who may talk there is set on the bot.
   await expect(chats.getByRole("combobox", { name: "Replies in You" })).toHaveCount(0);
-  const access = connected.getByRole("combobox", {
+  await settings.getByRole("button", { name: "Back to Channels" }).click();
+  const audience = connected.getByRole("region", { name: "Who can talk to this bot · NyxID Approvals" });
+  const access = audience.getByRole("combobox", {
     name: "Who can talk to NyxID Approvals in private chats",
   });
   await access.click();
@@ -406,16 +408,16 @@ test("a bot's chats: who can talk, how it answers, and posting are set per chat"
   await page.reload();
   const reopened = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
   const list = reopened.getByRole("list", { name: "Connected channel bots" });
-  await list.getByRole("button", { name: "Chats and who can talk" }).click();
-  await expect(
-    list.getByRole("combobox", { name: "Replies in Team chat" }),
-  ).toContainText("Every message");
-  await expect(
-    list.getByRole("switch", { name: "Let the agent post in Team chat on its own" }),
-  ).toBeChecked();
   await expect(
     list.getByRole("combobox", { name: "Who can talk to NyxID Approvals in private chats" }),
   ).toContainText("Anyone");
+  await list.getByRole("button", { name: "Chats and posting" }).click();
+  await expect(
+    reopened.getByRole("combobox", { name: "Replies in Team chat" }),
+  ).toContainText("Every message");
+  await expect(
+    reopened.getByRole("switch", { name: "Let the agent post in Team chat on its own" }),
+  ).toBeChecked();
 });
 
 test("destroying a specialist makes its threads read-only; it can then be deleted", async ({
