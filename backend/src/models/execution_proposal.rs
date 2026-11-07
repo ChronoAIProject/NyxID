@@ -12,6 +12,8 @@ pub struct ExecutionProposal {
     pub v2: Option<ProposalV2>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub v3: Option<Proposal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub v4: Option<Proposal>,
 }
 impl std::fmt::Debug for ExecutionProposal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

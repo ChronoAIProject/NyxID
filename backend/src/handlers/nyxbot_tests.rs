@@ -308,6 +308,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let agent = key(state, "agent").await;
     let now = Utc::now();
     let row = NyxbotChannel {
+        execution_policy_revision: 0,
         org_specialist: None,
         gateway_source: None,
         gateway_native_phase: None,
@@ -3325,6 +3326,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     let mut row: NyxbotChannel = {
         let now = Utc::now();
         NyxbotChannel {
+            execution_policy_revision: 0,
             org_specialist: None,
             gateway_source: None,
             gateway_native_phase: None,
@@ -5553,6 +5555,7 @@ async fn the_telegram_account_that_created_a_bot_through_nyxid_is_its_owner() {
             .is_empty()
     );
     let sender = |id: &'static str| Sender {
+        original_kind: None,
         media: Vec::new(),
         original_message: true,
         kind: crate::models::channel_thread::ThreadSenderKind::Human,
@@ -7155,3 +7158,6 @@ async fn relay_gateway_recovery_flag_off_preserves_live_stream_without_discovery
     server.abort();
     state.db.drop().await.unwrap();
 }
+
+#[path = "nyxbot_execution_permission_tests.rs"]
+mod execution_permission_tests;

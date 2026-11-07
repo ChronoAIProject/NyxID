@@ -59,6 +59,9 @@ pub struct GatewayBotMentionSupport {
 /// (`"direct"`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotChannel {
+    /// Audience-policy generation. Ordinary traffic never increments it.
+    #[serde(default)]
+    pub execution_policy_revision: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_specialist: Option<super::org_channel::Binding>,
     #[serde(default)]
@@ -237,6 +240,8 @@ impl std::fmt::Debug for NyxbotChannel {
 /// `kind`, so the gateway's conversation registry keeps working.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotThread {
+    #[serde(default)]
+    pub execution_policy_revision: i64,
     /// Native bot-message handoffs left until the next admitted human message.
     /// None is an existing chat's one-time initial budget; only atomic updates
     /// in channel_bot_turn_service may spend or refill it.
@@ -531,6 +536,12 @@ impl std::fmt::Debug for TriggerPrefill {
 /// neither they nor sender identifiers appear in Debug, logs or audit.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelTurnDelivery {
+    /// Set only by verified original human ingress; legacy events are ineligible.
+    #[serde(default)]
+    pub execution_owner_verified: bool,
+    /// Retain the original encrypted reply capability for source-bound v4 work.
+    #[serde(default)]
+    pub execution_source_bound: bool,
     /// Absent only on legacy admitted turns; Bot always retains guest authority.
     #[serde(default)]
     pub sender_kind: Option<super::channel_thread::ThreadSenderKind>,

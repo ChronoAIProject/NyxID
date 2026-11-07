@@ -817,10 +817,64 @@ issues no execution permit: the normal shared gate still checks live authority
 and claims Once before egress. A consumed HTTP Once decision cannot authorize
 another occurrence; changed consent must pass the original live checks.
 
-The remaining #2196 slices are verified-owner channel source/resume/result
-delivery and integrated B2 evidence. Existing assistant choices, including
-persistent, still bind one conversation. Slice (b)'s separate, explicit v3 choice
-supports private cross-conversation reuse only under its readiness gate and
-eligibility rules above. Channel/automation/guest and live voice remain outside
-the supported source list above. No migration diagnostic implicitly enrolls
-them or changes their audience.
+Existing assistant choices, including persistent, still bind one conversation.
+The separate, explicit v3 choice supports private cross-conversation reuse only
+under its readiness gate and eligibility rules above. The v4 source below adds
+verified-owner channel review/resume and separate result delivery. Other channel
+sources, automation, guests and live voice remain outside that source list; no
+migration diagnostic implicitly enrolls them or changes their audience.
+
+### Verified-owner channel proposals (v4)
+
+A personally owned channel bot may admit an enrolled owner's original verified
+human message as a Channel audience. Guests, unknown/bot/forwarded senders,
+custom events, org/shared agents, org bots and device voice do not acquire this
+source. Native permission enrollment uses the provider's actor classification
+before legacy chat normalization: current native WhatsApp events report
+`unknown` and remain on the legacy path. A stored proof binds the original event,
+agent/key, task, exact settings
+chat and thread, route/bot/gateway binding and policy generations. Private web
+permissions never cover the channel audience. Delegation preserves this source
+and audience or refuses; it cannot convert channel work to private work.
+Absent policy counters mean zero; the permission audience revision is that
+thread counter plus one, preserving the existing positive-revision contract.
+Invalid or overflowing counters refuse admission. Source fence counters remain
+transaction locks and do not count as policy changes in authority snapshots.
+
+The optional `permissions:execution-authoring-channel-v1` readiness capability
+requires every reader, worker and channel policy writer to be upgraded and old
+writers drained. Unknown/unready fresh sources remain legacy; marked work
+refuses/drains when readiness, enrollment or original-source authority is lost.
+The channel ingress has no loaded person row: its zero-command candidacy uses
+only bounded global/personal snapshot hints. Org-only enrollment is not inferred
+without membership data. The live single-flag/person check precedes marking.
+
+Only a signed-in owner on the NyxID web review can decide a v4 proposal. Channel
+“yes” replies still address legacy acknowledgement cards, never execution
+proposals. Reviews explicitly disclose the original channel audience; choices
+remain exact-conversation operation/task/window/persistent permissions. No
+across-private-conversations choice is offered. Review lasts at most ten minutes
+and is capped by the original task and reply-source deadline.
+
+Post-review results have a separate `execution_permission_deliveries` occurrence,
+committed with the ordinary stored assistant message. The outbox retains only
+references, not another copy of the answer. Preparation leases may be recovered;
+`dispatching` is irreversible, and an interrupted send becomes `unknown` without
+automatic resending. Source policy, task epoch, enrollment and readiness are
+fenced again before release. A completed task may release its stored receipt;
+a cancelled task or changed epoch may not. The original terminal stream/native
+replay claim is never reopened. Ordinary initial answers keep their existing
+transport behavior.
+
+Direct receipts reply to the original inbound message/topic. Gateway relay
+receipts use an original-event sealed reply target when available and a distinct
+occurrence idempotency key. Without a target they retain the original 29-minute
+bound. Eligible native receipts retain that short bound and exact native
+event; no latest-event, proactive-send or alternate-destination fallback is
+allowed. Receipts are text-only; attachments remain accessible in the web thread.
+Expired/refused/unknown delivery is recovered through authenticated web history.
+Terminal outbox metadata is retained for at most 24 hours; TTL is cleanup only.
+
+Rollback: disable enrollment or remove channel readiness on upgraded binaries,
+drain/cancel v4 work and preserve uncertain claims before rolling binaries back.
+Do not restart old readers/workers or policy writers while v4 work is outstanding.

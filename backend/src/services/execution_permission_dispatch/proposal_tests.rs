@@ -1448,3 +1448,6 @@ async fn execution_proposal_personal_policy_coverage_never_satisfies_an_org_or_o
 
 #[path = "proposal_private_conversations_tests.rs"]
 mod private_conversations;
+
+#[path = "proposal_channel_tests.rs"]
+mod channel;

@@ -38,6 +38,9 @@ fn projection(collection: &str) -> Document {
     }
     let mut projection = doc! {"last_used_at":0,"updated_at":0,"created_at":0,"execution_dispatch_fence":0,
     "execution_task_fence":0,"mutation_fence":0,"reference_fence":0};
+    // Source checks write this lock counter in the same transaction. It is
+    // not authority drift; the actual policy fields and row fences remain.
+    projection.insert("execution_source_fence", 0);
     if collection == "org_memberships" {
         // Live collaboration admission writes this lock counter in the same
         // transaction. It is not a membership/role revision; those authority

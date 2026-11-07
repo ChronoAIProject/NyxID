@@ -115,7 +115,7 @@ impl RequestContext {
         if resume.version == 2 {
             return proposals::v2::attach_resume(auth, resume);
         }
-        if !matches!(resume.version, 1 | 3) {
+        if !matches!(resume.version, 1 | 3 | 4) {
             return Err(refused());
         }
         let chat = auth
@@ -265,7 +265,22 @@ impl RequestContext {
                         .await?;
                 }
                 if let Some(task) = &chat.execution_task {
-                    tasks::check(&drain.db, task).await?;
+                    if task.channel_source.is_some() {
+                        // Even an operation with no eligible permission floor
+                        // must fence its original channel source before egress.
+                        // Covered requests use their stronger effect-claim fence.
+                        let scope = (drain.db.clone(), task.clone());
+                        super::transaction_service::run_db_only(
+                            &drain.db,
+                            &scope,
+                            |tx, (db, task)| {
+                                Box::pin(async move { tasks::fence(db, tx, task).await })
+                            },
+                        )
+                        .await?;
+                    } else {
+                        tasks::check(&drain.db, task).await?;
+                    }
                 }
             }
             Ok(())
@@ -434,6 +449,16 @@ async fn audience(
     actor: &str,
     session: Option<&mut ClientSession>,
 ) -> AppResult<Audience> {
+    if let Some(task) = chat.and_then(|c| c.execution_task.as_ref())
+        && let Some(source) = &task.channel_source
+    {
+        if let Some(session) = session {
+            super::execution_permission_channel::validate(db, session, source, true).await?;
+        } else {
+            super::execution_permission_channel::check(db, task).await?;
+        }
+        return Ok(super::execution_permission_channel::audience(source));
+    }
     let Some(id) = chat.and_then(|c| c.execution_group_id.as_deref()) else {
         return Ok(Audience::Private {
             user_id: actor.into(),
@@ -768,6 +793,19 @@ pub(crate) fn prepare<'a>(
         "query":effect.query,"body":effect.body,"headers":scope_headers,"endpoint":effect.endpoint,
         "target":target_digest(effect.target),"subject":subject,"binding":binding,"audience":audience}),
         );
+        let digest = if let Some(source) = chat
+            .and_then(|c| c.execution_task.as_ref())
+            .and_then(|t| t.channel_source.as_ref())
+        {
+            super::audit_service::keyed_fingerprint(
+                super::audit_service::audit_chain_hmac_key(),
+                b"execution-channel-effect-v4",
+                &serde_json::to_vec(&json!({"effect":digest,"source":source})).map_err(encoding)?,
+            )
+            .ok_or_else(|| AppError::Internal("Audit chain unavailable".into()))?
+        } else {
+            digest
+        };
         if context.resume().is_none()
             && context.authoring_allowed()
             && context.descendant.is_none()
@@ -789,8 +827,11 @@ pub(crate) fn prepare<'a>(
         // A completed one-operation permission belongs to its occurrence, not
         // to the next status poll or external request. Still evaluate unknown
         // versions and revocations of reusable/current-occurrence permissions.
+        let channel_request = chat
+            .and_then(|chat| chat.execution_task.as_ref())
+            .is_some_and(|task| task.channel_source.is_some());
         let mut candidates: Vec<_> = rows.iter().filter(|grant| {
-            !(context.resume().is_none() && proposals::v2::eligible(context, chat)
+            !(context.resume().is_none() && (proposals::v2::eligible(context, chat) || channel_request)
                 && grant.execution.as_ref().is_some_and(|permission| {
                     permission.version == VERSION && permission.v1.as_ref().is_some_and(|contract| {
                         matches!(&contract.validity, Validity::Operation { operation_id, .. } if operation_id != &context.operation_id)
@@ -1014,6 +1055,18 @@ pub(crate) fn prepare<'a>(
                     AppError::ApprovalFailed { request_id: request.id, reason: "This operation already has a terminal or saved decision; it will not be repeated".into(), approve_url: proposals::approve_url(&state.config.frontend_url) }
                 },
             );
+        }
+        if !effect.floors.is_empty()
+            && chat
+                .and_then(|c| c.execution_task.as_ref())
+                .is_some_and(|t| t.channel_source.is_some())
+        {
+            // Covered descendants retain the original channel task. A gap
+            // without a retainable v4 assistant effect must not become a v2
+            // private-source proposal or fall back to legacy approval cards.
+            return Err(AppError::Forbidden(
+                "This channel operation cannot be reviewed safely; use the NyxID web thread".into(),
+            ));
         }
         if let Some(request) = proposals::v2::create(
             state, context, chat, &effect, subject, binding, audience, digest, &authority, &gaps,

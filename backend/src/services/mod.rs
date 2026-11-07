@@ -563,3 +563,5 @@ pub mod org_channel_service;
 pub mod generated_artifacts;
 
 pub mod platform_model_service;
+
+pub(crate) mod execution_permission_channel;

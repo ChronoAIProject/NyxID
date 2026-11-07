@@ -314,6 +314,25 @@ async fn accept(
     Ok(stored)
 }
 
+pub(super) fn native_sender(activity: &Value) -> Sender<'_> {
+    use crate::models::channel_thread::ThreadSenderKind as Kind;
+    Sender {
+        original_kind: Some(match activity["actor"]["kind"].as_str() {
+            Some("human") => Kind::Human,
+            Some("bot") => Kind::Bot,
+            _ => Kind::Unknown,
+        }),
+        id: activity["actor"]["id"].as_str().unwrap_or_default(),
+        display_name: None,
+        // Preserve the deployed native-chat behavior. Permission enrollment
+        // separately requires the provider's positive human classification.
+        kind: Kind::Human,
+        media: vec![],
+        original_message: true,
+        owner_eligible: true,
+    }
+}
+
 async fn execute(
     state: &AppState,
     row: &NyxbotChannel,
@@ -324,14 +343,7 @@ async fn execute(
     let partition = stored.partition.as_str();
     let event_key = stored.event_key.as_str();
     let mut thread_reply = false;
-    let sender = Sender {
-        id: activity["actor"]["id"].as_str().unwrap_or_default(),
-        display_name: None,
-        kind: crate::models::channel_thread::ThreadSenderKind::Human,
-        media: vec![],
-        original_message: true,
-        owner_eligible: true,
-    };
+    let sender = native_sender(activity);
     let text = if row.platform == "whatsapp"
         && crate::services::whatsapp_native::has_unavailable_media(activity)
     {
@@ -639,7 +651,24 @@ pub(super) fn send_update<'a>(
     conversation: &'a str,
     text: &'a str,
 ) -> futures::future::BoxFuture<'a, AppResult<()>> {
-    Box::pin(send_update_impl(state, row, origin, conversation, text))
+    Box::pin(async move {
+        match send_update_impl(state, row, origin, conversation, text, None).await? {
+            "confirmed" => Ok(()),
+            _ => Err(AppError::NotFound("Native reply source unavailable".into())),
+        }
+    })
+}
+
+/// An independently claimed permission result has its own stable occurrence.
+pub(super) async fn send_occurrence(
+    state: &AppState,
+    row: &NyxbotChannel,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    text: &str,
+    occurrence: &str,
+) -> AppResult<&'static str> {
+    send_update_impl(state, row, origin, conversation, text, Some(occurrence)).await
 }
 
 async fn send_update_impl(
@@ -648,7 +677,8 @@ async fn send_update_impl(
     origin: &ChannelOrigin,
     conversation: &str,
     text: &str,
-) -> AppResult<()> {
+    occurrence: Option<&str>,
+) -> AppResult<&'static str> {
     let unavailable = || AppError::NotFound("Native reply source unavailable".into());
     if !source::ready(row) {
         return Err(unavailable());
@@ -674,123 +704,134 @@ async fn send_update_impl(
         .and_then(crate::turn_trace::TurnContext::for_turn);
     let mut operation =
         crate::turn_trace::Operation::start(trace, crate::turn_trace::Stage::Channel);
-    let result = crate::turn_trace::scope(operation.context(), async {
-    if event
-        .delivery
-        .as_ref()
-        .is_none_or(|d| d.origin != *origin || d.transport != "gateway")
-    {
-        return Err(unavailable());
-    }
-    let history = engine::get(
-        &state.db,
-        crate::services::org_channel_service::event_actor(&event),
-        conversation,
-    )
-    .await?;
-    if late_delivery::eligible(
-        state,
-        &event,
-        event.delivery.as_ref().ok_or_else(unavailable)?,
-        &history,
-    )
-    .await?
-    .is_none()
-    {
-        return Err(unavailable());
-    }
-    let ciphertext = event
-        .event_context_ciphertext
-        .as_ref()
-        .ok_or_else(unavailable)?;
-    let context: Value = serde_json::from_slice(&Zeroizing::new(
-        state.encryption_keys.decrypt(ciphertext).await?,
-    ))
-    .map_err(|_| unavailable())?;
-    if !source::provider_context(row, &context) {
-        return Err(unavailable());
-    }
-    let reference = context["event_ref"].as_str().ok_or_else(unavailable)?;
-    let key = decrypt_agent_key(state, row)
-        .await?
-        .ok_or_else(unavailable)?;
-    let reply_parts = if matches!(
-        row.gateway_source.as_ref(),
-        Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
-    ) {
-        let reply = crate::services::channel_platform::OutboundReply {
-            attachments: Vec::new(),
-            text: Some(text.to_owned()),
-            reply_to_platform_message_id: None,
-            metadata: None,
-        };
-        crate::services::whatsapp_native::text_reply(&reply)?;
-        crate::services::channel_reply_plan::text_parts(&reply, "whatsapp")?
-    } else {
-        vec![crate::services::channel_platform::OutboundReply {
-            attachments: Vec::new(),
-            text: Some(bounded_reply(text)),
-            reply_to_platform_message_id: None,
-            metadata: None,
-        }]
-    };
-    let mut outcome = "reply_confirmed";
-    for (index, part) in reply_parts.into_iter().enumerate() {
-        let mut part_trace = crate::turn_trace::Operation::part(crate::turn_trace::TurnContext::current(), index);
-        let mut body = json!({"text":part.text.unwrap_or_default()});
-        // A local followed reply chain is not necessarily a Discord thread.
-        // CMA accepts native-thread mode only for the original thread channel.
-        if context["activity"]["conversation"]["thread_id"].is_string() {
-            body["thread_reply"] = json!(true);
+    let result: AppResult<&'static str> = crate::turn_trace::scope(operation.context(), async {
+        if event
+            .delivery
+            .as_ref()
+            .is_none_or(|d| d.origin != *origin || d.transport != "gateway")
+        {
+            return Err(unavailable());
         }
-        let result = crate::turn_trace::scope(part_trace.context(), gateway_call(
+        let history = engine::get(
+            &state.db,
+            crate::services::org_channel_service::event_actor(&event),
+            conversation,
+        )
+        .await?;
+        if late_delivery::eligible(
             state,
-            reqwest::Method::POST,
-            &format!("/events/{}/replies", urlencode(reference)),
-            &key,
-            Some(&body),
-            None,
-        ))
-        .await;
-        // Transport success alone is not a platform send receipt. Do not retry
-        // an unknown outcome or report a rejected send as successful.
-        outcome = match &result {
-            Ok(result) if (200..300).contains(&result.status) => {
-                match result.body["delivery"]["outcome"].as_str() {
-                    Some("confirmed") => "reply_confirmed",
-                    Some("rejected") => "reply_rejected",
-                    Some("unsupported") => "reply_unsupported",
-                    Some("rate_limited") => "reply_rate_limited",
-                    _ => "reply_unknown",
-                }
-            }
-            Ok(_) => "reply_refused",
-            Err(_) => "reply_unknown",
-        };
-        part_trace.finish(match outcome {
-            "reply_confirmed" => crate::turn_trace::Outcome::Confirmed,
-            "reply_rejected" | "reply_unsupported" | "reply_rate_limited" | "reply_refused" => crate::turn_trace::Outcome::Rejected,
-            _ => crate::turn_trace::Outcome::Unknown,
-        }, None, None);
-        if outcome != "reply_confirmed" {
-            break;
+            &event,
+            event.delivery.as_ref().ok_or_else(unavailable)?,
+            &history,
+        )
+        .await?
+        .is_none()
+        {
+            return Err(unavailable());
         }
-    }
-    state.db.collection::<NyxbotChannel>(CHANNELS).update_one(
-        doc! {"_id":&row.id,"binding_id":&row.binding_id,"transport":"gateway","gateway_native_phase":"ready"},
-        doc! {"$set":{"gateway_native_delivery":outcome}},
-    ).await?;
-    if outcome != "reply_confirmed" {
-        return Err(unavailable());
-    }
-    Ok(())
-
-    }).await;
-    operation.finish(
-        if result.is_ok() {
-            crate::turn_trace::Outcome::Confirmed
+        let ciphertext = event
+            .event_context_ciphertext
+            .as_ref()
+            .ok_or_else(unavailable)?;
+        let context: Value = serde_json::from_slice(&Zeroizing::new(
+            state.encryption_keys.decrypt(ciphertext).await?,
+        ))
+        .map_err(|_| unavailable())?;
+        if !source::provider_context(row, &context) {
+            return Err(unavailable());
+        }
+        let reference = context["event_ref"].as_str().ok_or_else(unavailable)?;
+        let key = decrypt_agent_key(state, row)
+            .await?
+            .ok_or_else(unavailable)?;
+        let reply_parts = if matches!(
+            row.gateway_source.as_ref(),
+            Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
+        ) {
+            let reply = crate::services::channel_platform::OutboundReply {
+                attachments: Vec::new(),
+                text: Some(text.to_owned()),
+                reply_to_platform_message_id: None,
+                metadata: None,
+            };
+            crate::services::whatsapp_native::text_reply(&reply)?;
+            crate::services::channel_reply_plan::text_parts(&reply, "whatsapp")?
         } else {
-            crate::turn_trace::Outcome::Unknown
+            vec![crate::services::channel_platform::OutboundReply {
+                attachments: Vec::new(),
+                text: Some(bounded_reply(text)),
+                reply_to_platform_message_id: None,
+                metadata: None,
+            }]
+        };
+        let mut outcome = "reply_confirmed";
+        for (index, part) in reply_parts.into_iter().enumerate() {
+            let mut part_trace = crate::turn_trace::Operation::part(
+                crate::turn_trace::TurnContext::current(), index,
+            );
+            let mut body = json!({"text":part.text.unwrap_or_default()});
+            // A local followed reply chain is not necessarily a Discord thread.
+            // CMA accepts native-thread mode only for the original thread channel.
+            if context["activity"]["conversation"]["thread_id"].is_string() {
+                body["thread_reply"] = json!(true);
+            }
+            let idempotency = occurrence.map(|id| format!("{id}:{index}"));
+            let result = crate::turn_trace::scope(part_trace.context(), gateway_call(
+                state,
+                reqwest::Method::POST,
+                &format!("/events/{}/replies", urlencode(reference)),
+                &key,
+                Some(&body),
+                idempotency.as_deref(),
+            ))
+            .await;
+            // Transport success alone is not a platform send receipt. Do not retry
+            // an unknown outcome or report a rejected send as successful.
+            outcome = match &result {
+                Ok(result) if (200..300).contains(&result.status) => {
+                    match result.body["delivery"]["outcome"].as_str() {
+                        Some("confirmed") => "reply_confirmed",
+                        Some("rejected") => "reply_rejected",
+                        Some("unsupported") => "reply_unsupported",
+                        Some("rate_limited") => "reply_rate_limited",
+                        _ => "reply_unknown",
+                    }
+                }
+                Ok(result) if (500..600).contains(&result.status) => "reply_unknown",
+                Ok(_) => "reply_refused",
+                Err(_) => "reply_unknown",
+            };
+            part_trace.finish(
+                match outcome {
+                    "reply_confirmed" => crate::turn_trace::Outcome::Confirmed,
+                    "reply_rejected" | "reply_unsupported" | "reply_rate_limited" | "reply_refused" => crate::turn_trace::Outcome::Rejected,
+                    _ => crate::turn_trace::Outcome::Unknown,
+                },
+                None,
+                None,
+            );
+            if outcome != "reply_confirmed" {
+                break;
+            }
+        }
+        state.db.collection::<NyxbotChannel>(CHANNELS).update_one(
+            doc! {"_id":&row.id,"binding_id":&row.binding_id,"transport":"gateway","gateway_native_phase":"ready"},
+            doc! {"$set":{"gateway_native_delivery":outcome}},
+        ).await?;
+        Ok(match outcome {
+            "reply_confirmed" => "confirmed",
+            "reply_rejected" | "reply_unsupported" | "reply_rate_limited" | "reply_refused" => {
+                "rejected"
+            }
+            _ => "unknown",
+        })
+    })
+    .await;
+    operation.finish(
+        match &result {
+            Ok("confirmed") => crate::turn_trace::Outcome::Confirmed,
+            Ok("rejected") => crate::turn_trace::Outcome::Rejected,
+            _ => crate::turn_trace::Outcome::Unknown,
         },
         None,
         None,
