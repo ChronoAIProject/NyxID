@@ -2189,6 +2189,7 @@ async fn shared_agent_catalog_connections_exclude_internal_and_preserve_account_
     catalog_row.auth_method = "bearer".into();
     catalog_row.credential_encrypted = vec![1];
     catalog_row.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: crate::models::downstream_service::PlatformKeyAudience::Public,
         allowed_owner_ids: Vec::new(),
@@ -2674,5 +2675,73 @@ async fn shared_agent_crew_projection_keeps_skills_notes_and_rejects_other_surfa
         Err(crate::errors::AppError::ValidationError(_))
     ));
     session.abort_transaction().await.unwrap();
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_memory_concurrent_remember_retries_aborted_transactions_without_duplicates() {
+    use super::api_key_mutation_service::TransactionCollisionHook;
+    let f = Fixture::new("shared_memory_concurrent_remember").await;
+    let agent = publish(&f, true).await;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let first = TransactionCollisionHook::new(barrier.clone());
+    let second = TransactionCollisionHook::new(barrier);
+    let (a, b) = tokio::join!(
+        sharing::PRIVATE_NOTE_COLLISION.scope(
+            first.clone(),
+            sharing::edit_private_note(
+                &f.state.db,
+                &f.outsider,
+                &agent,
+                Some("First recipient fact"),
+                None
+            )
+        ),
+        sharing::PRIVATE_NOTE_COLLISION.scope(
+            second.clone(),
+            sharing::edit_private_note(
+                &f.state.db,
+                &f.outsider,
+                &agent,
+                Some("Second recipient fact"),
+                None
+            )
+        ),
+    );
+    assert_ne!(a.unwrap(), b.unwrap());
+    assert!(
+        first.attempts() + second.attempts() > 2,
+        "a real snapshot conflict must retry"
+    );
+    let notes = sharing::private_notes(&f.state.db, &f.outsider, &agent.id)
+        .await
+        .unwrap();
+    assert_eq!(notes.len(), 2);
+    assert!(notes.iter().any(|n| n.text == "First recipient fact"));
+    assert!(notes.iter().any(|n| n.text == "Second recipient fact"));
+    assert!(
+        team::agent(&f.state.db, &f.admin, &agent.id)
+            .await
+            .unwrap()
+            .memory
+            .is_empty()
+    );
+    assert!(
+        sharing::private_notes(&f.state.db, &f.admin, &agent.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for (text, replace, expected) in [
+        (" ", None, "note_empty"),
+        ("password: do-not-store", None, "secret_detected"),
+        ("Fact", Some("missing"), "replace_target_not_found"),
+    ] {
+        let error =
+            sharing::edit_private_note(&f.state.db, &f.outsider, &agent, Some(text), replace)
+                .await
+                .unwrap_err();
+        assert_eq!(error.response_body().details.unwrap()["reason"], expected);
+    }
     f.state.db.drop().await.unwrap();
 }

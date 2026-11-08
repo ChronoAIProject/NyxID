@@ -2211,6 +2211,16 @@ async fn channel_media_busy_mixed_queue_preserves_order_and_drains_after_flag_di
         .filter(|message| message.role == "assistant")
         .collect();
     assert_eq!(replies.len(), 4);
+    let queued_image = messages
+        .iter()
+        .find(|message| message.role == "event" && !message.attachments.is_empty())
+        .expect("queued channel media is exposed on its event message");
+    let history = serde_json::to_value(crate::handlers::assistant_nyxagent::MessageResponse::from(
+        queued_image.clone(),
+    ))
+    .unwrap();
+    assert_eq!(history["role"], "event");
+    assert_eq!(history["attachments"][0]["content_type"], "image/png");
     for reply in &replies[2..] {
         assert_eq!(reply.status, "completed");
         assert_eq!(reply.text, "Here is your answer");
@@ -2545,3 +2555,9 @@ async fn channel_media_follow_post_owner_guest_and_unaddressed_photo_preserve_fl
         server.abort();
     }
 }
+
+#[path = "nyxbot_relay_media_v2_tests.rs"]
+mod relay_v2_tests;
+
+#[path = "nyxbot_guest_media_tests.rs"]
+mod guest_media_tests;

@@ -39,7 +39,7 @@ function mount() {
 it("loads channel readiness only when opened and shares it across ordinary chat rows", async () => {
   const user=mount();
   expect(reads).toEqual([]);
-  await user.click(screen.getByRole("button",{name:"Chats and who can talk"}));
+  await user.click(screen.getByRole("button",{name:"Chats and posting"}));
   await screen.findByRole("heading", { name: /^Visitor 7 ·/ });
   expect(screen.getAllByText("Model ready for visitors")).toHaveLength(9);
   expect(reads.filter((r)=>r.includes("guest-readiness"))).toEqual([base]);
@@ -50,7 +50,7 @@ it("loads channel readiness only when opened and shares it across ordinary chat 
 it("checks a chat separately only when the server reports its own profile or route", async () => {
   scoped=["conv-1"];
   const user=mount();
-  await user.click(screen.getByRole("button",{name:"Chats and who can talk"}));
+  await user.click(screen.getByRole("button",{name:"Chats and posting"}));
   expect(await screen.findByText("Confirm this chat's model route.")).toBeVisible();
   await waitFor(()=>expect(reads.filter((r)=>r.includes("guest-readiness"))).toEqual([base,`${base}?conversation_id=conv-1`]));
 });

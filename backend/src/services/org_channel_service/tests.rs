@@ -137,6 +137,7 @@ impl Fixture {
             &self.org.admin,
             &self.channel,
             management::GuestSettings {
+                expected_revision: None,
                 enabled: true,
                 service_ids: ids,
                 daily_credits: Credits::from_whole(1),
@@ -312,7 +313,10 @@ async fn same_org_admin_only_linking_and_default_off() {
             .to_string()
             .contains("disabled for this account")
     );
-    assert!(!transport_holds(db, &f.channel).await.unwrap());
+    assert_eq!(
+        transport_access(db, &f.channel).await.unwrap(),
+        OrgAccess::Unavailable
+    );
     db.drop().await.unwrap();
 }
 
@@ -429,6 +433,7 @@ async fn exact_guest_billing_lane_preserves_ordinary_platform_key_payers() {
             &f.org.admin,
             &f.channel,
             management::GuestSettings {
+                expected_revision: None,
                 enabled: true,
                 service_ids: vec![],
                 daily_credits: Credits::from_whole(1)
@@ -543,6 +548,7 @@ async fn guest_delegation_requires_admin_and_live_agent_policy_intersection() {
                 actor,
                 &f.channel,
                 management::GuestSettings {
+                    expected_revision: None,
                     enabled: true,
                     service_ids: vec![id.clone()],
                     daily_credits: Credits::from_whole(1)
@@ -750,6 +756,7 @@ async fn guest_budget_reserves_fractional_tax_upward_at_the_exact_cap() {
             &f.org.admin,
             &f.channel,
             management::GuestSettings {
+                expected_revision: None,
                 enabled: true,
                 service_ids: vec![],
                 daily_credits: Credits::from_pico(cap).unwrap(),
@@ -1263,6 +1270,7 @@ async fn org_channel_rotated_guest_key_keeps_typed_lane_and_is_revoked_with_expo
         &f.org.admin,
         &f.channel,
         management::GuestSettings {
+            expected_revision: None,
             enabled: false,
             service_ids: vec![],
             daily_credits: Credits::from_whole(1),
@@ -1410,6 +1418,7 @@ async fn public_transcript_excludes_private_messages_and_erasure_purges_actor_co
         )
         .await
         .unwrap()
+        .accepted
     );
     tx.abort_transaction().await.unwrap();
     assert!(
@@ -1702,6 +1711,7 @@ async fn narrowing_guest_exposure_stops_guest_and_setup_keys_but_preserves_membe
         &f.org.admin,
         &f.channel,
         management::GuestSettings {
+            expected_revision: None,
             enabled: false,
             service_ids: vec![],
             daily_credits: Credits::from_whole(1),
@@ -2130,3 +2140,54 @@ async fn setup_guidance_keeps_readiness_and_expiry_checks_closed() {
     ));
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn org_access_2283_enabled_guest_does_not_revoke_transport_admin() {
+    let mut f = Fixture::new("org_access_2283_guest").await;
+    f.wallet().await;
+    f.guests(vec![]).await;
+    let origin = f.guest("unverified-visitor").await;
+    assert!(origin.org_execution.as_ref().unwrap().guest);
+    assert_eq!(
+        crate::handlers::nyxbot::org_access(&f.org.state, &f.channel)
+            .await
+            .unwrap(),
+        OrgAccess::Holds
+    );
+    crate::handlers::nyxbot::route_key_auth(&f.org.state, &f.channel)
+        .await
+        .unwrap();
+    let current = f
+        .org
+        .state
+        .db
+        .collection::<NyxbotChannel>("nyxbot_channels")
+        .find_one(doc! {"_id":&f.channel.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.status, "active");
+    assert_eq!(current.last_error, None);
+    for (collection, id) in [
+        ("api_keys", &f.channel.route_api_key_id),
+        (
+            "channel_conversations",
+            f.channel.route_id.as_ref().unwrap(),
+        ),
+    ] {
+        assert!(
+            f.org
+                .state
+                .db
+                .collection::<Document>(collection)
+                .find_one(doc! {"_id":id,"is_active":true})
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    f.org.state.db.drop().await.unwrap();
+}
+
+#[path = "guest_settings_tests.rs"]
+mod guest_settings;

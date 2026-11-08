@@ -700,10 +700,31 @@ async fn request(
     credential: &AssistantCredential,
     method: &str,
     path: &str,
-    body: Option<Value>,
+    mut body: Option<Value>,
     request_id: Option<&str>,
     policy: Option<BillingRoutePolicy>,
 ) -> AppResult<axum::response::Response> {
+    if let Some(body) = body
+        .as_mut()
+        .filter(|b| b["model"].as_str().is_some_and(|m| m.starts_with("nyxid/")))
+    {
+        let contract::NyxAgentExecutionContext::Owner { user_id, turn, .. } = authority else {
+            return Err(AppError::AssistantModelUnavailable);
+        };
+        let row = _state.db.collection::<AssistantConversation>("assistant_conversations")
+            .find_one(doc! {"_id":&turn.conversation_id,"user_id":user_id,"credential_api_key_id":&credential.api_key_id,
+                "active_turn.turn_id":&turn.turn_id,"active_turn.stop_requested":false}).await?
+            .ok_or(AppError::AssistantTurnRequired)?;
+        let handle = row
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.platform_model_context.as_deref())
+            .ok_or(AppError::AssistantModelUnavailable)?;
+        if row.guest_turn || body["model"] != row.model {
+            return Err(AppError::AssistantModelUnavailable);
+        }
+        body["nyxid_model_context"] = json!({"version":1,"handle":handle});
+    }
     let method = method
         .parse()
         .map_err(|_| AppError::Internal("Invalid assistant method".into()))?;
@@ -744,6 +765,11 @@ pub(crate) async fn run_owner_turn(
     mut permit: DirectChatPermit,
     mut events: Events,
 ) -> Option<OwnerTurnSettlement> {
+    let trace = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| crate::turn_trace::TurnContext::for_turn(&turn.turn_id));
+    crate::turn_trace::scope(trace, async move {
     let _typing = egress.channel_typing(&row).map(AbortOnDropHandle::new);
     if row
         .active_turn
@@ -998,6 +1024,8 @@ pub(crate) async fn run_owner_turn(
         }),
         SettledExecution::Deleted | SettledExecution::Unconfirmed => None,
     }
+
+    }).await
 }
 
 /// Bound on the queue's own writes: a stalled write must not hold capacity.
@@ -1443,6 +1471,35 @@ async fn execute_turn_inner(
     instruction_context: &mut Option<crate::services::assistant_instruction_context::Prepared>,
     tool_images: &mut images::ToolImages,
 ) -> Result<TurnResult, TurnError> {
+    let platform_plan = if row.model.starts_with("nyxid/") {
+        if row.guest_turn {
+            return Err(TurnError::new("model_unavailable"));
+        }
+        super::assistant_platform_model::require_ready(&state.db)
+            .await
+            .map_err(proxy_turn_error)?;
+        let capability = upstream_capabilities(
+            state,
+            egress,
+            authority,
+            credential,
+            Some(super::assistant_platform_model::CAPABILITY_POLICY),
+        )
+        .await;
+        if !super::assistant_platform_model::bridge_ready(&capability) {
+            return Err(TurnError::new("model_unavailable"));
+        }
+        super::assistant_platform_model::activate_bridge(&state.db, row, &capability)
+            .await
+            .map_err(proxy_turn_error)?;
+        Some(
+            super::assistant_platform_model::selection_plan(state, &row.user_id, &row.model)
+                .await
+                .map_err(proxy_turn_error)?,
+        )
+    } else {
+        None
+    };
     let media_context = if row.active_turn.as_ref().is_some_and(|turn| {
         turn.channel_event_id.is_some() || turn.events.iter().any(|e| !e.media_event_ids.is_empty())
     }) {
@@ -1735,6 +1792,13 @@ async fn execute_turn_inner(
         .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
         attachments = available;
         availability_notice = notice;
+    } else if row.guest_turn {
+        let (available, notice) =
+            super::assistant_channel_media::guest::input_for_turn(state, row, attachments)
+                .await
+                .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+        attachments = available;
+        availability_notice = notice;
     } else {
         let expired = Box::pin(crate::services::assistant_upload_retention::expired_ids(
             &state.db,
@@ -1755,21 +1819,40 @@ async fn execute_turn_inner(
         .iter()
         .any(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"));
     let model_text_only = has_images
-        && images::model_support(state, egress, authority, &row.model, policy).await == Some(false);
-    let mut listing =
-        crate::services::assistant_upload_service::listing(&listed_attachments, model_text_only);
+        && match platform_plan.as_ref() {
+            Some(plan) => plan.image_limits().is_none(),
+            None => {
+                images::model_support(state, egress, authority, &row.model, policy).await
+                    == Some(false)
+            }
+        };
+    let mut listing = if row.guest_turn && row.collaboration.is_none() {
+        // Never suggest attachment or machine tools to a channel guest.
+        String::new()
+    } else {
+        crate::services::assistant_upload_service::listing(&listed_attachments, model_text_only)
+    };
     listing.push_str(&availability_notice);
     let capabilities = if has_images && !model_text_only {
         upstream_capabilities(state, egress, authority, credential, policy).await
     } else {
         Value::Null
     };
+    let capabilities = match platform_plan.as_ref() {
+        Some(plan) => super::assistant_platform_model::image_capabilities(
+            capabilities,
+            plan.image_limits().as_ref(),
+        ),
+        None => capabilities,
+    };
     let image_notice = if model_text_only {
         crate::services::assistant_upload_service::MODEL_IMAGE_FALLBACK
+    } else if row.guest_turn && row.collaboration.is_none() {
+        "The image attached to this guest message cannot be viewed in this turn. Do not claim to have read it."
     } else {
         crate::services::assistant_upload_service::IMAGE_FALLBACK
     };
-    let (image_parts, omitted) = crate::services::assistant_upload_service::image_plan(
+    let (mut image_parts, omitted) = crate::services::assistant_upload_service::image_plan(
         &attachments,
         &capabilities,
         &state.config.base_url,
@@ -1781,6 +1864,7 @@ async fn execute_turn_inner(
             json!(omitted)
         ));
     }
+    let media_decision_offset = decisions.len();
     decisions.push_str(&listing);
     // Persist the delivery outcome on metadata, so a reload does not hide the fallback.
     for item in attachments
@@ -1794,6 +1878,8 @@ async fn execute_turn_inner(
         };
         let reason = (status == "unavailable").then_some(if model_text_only {
             "model_text_only"
+        } else if row.guest_turn && row.collaboration.is_none() {
+            "guest_media_unavailable"
         } else {
             "agent_unsupported"
         });
@@ -1837,6 +1923,45 @@ async fn execute_turn_inner(
         // check. Recheck every bound source before model execution, including
         // continuations; stop/expiry alone preserve already admitted work.
         let turn = row.active_turn.as_ref().expect("claimed turn");
+        if row.guest_turn && row.collaboration.is_none() && !listed_attachments.is_empty() {
+            // Capabilities, admission waits and continuations can outlive the
+            // initial check. Rebuild only this guest message's input from live
+            // authority before every request; the image GET rechecks again.
+            let (current, notice) = super::assistant_channel_media::guest::input_for_turn(
+                state,
+                row,
+                listed_attachments.clone(),
+            )
+            .await
+            .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+            let (parts, unavailable) = crate::services::assistant_upload_service::image_plan(
+                &current,
+                &capabilities,
+                &state.config.base_url,
+            );
+            image_parts = parts;
+            listing = notice;
+            if !unavailable.is_empty() {
+                listing.push_str(image_notice);
+            }
+            for item in listed_attachments
+                .iter()
+                .filter(|a| a.content_type.starts_with("image/"))
+            {
+                if !current.iter().any(|allowed| allowed.id == item.id) {
+                    images::record_upload_outcome(
+                        state,
+                        row,
+                        &item.id,
+                        "unavailable",
+                        Some("guest_media_unavailable"),
+                    )
+                    .await?;
+                }
+            }
+            decisions.truncate(media_decision_offset);
+            decisions.push_str(&listing);
+        }
         let origins: Vec<_> = match turn.origin {
             crate::models::assistant_conversation::TurnOrigin::Channel => turn
                 .asked_from

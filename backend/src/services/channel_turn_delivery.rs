@@ -17,7 +17,7 @@ pub async fn bind_in_session(
     owner: &str,
     conversation: &str,
     turn: &str,
-) -> AppResult<()> {
+) -> AppResult<Option<String>> {
     let bound = db
         .collection::<bson::Document>(EVENTS)
         .find_one_and_update(
@@ -59,7 +59,8 @@ pub async fn bind_in_session(
         ))
         .await?;
     }
-    bind_response(db, session, event, transport_owner, conversation, replay).await
+    bind_response(db, session, event, transport_owner, conversation, replay).await?;
+    Ok(bound.get_str("trace_request_id").ok().map(str::to_owned))
 }
 
 /// A guest waiting for model setup is still subject to the live source's
@@ -267,8 +268,12 @@ pub async fn silence(db: &Database, event: &str) -> AppResult<bool> {
         .update_one(
             doc! {"_id": event, "delivery.version": 1,
             "delivery.state": {"$in": ["waiting", "pending"]}},
-            doc! {"$set": {"delivery.state": "silent", "status": "completed"},
-            "$unset": {"event_context_ciphertext": "", "delivery.target_ciphertext": ""}},
+            // A separate permission result may still need the same original
+            // capability. Never reopen the terminal delivery claim itself.
+            vec![doc! {"$set": {"delivery.state": "silent", "status": "completed",
+                "event_context_ciphertext":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$event_context_ciphertext","$$REMOVE"]},
+                "delivery.target_ciphertext":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$delivery.target_ciphertext","$$REMOVE"]}
+            }}],
         )
         .await?
         .modified_count
@@ -291,7 +296,7 @@ pub async fn enqueue(
     let conversation = conversation.to_owned();
     let public_text = public_text.map(str::to_owned);
     let mut session = db.client().start_session().await?;
-    session
+    let admission = session
         .start_transaction()
         .and_run2(async move |session| {
             transactions::transaction_result(
@@ -307,7 +312,24 @@ pub async fn enqueue(
             )
         })
         .await
-        .map_err(transactions::map_transaction_error)
+        .map_err(transactions::map_transaction_error)?;
+    if let Some(turn) = admission.trace_turn {
+        if let Some(request) = admission.trace_request {
+            crate::turn_trace::source_link(&turn, &request);
+        }
+        if let Some(context) = crate::turn_trace::TurnContext::for_turn(&turn) {
+            crate::turn_trace::associate(context);
+        }
+    }
+    Ok(admission.accepted)
+}
+
+#[derive(Default)]
+pub(crate) struct EnqueueAdmission {
+    pub(crate) accepted: bool,
+    // Returned from the committed transaction, never emitted on a driver retry.
+    trace_turn: Option<String>,
+    trace_request: Option<String>,
 }
 
 /// Each driver retry receives immutable incoming work. Attempt-local queued
@@ -319,7 +341,7 @@ pub(crate) async fn enqueue_in_session(
     incoming: &crate::models::assistant_conversation::AgentEvent,
     public_text: Option<&str>,
     session: &mut ClientSession,
-) -> AppResult<bool> {
+) -> AppResult<EnqueueAdmission> {
     use super::assistant_nyxagent as engine;
     use crate::models::assistant_conversation::{
         AssistantConversation, COLLECTION_NAME as CONVERSATIONS,
@@ -396,7 +418,7 @@ pub(crate) async fn enqueue_in_session(
             .session(&mut *session)
             .await?;
         if count >= (engine::MAX_ALSO_DELIVER + 1) as u64 {
-            return Ok(false);
+            return Ok(EnqueueAdmission::default());
         }
         // Fence settlement and concurrent destination admissions on the
         // same conversation document, including repeated same-chat work.
@@ -415,7 +437,7 @@ pub(crate) async fn enqueue_in_session(
             && compatible_sources(e.reply_to.first(), event.reply_to.first())
     }) {
         if pending.source_event_ids.len() > engine::MAX_ALSO_DELIVER {
-            return Ok(false);
+            return Ok(EnqueueAdmission::default());
         }
         pending.source_event_ids.push(source.clone());
         pending.channel_contexts.extend(
@@ -427,7 +449,7 @@ pub(crate) async fn enqueue_in_session(
         );
     } else {
         if row.pending_events.len() >= engine::MAX_PENDING_EVENTS {
-            return Ok(false);
+            return Ok(EnqueueAdmission::default());
         }
         row.pending_events.push(event.clone());
     }
@@ -474,8 +496,8 @@ pub(crate) async fn enqueue_in_session(
     let accepted_origin = queued_origin_in_session(db, owner, conversation, &source, session)
         .await?
         .ok_or_else(|| AppError::Forbidden("Channel source authority changed".into()))?;
-    if let Some(turn) = &bound_turn {
-        bind_in_session(db, session, &source, owner, conversation, turn).await?;
+    let trace_request = if let Some(turn) = &bound_turn {
+        bind_in_session(db, session, &source, owner, conversation, turn).await?
     } else {
         rows.update_one(
             doc! {"_id": &conversation, "user_id": &owner},
@@ -484,7 +506,8 @@ pub(crate) async fn enqueue_in_session(
         )
         .session(&mut *session)
         .await?;
-    }
+        None
+    };
     if accepted_origin.org_execution.is_some()
         && let Some(text) = public_text
     {
@@ -504,7 +527,11 @@ pub(crate) async fn enqueue_in_session(
         )
         .await?;
     }
-    Ok(true)
+    Ok(EnqueueAdmission {
+        accepted: true,
+        trace_turn: bound_turn,
+        trace_request,
+    })
 }
 
 /// Home owner chats can share work across destinations. Native children retain
@@ -845,7 +872,19 @@ async fn target_in_session(
         .await
         {
             Ok(access) => access,
-            Err(AppError::Forbidden(_) | AppError::SecurityReadinessUnavailable) => {
+            Err(AppError::Forbidden(_)) => {
+                // Management keeps its flag-off 403. A saved delivery must use
+                // the transport classification before treating it as terminal.
+                if let Some(channel) = db
+                    .collection::<NyxbotChannel>(CHANNELS)
+                    .find_one(doc! {"_id": &origin.nyxbot_channel_id, "status": "active"})
+                    .session(&mut *session)
+                    .await?
+                    && super::org_channel_service::transport_access(db, &channel).await?
+                        == super::org_channel_service::OrgAccess::Unavailable
+                {
+                    return Err(AppError::SecurityReadinessUnavailable);
+                }
                 return Ok(None);
             }
             Err(e) => return Err(e),

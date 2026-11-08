@@ -1465,6 +1465,7 @@ async fn consent_platform_grants_are_owner_bound_and_use_live_platform_readiness
     catalog.provider_config_id = None;
     catalog.credential_encrypted = vec![1]; // Intentionally not decryptable: consent reads metadata only.
     catalog.platform_key = Some(PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: PlatformKeyAudience::Public,
         allowed_owner_ids: vec![],

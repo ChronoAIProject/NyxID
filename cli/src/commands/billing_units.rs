@@ -27,6 +27,16 @@ pub fn label(metric: &str, singular: bool) -> &str {
         ("cache_write_tokens", true) => "cache-write token",
         ("voice_seconds", true) => "voice second",
         ("voice_seconds", false) => "voice seconds",
+        ("reasoning_tokens", false) => "reasoning tokens",
+        ("reasoning_tokens", true) => "reasoning token",
+        ("image_input_tokens", false) => "image input tokens",
+        ("image_input_tokens", true) => "image input token",
+        ("image_output_tokens", false) => "image output tokens",
+        ("image_output_tokens", true) => "image output token",
+        ("audio_input_tokens", false) => "audio input tokens",
+        ("audio_input_tokens", true) => "audio input token",
+        ("audio_output_tokens", false) => "audio output tokens",
+        ("audio_output_tokens", true) => "audio output token",
         ("images", true) => "image",
         _ => metric,
     }
@@ -103,5 +113,23 @@ mod tests {
             assert!(price(bad).is_err(), "{bad}");
         }
         assert_eq!(label("future_unit", false), "future_unit");
+    }
+}
+
+#[cfg(test)]
+mod model_unit_tests {
+    #[test]
+    fn tariff_units_have_labels_but_cannot_be_authored_as_legacy_components() {
+        for unit in [
+            "reasoning_tokens",
+            "image_input_tokens",
+            "image_output_tokens",
+            "audio_input_tokens",
+            "audio_output_tokens",
+        ] {
+            assert_eq!(super::label(unit, false), unit.replace('_', " "));
+            assert!(super::label(unit, true).ends_with(" token"));
+            assert!(super::component(&format!("{unit}=1")).is_err());
+        }
     }
 }

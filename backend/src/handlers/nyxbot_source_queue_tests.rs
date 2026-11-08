@@ -801,12 +801,37 @@ async fn personal_channel_repeat_joins_owner_app_turn_without_another_execution(
     .await
     .unwrap();
     let a = source(&f, "app-repeat").await;
+    let ingress = crate::turn_trace::Ingress::new();
+    f.state
+        .db
+        .collection::<bson::Document>(EVENTS)
+        .update_one(
+            doc! {"_id": &a.id},
+            doc! {"$set": {"trace_request_id": ingress.request_id.to_string()}},
+        )
+        .await
+        .unwrap();
     let mut repeat = work(&a, "same app question");
     repeat.channel_contexts = vec![verified_context(&f.channel, &a)];
+    let (accepted, trace) = crate::turn_trace::capture(ingress.scope(delivery::enqueue(
+        &f.state.db,
+        OWNER,
+        &home.id,
+        repeat,
+        None,
+    )))
+    .await;
+    assert!(accepted.unwrap());
+    let original_turn = &prior.active_turn.as_ref().unwrap().turn_id;
+    assert_eq!(ingress.admitted().unwrap().turn_id(), *original_turn);
+    assert!(trace.iter().any(|record| record["phase"] == "link"
+        && record["turn_id"] == *original_turn
+        && record["ingress_request_id"] == ingress.request_id.to_string()));
+    // Joining a committed turn links the source without minting another admission.
     assert!(
-        delivery::enqueue(&f.state.db, OWNER, &home.id, repeat, None)
-            .await
-            .unwrap()
+        !trace
+            .iter()
+            .any(|record| record["stage"] == "admission" && record["phase"] == "start")
     );
     let current = row(&f).await;
     assert!(current.pending_events.is_empty());
@@ -1181,6 +1206,7 @@ async fn channel_media_committed_queue_and_turn_never_become_interrupted() {
     let f = fixture("media_committed_sources").await;
     let mut queued = source(&f, "media-queued").await;
     queued.media = Some(EventMedia {
+        guest: false,
         authority: None,
         key: "a".repeat(64),
         declared: 1,
@@ -1202,6 +1228,7 @@ async fn channel_media_committed_queue_and_turn_never_become_interrupted() {
     assert!(queue(&f, &queued, "media question").await);
     let mut bound = source(&f, "media-bound").await;
     bound.media = Some(EventMedia {
+        guest: false,
         authority: None,
         key: "b".repeat(64),
         declared: 1,

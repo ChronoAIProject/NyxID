@@ -1,6 +1,8 @@
 use super::*;
 #[path = "trigger_model_scope_tests.rs"]
 mod model_scope_tests;
+#[path = "trigger_notification_tests.rs"]
+mod notification_tests;
 use crate::models::trigger_run::RunOutcome;
 use crate::services::assistant_engine_policy as engine_policy;
 use crate::{
@@ -36,6 +38,11 @@ type Calls = Arc<Mutex<Vec<Call>>>;
 
 /// A NyxAgent stand-in answering every turn with one completed reply.
 async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+    setup_reply(name, "Work finished").await
+}
+
+async fn setup_reply(name: &str, reply: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
+    let reply = reply.to_owned();
     let db = connect_transaction_test_database(name).await;
     engine::ensure_indexes(&db).await.unwrap();
     db.collection(USERS)
@@ -48,6 +55,7 @@ async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
         "/v1/responses",
         post(move |headers: HeaderMap, Json(body): Json<Value>| {
             let sink = sink.clone();
+            let reply = reply.clone();
             async move {
                 sink.lock().await.push(Call {
                     authorization: headers["authorization"].to_str().unwrap().into(),
@@ -67,7 +75,7 @@ async fn setup(name: &str) -> (AppState, Calls, tokio::task::JoinHandle<()>) {
                                 {
                                     "type": "message",
                                     "role": "assistant",
-                                    "content": [{"type": "output_text", "text": "Work finished"}],
+                                    "content": [{"type": "output_text", "text": reply}],
                                 },
                             ],
                         },
@@ -647,6 +655,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     assert!(key.allowed_service_ids.is_empty());
     assert!(key.allowed_platform_service_ids.is_empty());
     let chat = ChatAuthority {
+        platform_model_context: None,
         automation_work: None,
         execution_group_id: None,
         execution_unsupported: false,
@@ -686,6 +695,7 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     .await;
     assert!(refused);
     let guest = ChatAuthority {
+        platform_model_context: None,
         automation_work: None,
         execution_group_id: None,
         execution_unsupported: false,
@@ -1421,7 +1431,18 @@ async fn result_transport() -> (
     Arc<Mutex<Vec<(String, Value)>>>,
     tokio::task::JoinHandle<()>,
 ) {
+    result_transport_responses(vec![]).await
+}
+
+async fn result_transport_responses(
+    responses: Vec<(u16, Option<u64>)>,
+) -> (
+    reqwest::Client,
+    Arc<Mutex<Vec<(String, Value)>>>,
+    tokio::task::JoinHandle<()>,
+) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let responses = Arc::new(Mutex::new(std::collections::VecDeque::from(responses)));
     let hosts = vec![
         "api.telegram.org".into(),
         "fcm.googleapis.com".into(),
@@ -1451,6 +1472,7 @@ async fn result_transport() -> (
             };
             let acceptor = acceptor.clone();
             let sink = sink.clone();
+            let responses = responses.clone();
             tokio::spawn(async move {
                 let mut stream = acceptor.accept(stream).await.unwrap();
                 let mut bytes = Vec::new();
@@ -1503,8 +1525,26 @@ async fn result_transport() -> (
                     }
                 }
                 .to_string();
+                let (status, retry_after) = if route == "/token" {
+                    (200, None)
+                } else {
+                    responses.lock().await.pop_front().unwrap_or((200, None))
+                };
+                if status == 0 {
+                    return;
+                } // Request arrived, response was lost.
+                let body = if status == 200 {
+                    body
+                } else if status == 404 {
+                    json!({"error":{"status":"NOT_FOUND","details":[{"@type":"type.googleapis.com/google.firebase.fcm.v1.FcmError","errorCode":"UNREGISTERED"}]}}).to_string()
+                } else {
+                    json!({"error":{"status":"PRIVATE_PROVIDER_TEXT", "message":"test-device-token secret-report"}}).to_string()
+                };
+                let retry = retry_after
+                    .map(|s| format!("Retry-After: {s}\r\n"))
+                    .unwrap_or_default();
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 {status} Fixture\r\n{retry}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
                     body
                 );

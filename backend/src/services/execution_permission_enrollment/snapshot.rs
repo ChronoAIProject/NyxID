@@ -34,6 +34,30 @@ pub(crate) fn candidate(db: &Database, person: &User, known: &[(String, OrgRole)
     Cache(cache.unwrap_or_default()).candidate(person, known)
 }
 
+/// Server channel ingress has a verified owner ID, but no loaded person row.
+/// This deliberately conservative hint infers only global/personal enrollment;
+/// it never infers org membership. The live admission checks person eligibility.
+pub(crate) fn channel_candidate(db: &Database, actor: &str) -> bool {
+    let cache = CACHES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(db.name())
+        .and_then(Weak::upgrade);
+    let Some(cache) = cache else {
+        return false;
+    };
+    let Ok(data) = cache.read() else {
+        return false;
+    };
+    let Some(data) = data.as_ref().filter(|d| d.at.elapsed() <= MAX_AGE) else {
+        return false;
+    };
+    data.users.get(actor).map_or_else(
+        || data.global.as_ref().is_some_and(|r| r.enabled),
+        |r| r.enabled,
+    )
+}
+
 struct Data {
     at: Instant,
     global: Option<FeatureFlagOverride>,

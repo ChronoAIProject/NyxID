@@ -659,7 +659,7 @@ const INHERIT = "inherit";
 function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
   const advancedControls = useFeature(FEATURE_FLAG.ASSISTANT_MODEL_CONTROLS);
   const update = useUpdateNyxBotAgent();
-  const models = useNyxAgentModels(advancedControls);
+  const models = useNyxAgentModels(advancedControls, { agentId: agent.id });
   const workspaceMode = useNyxBotSettings().data?.access_mode;
   const nyxbot = agent.kind === "nyxbot";
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
@@ -790,7 +790,8 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                       <ModelSelect
                         grouped
                         label="Agent model"
-                        value={field.value || undefined}
+                        agentId={agent.id}
+                        value={field.value}
                         disabled={readOnly}
                         onChange={field.onChange}
                       />

@@ -1,3 +1,4 @@
+import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouterState, Link } from "@tanstack/react-router";
 import {
@@ -39,7 +40,6 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { useAuthStore } from "@/stores/auth-store";
 import { useThemeStore, type SidebarMode } from "@/stores/theme-store";
@@ -55,6 +55,7 @@ import {
 
 export const MAIN_NAV = [
   { to: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
+  { to: "/models", icon: Sparkles, label: "Platform Models" },
   { to: "/keys", icon: Cable, label: "AI Services" },
   { to: "/tools", icon: Sparkles, label: "Tools" },
   { to: "/billing", icon: WalletCards, label: "Billing & Usage" },
@@ -84,6 +85,7 @@ export const DEVELOPER_NAV = [
 const ADMIN_USAGE_PATH = "/admin/usage";
 
 export const ADMIN_NAV = [
+  { to: "/admin/platform-models", icon: Sparkles, label: "Platform Models" },
   { to: "/admin/platform-bots", icon: Bot, label: "Platform BotFather" },
   { to: "/admin/users", icon: Users, label: "Users" },
   { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
@@ -120,7 +122,7 @@ export function getVisibleMainNav(
   user: Parameters<typeof isBillingAvailable>[0],
 ): readonly NavItemDef[] {
   return MAIN_NAV.filter(
-    (item) => item.to !== "/billing" || isBillingAvailable(user),
+    (item) => (item.to !== "/billing" || isBillingAvailable(user)) && (item.to !== "/models" || userHasFeature(user, FEATURE_FLAG.INFERENCE_PLATFORM_MODELS)),
   );
 }
 

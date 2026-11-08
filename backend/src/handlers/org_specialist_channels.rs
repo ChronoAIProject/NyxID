@@ -1,6 +1,9 @@
 //! First-party human management and per-member sender confirmation.
 use crate::{
-    AppState, errors::AppResult, mw::auth::AuthUser, services::org_channel_service as org,
+    AppState,
+    errors::{AppError, AppResult},
+    mw::auth::AuthUser,
+    services::org_channel_service as org,
 };
 use axum::{
     Json,
@@ -31,6 +34,23 @@ pub async fn update(
     let row = org::management::load(&state.db, &actor, &id, true).await?;
     audit(&state, &actor, "org_channel_guest_policy_changed", &id).await;
     Ok(Json(org::management::view(&state.db, &actor, &row).await?))
+}
+
+/// Called only through NyxBot's existing sensitive channel-management tool.
+/// The actor is its authenticated conversation owner, never a model argument.
+pub(crate) async fn update_tool(
+    state: &AppState,
+    actor: &str,
+    id: &str,
+    input: &Value,
+) -> AppResult<Value> {
+    let input: org::management::GuestSettingsPatch = serde_json::from_value(input.clone())
+        .map_err(|_| AppError::ValidationError("Invalid organization guest settings".into()))?;
+    let row = org::management::load(&state.db, actor, id, true).await?;
+    org::management::patch(&state.db, actor, &row, input).await?;
+    let row = org::management::load(&state.db, actor, id, true).await?;
+    audit(state, actor, "org_channel_guest_policy_changed", id).await;
+    org::management::view(&state.db, actor, &row).await
 }
 pub async fn issue(
     State(state): State<AppState>,

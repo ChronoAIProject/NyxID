@@ -58,6 +58,7 @@ feature flags requires deployment readiness:
 | `permissions:execution-dispatch-v1` | Phase A coordinator, live egress fences and one-operation claims. |
 | `permissions:execution-authoring-v1` | Part A assistant MCP/proxy proposal readers/writers, human decisions, retained-effect resume and legacy decision refusal. Upgrade/drain every writer before activation. |
 | `permissions:execution-authoring-v2` | B1 personal external-key, standalone LLM, native-key, watch and human voice-task proposals. Default connected waits never become background work; external background execution requires explicit async opt-in. Required for person/org/global activation alongside the existing capabilities. |
+| `permissions:execution-authoring-private-conversations-v1` | Optional v3 assistant proposal reader/writer and explicit across-private-conversations choice. Gates v3 creation, decisions, resume and send; does not become a prerequisite for existing cohort activation or v1/v2 sources. Upgrade/drain every reader and worker first. |
 | `permissions:execution-enrollment-v1` | Broad enrollment snapshot, scoped hints and live admission integration. Advertised by production heartbeats with complete auth/admission and Phase B integration. Required for global/org activation and clear-that-enables. |
 | `assistant:org-instruction-v1` | Exact owner instruction or a single-use owner card before covered org credential effects, in every access mode. |
 | `assistant:hosted-connect-intent-v1` | New assistant MCP and Plugins links persist immutable personal/platform intent; completion always enforces an existing lock. |
@@ -78,6 +79,14 @@ Discord ingress additionally stops its socket on readiness loss. Flag resolution
 itself remains unchanged. Disable ingress and drain its socket holders before
 rolling back to writers that do not coordinate the gateway handoff; see
 [Discord relay setup](CHANNEL_BOT_RELAY.md#discord-ordinary-chat-and-interactions).
+
+`assistant:channel-media-v2` gates new owner ingestion for Discord, Slack,
+WhatsApp and X relay sources under the existing `assistant:channel-media` flag.
+It is an execution capability, not a separate feature flag: admission and
+fetch/bind rechecks require a complete upgraded roster and drained old workers.
+Lark/Feishu/Telegram retain their existing owner-media gates. No guest-media
+authority is added. Keep upgraded workers until accepted media drains before
+binary rollback; see [channel media](chat/10-uploads.md#channel-rollout-and-rollback).
 
 The `approval:required-web-v1` capability is **diagnostic**, not an enforced
 activation switch. Required approval is implemented by every upgraded process
@@ -182,3 +191,53 @@ binaries before rolling back. Global false alone does not override a user/org tr
 A racing admitted send may finish; flags are rollout controls, while saved permission
 and claim fences remain authority. Off→on may resume pending valid marked work,
 never a consumed/uncertain claim. See [enrollment contract](EXECUTION_PERMISSIONS.md#global-and-organization-enrollment).
+
+
+Machine execution-permission authoring additionally requires
+`permissions:execution-authoring-machine-v1`. Its closed Machine source and
+retained-adapter variants are not readable by B1-only servers, so deploy every
+API/worker reader before allowing these rows. This gate applies only to Machine
+proposals; existing B1 sources remain available. Node-side
+`machine_execution_approval_v1` negotiation is separately required and defaults
+off when absent. Old nodes keep legacy prompts indefinitely. Drain/remove all
+Machine-variant proposal rows, including terminal receipts, before a binary
+rollback to readers without this capability. Disabling authoring never converts
+a retained occurrence into a legacy request or permits another send.
+
+`permissions:execution-authoring-channel-v1` is an optional v4 channel source,
+review and result-delivery capability. It is not a new prerequisite for existing
+web/v1/v3 or B2/v2 cohorts. Upgrade all API replicas/workers, deploy the monotonic
+channel/settings policy writers and outbox cleanup, then drain old writers before
+allowing this capability to become ready. Fresh unready sources stay legacy;
+existing marked work refuses at task/decision/send/delivery barriers. Disable
+and drain on upgraded binaries before a binary rollback. The saved permission
+remains v1 with a Channel audience; it never becomes a private permission.
+
+## Platform model foundation
+
+PRs 1–3 advertise `inference:platform-model-registry-v1` for registry/entitlements,
+`billing:model-prices-v1` for exact tariffs and `inference:platform-models-v1` for
+the bounded stateless Chat executor. They do not advertise the paired NyxAgent
+`assistant:platform-models-v1` contract. The default-off
+`inference:platform-models` flag cannot be enabled until all required local and
+fleet capabilities are implemented and ready. Reads and disabling remain usable.
+Upgrade and drain every credential consumer before enabling model-only catalog
+records: old replicas ignore their additive purpose field. The restriction remains
+enforced when the flag is off. See [the registry contract](PLATFORM_MODELS.md).
+
+PR 3b additionally advertises `inference:platform-model-images-v1`. Certified
+image-tariff authoring and image execution require that capability across the
+fleet, in addition to the existing model gates. Text execution and historical
+text tariffs do not acquire an image dependency. The assistant guard remains;
+this capability does not advertise `assistant:platform-models-v1`. No new
+environment setting or automatic model/rate activation is introduced.
+
+### Channel guest media
+
+`assistant:channel-guest-media` is a separate default-off flag and replica
+capability. Its readers also require `assistant:channel-media-v2`: Stage A alone
+is insufficient to enforce the exact-current-turn guest boundary. Deploy all API
+and async workers, drain older workers, inspect both readiness reports, then
+opt in a linking person before broader rollout. Flag-off denies new guest
+fetch/model reads, including model-setup waits, without deleting retained
+human-owner uploads. Retention and erasure continue normally.

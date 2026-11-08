@@ -1020,6 +1020,7 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
             execution_unsupported: false,
@@ -1060,6 +1061,7 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub(crate) platform_model_context: Option<String>,
     pub(crate) automation_work: Option<crate::models::trigger_run::AutomationWork>,
     pub(crate) execution_group_id: Option<String>,
     pub(crate) execution_unsupported: bool,
@@ -1622,6 +1624,7 @@ pub async fn for_key_with_access(
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        platform_model_context: live.and_then(|t| t.platform_model_context.clone()),
         automation_work: live.and_then(|t| t.automation_work.clone()),
         execution_group_id: conversation
             .collaboration
@@ -1636,6 +1639,15 @@ pub async fn for_key_with_access(
         execution_unsupported: (conversation.automation_thread
             && conversation.voice_parent_conversation_id.is_none())
             || conversation.platform_thread.is_some()
+            || conversation.active_turn.as_ref().is_some_and(|t| {
+                (conversation.channel.is_some()
+                    || t.asked_from.is_some()
+                    || t.channel_context.is_some()
+                    || t.channel_event_id.is_some())
+                    && t.execution_task
+                        .as_ref()
+                        .is_none_or(|task| task.channel_source.is_none())
+            })
             || conversation.active_turn.as_ref().is_some_and(|t| {
                 t.trigger_run_id.is_some()
                     || t.automation_work.is_some()
@@ -3214,6 +3226,7 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        platform_model_context: None,
         automation_work: None,
         execution_group_id: target
             .collaboration

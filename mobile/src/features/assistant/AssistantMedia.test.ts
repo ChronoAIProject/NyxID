@@ -3,7 +3,7 @@ import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { hookHarness, deferred } from "./assistantHookTestHarness";
 import { ApiError } from "../../lib/api/ApiError";
-import { activitySchema } from "./assistantTypes";
+import { activitySchema, attachmentSchema } from "./assistantTypes";
 import { groupMessageSchema } from "../groups/groupContracts";
 type E = { type: unknown; props: Record<string, any> };
 const nodes = (n: any): E[] =>
@@ -224,7 +224,7 @@ test("crew schema retains typed machine/failure metadata for notice and agent ro
     assert.equal(row.activities[0]?.failure?.kind, "tool_error");
   }
 });
-function imageHarness(captionColor?: string) {
+function imageHarness(captionColor?: string, imageInputReason?: string) {
   let epoch = 1,
     focused = true;
   let deleted = 0;
@@ -249,14 +249,15 @@ function imageHarness(captionColor?: string) {
     }
   }
   const props = {
-    attachment: {
+    attachment: attachmentSchema.parse({
       id: "image",
       label: "Browser screen",
       size: 3,
       content_type: "image/png",
-      origin: "tool",
+      origin: imageInputReason ? "user_upload" : "tool",
       image_input: "unavailable",
-    },
+      image_input_reason: imageInputReason,
+    }),
     conversationId: "chat",
     captionColor,
   };
@@ -458,4 +459,50 @@ test("real crew receipt renderer supports notice/agent rows and removes duplicat
     assert.equal(attachments[0]!.props.groupId, "crew");
     x.h.unmount();
   }
+});
+
+
+test("queued channel event attachments remain visible in their own conversation", () => {
+  const attachments = [
+    { id: "photo", origin: "user_upload", content_type: "image/png", label: "photo" },
+    { id: "file", origin: "user_upload", content_type: "application/octet-stream", label: "original.bin" },
+  ];
+  const x = setup("./AssistantSystemMessage.tsx", "AssistantSystemMessage", {
+    message: { role: "event", text: "Queued owner message", attachments },
+    conversationId: "channel-thread",
+    onOpenAutomations: () => {},
+  }, {
+    "../../theme/ThemeContext": { useTheme: () => ({ colors: { segmentTrack: "#111" } }) },
+    "../../components/AgentAvatar": { AgentAvatar: "Avatar" },
+    "./AssistantMessageFooter": { AssistantMessageTime: "Time" },
+    "./AssistantAttachmentView": { AssistantAttachmentView: "Attachment" },
+    "lucide-react-native": {},
+  });
+  const rendered = x.nodes().filter((n) => n.type === "Attachment");
+  assert.equal(rendered.length, 2);
+  assert.deepEqual(rendered.map((n) => n.props.attachment), attachments);
+  assert.ok(rendered.every((n) => n.props.conversationId === "channel-thread"));
+  x.h.unmount();
+});
+
+
+test("guest image notices preserve owner previews without suggesting owner-only tools", async () => {
+  for (const [reason, notice] of [
+    ["guest_media_unavailable", "This guest image was saved in this chat"],
+    ["model_text_only", "This model can’t view images"],
+    ["image_input_unsupported", "This model can’t view images"],
+  ]) {
+    const x = imageHarness(undefined, reason);
+    x.pending.resolve(new Uint8Array([1, 2, 3]));
+    await x.h.settle();
+    assert.equal(x.text().includes(notice!), true);
+    assert.doesNotMatch(x.text(), /machine|smaller image/);
+    assert.ok(x.nodes().some((node) => node.type === "Image"));
+    x.h.unmount();
+  }
+  const parsed = attachmentSchema.parse({
+    id: "image", label: "Photo", size: 3, content_type: "image/png",
+    image_input_reason: "future_reason",
+  });
+  assert.equal(parsed.image_input_reason, undefined);
 });

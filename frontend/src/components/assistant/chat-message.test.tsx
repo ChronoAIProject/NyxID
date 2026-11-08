@@ -1682,3 +1682,34 @@ describe("turn summary", () => {
     expect(screen.getByRole("button", { name: "Turn details: Completed, delivery failed" })).toHaveTextContent("delivery failed");
   });
 });
+
+
+it.each([
+  ["note_too_long", "Validation: the note exceeds 500 characters"],
+  ["note_empty", "Validation: the note is empty"],
+  ["secret_detected", "Validation: the note resembles a credential or secret"],
+  ["invalid_note", "Validation: invalid memory arguments"],
+  ["memory_full", "Capacity: memory holds at most 50 notes"],
+  ["replace_target_not_found", "Conflict: the note to replace no longer exists"],
+  ["memory_conflict", "Conflict: memory or the agent changed"],
+  ["memory_unauthorized", "Authorization: memory is unavailable here"],
+  ["memory_storage_error", "Storage: the write could not be confirmed"],
+  ["memory_internal_error", "Internal error: the write could not be confirmed"],
+])("shows the safe memory diagnostic %s and retains the failed outcome after a later save", (reason, copy) => {
+  render(<ChatMessageBubble message={{ ...BASE, status: "complete", toolCalls: [
+    { id: "rejected", name: "nyxid__remember", status: "error", startedAt: 1, failure: { kind: "tool_error", reason } },
+    { id: "saved", name: "nyxid__remember", status: "done", startedAt: 2 },
+  ] }} />);
+  const actions = screen.getByRole("button", { name: /actions/ });
+  expect(actions).toHaveTextContent("1 failed");
+  fireEvent.click(actions);
+  expect(screen.getByText((content) => content.includes(copy))).toBeVisible();
+  expect(screen.queryByText(/The tool reported an error/)).toBeNull();
+});
+
+it("never renders unrecognized memory diagnostic text", () => {
+  render(<ChatMessageBubble message={{ ...BASE, status: "complete", toolCalls: [{ id: "bad", name: "nyxid__remember", status: "error", startedAt: 1, failure: { kind: "tool_error", reason: "untrusted secret contents" } }] }} />);
+  fireEvent.click(screen.getByRole("button", { name: /action/ }));
+  expect(screen.getByText(/The tool reported an error/)).toBeVisible();
+  expect(screen.queryByText(/untrusted secret/)).toBeNull();
+});

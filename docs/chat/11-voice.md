@@ -52,7 +52,7 @@ Live/Realtime guides; their Realtime examples are a different protocol.
 | OpenAI browser connection | [WebRTC guide][oa-webrtc]: trusted server calls `POST /v1/live/sessions` with `{session:{model,instructions,delegation:{type:"responses",responses:{model:catalog.delegation_model,...}},...},transport:{type:"webrtc",sdp}}`; answer is `transport.sdp`, identity is `session.id`. Browser channel label is `oai-events`. Wait for `session.started`; do not send `session.start` again. No ephemeral token is necessary. |
 | OpenAI sideband | [Server controls][oa-controls]: attach to `wss://api.openai.com/v1/live/sessions/{session_id}/attach` with the creating project's authentication and required connection headers. It receives subsequent events, including reflected audio. Attach before releasing the answer to the browser; discard reflected audio immediately without persistence. No documented replay guarantee for events before attachment. |
 | Browser control permissions | [Live sideband reference][oa-sideband] describes `session.client.data_channel.allowed_client_events` and `allowed_server_events`. Omission allows all. Explicitly restrict them at creation; see §5. Trusted sideband permissions are unaffected. |
-| Responses delegation | [Delegation][oa-delegation]: Live prepares conversational context for the catalog-selected Responses model. Its only function is `request_nyxbot({request})`. Complete function items become tasks only after a successful `response.completed`; caption pauses, fragments and offsets never select task text. Appends use `delegation_id:null` and remain bounded to 500 tokens. |
+| Responses delegation | [Delegation][oa-delegation]: Live prepares conversational context for the catalog-selected Responses model. `request_nyxbot({request})` submits work; `get_task_status({})` reads bounded status for tasks already accepted in the same call. Complete function items become tasks only after a successful `response.completed`; caption pauses, fragments and offsets never select task text. Appends use `delegation_id:null` and remain bounded to 500 tokens. |
 | OpenAI configuration/usage | [Session guide][oa-sessions]: model, voice, input, store and delegation mode are startup choices. `session.update` only updates supported Responses delegation settings, not arbitrary Live configuration. `session.usage.updated.usage.seconds` is cumulative; `session.closed` contains final usage. Appended acknowledgements describe context injection, not speech completion. There is no client-delegation cancel event. |
 | OpenAI pricing/storage | [Model][oa-model] lists $0.05/minute billed per second, backend work separate. [Cost guide][oa-cost] says silence, mute and backend waiting count. WebRTC creation bills 15 initialization seconds credited against running duration: a 90-second session is 90, not 105. `store:false` is explicit; no recording download, forking or raw-audio storage. Provider retention policy is separate from NyxID retention. |
 | xAI model/transport | [Voice guide][xai-voice] now redirects to Speech to Speech: `wss://api.x.ai/v1/realtime?model=grok-voice-think-fast-2.0`; `grok-voice-latest` currently aliases it. Server Bearer authentication, bidirectional WebSocket, PCM and other codecs, JSON or binary audio transport. |
@@ -134,6 +134,12 @@ Choose the simple option for the first release:
   turn, including "read my calendar", "remember this" and "turn on the light".
 * Session controls (mute/end/Stop/queue inspection) are closed coordinator
   operations. The displayed task list is not a general account-data fast path.
+  The OpenAI Responses delegation exposes `get_task_status({})` for progress
+  questions. It revalidates the call's current authority and returns at most
+  eight task records, prioritizing pending work, scoped to the exact call,
+  person and conversation. It exposes task state and verified progress only,
+  accepts no caller-selected identity or task ID, and does not submit, cancel
+  or approve work.
 * Disable xAI built-in `web_search`, `x_search`, `file_search` and `mcp`. Otherwise
   voice would bypass the thread's grants, scopes, approval and metering path.
 
@@ -394,8 +400,9 @@ bounded recap on its first turn, so references to earlier chat context remain
 available without merging execution histories.
 
 1. Live supplies conversation context to the catalog-selected Responses model.
-   Its only function accepts `request`, a complete self-contained task preserving
-   all requested outcomes and relevant references. Bind nested events to the
+   Its task function accepts `request`, a complete self-contained task preserving
+   all requested outcomes and relevant references. A separate status function
+   accepts only an empty object and reads already accepted work. Bind nested events to the
    observed delegation, response and call IDs. Ignore argument deltas/done events
    as execution triggers; wait for a complete function item and a successful
    terminal response. Reject unknown tools/fields, oversized or empty tasks,
@@ -450,8 +457,8 @@ Only durable settlement produces a final result announcement. Persist the full
 backend answer; send a bounded, factual speech summary (one/two coherent chunks,
 each <=500 tokens for Live) and leave details/cards/attachments on screen.
 Do not announce a provider effect as successful from a text delta or a completed
-activity alone. If no safe bounded summary is available, explain the
-presentation failure without redirecting the user to another conversation. Suppress duplicate or superseded announcements using task version
+activity alone. If no safe bounded summary is available, give the complete result
+to the live model as quoted factual context within its separate budget. Suppress duplicate or superseded announcements using task version
 and session generation. Append acknowledgement is not proof the user heard it;
 reconnect should show "Result ready" rather than blindly replaying speech.
 
@@ -477,8 +484,18 @@ language allowlist. The summary has a three-second timeout and the existing
 concrete findings/failure and necessary detail directly, without mentioning saved
 answers, another chat, backend conversations or internal handoffs. If
 summarization is unavailable, a safe successful answer may be spoken whole within
-the same byte budget. Otherwise send bounded task-state facts for the live model
-to explain naturally in the conversation language. Presentation failure does not
+the same byte budget. Otherwise preserve the entire answer as quoted factual
+context, including technical fields and Markdown that must not be read verbatim.
+The complete serialized context has an 8,000-byte budget, matching the existing
+Grok presentation queue. OpenAI receives larger answers in ordered, correlated
+parts, each within the 480-byte append limit including JSON escaping and metadata.
+All preceding parts use silent `session.thinking.append`; only the final part uses
+`session.commentary.append` to request one natural presentation. Construct and
+validate the complete sequence before sending; each send retains the transport's
+live authority checks. These parts split result data only, never user speech or
+task execution. Grok receives the complete context as one queued presentation.
+Only empty answers or results exceeding the full context budget fall back to
+task-state facts without an answer; never send a truncated result. Presentation failure does not
 change a completed task into a failed task or request its execution again. Never
 select partial findings, rewrite Markdown, infer completeness from punctuation,
 or substitute a fixed spoken sentence. Grok queues presentation separately from

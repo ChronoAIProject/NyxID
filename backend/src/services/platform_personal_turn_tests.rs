@@ -850,6 +850,7 @@ async fn personal_event_captures_fresh_authority_and_unlinked_events_remain_web_
         let reply = finish_claim(
             &state,
             &engine::OwnerTurnClaim {
+                trace_sources: Vec::new(),
                 reclaimed: None,
                 conversation: row.clone(),
                 credential,
@@ -1285,6 +1286,7 @@ async fn async_result_settlement_retains_original_destination_across_new_revisio
         let reply = finish_claim(
             &state,
             &engine::OwnerTurnClaim {
+                trace_sources: Vec::new(),
                 reclaimed: None,
                 conversation: continued.clone(),
                 credential,

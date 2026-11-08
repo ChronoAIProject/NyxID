@@ -747,6 +747,33 @@ broad enough for followed threads; NyxID's local policy decides whether to act.
 Routing selects only the default provider, with textual `@name` and `/to`
 directives and unknown-target notices disabled. They never establish addressing.
 
+Native management separates the desired routing policy from channel bodies.
+CMAEG rejects top-level `routing` in both `POST /v1/channels` and full
+`PUT /v1/channels/{id}`. Setup sends the stable UUID-v4 create without routing,
+records its acknowledgement, then sends `PUT /v1/channels/{id}/routing` with
+only `{expected_version,routing}` using the returned create version and the same
+creator bearer. Only create carries the credential bundle. The route-attachment
+full PUT omits routing and uses the routing response version; full PUT preserves
+saved routing. Native WhatsApp uses the same split. Relay definitions keep their
+existing requests and do not call the routing endpoint.
+
+Setup and direct-to-native handoff require the final intended source **and**
+saved routing acknowledgement before committing `ready`. Each acknowledged
+setup version is retained in the provisional release; the final response version
+is persisted on the channel. Settings/reconciliation sends full PUT without
+routing, then authors routing using that returned version and persists the final
+routing version behind the existing local binding/version CAS.
+
+A routing transport or malformed-response failure gets one exact confirmation
+attempt with the original version and identical policy. CMAEG accepts only the
+immediately following identical revision; different policy or any later version
+is 409. There is no retry with an invented/new version. Settings reconcile a
+conflict through an authenticated channel read before a later policy write;
+failed preparation retains the working direct route and retires its provisional
+channel through the existing read/delete and native-drain fences. Initial
+default-only routing, a successful direct reply, or `pending_discovery` alone
+never acknowledges the requested native policy.
+
 Deploy all replicas with readiness capability `nyxbot:native-gateway-v1` before
 native enrollment. The existing roster/drained check refuses selection during a
 mixed rollout. A persisted `preparing` phase permits binding setup but refuses
@@ -797,6 +824,10 @@ Status exposes `gateway_native_phase`, `gateway_native_activation` and
 through relay fallback and included in connect/transport audit metadata and an
 info log with the channel agent ID. Upstream prose, URLs and credentials are
 never retained; a new preparation or successful activation clears the detail.
+`gateway_native_activation_operation` records the fixed failed management step
+(`create`, `channel_update`, or `routing_update`) in the channel API/audit and
+bounded logs. It follows the same attempt fences and clearing rules. Routing
+acknowledgement failures use the fixed `policy_not_acknowledged` detail.
 
 Native Discord fallback visibility (#2183): `nyxbot_channel_connected` records
 the persisted transport after setup/fallback, plus `gateway_native_activation`
@@ -857,6 +888,21 @@ Deploy the provider authority check to all replicas before enabling org gateway
 cohorts. If gateway flags are already enabled for linking admins, drain older
 provider replicas during rollout: they do not have the per-event org check.
 
+### Additional relay owner media
+
+Discord, Slack, WhatsApp and X relay adapters late-bind owner attachments to
+ordinary encrypted assistant uploads under `assistant:channel-media` and
+all-replica `assistant:channel-media-v2` readiness. Direct relay works locally;
+relay-through-CMA additionally depends on CMA accepting/delivering that
+platform's activity. NyxID uses the stored authenticated inbound row, exact
+source identity and current owner/member authority, never activity URLs. This
+does not add missing CMA raw-event verification or native attachment retrieval.
+Native Discord/WhatsApp ingestion is deferred pending CMA#1402; native sources
+retain explicit unavailable-media feedback. Guests still produce no uploads;
+org public transcripts remain attachment-free. Unsupported originals remain
+authorized download chips with explicit model limitations. See
+[inbound channel media](chat/10-uploads.md#inbound-channel-media).
+
 ## NyxBot provider late replies and CMA contract boundary
 
 This section concerns NyxID acting as CMAEG's `nyxbot` provider, not the generic
@@ -865,7 +911,7 @@ existing assistant history owns answer content; additive `nyxbot_events.delivery
 metadata arbitrates streamed versus delayed answers. The implementation contract
 is in [NyxBot channel delivery](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes).
 
-With `assistant:channel-media` enabled, a Lark/Feishu media activity whose source
+With `assistant:channel-media` enabled, a supported relay media activity whose source
 ID names an existing row outside its authorized owner/chat/sender/route returns
 HTTP **403** with problem code `media_source_refused`. This refusal is terminal
 and must not be retried. Database failures still return **503**
@@ -944,7 +990,7 @@ Event Gateway remains distinct from NyxID's device HTTP Event Gateway.
 | Follow admission | NyxID follows child threads and applies live sender/settings policy | **Both:** gateway admits mentions/replies by default; NyxID disables gateway follow | Negotiate the contract, admit unmentioned events for selected follow-enabled group chats, and reuse NyxID's follow selection. |
 | Lark / Feishu reply target | Native reply endpoint with `reply_in_thread=true` | **Both:** CMA uses the legacy relay reply API without a bound thread request | Seal the thread-reply decision with the source event; explicitly request server-resolved targeting in NyxID for immediate and delayed sends. Never fall back to the parent. |
 | Mentions | Real bot mentions address; other-user-only mentions stay quiet in a followed child; broadcasts retain ordinary followed behavior | **CMA:** Lark requires pinned bot identity for exact evidence; no other-user boolean | Carry only address evidence and `mentions_others`, never mentioned names/IDs. Broadcasts do not become bot mentions. |
-| Lark / Feishu inbound media | Native adapter stores image/file selectors and ordered embedded post selectors | CMA ≥ `a570be21`, `CMAEG_MEDIA_ENABLED=true`, NyxID `assistant:channel-media` on | Owner media is late-bound to encrypted assistant uploads after admission; guests receive a fixed note with no download. See [limits and rollout](chat/10-uploads.md#inbound-channel-media). |
+| Lark / Feishu inbound media | Native adapter stores image/file selectors and ordered embedded post selectors | CMA ≥ `a570be21`, `CMAEG_MEDIA_ENABLED=true`, NyxID `assistant:channel-media` on | Owner media is late-bound to encrypted assistant uploads after admission; guests default to a fixed note with no download; personal-channel opt-ins use exact-turn guest media authority. See [limits and rollout](chat/10-uploads.md#inbound-channel-media). |
 | Lark / Feishu outbound media | Native adapter uploads supported attachments | **CMA:** renderer reduces attachments to safe link text | NyxID delivers NyxBot tool images itself through existing adapters before text, retaining exact thread targets. A CMA attachment-block renderer is **not required**. |
 | Edits | Adapter-specific edit hooks and authenticated outbound receipts | **CMA:** Lark/Feishu edits unsupported; only confirmed Telegram interactive cards edit | Follow-up: platform capabilities plus opaque receipt-bound edits through NyxID. Inbound edits need explicit replacement/dedup policy before they can affect an agent. |
 | Slack | `thread_ts`, structured mentions, native bound replies and bounded history | **CMA:** no raw verifier; `trust_normalized` gives unknown actors and no address/thread evidence; NyxID does not opt in | Follow-up: verify Slack raw events and correlate channel/sender/message, then enable the same contract. |
@@ -975,7 +1021,7 @@ The remaining platform surfaces need explicit parity before moving all traffic:
 | --- | --- | --- | --- |
 | Lark / Feishu | Contract 1 carries exact pinned-bot evidence and the other-user boolean; `@_all` is not a bot mention | Owner image/file/post ingress supported under the media flag and CMA prerequisites; NyxID sends NyxBot tool images directly; generic outgoing attachments remain link text | **CMA:** enable receipt-bound edits through NyxID's existing edit API. |
 | Slack | **CMA:** verify `app_mention`, structured bot/other-user mentions and broadcast tokens with native `thread_ts` | Incoming attachments rejected by generic verifier; outgoing link text only | **CMA:** use existing NyxID edit/upload APIs after implementing the raw verifier and target binding. |
-| Discord | **NyxID:** relay callbacks add versioned verified facts; provider group admission requires explicit addressing evidence or a known stored reply, never names or admission alone | Incoming attachments produce explicit unavailable-media feedback without URL fetches; outbound native images are unsupported and cannot use relay anchors | NyxID accepts original message activities, not edit activities. Immediate/delayed replies retain their original event reference, including threads; no fallback to a parent channel or newer event. Gateway-side support is owned by the CMA owner. |
+| Discord | **NyxID:** relay callbacks add versioned verified facts; provider group admission requires explicit addressing evidence or a known stored reply, never names or admission alone | Relay owner attachments use stored-source late binding under media-v2 readiness; native attachments still produce unavailable-media feedback pending CMA#1402; outbound native images cannot use relay anchors | NyxID accepts original message activities, not edit activities. Immediate/delayed replies retain their original event reference, including threads; no fallback to a parent channel or newer event. Gateway-side support is owned by the CMA owner. |
 | Telegram / telegram-new | Bot mention/reply evidence exists, but **CMA** lacks the full other-user boolean and topic/chain contract | Text-only message ingress; outgoing attachments are link text | Native Telegram supports ordinary message edits; relay edits are limited to confirmed interactive cards. **CMA:** extend verified attachment transport and receipt-bound relay edits while retaining the forum topic. |
 | WhatsApp | **NyxID:** dedicated-app BYO native support uses the shared source, admission and recovery contract; native groups remain disabled | Native media/control mapping remains text-only with explicit unavailable feedback; delivery status is consumed from CMA Activity and the 24-hour free-form window remains | Gateway-side WhatsApp runtime and scoped `non_human` policy belong to the CMA owner; managed/shared-app bots stay on the relay. |
 | X / Aurinko | **CMA:** no platform source; do not claim addressing or follow parity | Unsupported in gateway | **Both:** design verified sources and credential/receipt boundaries before migration; preserve email single-recipient barriers and keep X public follow excluded. |
@@ -1354,3 +1400,12 @@ CMA-provided membership/payer and no fallback to a personal agent. See
 [org-specialist channel rules](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots)
 for verification, public transcript isolation, payer rules and mandatory rollout
 readiness.
+
+Personal-channel guest attachments are an opt-in NyxID relay feature under
+`assistant:channel-guest-media`, with an independent guest-capable fleet readiness
+check. Relay-through-CMA still uses only the exact stored authenticated NyxID
+source selectors; a gateway attachment URL grants no fetch authority. Guest
+uploads belong to the guest's channel conversation and only the current guest
+turn can supply them to the model. Org-specialist guest media is deferred. Native
+Discord/WhatsApp still waits for CMA#1402; this flag does not enable native reads.
+See [guest uploads](chat/10-uploads.md#personal-channel-guest-media).

@@ -390,6 +390,9 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     crate::services::platform_public_credential_service::ensure_indexes(db).await?;
     crate::services::platform_provisioning_service::ensure_indexes(db).await?;
     crate::services::platform_inference_service::ensure_indexes(db).await?;
+    crate::services::platform_model_service::ensure_indexes(db).await?;
+    crate::services::platform_model_execution::ensure_indexes(db).await?;
+    crate::services::billing::model_tariffs::ensure_indexes(db).await?;
     crate::services::platform_native_receipt_service::ensure_indexes(db).await?;
 
     // ── assistant_wire_logs ──
@@ -739,6 +742,8 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
             .build(),
     )
     .await?;
+
+    crate::services::admin_audit_service::ensure_turn_trace_index(db).await?;
 
     // Bounded machine metadata pages, with and without an agent filter.
     for keys in [
@@ -1550,6 +1555,57 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
         )
         .await?;
     approval_requests.create_index(IndexModel::builder().keys(doc!{"execution_proposal.version":1,"execution_proposal.v2.state":1,"execution_proposal.v2.maintenance_at":1,"created_at":1}).build()).await?;
+    // Assistant v3 retains v1's bounded effect/gap/maintenance access patterns.
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"execution_proposal.v3.effect_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("execution_proposal_effect_v3".to_owned())
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! {"execution_proposal.v3.effect_id":{"$type":"string"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    approval_requests.create_index(IndexModel::builder()
+        .keys(doc! {"execution_proposal.version":1,"execution_proposal.v3.delivered_turn_id":1,"execution_proposal.v3.maintenance_at":1,"created_at":1})
+        .build()).await?;
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"execution_proposal.v3.gap_key":1,"created_at":-1})
+                .build(),
+        )
+        .await?;
+    crate::services::execution_permission_channel::deliveries::ensure_indexes(db).await?;
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"execution_proposal.v4.effect_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! {"execution_proposal.v4.effect_id":{"$type":"string"}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    approval_requests.create_index(IndexModel::builder().keys(doc!{"execution_proposal.version":1,"execution_proposal.v4.delivered_turn_id":1,"execution_proposal.v4.maintenance_at":1,"created_at":1}).build()).await?;
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"execution_proposal.v4.gap_key":1,"created_at":-1})
+                .build(),
+        )
+        .await?;
     // ── approval_grants ──
     let approval_grants = db.collection::<mongodb::bson::Document>("approval_grants");
     approval_grants

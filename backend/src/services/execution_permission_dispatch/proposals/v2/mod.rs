@@ -10,8 +10,10 @@ mod readback;
 mod source;
 pub(crate) mod watch;
 pub(crate) use decision::decide;
-pub(crate) use delivery::{attach_resume, cancel_in_session, fence_resume, resume_voice, sweep};
-pub(crate) use readback::{ExecutionView, decrypt_result, readback, view};
+pub(crate) use delivery::{
+    attach_resume, cancel_in_session, fence_resume, not_sent_before_handoff, resume_voice, sweep,
+};
+pub(crate) use readback::{ExecutionView, decrypt_result, machine_readback, readback, view};
 pub(in crate::services::execution_permission_dispatch) use source::existing;
 use source::*;
 pub(crate) use source::{eligible, pin_pool};
@@ -60,6 +62,9 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
     }
     if effect.floors.iter().any(|f| !contract::satisfiable(*f)) {
         return Err(refused());
+    }
+    if !machine::ready(state, context).await? {
+        return Ok(None);
     }
     // External keys are hash-only. Replaying without the original forwarded
     // bearer would change the reviewed request; retaining that bearer is not
@@ -182,6 +187,21 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
     if let Some(descendants::Descendant::Watch(w)) = context.descendant.as_deref() {
         end = end.min(w.deadline).min(w.expires_at);
     }
+    if let Some(machine) = context.machine.get() {
+        end = end.min(machine.job_deadline);
+        if !background_allowed {
+            end = end.min(machine.deadline);
+            if end < Utc::now() + Duration::seconds(machine::MIN_WAIT_SECONDS) {
+                return Err(
+                    crate::services::approval_service::map_wait_for_decision_error(
+                        AppError::Forbidden("Approval request timed out".into()),
+                        &context.operation_id,
+                        &state.config.frontend_url,
+                    ),
+                );
+            }
+        }
+    }
     if end <= now {
         return Err(refused());
     }
@@ -285,6 +305,7 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         .into_iter()
         .map(|(id, label, validity)| {
             Ok(Choice {
+                conversation_scope: None,
                 id: id.into(),
                 label: label.into(),
                 digest: fingerprint(&json!({"scope":contract,"choice":validity}))?,
@@ -345,6 +366,8 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
     };
     let request = ApprovalRequest {
         execution_proposal: Some(ExecutionProposal {
+            v3: None,
+            v4: None,
             version: 2,
             v1: None,
             v2: Some(p),

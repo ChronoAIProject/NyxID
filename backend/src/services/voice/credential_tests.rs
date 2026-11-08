@@ -66,6 +66,7 @@ async fn configure(state: &mut crate::AppState, owner: &str) -> DownstreamServic
     service.auth_method = "bearer".into();
     service.base_url = "https://api.openai.com/v1".into();
     service.platform_key = Some(PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: PlatformKeyAudience::Public,
         allowed_owner_ids: vec![],

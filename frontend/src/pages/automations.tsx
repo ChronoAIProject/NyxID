@@ -274,6 +274,11 @@ function AutomationsContent() {
                     ? `Last run: ${row.last_run.outcome.replaceAll("_", " ")}`
                     : "Not run yet"}
                 </span>
+                {row.last_run?.notification_delivery?.message && (
+                  <span className="mt-1 block type-secondary text-warning">
+                    {row.last_run.execution_outcome === "completed" ? "Task completed. " : ""}{row.last_run.notification_delivery.message}
+                  </span>
+                )}
                 {row.pause_reason && (
                   <span className="mt-1 block type-secondary text-warning">
                     {automationPauseReason(row.pause_reason)}
@@ -883,7 +888,7 @@ export function AutomationEditor({
                     ])}
                 </GroupedList>
               )}
-              <GroupedList title="Deliver to">
+              <GroupedList title="Deliver to" footer={values.delivery_type === "assistant" && values.deliver_type === "notification" ? "Mobile push requires an enabled, registered device in the NyxID app. For Telegram reports, choose Channel chat; linking Telegram notifications does not enable push." : undefined}>
                 {select("delivery_type", "Delivery", [
                   ["assistant", "NyxBot / specialist"],
                   ["notification", "Notification reminder"],
@@ -895,7 +900,7 @@ export function AutomationEditor({
                     {select("deliver_type", "Send result to", [
                       ["thread", "Web thread"],
                       ["chat", "Channel chat"],
-                      ["notification", "Notification"],
+                      ["notification", "Mobile push"],
                     ])}
                     {values.deliver_type === "chat" &&
                       select("chat_id", "Chat (posting must be allowed)", [
@@ -932,7 +937,7 @@ export function AutomationEditor({
               </GroupedList>
             </DialogBody>
             <GroupedDialogActions
-              changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "label", label: "Label" }, { key: "instruction", label: "Instruction" }, { key: "source", label: "Source", format: labelValue({ schedule: "Schedule", webhook: "Webhook" }) }, { key: "kind", label: "Schedule type", format: labelValue({ cron: "Calendar", every: "Every", at: "Once" }) }, { key: "expression", label: "Cron expression" }, { key: "timezone", label: "Timezone" }, { key: "amount", label: "Interval" }, { key: "unit", label: "Interval unit", format: labelValue({ minutes: "Minutes", hours: "Hours", days: "Days" }) }, { key: "anchor", label: "Anchor" }, { key: "at", label: "Run at" }, { key: "start", label: "Start" }, { key: "end", label: "End" }, { key: "max_runs", label: "Maximum runs" }, { key: "grace_seconds", label: "Grace period (seconds)" }, { key: "delivery_type", label: "Delivery type", format: labelValue({ assistant: "Assistant", notification: "Notification", webhook: "Webhook", agent: "Device agent" }) }, { key: "agent_id", label: "Target agent", format: (value) => { const agent = agents.data?.agents.find((agent) => agent.id === value); return agent?.display_name || agent?.name || String(value || "None"); } }, { key: "thread_policy", label: "Thread", format: labelValue({ default: values.source === "webhook" ? "Default (dedicated thread)" : "Default (NyxBot home, specialist dedicated)", home: "Home thread", dedicated: "One thread for this automation", new: "New thread each run" }) }, { key: "confirmation_policy", label: "Confirmation policy", format: labelValue({ changes: "Every changing action (recommended)", destructive: "Only destructive actions" }) }, { key: "deliver_type", label: "Send result to", format: labelValue({ thread: "Web thread", chat: "Channel chat", notification: "Notification" }) }, { key: "chat_id", label: "Chat", format: (value) => { const chat = chats.data?.find((chat) => chat.id === value); return chat ? `${chat.bot_label}: ${chat.title ?? chat.kind ?? "Chat"}` : value ? "Saved chat" : "None"; } }, { key: "overlap", label: "If still running", format: labelValue({ skip: "Skip", queue: "Queue one" }) }, { key: "webhook_url", label: "Webhook URL", format: (value) => value === form.formState.defaultValues?.webhook_url ? "Saved destination (hidden)" : "New destination (hidden)" }, { key: "conversation_id", label: "Device conversation" }, { key: "verification_mode", label: "Verification method", format: labelValue({ bearer: "Bearer token", query: "Query token", hmac: "HMAC signature" }) }, { key: "signature_header", label: "Signature header" }])}
+              changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "label", label: "Label" }, { key: "instruction", label: "Instruction" }, { key: "source", label: "Source", format: labelValue({ schedule: "Schedule", webhook: "Webhook" }) }, { key: "kind", label: "Schedule type", format: labelValue({ cron: "Calendar", every: "Every", at: "Once" }) }, { key: "expression", label: "Cron expression" }, { key: "timezone", label: "Timezone" }, { key: "amount", label: "Interval" }, { key: "unit", label: "Interval unit", format: labelValue({ minutes: "Minutes", hours: "Hours", days: "Days" }) }, { key: "anchor", label: "Anchor" }, { key: "at", label: "Run at" }, { key: "start", label: "Start" }, { key: "end", label: "End" }, { key: "max_runs", label: "Maximum runs" }, { key: "grace_seconds", label: "Grace period (seconds)" }, { key: "delivery_type", label: "Delivery type", format: labelValue({ assistant: "Assistant", notification: "Notification", webhook: "Webhook", agent: "Device agent" }) }, { key: "agent_id", label: "Target agent", format: (value) => { const agent = agents.data?.agents.find((agent) => agent.id === value); return agent?.display_name || agent?.name || String(value || "None"); } }, { key: "thread_policy", label: "Thread", format: labelValue({ default: values.source === "webhook" ? "Default (dedicated thread)" : "Default (NyxBot home, specialist dedicated)", home: "Home thread", dedicated: "One thread for this automation", new: "New thread each run" }) }, { key: "confirmation_policy", label: "Confirmation policy", format: labelValue({ changes: "Every changing action (recommended)", destructive: "Only destructive actions" }) }, { key: "deliver_type", label: "Send result to", format: labelValue({ thread: "Web thread", chat: "Channel chat", notification: "Mobile push" }) }, { key: "chat_id", label: "Chat", format: (value) => { const chat = chats.data?.find((chat) => chat.id === value); return chat ? `${chat.bot_label}: ${chat.title ?? chat.kind ?? "Chat"}` : value ? "Saved chat" : "None"; } }, { key: "overlap", label: "If still running", format: labelValue({ skip: "Skip", queue: "Queue one" }) }, { key: "webhook_url", label: "Webhook URL", format: (value) => value === form.formState.defaultValues?.webhook_url ? "Saved destination (hidden)" : "New destination (hidden)" }, { key: "conversation_id", label: "Device conversation" }, { key: "verification_mode", label: "Verification method", format: labelValue({ bearer: "Bearer token", query: "Query token", hmac: "HMAC signature" }) }, { key: "signature_header", label: "Signature header" }])}
               intent={row ? "edit" : "create"}
               disabled={!form.formState.isValid}
               label="automation"
@@ -1023,6 +1028,13 @@ function AutomationHistory({
                       run.capacity_wait_ms > 0 && (
                         <p>waited {formatCapacityWait(run.capacity_wait_ms)} for capacity</p>
                       )}
+                    {run.notification_delivery && (
+                      <>
+                        {run.notification_delivery.message && <p>{run.notification_delivery.message}</p>}
+                        {run.notification_delivery.retry_at && <p>Next delivery attempt: {formatAutomationTime(run.notification_delivery.retry_at, zone, true)}</p>}
+                        <p>{run.notification_delivery.attempts} push {run.notification_delivery.attempts === 1 ? "attempt" : "attempts"}{run.notification_delivery.http_status != null ? ` · Provider HTTP ${run.notification_delivery.http_status}` : ""}</p>
+                      </>
+                    )}
                     {run.missed ? (
                       <p>
                         Missed {run.missed.count} occurrences between{" "}
@@ -1040,7 +1052,7 @@ function AutomationHistory({
                           ` (HTTP ${run.failure_reason.http_status})`}
                       </p>
                     ) : (
-                      run.reason && <p>{run.reason === "coordinator_timeout"
+                      run.reason && run.reason !== run.notification_delivery?.reason && <p>{run.reason === "coordinator_timeout"
                         ? "Coordinator deadline expired (coordinator_timeout)."
                         : run.outcome === "waiting" && run.wait_kind === "coordinator"
                           ? "Waiting for delegated work to finish"
@@ -1056,6 +1068,8 @@ function AutomationHistory({
                   title={run.scheduled_at ? "Scheduled" : "On demand"}
                   accessory={run.scheduled_at ? formatAutomationTime(run.scheduled_at, zone, true) : "Started by an event or request"}
                 />
+                {run.execution_outcome && <GroupedRow title="Task execution" accessory={run.execution_outcome} />}
+                {run.notification_delivery && <GroupedRow title="Mobile push delivery" accessory={run.notification_delivery.state === "accepted" ? "Accepted by push provider" : run.notification_delivery.state} />}
                 {run.outcome === "waiting" && run.coordinator_deadline && (
                   <GroupedRow
                     title="Completion deadline"

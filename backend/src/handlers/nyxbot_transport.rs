@@ -2,14 +2,18 @@
 use super::*;
 
 pub(super) async fn authority(state: &AppState, row: &NyxbotChannel) -> Result<(), &'static str> {
-    if !org_access_holds(state, row)
+    match org_access(state, row)
         .await
         .map_err(|_| "storage_unavailable")?
     {
-        Box::pin(release_org_channel(state, row))
-            .await
-            .map_err(|_| "storage_unavailable")?;
-        return Err("org_access_lost");
+        OrgAccess::Holds => {}
+        OrgAccess::Lost => {
+            Box::pin(release_org_channel(state, row))
+                .await
+                .map_err(|_| "storage_unavailable")?;
+            return Err("org_access_lost");
+        }
+        OrgAccess::Unavailable => return Err("org_access_unavailable"),
     }
     Ok(())
 }
@@ -45,6 +49,13 @@ pub(super) async fn swap_route(
     fence: bson::Document,
     update: bson::Document,
 ) -> AppResult<bool> {
+    let mut update = update;
+    update
+        .entry("$inc".into())
+        .or_insert_with(|| bson::Bson::Document(doc! {}))
+        .as_document_mut()
+        .ok_or_else(|| AppError::Internal("Invalid channel mutation".into()))?
+        .insert("execution_policy_revision", 1_i64);
     let route_id = row
         .route_id
         .clone()
@@ -144,7 +155,10 @@ pub(super) async fn reconcile(state: &AppState) -> AppResult<()> {
         Ok(()) => Box::pin(move_to_gateway(state, &row)).await,
         Err(code) => Err(code),
     };
-    if matches!(outcome, Err("answering" | "flag_changed")) {
+    if matches!(
+        outcome,
+        Err("answering" | "flag_changed" | "org_access_unavailable" | "storage_unavailable")
+    ) {
         channels.update_one(doc! {"_id": &row.id, "transport": "direct"},
             doc! {"$set": {"gateway_attempted_at": bson::DateTime::from_chrono(
                 now - ChronoDuration::hours(GATEWAY_RETRY_HOURS) + ChronoDuration::minutes(MOVE_RECHECK_MINUTES))}}).await?;
@@ -248,6 +262,7 @@ async fn move_to_direct(state: &AppState, row: &NyxbotChannel) -> Result<(), &'s
     if row.gateway_source.is_some() {
         set.insert("gateway_native_activation", "relay_draining");
         set.insert("gateway_native_activation_detail", bson::Bson::Null);
+        set.insert("gateway_native_activation_operation", bson::Bson::Null);
     }
     let update = doc! {"$set": set,
     "$unset": {"agent_api_key_id": "", "agent_key_ciphertext": "", "gateway_channel_id": "",

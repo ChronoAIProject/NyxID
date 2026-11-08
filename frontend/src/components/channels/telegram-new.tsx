@@ -26,7 +26,7 @@ export function TelegramNew({
   readonly onCancelled?: () => void | Promise<void>;
   readonly onConnected: (id: string, username?: string | null) => void;
 }) {
-  const { configuration, begin, launch, creationLink, cancel, connect, getCurrentRequest } =
+  const { configuration, begin, launch, creationLink, regenerateUsername, cancel, connect, getCurrentRequest } =
     useTelegramNew(requestId);
   const link = useChannelConnectLinkContext();
   const actor = useAuthStore((state) => state.user?.id);
@@ -49,13 +49,14 @@ export function TelegramNew({
     return () => window.clearTimeout(timer);
   }, [requestExpiresAt, canOpenCreationForm]);
   const recoveryUnexpired = Boolean(request && Date.parse(request.expires_at) > now);
-  const [recovery, setRecovery] = useState<{ actor: string; id: string; revision: number; url: string } | null>(null);
+  const [recovery, setRecovery] = useState<{ actor: string; id: string; revision: number; username?: string; url: string } | null>(null);
   const terminal = Boolean(
     request && ["cancelled", "expired", "suspended"].includes(request.status),
   );
   const preparing = begin.isPending || launch.isPending;
-  const pending = preparing || creationLink.isPending || cancel.isPending || connect.isPending;
+  const pending = preparing || creationLink.isPending || regenerateUsername.isPending || cancel.isPending || connect.isPending;
   const error =
+    regenerateUsername.error ??
     creationLink.error ??
     begin.error ??
     launch.error ??
@@ -63,12 +64,13 @@ export function TelegramNew({
     connect.error ??
     configuration.error;
   const canLaunch =
-    !request ||
-    request.status === "cancelled" ||
-    request.status === "expired" ||
-    ["waiting_telegram", "waiting_bot", "waiting_consent"].includes(
-      request.status,
-    );
+    !request?.setup_notice &&
+    (!request ||
+      request.status === "cancelled" ||
+      request.status === "expired" ||
+      ["waiting_telegram", "waiting_bot", "waiting_consent"].includes(
+        request.status,
+      ));
   const launchUrl =
     handoff && handoff.actor === actor && handoff.id === request?.id
       ? handoff.url
@@ -98,6 +100,7 @@ export function TelegramNew({
     const tab = window.open("about:blank", "_blank");
     if (tab) tab.opener = null;
     creationLink.reset();
+    regenerateUsername.reset();
     setRecovery(null);
     begin.reset();
     launch.reset();
@@ -128,7 +131,7 @@ export function TelegramNew({
     }
   }
 
-  async function openCreationForm() {
+  async function openCreationForm(index = 0) {
     if (!request?.can_open_creation_form || !actor || Date.parse(request.expires_at) <= Date.now()) return;
     const captured = request;
     const tab = window.open("about:blank", "_blank");
@@ -146,11 +149,26 @@ export function TelegramNew({
         tab?.close();
         return;
       }
-      setRecovery({ actor, id: captured.id, revision: captured.revision, url: result.creation_url });
-      if (tab && !tab.closed) tab.location.replace(result.creation_url);
+      const choice = result.username_suggestions?.[index];
+      const expectedUsername = captured.username_suggestions?.[index];
+      if ((index > 0 && !choice) || (choice && expectedUsername && (choice.username !== expectedUsername
+        || (latest.username_suggestions && latest.username_suggestions[index] !== expectedUsername)))) {
+        tab?.close();
+        return;
+      }
+      const url = choice?.creation_url ?? result.creation_url;
+      setRecovery({ actor, id: captured.id, revision: captured.revision, username: choice?.username, url });
+      if (tab && !tab.closed) tab.location.replace(url);
     } catch {
       tab?.close();
     }
+  }
+
+  async function regenerate() {
+    if (!request || pending) return;
+    creationLink.reset();
+    setRecovery(null);
+    try { await regenerateUsername.mutateAsync(request.id); } catch { /* Displayed below. */ }
   }
 
   async function finishLegacyRequest() {
@@ -188,7 +206,7 @@ export function TelegramNew({
         </Button>
       </div>
     );
-  if (!configuration.data?.available)
+  if (!configuration.data?.available && !request?.setup_notice)
     return (
       <div className="space-y-3">
         {error && <ErrorBanner message={error.message} />}
@@ -219,7 +237,26 @@ export function TelegramNew({
           Open existing Telegram setup
         </a>
       )}
-      {(connecting && request?.auto_connect) || connected ? (
+      {request?.setup_notice && (
+        <div className="space-y-3 type-secondary text-muted-foreground">
+          <p role="status">{request.setup_notice.message}</p>
+          {request.connection_error && <p role="status">{request.connection_error}</p>}
+          <div className="flex flex-wrap gap-2">
+            <Button asChild variant="outline">
+              <a href={request.setup_notice.status_url}>Check status</a>
+            </Button>
+            <Button asChild variant="outline">
+              <a href={request.setup_notice.new_setup_url}>Start a new setup</a>
+            </Button>
+            {request.setup_notice.agent_url && (
+              <Button asChild variant="outline">
+                <a href={request.setup_notice.agent_url}>Open the agent</a>
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+      {request?.setup_notice ? null : (connecting && request?.auto_connect) || connected ? (
         <div className="space-y-3">
           <p role="status" className="flex items-center gap-2 text-14">
             {connected ? <Check className="size-3 text-success" /> : <Loader2 className="size-3 animate-spin" />}
@@ -343,10 +380,11 @@ export function TelegramNew({
           </div>
         </li>
       </ol>}
-      {request && ["waiting_telegram", "waiting_bot"].includes(request.status) && (
+      {request && !request.setup_notice && ["waiting_telegram", "waiting_bot"].includes(request.status) && (
         <TelegramPromptStatus request={request} recoveryUnexpired={recoveryUnexpired} pending={pending} recovering={creationLink.isPending}
-          onRecover={() => void openCreationForm()}
-          recoveryUrl={recovery && recovery.actor === actor && recovery.id === request.id && recovery.revision === request.revision && request.can_open_creation_form && recoveryUnexpired ? recovery.url : undefined} />
+          onRecover={(index) => void openCreationForm(index)}
+          onRegenerate={() => void regenerate()} regenerating={regenerateUsername.isPending}
+          recoveryUrl={recovery && recovery.actor === actor && recovery.id === request.id && recovery.revision === request.revision && (!recovery.username || request.username_suggestions?.includes(recovery.username)) && request.can_open_creation_form && recoveryUnexpired ? recovery.url : undefined} />
       )}
       {request && !request.auto_connect && !terminal && (
         <div className="space-y-2 rounded-lg border border-border p-3 text-13">
@@ -366,7 +404,7 @@ export function TelegramNew({
           )}
         </div>
       )}
-      {terminal && (
+      {terminal && !request?.setup_notice && (
         <p role="status" className="text-14 text-muted-foreground">
           {request?.status === "expired"
             ? "This setup expired. Start again to create a new bot."
@@ -378,8 +416,8 @@ export function TelegramNew({
       {!fullPage && request && !terminal && !connected && (
         <div className="space-y-2 border-t border-border pt-3">
           <p className="text-13 text-muted-foreground">
-            Setting up: {request.label}.{" "}
-            {request.status !== "provisioning" && (
+            {request.setup_notice ? "Saved setup" : "Setting up"}: {request.label}.{" "}
+            {request.status !== "provisioning" && !request.setup_notice && (
               <>
                 Saved until{" "}
                 <time dateTime={request.expires_at}>

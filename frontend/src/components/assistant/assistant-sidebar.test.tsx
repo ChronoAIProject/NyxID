@@ -511,7 +511,7 @@ describe("NyxBot agents in the sidebar", () => {
 
   function renderAgents(
     model: Partial<SidebarAgents> = {},
-    options: { conversations?: readonly Conversation[]; groups?: SidebarGroups } = {},
+    options: { conversations?: readonly Conversation[]; groups?: SidebarGroups; rail?: boolean } = {},
   ) {
     const handlers = {
       onSelectAgent: vi.fn(),
@@ -521,6 +521,7 @@ describe("NyxBot agents in the sidebar", () => {
     const onSelect = vi.fn();
     render(
       <TooltipProvider>
+        <SidebarRailContext value={options.rail ?? false}>
         <AssistantSidebar
           conversations={options.conversations ?? []}
           groups={options.groups}
@@ -536,10 +537,48 @@ describe("NyxBot agents in the sidebar", () => {
             ...model,
           }}
         />
+        </SidebarRailContext>
       </TooltipProvider>,
     );
     return { ...handlers, onSelect };
   }
+
+  it.each([null, { seq: 2, status: "completed", text: "Hello", created_at: at }])(
+    "shows a newly created idle specialist with last reply %j",
+    async (last_reply) => {
+      const user = userEvent.setup();
+      const { onSelectAgent } = renderAgents({ agents: [agent({}), agent({
+        id: "new-specialist", kind: "specialist", name: "restaurant",
+        home_conversation_id: `nyxa-${"d".repeat(32)}`, last_reply,
+      })] });
+      await user.click(screen.getByRole("button", { name: /restaurant.*specialist, Idle/ }));
+      expect(onSelectAgent).toHaveBeenCalledWith("new-specialist");
+    },
+  );
+
+  it("distinguishes a loading roster from an empty roster", () => {
+    renderAgents({ agents: [], loading: true });
+    expect(screen.getByText("Loading agents...")).toBeInTheDocument();
+    expect(screen.queryByText("No agents to show.")).not.toBeInTheDocument();
+    cleanup();
+    renderAgents({ agents: [] });
+    expect(screen.getByText("No agents to show.")).toBeInTheDocument();
+  });
+
+  it.each([false, true])("shows a retryable roster failure, including rail=%s", async (rail) => {
+    const user = userEvent.setup();
+    const onRetry = vi.fn();
+    renderAgents({ agents: [], loadError: "Could not load agents.", onRetry }, { rail });
+    expect(screen.queryByText("No agents to show.")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Retry/ }));
+    expect(onRetry).toHaveBeenCalledOnce();
+  });
+
+  it("retains visible agents when refreshing the roster fails", () => {
+    renderAgents({ loadError: "Could not refresh agents.", onRetry: vi.fn() });
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not refresh agents.");
+    expect(screen.getByRole("button", { name: /researcher.*specialist/ })).toBeInTheDocument();
+  });
 
   it("pins NyxBot first and nests the selected agent's threads under it", async () => {
     const user = userEvent.setup();
@@ -725,6 +764,7 @@ describe("NyxBot agents in the sidebar", () => {
     const user = userEvent.setup();
     renderAgents();
     expect(screen.queryByRole("button", { name: /^mailer/ })).not.toBeInTheDocument();
+    expect(screen.queryByText("Older destroyed agents not shown.")).not.toBeInTheDocument();
     const toggle = screen.getByRole("button", { name: "Show destroyed (1)" });
     await user.click(toggle);
     const mailer = screen.getByRole("button", { name: "mailer, specialist, Destroyed" });
@@ -733,6 +773,15 @@ describe("NyxBot agents in the sidebar", () => {
       "aria-pressed",
       "true",
     );
+  });
+
+  it("explains the bounded archive under the destroyed toggle", async () => {
+    const user = userEvent.setup();
+    renderAgents({ destroyedTruncated: true });
+    expect(screen.getByText("Older destroyed agents not shown.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Show destroyed (1)" }));
+    expect(screen.getByRole("button", { name: "mailer, specialist, Destroyed" })).toBeVisible();
+    expect(screen.getByText("Older destroyed agents not shown.")).toBeVisible();
   });
 
   it("offers organization agents in the create menu when allowed", async () => {

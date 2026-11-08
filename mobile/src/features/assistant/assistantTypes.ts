@@ -42,6 +42,15 @@ export const attachmentSchema = z.object({
   pages: z.number().int().nonnegative().nullish(),
   expired: z.boolean().optional(),
   image_input: z.string().nullish(),
+  image_input_reason: z
+    .enum([
+      "agent_unsupported",
+      "model_text_only",
+      "image_input_unsupported",
+      "guest_media_unavailable",
+    ])
+    .nullish()
+    .catch(undefined),
 });
 export type AssistantAttachment = z.infer<typeof attachmentSchema>;
 export const conversationSchema = z.object({

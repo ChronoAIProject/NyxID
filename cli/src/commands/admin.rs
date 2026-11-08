@@ -7,6 +7,7 @@ use crate::cli::{AdminCommands, AdminUserCommands, InviteCodeCommands, OutputFor
 
 pub async fn run(command: AdminCommands) -> Result<()> {
     match command {
+        AdminCommands::Models { command } => super::models::run_admin(command).await,
         AdminCommands::Billing { command } => super::admin_billing::run(command).await,
         AdminCommands::Credits { command } => super::admin_credits::run(command).await,
         AdminCommands::Usage(args) => super::admin_usage::run(args).await,

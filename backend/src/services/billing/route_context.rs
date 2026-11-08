@@ -48,6 +48,7 @@ pub enum NodeIntent {
 
 #[derive(Clone, Debug)]
 pub struct BillingRouteContext {
+    pub(crate) model_tariff: Option<Box<super::model_tariffs::SelectedTariff>>,
     pub(crate) org_channel_guest: Option<crate::services::org_channel_service::GuestPayer>,
     pub ingress: BillingIngress,
     pub pool_attempt: Option<crate::models::usage_meter::PoolAttemptAccounting>,
@@ -110,6 +111,21 @@ pub(crate) struct ManagedBillingAdmission {
 }
 
 impl BillingRouteContext {
+    /// Platform inference is funded at the inner gateway. Keep distinct non-token
+    /// orchestration prices, but never charge the outer copy of model usage.
+    pub(crate) fn with_platform_model_orchestration(
+        mut self,
+        _proof: &crate::services::assistant_platform_model::Orchestration,
+    ) -> Self {
+        if self.platform_metric.is_token_family() || self.platform_metric == BillingMetric::Images {
+            self.platform_billable = false;
+            self.service_platform_billable = false;
+        }
+        self.platform_components
+            .retain(|c| !c.metric.is_token_family() && c.metric != BillingMetric::Images);
+        self
+    }
+
     /// Called after normal resource authorization/payer resolution, before
     /// reservation. Personal-agent guests consume their owner's budget even
     /// for org connections; the typed org-channel guest instead retains its
@@ -274,6 +290,7 @@ impl BillingRouteContext {
                             })
                     })
                 }),
+            model_tariff: None,
             request_bytes: 0,
             native_text_bound: None,
             requested_images: 1,
@@ -285,6 +302,57 @@ impl BillingRouteContext {
             platform_metered: false,
             platform_billable: false,
         }
+    }
+
+    /// A validated model replaces the complete lane. No base/operation/resale
+    /// price survives. Finite per-code bounds are reserved without estimates.
+    pub fn with_model_tariff(
+        mut self,
+        selected: super::model_tariffs::SelectedTariff,
+    ) -> crate::errors::AppResult<Self> {
+        let t = selected.tariff();
+        if self.catalog_service_id.as_deref() != Some(&t.service_id)
+            || self.resale.is_some()
+            || self.pool_attempt.is_some()
+            || self.public_admission.is_some()
+            || self.managed_admission.is_some()
+            || !matches!(
+                (BillingLane::for_credential(self.credential_class), t.lane),
+                (
+                    Some(BillingLane::Byok),
+                    crate::models::platform_model_tariff::TariffLane::Byok
+                ) | (
+                    Some(BillingLane::PlatformKey),
+                    crate::models::platform_model_tariff::TariffLane::PlatformKey
+                )
+            )
+        {
+            return Err(super::model_tariffs::unavailable("incompatible_route"));
+        }
+        let first = t
+            .components
+            .first()
+            .ok_or_else(|| super::model_tariffs::unavailable("empty_tariff"))?;
+        self.platform_metric = first.metric;
+        self.platform_lago_metric_code = first.lago_metric_code.clone();
+        self.platform_components = t
+            .components
+            .iter()
+            .skip(1)
+            .map(|c| ResaleSpec {
+                metric: c.metric,
+                lago_metric_code: c.lago_metric_code.clone(),
+            })
+            .collect();
+        self.operation = None;
+        self.operation_prices.clear();
+        self.capture_tokens = t.contract.tokens;
+        self.service_platform_billable = selected.paid();
+        self.lane_pricing_configured = true;
+        self.platform_metered = true;
+        self.platform_billable = selected.paid();
+        self.model_tariff = Some(Box::new(selected));
+        Ok(self)
     }
 
     /// Whether the selected lane prices any operation, so callers resolve
@@ -393,7 +461,12 @@ impl BillingRouteContext {
                 BillingMetric::Bytes => self.request_bytes.saturating_add(response_bytes),
                 BillingMetric::Images | BillingMetric::VoiceSeconds => 0,
                 // Machine runtime is reserved only by dedicated admission.
-                BillingMetric::MachineRunningSeconds
+                BillingMetric::ReasoningTokens
+                | BillingMetric::ImageInputTokens
+                | BillingMetric::ImageOutputTokens
+                | BillingMetric::AudioInputTokens
+                | BillingMetric::AudioOutputTokens
+                | BillingMetric::MachineRunningSeconds
                 | BillingMetric::SandboxCpuMillisSeconds
                 | BillingMetric::SandboxMemoryMibSeconds
                 | BillingMetric::SandboxDiskGibSeconds => 0,
@@ -413,7 +486,12 @@ impl BillingRouteContext {
             BillingMetric::Images => self.requested_images,
             BillingMetric::VoiceSeconds => self.requested_voice_seconds.max(0),
             // Dedicated Machine admission reserves a finite runtime window.
-            BillingMetric::MachineRunningSeconds
+            BillingMetric::ReasoningTokens
+            | BillingMetric::ImageInputTokens
+            | BillingMetric::ImageOutputTokens
+            | BillingMetric::AudioInputTokens
+            | BillingMetric::AudioOutputTokens
+            | BillingMetric::MachineRunningSeconds
             | BillingMetric::SandboxCpuMillisSeconds
             | BillingMetric::SandboxMemoryMibSeconds
             | BillingMetric::SandboxDiskGibSeconds => 0,
@@ -455,6 +533,7 @@ mod tests {
     fn guest_1995_payer_is_agent_owner_and_owner_resource_billing_is_unchanged() {
         use crate::services::assistant_acknowledgement_service::ChatAuthority;
         let mut chat = ChatAuthority {
+            platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
             execution_unsupported: false,
@@ -532,6 +611,7 @@ mod tests {
     fn shared_recipient_never_uses_guest_owner_payer_override() {
         use crate::services::assistant_acknowledgement_service::ChatAuthority;
         let chat = ChatAuthority {
+            platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
             execution_unsupported: false,
@@ -669,6 +749,7 @@ mod tests {
     fn lane_selection_uses_final_credential_and_supersedes_legacy() {
         use crate::models::service_billing::{LanePricing, PricingSyncStatus};
         let lane = |metric, code: &str| LanePricing {
+            model_prices: Vec::new(),
             components: Vec::new(),
             operations: Vec::new(),
             metric,

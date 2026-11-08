@@ -1607,6 +1607,7 @@ async fn workspace_platform_keys_are_rejected_before_target_selection_and_catalo
     );
     let mut configured = catalog.clone();
     configured.platform_key = Some(downstream_service::PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         ..Default::default()
     });

@@ -835,6 +835,26 @@ and limits. Every agent has `remember` and
 `forget` (which refuses obvious credential shapes); its memory notes are
 supplied in each turn's input and are not part of stable instructions. A specialist calling a NyxBot-only tool gets
 `orchestrator_only`. Grants resolve slugs or IDs through the owner's MCP catalog.
+Native `remember` errors carry content-free `details.reason` and `details.category`
+in the MCP `isError` text. Reasons are `note_too_long`, `note_empty`,
+`secret_detected`, `invalid_note`, `memory_full`, `replace_target_not_found`,
+`memory_conflict`, `memory_unauthorized`, `memory_storage_error`, and
+`memory_internal_error`. The activity projection retains the closed reason in an
+optional `failure.reason`; old rows and unknown reasons retain generic copy.
+Only native diagnostics populate it, never downstream tool text. Neither audit
+nor activity stores rejected note contents or secret matches. Storage/internal
+failures mean the write is unconfirmed: inspect notes before retrying, since the
+write may already have committed. A subsequent successful save does not erase a
+failed step or prove that all of its intended facts were recovered. Prompts require
+reporting unresolved facts and only confirming saves with successful receipts.
+There is no inferred compensation link between different calls.
+
+Owner/team appends use an atomic capacity fence; replacements return the atomic
+post-write snapshot, so later edits cannot change the receipt. Destroyed agents
+refuse writes as a conflict. Shared-recipient private notes use the existing
+snapshot/majority transaction retry helper with a live sharing fence on each
+attempt; definite aborts retry, unknown commits retry only the same COMMIT.
+
 Creating a specialist fences the owner's NyxBot row; `max_live_subagents`
 (default 8, at most 32) bounds live specialists.
 

@@ -502,6 +502,19 @@ pub fn error_result_for(
     result
 }
 
+/// Content-free memory diagnostics without changing the underlying error class.
+pub(crate) fn memory_error_result_for(
+    error: AppError,
+    chat: Option<&acks::ChatAuthority>,
+    frontend: &str,
+) -> ToolResult {
+    let reason = crate::errors::memory_write::MemoryWriteReason::from_error(&error);
+    let mut result = error_result_for(error, chat, frontend);
+    result.value["message"] = json!(reason.message());
+    result.value["details"] = json!({"reason": reason, "category": reason.category()});
+    result
+}
+
 fn error_result_inner(
     error: AppError,
     chat: Option<&acks::ChatAuthority>,
@@ -530,7 +543,7 @@ fn error_result_inner(
                 value,
             };
         }
-        AppError::SkillDraftValidation(_) => {
+        AppError::SkillDraftValidation(_) | AppError::MemoryWrite(_) => {
             return ToolResult {
                 permission_request: None,
                 is_error: true,

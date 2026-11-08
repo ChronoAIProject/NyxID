@@ -505,6 +505,7 @@ mod tests {
             managed_execution: Some(fixture_contract()),
             platform_billable: true,
             platform_key_pricing: Some(LanePricing {
+                model_prices: Vec::new(),
                 metric: BillingMetric::InputTokens,
                 credits_per_unit: "0.000001".into(),
                 lago_metric_code: "platform_svc_telnyx_platform_pk".into(),

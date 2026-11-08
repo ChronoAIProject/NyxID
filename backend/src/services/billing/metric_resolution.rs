@@ -23,8 +23,17 @@ pub fn configured_lane_metrics(service: &DownstreamService) -> Vec<BillingMetric
         .into_iter()
         .flatten()
         {
-            for metric in
-                std::iter::once(lane.metric).chain(lane.components.iter().map(|c| c.metric))
+            let model_offering = service.platform_key.as_ref().is_some_and(|p| {
+                p.purpose == crate::models::downstream_service::PlatformKeyPurpose::ModelOffering
+            });
+            for metric in std::iter::once(lane.metric)
+                .chain(lane.components.iter().map(|c| c.metric))
+                .filter(|_| !model_offering)
+                .chain(
+                    lane.model_prices
+                        .iter()
+                        .flat_map(|b| b.allowance_metrics.iter().copied()),
+                )
             {
                 if !metrics.contains(&metric) {
                     metrics.push(metric);
@@ -39,6 +48,11 @@ pub fn configured_lane_metrics(service: &DownstreamService) -> Vec<BillingMetric
 /// is unsynced (or when there are no lanes). Shared by validation and admin UIs.
 pub fn allowance_metrics(service: &DownstreamService) -> Vec<BillingMetric> {
     let mut metrics = configured_lane_metrics(service);
+    if service.platform_key.as_ref().is_some_and(|p| {
+        p.purpose == crate::models::downstream_service::PlatformKeyPurpose::ModelOffering
+    }) {
+        return metrics;
+    }
     // Pending/failed lanes can still charge the legacy metric during sync.
     if metrics.is_empty()
         || service.billing.as_ref().is_some_and(|b| {

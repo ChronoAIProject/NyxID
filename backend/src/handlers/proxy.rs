@@ -781,61 +781,72 @@ pub async fn proxy_request(
     Path((service_id, path)): Path<(String, String)>,
     mut request: Request<Body>,
 ) -> AppResult<Response> {
-    // Emit `proxy.error` on any error branch reached via this handler. The
-    // inner function threads `resolved_slug` through so we can attach a
-    // real slug (never a UUID from the route path) even when the error
-    // happens after service resolution. See docs/TELEMETRY.md §5.1.
-    let started_at = std::time::Instant::now();
-    let method = request.method().clone();
-    request
-        .extensions_mut()
-        .insert(ProxyExchangeStartedAt(started_at));
-    let generated_id = !request.headers().contains_key("x-request-id");
-    let request_id = ensure_proxy_request_id(request.headers_mut());
-    if generated_id && let Some(context) = auth_user.execution_permission.as_ref() {
-        context.bind_generated_correlation(&request_id);
-    }
-    if let Some(context) = &auth_user.execution_permission {
-        context.bind_cancellation(request_cancellation(&request));
-    }
-    let mut resolved_slug = String::new();
-    // Keep nested proxy dispatch off the handler frame (also called by
-    // assistant operation-scope checks through the full router).
-    let mut result = Box::pin(proxy_request_inner(
-        &state,
-        &auth_user,
-        &service_id,
-        &path,
-        request,
-        &mut resolved_slug,
-    ))
-    .await;
-    if let Ok(response) = &mut result {
-        apply_proxy_request_id_header(response, &request_id);
-    }
-    let event = match &result {
-        Ok(response) if response.status().is_success() => Some(proxy_success_event(
-            &auth_user.auth_method,
-            &resolved_slug,
-            &method,
-            response.status(),
-            started_at,
-        )),
-        // Upstream non-2xx passthrough is neither a NyxID success nor fault.
-        Ok(_) => None,
-        Err(err) => proxy_error_event(&resolved_slug, err),
-    };
-    if let Some(event) = event {
-        emit_event(
-            state.telemetry.as_deref(),
-            &auth_user.user_id.to_string(),
-            auth_user.api_key_id.as_deref(),
-            &tele,
-            event,
-        )
-        .await;
-    }
-    result
+    let trace = crate::turn_trace::TurnContext::for_request(
+        request.headers(),
+        auth_user
+            .assistant_chat
+            .as_ref()
+            .and_then(|chat| chat.turn_id.as_deref()),
+    );
+    trace
+        .response(crate::turn_trace::Stage::Proxy, async move {
+            // Emit `proxy.error` on any error branch reached via this handler. The
+            // inner function threads `resolved_slug` through so we can attach a
+            // real slug (never a UUID from the route path) even when the error
+            // happens after service resolution. See docs/TELEMETRY.md §5.1.
+            let started_at = std::time::Instant::now();
+            let method = request.method().clone();
+            request
+                .extensions_mut()
+                .insert(ProxyExchangeStartedAt(started_at));
+            let generated_id = !request.headers().contains_key("x-request-id");
+            let request_id = ensure_proxy_request_id(request.headers_mut());
+            if generated_id && let Some(context) = auth_user.execution_permission.as_ref() {
+                context.bind_generated_correlation(&request_id);
+            }
+            if let Some(context) = &auth_user.execution_permission {
+                context.bind_cancellation(request_cancellation(&request));
+            }
+            let mut resolved_slug = String::new();
+            // Keep nested proxy dispatch off the handler frame (also called by
+            // assistant operation-scope checks through the full router).
+            let mut result = Box::pin(proxy_request_inner(
+                &state,
+                &auth_user,
+                &service_id,
+                &path,
+                request,
+                &mut resolved_slug,
+            ))
+            .await;
+            if let Ok(response) = &mut result {
+                apply_proxy_request_id_header(response, &request_id);
+            }
+            let event = match &result {
+                Ok(response) if response.status().is_success() => Some(proxy_success_event(
+                    &auth_user.auth_method,
+                    &resolved_slug,
+                    &method,
+                    response.status(),
+                    started_at,
+                )),
+                // Upstream non-2xx passthrough is neither a NyxID success nor fault.
+                Ok(_) => None,
+                Err(err) => proxy_error_event(&resolved_slug, err),
+            };
+            if let Some(event) = event {
+                emit_event(
+                    state.telemetry.as_deref(),
+                    &auth_user.user_id.to_string(),
+                    auth_user.api_key_id.as_deref(),
+                    &tele,
+                    event,
+                )
+                .await;
+            }
+            result
+        })
+        .await
 }
 
 pub(crate) async fn proxy_request_inner(
@@ -1137,63 +1148,74 @@ pub async fn proxy_request_by_slug(
     Path((slug, path)): Path<(String, String)>,
     mut request: Request<Body>,
 ) -> AppResult<Response> {
-    // Start empty; `proxy_request_by_slug_inner` populates this once the
-    // resolved `UserService`/`DownstreamService` is available. We
-    // intentionally do NOT seed with the path-param slug: telemetry §5.1
-    // requires a resolved slug or empty, and the path param is unvalidated
-    // user input until resolution succeeds.
-    let started_at = request
-        .extensions()
-        .get::<ProxyExchangeStartedAt>()
-        .map_or_else(std::time::Instant::now, |started| started.0);
-    let method = request.method().clone();
-    request
-        .extensions_mut()
-        .insert(ProxyExchangeStartedAt(started_at));
-    let generated_id = !request.headers().contains_key("x-request-id");
-    let request_id = ensure_proxy_request_id(request.headers_mut());
-    if generated_id && let Some(context) = auth_user.execution_permission.as_ref() {
-        context.bind_generated_correlation(&request_id);
-    }
-    if let Some(context) = &auth_user.execution_permission {
-        context.bind_cancellation(request_cancellation(&request));
-    }
-    let mut resolved_slug = String::new();
-    let mut result = Box::pin(proxy_request_by_slug_inner(
-        &state,
-        &auth_user,
-        &slug,
-        &path,
-        request,
-        &mut resolved_slug,
-    ))
-    .await;
-    if let Ok(response) = &mut result {
-        apply_proxy_request_id_header(response, &request_id);
-    }
-    let event = match &result {
-        Ok(response) if response.status().is_success() => Some(proxy_success_event(
-            &auth_user.auth_method,
-            &resolved_slug,
-            &method,
-            response.status(),
-            started_at,
-        )),
-        // Upstream non-2xx passthrough is neither a NyxID success nor fault.
-        Ok(_) => None,
-        Err(err) => proxy_error_event(&resolved_slug, err),
-    };
-    if let Some(event) = event {
-        emit_event(
-            state.telemetry.as_deref(),
-            &auth_user.user_id.to_string(),
-            auth_user.api_key_id.as_deref(),
-            &tele,
-            event,
-        )
-        .await;
-    }
-    result
+    let trace = crate::turn_trace::TurnContext::for_request(
+        request.headers(),
+        auth_user
+            .assistant_chat
+            .as_ref()
+            .and_then(|chat| chat.turn_id.as_deref()),
+    );
+    trace
+        .response(crate::turn_trace::Stage::Proxy, async move {
+            // Start empty; `proxy_request_by_slug_inner` populates this once the
+            // resolved `UserService`/`DownstreamService` is available. We
+            // intentionally do NOT seed with the path-param slug: telemetry §5.1
+            // requires a resolved slug or empty, and the path param is unvalidated
+            // user input until resolution succeeds.
+            let started_at = request
+                .extensions()
+                .get::<ProxyExchangeStartedAt>()
+                .map_or_else(std::time::Instant::now, |started| started.0);
+            let method = request.method().clone();
+            request
+                .extensions_mut()
+                .insert(ProxyExchangeStartedAt(started_at));
+            let generated_id = !request.headers().contains_key("x-request-id");
+            let request_id = ensure_proxy_request_id(request.headers_mut());
+            if generated_id && let Some(context) = auth_user.execution_permission.as_ref() {
+                context.bind_generated_correlation(&request_id);
+            }
+            if let Some(context) = &auth_user.execution_permission {
+                context.bind_cancellation(request_cancellation(&request));
+            }
+            let mut resolved_slug = String::new();
+            let mut result = Box::pin(proxy_request_by_slug_inner(
+                &state,
+                &auth_user,
+                &slug,
+                &path,
+                request,
+                &mut resolved_slug,
+            ))
+            .await;
+            if let Ok(response) = &mut result {
+                apply_proxy_request_id_header(response, &request_id);
+            }
+            let event = match &result {
+                Ok(response) if response.status().is_success() => Some(proxy_success_event(
+                    &auth_user.auth_method,
+                    &resolved_slug,
+                    &method,
+                    response.status(),
+                    started_at,
+                )),
+                // Upstream non-2xx passthrough is neither a NyxID success nor fault.
+                Ok(_) => None,
+                Err(err) => proxy_error_event(&resolved_slug, err),
+            };
+            if let Some(event) = event {
+                emit_event(
+                    state.telemetry.as_deref(),
+                    &auth_user.user_id.to_string(),
+                    auth_user.api_key_id.as_deref(),
+                    &tele,
+                    event,
+                )
+                .await;
+            }
+            result
+        })
+        .await
 }
 
 #[path = "service_pool_attempt.rs"]
@@ -4332,6 +4354,13 @@ async fn execute_resolved_proxy_inner<'a>(
         target.service.billing.as_ref(),
         state.billing.resale_enabled(),
     );
+    if nyxagent_admission
+        && let Some(proof) = request
+            .extensions()
+            .get::<crate::services::assistant_platform_model::Orchestration>()
+    {
+        billing_ctx = billing_ctx.with_platform_model_orchestration(proof);
+    }
     billing_ctx = billing_ctx.with_assistant_payer(auth_user.assistant_chat.as_deref());
     billing_ctx = billing_ctx.with_assistant_provenance(
         auth_user.assistant_turn_fence.is_some(),

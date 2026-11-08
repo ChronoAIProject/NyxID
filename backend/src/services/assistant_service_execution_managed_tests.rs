@@ -48,6 +48,7 @@ fn billing() -> ServiceBilling {
             tariff_verified_at: Utc::now() - Duration::minutes(1),
         }),
         platform_key_pricing: Some(LanePricing {
+            model_prices: Vec::new(),
             metric: BillingMetric::InputTokens,
             credits_per_unit: "0.000000000002".into(),
             lago_metric_code: "policy_managed_input".into(),
@@ -136,6 +137,7 @@ async fn fixture(trailing: bool) -> (Fixture, String, String) {
     service.auth_method = "bearer".into();
     service.service_category = "internal".into();
     service.platform_key = Some(PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: PlatformKeyAudience::Restricted,
         allowed_owner_ids: vec![f.owner.clone()],

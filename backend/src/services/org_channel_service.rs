@@ -240,6 +240,15 @@ pub(crate) fn sender_hash(channel: &str, sender: &str) -> String {
     crate::crypto::token::hash_token(&format!("org-channel-sender:{channel}:{sender}"))
 }
 
+pub(crate) fn sender_identity(channel: &NyxbotChannel, sender: &str) -> String {
+    let namespace = channel
+        .org_specialist
+        .as_ref()
+        .and_then(|binding| binding.guests.continuity_channel_id.as_deref())
+        .unwrap_or(&channel.id);
+    sender_hash(namespace, sender)
+}
+
 pub(crate) async fn sender(
     db: &Database,
     row: &NyxbotChannel,
@@ -248,7 +257,7 @@ pub(crate) async fn sender(
     agent_id: &str,
 ) -> AppResult<(Execution, bool)> {
     let binding = row.org_specialist.as_ref().ok_or_else(denied)?;
-    let hash = sender_hash(&row.id, sender);
+    let hash = sender_identity(row, sender);
     let link = db
         .collection::<SenderLink>(LINKS)
         .find_one(doc! {"channel_id":&row.id,"sender_hash":&hash})
@@ -272,7 +281,19 @@ pub(crate) async fn sender(
                 false,
             )
         }
-        None if binding.guests.enabled => (binding.org_id.clone(), None, None, false, true),
+        None if binding.guests.enabled => {
+            // Rebuilds require fresh verification, but a previously claimed or
+            // erased member identity must not become an organization-paid guest.
+            if db
+                .collection::<Document>(LINKS)
+                .find_one(doc! {"org_id":&binding.org_id,"sender_hash":&hash})
+                .await?
+                .is_some()
+            {
+                return Err(denied());
+            }
+            (binding.org_id.clone(), None, None, false, true)
+        }
         None => return Err(denied()),
     };
     Ok((
@@ -449,7 +470,7 @@ pub(crate) async fn validate_in_session(
         // A claimed member identity must never be converted into guest authority.
         if db
             .collection::<Document>(LINKS)
-            .find_one(doc! {"channel_id":&channel.id,"sender_hash":&execution.sender_hash})
+            .find_one(doc! {"org_id":&execution.org_id,"sender_hash":&execution.sender_hash})
             .session(&mut *session)
             .await?
             .is_some()
@@ -642,6 +663,13 @@ pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> 
             )
             .await?;
     }
+    db.collection::<Document>(LINKS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"org_id":1,"sender_hash":1})
+                .build(),
+        )
+        .await?;
     db.collection::<Document>(MESSAGES)
         .create_index(
             IndexModel::builder()
@@ -675,17 +703,21 @@ pub(crate) async fn project_sender(
     Ok((projected, admin))
 }
 
-pub(crate) async fn transport_holds(db: &Database, row: &NyxbotChannel) -> AppResult<bool> {
+/// Only confirmed authority loss permits retiring a persisted channel. Rollout
+/// controls suspend work; dependency errors propagate without changing authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OrgAccess {
+    Holds,
+    Lost,
+    Unavailable,
+}
+
+pub(crate) async fn transport_access(db: &Database, row: &NyxbotChannel) -> AppResult<OrgAccess> {
     let Some(b) = &row.org_specialist else {
-        return Ok(true);
+        return Ok(OrgAccess::Holds);
     };
     if b.version != 1 || row.bot_owner_id.as_ref() != Some(&b.org_id) {
-        return Ok(false);
-    }
-    match enabled(db, &row.user_id).await {
-        Ok(()) => {}
-        Err(AppError::Forbidden(_) | AppError::SecurityReadinessUnavailable) => return Ok(false),
-        Err(e) => return Err(e),
+        return Ok(OrgAccess::Lost);
     }
     if db
         .collection::<Document>("assistant_agents")
@@ -700,9 +732,16 @@ pub(crate) async fn transport_holds(db: &Database, row: &NyxbotChannel) -> AppRe
             .await?
             .is_none()
     {
-        return Ok(false);
+        return Ok(OrgAccess::Lost);
     }
-    Ok(true)
+    match enabled(db, &row.user_id).await {
+        Ok(()) => Ok(OrgAccess::Holds),
+        // Flag-off refuses management with 403, but only suspends a saved transport.
+        Err(AppError::Forbidden(_) | AppError::SecurityReadinessUnavailable) => {
+            Ok(OrgAccess::Unavailable)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Management uses the acting admin as well as the persisted transport admin.

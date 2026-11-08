@@ -2234,6 +2234,7 @@ async fn fund_sms(f: &mut Fixture) {
     let code = "platform_svc_twilio_byok";
     let billing = ServiceBilling {
         byok_pricing: Some(LanePricing {
+            model_prices: Vec::new(),
             metric: BillingMetric::Requests,
             credits_per_unit: "2".into(),
             lago_metric_code: code.into(),
@@ -3323,6 +3324,7 @@ async fn platform_binding(f: &mut Fixture) -> ProviderAccount {
         .await
         .unwrap();
     catalog.platform_key = Some(PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: PlatformKeyAudience::Restricted,
         allowed_owner_ids: vec![f.b.user_id.clone()],

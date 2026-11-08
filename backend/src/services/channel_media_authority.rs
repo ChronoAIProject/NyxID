@@ -1,4 +1,4 @@
-//! Owner-only authority for native channel media. Provider handles come solely
+//! Source authority for relay channel media. Provider handles come solely
 //! from authenticated NyxID ingress metadata, never from a gateway attachment.
 use crate::{
     errors::{AppError, AppResult},
@@ -13,6 +13,26 @@ use crate::{
     },
 };
 use mongodb::{Database, bson::doc};
+
+pub const READINESS: &str = "assistant:channel-media-v2";
+
+pub fn expanded_relay(platform: &str) -> bool {
+    matches!(platform, "discord" | "slack" | "whatsapp" | "x")
+}
+
+pub fn supported_relay(platform: &str) -> bool {
+    matches!(platform, "lark" | "feishu") || expanded_relay(platform)
+}
+
+/// Lark/Feishu audio and video keep their pre-v2 behavior. The new adapters
+/// retain originals even when the document parser cannot interpret them.
+pub fn supported_source(source: &ChannelMessage) -> bool {
+    expanded_relay(&source.platform)
+        || source
+            .attachments
+            .iter()
+            .all(|item| matches!(item.content_type.as_str(), "image" | "file"))
+}
 
 /// Captured routing facts. Reuse the original request on every fetch/retry so a
 /// relink cannot silently replace the admitted authority.
@@ -36,6 +56,7 @@ impl std::fmt::Debug for MediaRequest {
 pub struct AuthorizedMedia {
     pub source: ChannelMessage,
     pub bot: ChannelBot,
+    pub guest: bool,
 }
 impl std::fmt::Debug for AuthorizedMedia {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -51,7 +72,9 @@ fn refused() -> AppError {
 /// decision. It does not authorize downloads.
 pub async fn source(db: &Database, request: &MediaRequest) -> AppResult<ChannelMessage> {
     let channel = &request.channel;
-    if !matches!(channel.platform.as_str(), "lark" | "feishu") {
+    if !(supported_relay(&channel.platform) || channel.platform == "telegram")
+        || channel.gateway_source.is_some()
+    {
         return Err(refused());
     }
     let mut filter = doc! {
@@ -75,6 +98,9 @@ pub async fn source(db: &Database, request: &MediaRequest) -> AppResult<ChannelM
 /// immediately before each fetch, including a larger-limit retry.
 pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<AuthorizedMedia> {
     let source = source(db, request).await?;
+    if expanded_relay(&source.platform) {
+        super::security_readiness_service::require(db, READINESS).await?;
+    }
     let captured = &request.channel;
     let channel = db
         .collection::<NyxbotChannel>(CHANNELS)
@@ -89,9 +115,12 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
         || channel.agent_id != captured.agent_id
         || channel.follow_binding_generation != captured.follow_binding_generation
         || channel.org_specialist != captured.org_specialist
+        || channel.gateway_source.is_some()
     {
         return Err(refused());
     }
+    let guest =
+        channel.org_specialist.is_none() && !channel.owner_sender_ids.contains(&request.sender_id);
     let member = if channel.org_specialist.is_some() {
         super::org_channel_service::enabled(db, &channel.user_id).await?;
         let (identity, _) = super::org_channel_service::sender(
@@ -131,7 +160,7 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
         }
         Some(identity)
     } else {
-        if !channel.owner_sender_ids.contains(&request.sender_id) {
+        if guest && !super::assistant_channel_media::guest::enabled(db, &channel.user_id).await? {
             return Err(refused());
         }
         None
@@ -196,7 +225,7 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
             requires_nyxbot = effective.is_none();
         }
         if let Some(binding) = origin.thread.as_deref() {
-            if binding.guest
+            if binding.guest != guest
                 || request.agent_id.as_deref() != Some(binding.agent_id.as_str())
                 || binding.source_message_id != source.id
                 || binding.sender_id != request.sender_id
@@ -237,5 +266,5 @@ pub async fn resolve(db: &Database, request: &MediaRequest) -> AppResult<Authori
             return Err(refused());
         }
     }
-    Ok(AuthorizedMedia { source, bot })
+    Ok(AuthorizedMedia { source, bot, guest })
 }

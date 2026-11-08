@@ -85,7 +85,7 @@ async fn proposal(f: &Fixture) -> ApprovalRequest {
     f.state
         .db
         .collection::<ApprovalRequest>("approval_requests")
-        .find_one(doc! {"execution_proposal.version":1})
+        .find_one(doc! {"execution_proposal.version":{"$in":[1,3]}})
         .await
         .unwrap()
         .unwrap()
@@ -163,7 +163,13 @@ async fn execution_proposal_proxy_card_human_decision_resume_and_receipt_are_exa
         let p = proposals::proposal(&request).unwrap();
         assert_eq!(
             p.choices.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-            ["operation", "task", "window", "persistent"]
+            [
+                "operation",
+                "task",
+                "window",
+                "persistent",
+                "persistent_private_conversations"
+            ]
         );
         assert!(
             p.contract
@@ -418,13 +424,108 @@ async fn execution_proposal_crash_after_barrier_reports_unknown_and_never_retrie
         .collection::<Document>("approval_requests")
         .update_one(
             doc! {"_id":&request.id},
-            doc! {"$set":{"execution_proposal.v1.state":"dispatched"}},
+            proposals::v3::AssistantVersion::of(&request)
+                .unwrap()
+                .update(doc! {"$set":{"execution_proposal.v1.state":"dispatched"}}),
         )
         .await
         .unwrap();
     assert!(resume(&f, &resumed).await.contains("unknown"));
     assert!(resume(&f, &resumed).await.contains("unknown"));
     assert!(f.server.received_requests().await.unwrap().is_empty());
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn migration_permission_commit_lost_response_restart_keeps_original_effect() {
+    let (mut f, row) = assistant("migration_commit_restart").await;
+    let _ = write_call(&f).await;
+    let request = proposal(&f).await;
+    let input = decision(&request, "persistent");
+    let effect = proposals::proposal(&request).unwrap().effect_id.clone();
+    // The commit succeeded but the client never received the decision response.
+    drop(
+        proposals::decide(&f.state, &f.owner, &request.id, &input)
+            .await
+            .unwrap(),
+    );
+    finish(&f, &row, "Waiting").await;
+    f.state = test_utils::test_app_state(f.state.db.clone());
+    proposals::decide(&f.state, &f.owner, &request.id, &input)
+        .await
+        .unwrap();
+    assert_eq!(count(&f, "approval_grants").await, 1);
+    let (first, second) = tokio::join!(proposals::sweep(&f.state), proposals::sweep(&f.state));
+    first.unwrap();
+    second.unwrap();
+    let resumed = event_turn(&f, &row).await;
+    assert!(resume(&f, &resumed).await.contains("HTTP 200"));
+    assert!(resume(&f, &resumed).await.contains("HTTP 200"));
+    assert_eq!(
+        proposals::proposal(&proposal(&f).await).unwrap().effect_id,
+        effect
+    );
+    assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(count(&f, "assistant_acknowledgements").await, 0);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn migration_provider_accepts_then_drops_response_never_repeats_write() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::AsyncReadExt;
+    let (f, row) = assistant("migration_uncertain_send").await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let observed = attempts.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            let mut buf = [0_u8; 1024];
+            loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                received.extend_from_slice(&buf[..n]);
+                if received.ends_with(br#"{"title":"Note"}"#) {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    break; // Provider accepts the body, but loses the response.
+                }
+                assert!(received.len() < 16384);
+            }
+        }
+    });
+    f.state
+        .db
+        .collection::<Document>("user_endpoints")
+        .update_many(
+            doc! {"user_id":&f.owner},
+            doc! {"$set":{"url":format!("http://{address}")}},
+        )
+        .await
+        .unwrap();
+    let _ = write_call(&f).await;
+    let request = proposal(&f).await;
+    proposals::decide(
+        &f.state,
+        &f.owner,
+        &request.id,
+        &decision(&request, "operation"),
+    )
+    .await
+    .unwrap();
+    finish(&f, &row, "Waiting").await;
+    let resumed = event_turn(&f, &row).await;
+    let result = resume(&f, &resumed).await;
+    assert!(result.contains("unknown"), "{result}");
+    assert!(resume(&f, &resumed).await.contains("unknown"));
+    proposals::sweep(&f.state).await.unwrap();
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(count(&f, "approval_requests").await, 1);
+    server.abort();
     f.cleanup().await;
 }
 
@@ -573,7 +674,9 @@ async fn execution_proposal_recovery_requeues_missing_wake_and_retains_one_effec
         .collection::<Document>("approval_requests")
         .update_one(
             doc! {"_id":&request.id},
-            doc! {"$unset":{"execution_proposal.v1.wake_at":""}},
+            proposals::v3::AssistantVersion::of(&request)
+                .unwrap()
+                .update(doc! {"$unset":{"execution_proposal.v1.wake_at":""}}),
         )
         .await
         .unwrap();
@@ -818,7 +921,9 @@ async fn execution_proposal_notification_claim_is_once_and_preserves_absent_sett
         .collection::<Document>("approval_requests")
         .update_one(
             doc! {"_id":&request.id},
-            doc! {"$unset":{"execution_proposal.v1.maintenance_at":""}},
+            proposals::v3::AssistantVersion::of(&request)
+                .unwrap()
+                .update(doc! {"$unset":{"execution_proposal.v1.maintenance_at":""}}),
         )
         .await
         .unwrap();
@@ -1091,7 +1196,9 @@ async fn execution_proposal_org_instruction_remains_separate_and_resumes_once() 
             .collection::<Document>("approval_requests")
             .update_one(
                 doc! {"_id":&request.id},
-                doc! {"$unset":{"execution_proposal.v1.wake_at":""}},
+                proposals::v3::AssistantVersion::of(&request)
+                    .unwrap()
+                    .update(doc! {"$unset":{"execution_proposal.v1.wake_at":""}}),
             )
             .await
             .unwrap();
@@ -1268,10 +1375,10 @@ async fn execution_proposal_recovers_a_matching_operation_reservation_before_sen
     finish(&f, &row, "Waiting").await;
     let resumed = event_turn(&f, &row).await;
     let old = Utc::now() - chrono::Duration::minutes(3);
-    f.state.db.collection::<Document>("approval_requests").update_one(doc!{"_id":&request.id},doc!{"$set":{
+    f.state.db.collection::<Document>("approval_requests").update_one(doc!{"_id":&request.id},proposals::v3::AssistantVersion::of(&request).unwrap().update(doc!{"$set":{
         "execution_proposal.v1.state":"preparing","execution_proposal.v1.claim_id":"lost-preparer",
         "execution_proposal.v1.claimed_at":bson::DateTime::from_chrono(old)
-    }}).await.unwrap();
+    }})).await.unwrap();
     f.state.db.collection::<Document>("approval_grants").update_one(doc!{"_id":&p.grant_id},doc!{"$set":{"execution_use":bson::to_bson(&ExecutionUse{
         version:VERSION,operation_id:p.effect_id.clone(),prepared_digest:p.prepared_digest.clone(),claim_id:"lost-reservation".into(),
         state:ExecutionUseState::Claimed,claimed_at:old,dispatched_at:None,completed_at:None,
@@ -1338,3 +1445,9 @@ async fn execution_proposal_personal_policy_coverage_never_satisfies_an_org_or_o
     assert!(f.server.received_requests().await.unwrap().is_empty());
     f.cleanup().await;
 }
+
+#[path = "proposal_private_conversations_tests.rs"]
+mod private_conversations;
+
+#[path = "proposal_channel_tests.rs"]
+mod channel;

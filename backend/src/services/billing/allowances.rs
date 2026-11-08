@@ -78,6 +78,10 @@ async fn prepare_allowance(
     .await?;
     let service = resolve_service(db, &input.service_ref).await?;
     let metric = service.metric(input.metric)?;
+    if metric.requires_model_evidence() {
+        crate::services::security_readiness_service::require(db, super::model_tariffs::READINESS)
+            .await?;
+    }
     let now = Utc::now();
     let allowance = UsageAllowance {
         bundle_id: None,
@@ -186,6 +190,13 @@ async fn prepare_update(
         } else {
             service.metric(input.metric)?
         };
+        if metric.requires_model_evidence() && metric != current.metric {
+            crate::services::security_readiness_service::require(
+                db,
+                super::model_tariffs::READINESS,
+            )
+            .await?;
+        }
         set.insert("service_id", service.id);
         set.insert("service_slug", service.slug.clone());
         set.insert(
@@ -235,6 +246,13 @@ async fn validate_bundle(
         }
         validate_quantity(unit.quantity)?;
         service.metric(Some(unit.metric))?;
+        if unit.metric.requires_model_evidence() {
+            crate::services::security_readiness_service::require(
+                db,
+                super::model_tariffs::READINESS,
+            )
+            .await?;
+        }
     }
     super::targets::validate(
         db,

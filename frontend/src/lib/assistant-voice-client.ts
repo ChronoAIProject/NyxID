@@ -380,6 +380,7 @@ export class AssistantVoiceClient {
     socket.binaryType = "arraybuffer";
     socket.onmessage = ({ data }) => {
       if (this.closed || socket !== this.controlSocket) return;
+      let event: unknown;
       try {
         if (this.grok && data instanceof ArrayBuffer) {
           if (
@@ -392,41 +393,54 @@ export class AssistantVoiceClient {
           this.audioEnd = undefined;
           return;
         }
-        const event = JSON.parse(String(data)) as {
+        event = JSON.parse(String(data));
+      } catch {
+        this.recoverControlProtocol(socket);
+        return;
+      }
+      try {
+        const control = event as {
           type?: string;
           generation?: number;
           end_ms?: number;
         };
         if (
           this.grok &&
-          (event.type === "audio" || event.type === "audio_flush")
+          (control.type === "audio" || control.type === "audio_flush")
         ) {
-          if (event.generation !== this.session?.generation || this.closed)
+          if (control.generation !== this.session?.generation || this.closed)
             return;
-          if (event.type === "audio_flush") {
+          if (control.type === "audio_flush") {
             this.grok.flush();
             this.audioEnd = undefined;
             return;
           }
           if (
             this.audioEnd !== undefined ||
-            !Number.isSafeInteger(event.end_ms) ||
-            event.end_ms! < 0 ||
-            event.end_ms! > 1830000
+            !Number.isSafeInteger(control.end_ms) ||
+            control.end_ms! < 0 ||
+            control.end_ms! > 1830000
           )
             throw new Error("Invalid playback watermark");
-          this.audioEnd = event.end_ms;
+          this.audioEnd = control.end_ms;
           return;
         }
-        if (event.type === "start_failed") {
+        if (control.type === "start_failed") {
           const failure = voiceStartFailureSchema.parse(event);
           this.onError(
             voiceStartError(new ApiError(503, failure.error), "server"),
           );
-          void this.end();
+          this.dispose();
           return;
         }
-        const snapshot = voiceSnapshotSchema.parse(event);
+        // New control event types do not invalidate an established call.
+        if (control.type !== "snapshot") return;
+        const result = voiceSnapshotSchema.safeParse(event);
+        if (!result.success) {
+          this.recoverControlProtocol(socket);
+          return;
+        }
+        const snapshot = result.data;
         if (this.closed || snapshot.session.id !== this.session?.id) return;
         this.controlsReady = true;
         this.reconnectAttempt = 0;
@@ -444,20 +458,23 @@ export class AssistantVoiceClient {
           this.dispose();
         }
       } catch {
-        this.onError("Voice state could not be verified.");
-        void this.end();
+        this.recoverControlProtocol(socket);
       }
     };
     socket.onclose = () => {
       if (this.closed || socket !== this.controlSocket) return;
       if (this.heartbeat) clearInterval(this.heartbeat);
+      this.audioEnd = undefined;
+      this.grok?.flush();
       this.controlsReady = false;
       this.held = false;
       this.updateInput();
       this.setStatus("reconnecting");
       if (this.reconnectAttempt >= 6) {
         this.onError("Voice control connection could not reconnect.");
-        void this.end();
+        // Losing transport is not a user End command. Heartbeat expiry owns
+        // server cleanup, and accepted work keeps its independent lifetime.
+        this.dispose();
         return;
       }
       const delays = [1000, 2000, 4000, 8000, 15000, 30000];
@@ -488,6 +505,23 @@ export class AssistantVoiceClient {
           }),
         );
     }, 1000);
+  }
+  /**
+   * A forward-compatible server event must not turn into an implicit hang-up.
+   * Drop this control socket and let the existing bounded reconnect path obtain
+   * a fresh snapshot while the durable call keeps running on the server.
+   */
+  private recoverControlProtocol(socket: WebSocket) {
+    if (this.closed || socket !== this.controlSocket) return;
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
+    this.audioEnd = undefined;
+    this.grok?.flush();
+    this.controlsReady = false;
+    this.held = false;
+    this.updateInput();
+    this.setStatus("reconnecting");
+    socket.close();
   }
   private updateInput() {
     const ready =

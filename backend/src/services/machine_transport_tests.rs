@@ -1274,6 +1274,7 @@ async fn machine_gateway_and_direct_api_key_auth_have_identical_effective_author
     catalog.auth_method = "bearer".into();
     catalog.credential_encrypted = vec![1];
     catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: crate::models::downstream_service::PlatformKeyAudience::Public,
         ..Default::default()

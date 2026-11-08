@@ -581,57 +581,7 @@ pub async fn send_trigger_notification(
     }
 }
 
-/// Automation result delivery explicitly selects push, independent of Telegram.
-#[allow(clippy::too_many_arguments)]
-pub async fn send_automation_push(
-    db: &Database,
-    config: &AppConfig,
-    http_client: &Client,
-    fcm_auth: Option<&FcmAuth>,
-    apns_auth: Option<&ApnsAuth>,
-    user_id: &str,
-    label: &str,
-    text: &str,
-    thread_id: &str,
-) -> AppResult<()> {
-    let channel = db
-        .collection::<NotificationChannel>(COLLECTION_NAME)
-        .find_one(doc! {"user_id":user_id,"push_enabled":true})
-        .await?
-        .ok_or(AppError::TriggerDeliveryUnsupported)?;
-    if channel.push_devices.is_empty() {
-        return Err(AppError::TriggerDeliveryUnsupported);
-    }
-    let body: String = text.chars().take(200).collect();
-    let data = std::collections::HashMap::from([
-        ("type".to_string(), "automation_result".to_string()),
-        ("conversation_id".to_string(), thread_id.to_string()),
-    ]);
-    let mut delivered = false;
-    for device in unique_devices_by_token(&channel.push_devices) {
-        if matches!(
-            send_push_to_device(
-                http_client,
-                fcm_auth,
-                apns_auth,
-                config,
-                device,
-                label,
-                &body,
-                &data,
-            )
-            .await,
-            Ok(PushResult::Success)
-        ) {
-            delivered = true;
-        }
-    }
-    if delivered {
-        Ok(())
-    } else {
-        Err(AppError::TriggerDeliveryFailed)
-    }
-}
+pub mod automation;
 
 fn render_trigger_notification(
     trigger_label: &str,
@@ -1225,7 +1175,7 @@ async fn send_push_to_device(
             {
                 FcmSendResult::Success { .. } => Ok(PushResult::Success),
                 FcmSendResult::TokenInvalid => Ok(PushResult::TokenInvalid),
-                FcmSendResult::Failed { reason } => Err(AppError::Internal(reason)),
+                FcmSendResult::Failed { reason, .. } => Err(AppError::Internal(reason)),
             }
         }
         "apns" => {
@@ -1251,7 +1201,7 @@ async fn send_push_to_device(
             {
                 ApnsSendResult::Success => Ok(PushResult::Success),
                 ApnsSendResult::TokenInvalid => Ok(PushResult::TokenInvalid),
-                ApnsSendResult::Failed { reason } => Err(AppError::Internal(reason)),
+                ApnsSendResult::Failed { reason, .. } => Err(AppError::Internal(reason)),
             }
         }
         other => {

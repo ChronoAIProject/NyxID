@@ -19,6 +19,11 @@ export const SERVICE_BILLING_METRICS = [
 export const BILLING_METRICS = [
   ...SERVICE_BILLING_METRICS,
   "machine_running_seconds",
+  "reasoning_tokens",
+  "image_input_tokens",
+  "image_output_tokens",
+  "audio_input_tokens",
+  "audio_output_tokens",
 ] as const;
 export const BILLING_UNITS: Record<
   (typeof BILLING_METRICS)[number],
@@ -72,6 +77,11 @@ export const BILLING_UNITS: Record<
     singular: "Sandbox disk GiB-second",
     tokenFamily: false,
   },
+  reasoning_tokens: { label: "reasoning tokens", singular: "reasoning token", tokenFamily: true },
+  image_input_tokens: { label: "image input tokens", singular: "image input token", tokenFamily: true },
+  image_output_tokens: { label: "image output tokens", singular: "image output token", tokenFamily: true },
+  audio_input_tokens: { label: "audio input tokens", singular: "audio input token", tokenFamily: true },
+  audio_output_tokens: { label: "audio output tokens", singular: "audio output token", tokenFamily: true },
   images: { label: "images", singular: "image", tokenFamily: false },
 };
 export function metricLabel(metric: string, quantity?: number): string {

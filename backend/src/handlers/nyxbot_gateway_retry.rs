@@ -80,7 +80,7 @@ pub(crate) async fn retry(state: &AppState, owner: &str, id: &str) -> AppResult<
         doc! {"_id":&row.id,"user_id":owner,"status":"active","transport":"direct",
             "route_api_key_id":&row.route_api_key_id,"gateway_attempted_at":row.gateway_attempted_at.map(bson::DateTime::from_chrono),
             "pending_agent_api_key_id":null,"pending_route_api_key_id":null},
-        doc! {"$set":{"gateway_attempted_at":bson::DateTime::from_chrono(now),"gateway_native_activation_detail":bson::Bson::Null}},
+        doc! {"$set":{"gateway_attempted_at":bson::DateTime::from_chrono(now),"gateway_native_activation_detail":bson::Bson::Null,"gateway_native_activation_operation":bson::Bson::Null}},
     ).await?;
     if result.matched_count != 1 {
         return Err(refused("native_gateway_retry_busy"));

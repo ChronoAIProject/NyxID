@@ -106,7 +106,7 @@ describe("admin list / detail queries", () => {
   });
 
   it("useAdminAuditLog forwards every applied table control", async () => {
-    mockGet.mockResolvedValue({ entries: [], total: 0 });
+    mockGet.mockResolvedValue({ entries: [], total: 0, applied_turn_id: "e8242800-436d-4a66-8cdf-b0265db90ca1" });
     const { result } = renderHook(
       () =>
         useAdminAuditLog({
@@ -115,6 +115,7 @@ describe("admin list / detail queries", () => {
           sort: "event_type",
           user_id: "exact-user",
           api_key_id: "exact-key",
+          turn_id: "e8242800-436d-4a66-8cdf-b0265db90ca1",
           search: "mfa",
           search_filters: '[{"field":"user_id","values":["u1"]}]',
           custom_filters: '{"event_type":["login"]}',
@@ -138,6 +139,7 @@ describe("admin list / detail queries", () => {
       include_total: "false",
       user_id: "exact-user",
       api_key_id: "exact-key",
+          turn_id: "e8242800-436d-4a66-8cdf-b0265db90ca1",
       search: "mfa",
       search_filters: '[{"field":"user_id","values":["u1"]}]',
       custom_filters: '{"event_type":["login"]}',
@@ -430,4 +432,39 @@ describe("admin user mutations", () => {
     await result.current.mutateAsync("u1");
     expect(mockDelete).toHaveBeenCalledWith("/admin/users/u1/sessions");
   });
+});
+
+
+it("refuses rows from an old replica that ignores turn_id", async () => {
+  mockGet.mockResolvedValue({ entries: [{ id: "unfiltered-row" }], total: 999 });
+  const { result } = renderHook(() => useAdminAuditLog({ page: 1, per_page: 25, sort: "-created_at", turn_id: "e8242800-436d-4a66-8cdf-b0265db90ca1" }), { wrapper: wrapperFactory() });
+  await waitFor(() => expect(result.current.isError).toBe(true));
+  expect(result.current.data).toBeUndefined();
+  expect(result.current.error?.message).toContain("exact turn filter");
+  expect(mockGet.mock.calls.some(([path]) => String(path).includes("/count?"))).toBe(false);
+});
+
+it("uses the same exact turn in list and count and rejects an old count replica", async () => {
+  const turn = "e8242800-436d-4a66-8cdf-b0265db90ca1";
+  mockGet.mockImplementation((path: string) => path.startsWith("/admin/audit-log/count?")
+    ? Promise.resolve({ total: 999 })
+    : Promise.resolve({ entries: [], has_more: true, applied_turn_id: turn }));
+  const { result } = renderHook(() => useAdminAuditLog({ page: 1, per_page: 25, sort: "-created_at", turn_id: turn }), { wrapper: wrapperFactory() });
+  await waitFor(() => expect(result.current.totalError).toBeTruthy());
+  expect(result.current.total).toBeUndefined();
+  const countCall = mockGet.mock.calls.find(([path]) => String(path).includes("/count?"));
+  expect(String(countCall?.[0])).toContain(`turn_id=${turn}`);
+});
+
+
+it.each(["", " ", "partial", "invalid-turn-id"])("never broadens an invalid exact turn filter (%j)", async (turn_id) => {
+  mockGet.mockResolvedValue({ entries: [{ id: "unfiltered-row" }], total: 999 });
+  const { result } = renderHook(
+    () => useAdminAuditLog({ page: 1, per_page: 25, sort: "-created_at", turn_id }),
+    { wrapper: wrapperFactory() },
+  );
+  await waitFor(() => expect(result.current.isError).toBe(true));
+  expect(result.current.data).toBeUndefined();
+  expect(result.current.error?.message).toBe("Enter a complete turn ID");
+  expect(mockGet).not.toHaveBeenCalled();
 });

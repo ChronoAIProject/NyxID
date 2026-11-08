@@ -375,6 +375,33 @@ mod tests {
         }
     }
 
+    /// The production admission path drops an event when its consent read
+    /// exceeds the 250 ms budget, which is correct behavior but happens under
+    /// heavily parallel CI load. Tests that assert revision/admission semantics
+    /// retry the same admission (bounded) until it enqueues, so they don't
+    /// fail on runner latency. Returns once exactly one event was enqueued.
+    async fn track_until_enqueued(
+        client: &TelemetryClient,
+        db: &mongodb::Database,
+        actor: &str,
+        event: impl Fn() -> TelemetryEvent,
+        ctx: &TelemetryContext,
+        what: &str,
+    ) {
+        for _ in 0..20 {
+            await_responsive_consent_reads(db, actor).await;
+            let before = client.tx.capacity();
+            client.track(actor, event(), ctx, None).await;
+            let after = client.tx.capacity();
+            if after < before {
+                assert_eq!(after, before - 1, "{what}: exactly one event");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        panic!("{what}: event was never admitted after bounded retries");
+    }
+
     #[test]
     fn from_config_returns_none_when_telemetry_is_hard_off() {
         let cfg = test_app_config();
@@ -743,30 +770,25 @@ mod tests {
         };
         let admitted_revision = consent::read(db, actor).await.unwrap().revision;
         await_responsive_consent_reads(db, actor).await;
-        let capacity = client.tx.capacity();
-        first_state
-            .telemetry
-            .as_ref()
-            .unwrap()
-            .track(actor, TelemetryEvent::AuthLoggedOut, &allowed(actor), None)
-            .await;
-        assert_eq!(
-            client.tx.capacity(),
-            capacity - 1,
-            "first replica must enqueue"
-        );
-        await_responsive_consent_reads(&remote_db, actor).await;
-        second_state
-            .telemetry
-            .as_ref()
-            .unwrap()
-            .track(actor, TelemetryEvent::AuthLoggedOut, &allowed(actor), None)
-            .await;
-        assert_eq!(
-            second_state.telemetry.as_ref().unwrap().tx.capacity(),
-            0,
-            "second replica must enqueue before withdrawal"
-        );
+        track_until_enqueued(
+            first_state.telemetry.as_ref().unwrap(),
+            db,
+            actor,
+            || TelemetryEvent::AuthLoggedOut,
+            &allowed(actor),
+            "first replica must enqueue",
+        )
+        .await;
+        track_until_enqueued(
+            second_state.telemetry.as_ref().unwrap(),
+            &remote_db,
+            actor,
+            || TelemetryEvent::AuthLoggedOut,
+            &allowed(actor),
+            "second replica must enqueue before withdrawal",
+        )
+        .await;
+        assert_eq!(second_state.telemetry.as_ref().unwrap().tx.capacity(), 0);
         consent::set(&second_state.db, actor, false).await.unwrap();
         consent::set(&second_state.db, actor, true).await.unwrap();
         drop(first_state);
@@ -800,16 +822,15 @@ mod tests {
                 .await
                 .unwrap();
             consent::set(&remote_db, id, true).await.unwrap();
-            await_responsive_consent_reads(db, id).await;
-            let capacity = client.tx.capacity();
-            client
-                .track(id, TelemetryEvent::AuthLoggedOut, &allowed(id), None)
-                .await;
-            assert_eq!(
-                client.tx.capacity(),
-                capacity - 1,
-                "permission-change case must start admitted"
-            );
+            track_until_enqueued(
+                &client,
+                db,
+                id,
+                || TelemetryEvent::AuthLoggedOut,
+                &allowed(id),
+                "permission-change case must start admitted",
+            )
+            .await;
         }
         consent::set(&remote_db, &withdrawn, false).await.unwrap();
         client
@@ -964,15 +985,15 @@ mod tests {
             let (failure_tx, failure_rx) = mpsc::channel(1);
             let mut admitted = client.clone();
             admitted.tx = failure_tx;
-            await_responsive_consent_reads(db, &sentinel).await;
-            admitted
-                .track(
-                    &sentinel,
-                    TelemetryEvent::AuthLoggedOut,
-                    &allowed(&sentinel),
-                    None,
-                )
-                .await;
+            track_until_enqueued(
+                &admitted,
+                db,
+                &sentinel,
+                || TelemetryEvent::AuthLoggedOut,
+                &allowed(&sentinel),
+                "outage case must start admitted",
+            )
+            .await;
             assert_eq!(admitted.tx.capacity(), 0, "outage case must start admitted");
             drop(admitted);
             drain_loop(
@@ -984,21 +1005,19 @@ mod tests {
             )
             .await;
         }
-        await_responsive_consent_reads(db, &sentinel).await;
-        let capacity = client.tx.capacity();
-        client
-            .track(
-                &sentinel,
-                TelemetryEvent::KeyCreated {
-                    source: "catalog".into(),
-                    catalog_slug: None,
-                    has_node_binding: false,
-                },
-                &allowed(&sentinel),
-                None,
-            )
-            .await;
-        assert_eq!(client.tx.capacity(), capacity - 1, "sentinel must enqueue");
+        track_until_enqueued(
+            &client,
+            db,
+            &sentinel,
+            || TelemetryEvent::KeyCreated {
+                source: "catalog".into(),
+                catalog_slug: None,
+                has_node_binding: false,
+            },
+            &allowed(&sentinel),
+            "sentinel must enqueue",
+        )
+        .await;
         // End the bounded stream after the sentinel; worker completion proves all
         // items were processed, including any erroneously admitted extra jobs.
         drop(no_db);

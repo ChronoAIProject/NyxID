@@ -103,6 +103,7 @@ pub(crate) async fn task(db: &Database, row: &AssistantConversation) -> TaskAdmi
         .unwrap()
         .unwrap();
     let task = TaskAdmission {
+        channel_source: None,
         version: VERSION,
         task: TaskRef {
             root_kind: TaskRootKind::Message,

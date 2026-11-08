@@ -7,6 +7,7 @@ import {
   GroupedDisclosure,
 } from "@/components/ui/grouped-list";
 import { GuestReadiness } from "./guest-readiness";
+import { botAudienceDescription } from "@/lib/assistant/bot-audience";
 import { ChannelThreads } from "./nyxbot-channel-threads";
 import { useState } from "react";
 import { Megaphone, User, Users } from "lucide-react";
@@ -21,7 +22,6 @@ import { GroupedDetail } from "@/components/ui/grouped-detail";
 import {
   useGuestReadiness,
   useNyxBotChannelChats,
-  useSetNyxBotPrivateChats,
   useSetNyxBotPrivateChatPosts,
   useUpdateNyxBotChannelChat,
 } from "@/hooks/use-nyxbot-agents";
@@ -304,7 +304,6 @@ export function ChannelChats({
   const chats = useNyxBotChannelChats(channel.id, open || inDrawer);
   const agentId = channel.agent_id ?? agents.find((a) => a.kind === "nyxbot")?.id;
   const readiness = useGuestReadiness(agentId, open && !channel.org_specialist);
-  const access = useSetNyxBotPrivateChats();
   const posts = useSetNyxBotPrivateChatPosts();
   const [applyToExisting, setApplyToExisting] = useState(false);
   const rows = chats.data ?? [];
@@ -316,23 +315,12 @@ export function ChannelChats({
 
   const searchId = `channel-chats-${channel.id}`;
   useDrawerSearchEntries([
-    { id: searchId, title: "Chats and who can talk", breadcrumb: `Channels › ${channel.bot_label}`, keywords: "Private chats posts members", pages: [searchId], reveal: () => setOpen(true) },
+    { id: searchId, title: "Chats and posting", breadcrumb: `Channels › ${channel.bot_label}`, keywords: "Private chats posts members", pages: [searchId], reveal: () => setOpen(true) },
     ...rows.map((chat) => ({ id: `channel-chat-${chat.id}`, title: channelChatTitle(chat.kind, chat.title, channel.platform),
       breadcrumb: `Channels › ${channel.bot_label} › Chats`, keywords: `${chat.kind ?? ""} ${chat.members ?? ""} Answered by Posts on its own`,
       pages: [searchId], reveal: () => { setShown(rows.length); setOpen(true); },
     })),
   ]);
-  async function setAccess(privateChats: "owner" | "everyone") {
-    setError(undefined);
-    try {
-      await access.mutateAsync({ channelAgentId: channel.id, privateChats });
-    } catch (cause) {
-      setError(
-        errorMessage(cause, "Could not change who can talk in private chats."),
-      );
-    }
-  }
-
   async function setPosts(enabled: boolean) {
     setError(undefined);
     try {
@@ -350,13 +338,13 @@ export function ChannelChats({
   return (
     <>
       <GroupedDisclosure data-drawer-page-trigger={searchId} onClick={() => setOpen(true)}>
-        Chats and who can talk
+        Chats and posting
       </GroupedDisclosure>
       <GroupedDetail
         searchPage={searchId}
         open={open}
         title={`${channel.bot_label} · Chats`}
-        info="Manage private-chat access and the bot’s behavior in each connected chat. Changes to these controls apply immediately."
+        info="Manage posting and the bot’s behavior in each connected chat. Changes to these controls apply immediately."
         onReveal={() => setOpen(true)}
         backLabel="Back to Channels"
         onBack={() => setOpen(false)}
@@ -366,18 +354,10 @@ export function ChannelChats({
           data-drawer-search-target={searchId}
           footer={
             <>
-              <p>
-                {channel.org_specialist ? (
-                  "Verified members use their own membership permissions and billing. Guests can chat only when an admin enables guest access and a daily budget for this binding. An admin talking in a group opens its default audience to enabled guests; other members cannot widen it."
-                ) : <>
-                People other than you talk to the agent as guests: it never acts
-                on your account for them, NyxBot uses none of your services for
-                them, and a chat’s own specialist only reads with its services.
-                Members of a group can talk to it once you have talked to the
-                bot there. In groups it answers when mentioned or replied to
-                unless set to every message.
-                </>}
-              </p>
+              <p>{botAudienceDescription(channel)}</p>
+              <p>{channel.org_specialist
+                ? "An admin talking in a group opens its default audience to enabled guests; other members cannot widen it."
+                : "Members of a group can talk to the bot once you have talked to it there. In groups it answers when mentioned or replied to unless set to every message."}</p>
               <p>
                 The agent can send updates after a customer first messages this
                 bot. Existing chats keep their settings; you can still turn
@@ -399,21 +379,6 @@ export function ChannelChats({
             </>
           }
         >
-          <GroupedRow
-            title="Private chats with the bot"
-            accessory={
-              <SettingSelect
-                label={`Who can talk to ${channel.bot_label} in private chats`}
-                value={channel.private_chats}
-                disabled={access.isPending}
-                options={[
-                  { value: "owner", label: channel.org_specialist ? "Verified organization members" : "Only you" },
-                  { value: "everyone", label: channel.org_specialist ? "Members and enabled guests" : "Anyone" },
-                ]}
-                onChange={(value) => void setAccess(value)}
-              />
-            }
-          />
           <GroupedRow
             title="Allow posts in new private chats"
             accessory={

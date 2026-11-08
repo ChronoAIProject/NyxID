@@ -761,6 +761,8 @@ async fn rebuild_request(
         status,
         active: status != Status::Connected,
         revision: 1,
+        previous_challenge_hashes: Vec::new(),
+        username_seed: None,
         challenge_hash: super::telegram_new_service::hash(&hex::encode(rand::random::<[u8; 24]>())),
         telegram_user_id: Some(a.telegram_sender_id),
         telegram_bot_id: installation
@@ -1304,9 +1306,7 @@ mod tests {
                 .await
                 .unwrap()
                 .iter()
-                .all(|request| {
-                    !String::from_utf8_lossy(&request.body).contains("Open the same creation form")
-                })
+                .all(|request| { !String::from_utf8_lossy(&request.body).contains("/newbot/") })
         );
         f.state.db.drop().await.unwrap();
     }

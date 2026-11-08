@@ -37,6 +37,7 @@ const MODES: readonly NyxAgentAccessMode[] = [
 /** One footer menu for the thread's model and effective action permissions. */
 export function ComposerSettings({
   conversationId,
+  agentId,
   model,
   onDraftModelChange,
   agentOverride,
@@ -45,6 +46,7 @@ export function ComposerSettings({
   onVoiceSettings,
 }: {
   readonly conversationId?: string;
+  readonly agentId?: string;
   readonly model: string;
   readonly onDraftModelChange: (model: string) => void;
   readonly agentOverride?: NyxAgentAccessMode | null;
@@ -58,13 +60,13 @@ export function ComposerSettings({
   const menuLabel = advancedControls
     ? "Model and permissions"
     : "Thinking and permissions";
-  const models = useNyxAgentModels();
+  const models = useNyxAgentModels(true, { conversationId, agentId });
   const settings = useNyxBotSettings();
   const changeModel = useChangeNyxAgentModel();
   const changePermissions = useUpdateNyxBotSettings();
   const options = modelOptions(models.data, model);
   const selected = options.find((row) => row.id === model);
-  const name = modelDisplayName(selected ?? { id: model, label: model });
+  const name = model ? modelDisplayName(selected ?? { id: model, label: model }) : "Model unavailable";
   const mode = agentOverride ?? settings.data?.access_mode;
   const accessLabel = mode ? ACCESS_MODE_LABEL[mode] : "Permissions";
   const triggerLabel = advancedControls
@@ -179,6 +181,7 @@ export function ComposerSettings({
                   <span className="min-w-0 flex-1 break-words">
                     {modelDisplayName(row)}
                     {modelCannotViewImages(row) && <span className="ml-2 text-13 text-muted-foreground">Can’t view images</span>}
+                    {row.id.startsWith("nyxid/") && row.description && <span className="block text-13 text-muted-foreground">{row.description}</span>}
                     {!row.available && !models.isPending
                       ? " (unavailable)"
                       : ""}

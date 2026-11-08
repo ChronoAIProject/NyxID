@@ -83,6 +83,35 @@ fn turn(id: Option<&str>, text: &str) -> engine::TurnRequest {
         access_mode: None,
     }
 }
+#[tokio::test]
+async fn voice_idle_warning_only_applies_to_a_live_active_call() {
+    use crate::models::assistant_voice_session::SessionState;
+    let (state, _, mut call) = setup("voice_idle_warning_lifecycle").await;
+    call.last_user_at = chrono::Utc::now() - chrono::Duration::seconds(170);
+    for phase in [
+        SessionState::Starting,
+        SessionState::Active,
+        SessionState::Closing,
+        SessionState::Closed,
+        SessionState::Failed,
+    ] {
+        call.state = phase;
+        assert_eq!(
+            application::SessionResponse::from(call.clone()).idle_warning,
+            phase == SessionState::Active
+        );
+    }
+    call.state = SessionState::Active;
+    call.end_requested = true;
+    assert!(!application::SessionResponse::from(call.clone()).idle_warning);
+    call.end_requested = false;
+    call.live_slot = false;
+    assert!(!application::SessionResponse::from(call.clone()).idle_warning);
+    call.live_slot = true;
+    call.last_work_at = Some(chrono::Utc::now());
+    assert!(!application::SessionResponse::from(call).idle_warning);
+    state.db.drop().await.unwrap();
+}
 #[test]
 fn transcripts_dedupe_reorder_and_never_seal_a_disconnected_tail_as_actionable() {
     let mut buffer = transcript::Transcripts::default();
@@ -1036,7 +1065,7 @@ async fn voice_options_use_catalog_models_voices_and_supported_protocols_only() 
         service.visibility = "public".into(); service.is_active = true;
         service.service_category = "connection".into(); service.requires_user_credential = true;
         service.auth_method = "bearer".into(); service.base_url = "https://api.openai.com/v1".into();
-        service.platform_key = Some(PlatformKeyConfig { enabled: true, audience: PlatformKeyAudience::Public, allowed_owner_ids: vec![] });
+        service.platform_key = Some(PlatformKeyConfig { purpose: Default::default(), enabled: true, audience: PlatformKeyAudience::Public, allowed_owner_ids: vec![] });
         service.credential_encrypted = state.encryption_keys.encrypt(b"fixture-key").await.unwrap();
         service.inference = crate::services::inference_service::default_inference("llm-openai");
         let voice = service.inference.as_mut().unwrap().voice.as_mut().unwrap();
@@ -1133,6 +1162,7 @@ fn duration_billing_requires_synced_authored_prices_and_meters_unpriced_byok() {
     };
     use credentials::duration_billing;
     let lane = LanePricing {
+        model_prices: Vec::new(),
         metric: BillingMetric::InputTokens,
         credits_per_unit: "0.001".into(),
         lago_metric_code: "input".into(),

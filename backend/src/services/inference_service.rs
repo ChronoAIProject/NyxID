@@ -192,6 +192,7 @@ mod tests {
         };
         // A non-X service, such as an overlay with its own `get_me`.
         let view = LanePricingView::from(&LanePricing {
+            model_prices: Vec::new(),
             metric: BillingMetric::Requests,
             credits_per_unit: "1".into(),
             lago_metric_code: "platform_svc_api-reddit_byok".into(),

@@ -140,6 +140,8 @@ impl ApprovalGrantAuthorizationEvidenceResponse {
 /// The bounded review is private to the first-party human.
 #[derive(Clone, Debug, Serialize)]
 pub struct ExecutionPermissionItem {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_scope: Option<&'static str>,
     pub review: Option<crate::models::execution_proposal::Review>,
     pub source_request_id: Option<String>,
     pub source_review_path: Option<String>,
@@ -174,6 +176,11 @@ impl ExecutionPermissionItem {
             None => (None, None, None),
         };
         Self {
+            context_scope: contract.map(|c| {
+                crate::services::execution_permission_dispatch::proposals::v3::context_scope(
+                    &c.context,
+                )
+            }),
             review: None,
             source_request_id: None,
             source_review_path: None,
@@ -2184,6 +2191,35 @@ mod tests {
         assert!(!unknown.supported);
         assert!(unknown.validity.is_none());
         assert!(unknown.actor_user_id.is_none());
+    }
+
+    #[test]
+    fn private_conversations_grant_view_distinguishes_context_without_extra_reads() {
+        use crate::models::execution_permission::{Audience, ConversationScope};
+        let mut grant = crate::services::execution_permission::tests::fixture();
+        let permission = grant.execution.as_mut().unwrap();
+        let c = permission.v1.as_mut().unwrap();
+        c.context.audience = Audience::Private {
+            user_id: c.subject.actor_user_id.clone(),
+        };
+        c.context.conversation = ConversationScope::SameAudience;
+        assert_eq!(
+            ExecutionPermissionItem::from_permission(permission).context_scope,
+            Some("private_conversations")
+        );
+        permission.v1.as_mut().unwrap().context.conversation = ConversationScope::Exact {
+            conversation_id: "thread".into(),
+        };
+        assert_eq!(
+            ExecutionPermissionItem::from_permission(permission).context_scope,
+            Some("current_conversation")
+        );
+        permission.version = 99;
+        assert!(
+            ExecutionPermissionItem::from_permission(permission)
+                .context_scope
+                .is_none()
+        );
     }
 
     #[test]

@@ -60,6 +60,28 @@ pub enum LagoPushDecision {
 }
 
 impl BillingReconciler {
+    #[cfg(test)]
+    pub(crate) async fn compare_usage_for_test(&self) -> AppResult<ReconcileStats> {
+        let mut stats = ReconcileStats::default();
+        self.compare_finalized_usage(
+            self.lago.as_ref().expect("test Lago client").as_ref(),
+            &mut stats,
+        )
+        .await?;
+        Ok(stats)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn push_usage_for_test(&self) -> AppResult<ReconcileStats> {
+        let mut stats = ReconcileStats::default();
+        self.push_unacked(
+            self.lago.as_ref().expect("test Lago client").as_ref(),
+            &mut stats,
+        )
+        .await?;
+        Ok(stats)
+    }
+
     pub fn new(
         db: mongodb::Database,
         lago: Option<Arc<dyn LagoApi>>,
@@ -85,6 +107,7 @@ impl BillingReconciler {
             )
             .await?;
         }
+        crate::services::platform_model_execution::recover(&self.db).await?;
         let mut stats = ReconcileStats::default();
         match super::pool_attempt::recover_expired(&self.db, Utc::now()).await {
             Ok(count) => stats.abandoned += count,
@@ -138,6 +161,19 @@ impl BillingReconciler {
             &self.config.lago_plan_code,
         )
         .await?;
+        match super::model_tariffs::retry_pending(
+            &self.db,
+            lago.as_ref(),
+            &self.config.lago_plan_code,
+        )
+        .await
+        {
+            Ok(n) => stats.service_price_syncs += n,
+            Err(error) => tracing::warn!(
+                error_code = error.error_code(),
+                "Model tariff synchronization will retry"
+            ),
+        }
         let mut runtime_billing = super::BillingService::new(self.db.clone(), self.config.clone());
         runtime_billing.lago = self.lago.clone();
         // CMA configuration work must not prevent ordinary usage emission or
@@ -766,6 +802,7 @@ mod tests {
     pub(super) fn finalized_row(transaction_id: &str) -> UsageMeterRow {
         let now = Utc::now() - Duration::seconds(120);
         UsageMeterRow {
+            model_tariff: None,
             org_channel_guest: None,
             rollup_pending: true,
             id: Uuid::new_v4().to_string(),

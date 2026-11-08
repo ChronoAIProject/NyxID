@@ -1,3 +1,5 @@
+import { PlatformModelsPage } from "@/pages/platform-models";
+import { AdminPlatformModelsPage, AdminPlatformModelDetailPage } from "@/pages/admin-platform-models";
 import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
 import { FloatingCmaSessions } from "@/components/assistant/cma-session-card";
 import { captureGroupInvite } from "./lib/collaboration-invite";
@@ -863,6 +865,8 @@ const nodeDetailRoute = createRoute({
   component: NodeDetailPage,
 });
 
+const platformModelsRoute = createRoute({ path: "models", getParentRoute: () => dashboardLayout, component: PlatformModelsPage });
+
 const keysRoute = createRoute({
   path: "/keys",
   getParentRoute: () => dashboardLayout,
@@ -1216,6 +1220,9 @@ const adminCreditsRoute = createRoute({
   }),
 });
 
+const adminModelsRoute = createRoute({ path: "platform-models", getParentRoute: () => adminLayout, component: AdminPlatformModelsPage });
+const adminModelDetailRoute = createRoute({ path: "platform-models/$modelId", getParentRoute: () => adminLayout, component: AdminPlatformModelDetailPage });
+
 const adminBillingRoute = createRoute({
   path: "billing",
   getParentRoute: () => adminLayout,
@@ -1339,6 +1346,7 @@ const routeTree = rootRoute.addChildren([
     approvalHistoryRoute,
     approvalGrantsRoute,
     keysRoute,
+    platformModelsRoute,
     billingRoute,
     serviceOverviewRoute,
     keyDetailRoute,
@@ -1374,6 +1382,8 @@ const routeTree = rootRoute.addChildren([
       adminIntegrityRoute,
       adminCreditsRoute,
       adminBillingRoute,
+      adminModelsRoute,
+      adminModelDetailRoute,
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,
       adminUploadRetentionRoute,
