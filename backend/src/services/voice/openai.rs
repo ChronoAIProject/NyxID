@@ -49,13 +49,23 @@ impl From<AppError> for CreateError {
 
 impl OpenAi {
     pub fn new(key: Zeroizing<String>) -> AppResult<Self> {
+        // Pool only transport, never credentials or per-call state. Calls still
+        // resolve their own authorized credential and set Bearer on each request.
+        static CLIENT: std::sync::OnceLock<Result<reqwest::Client, reqwest::Error>> =
+            std::sync::OnceLock::new();
+        let client = CLIENT
+            .get_or_init(|| {
+                reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .timeout(std::time::Duration::from_secs(15))
+                    .build()
+            })
+            .as_ref()
+            .cloned()
+            .map_err(|_| AppError::VoiceProviderUnavailable)?;
         Ok(Self {
             delegation_model: None,
-            client: reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .map_err(|_| AppError::VoiceProviderUnavailable)?,
+            client,
             key,
             http_origin: "https://api.openai.com".into(),
             ws_origin: "wss://api.openai.com".into(),
@@ -194,7 +204,7 @@ impl OpenAi {
             .max_frame_size(Some(MAX_FRAME));
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            tokio_tungstenite::connect_async_with_config(request, Some(config), false),
+            tokio_tungstenite::connect_async_with_config(request, Some(config), true),
         )
         .await
         .map_err(|_| AppError::VoiceProviderUnavailable)?
@@ -290,9 +300,72 @@ pub async fn receive(socket: &mut Socket) -> AppResult<Option<Value>> {
 impl OpenAi {
     pub(super) fn fixture(key: Zeroizing<String>, address: std::net::SocketAddr) -> Self {
         let mut adapter = Self::new(key).unwrap();
+        // Ordinary fixtures can reuse a port after its previous server drops.
+        adapter.client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(15))
+            .pool_max_idle_per_host(0)
+            .build()
+            .unwrap();
         adapter.http_origin = format!("http://{address}");
         adapter.ws_origin = format!("ws://{address}");
         adapter
+    }
+}
+
+#[cfg(test)]
+mod pooling_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn transport_reuse_keeps_each_calls_credential() {
+        use axum::{Json, Router, extract::ConnectInfo, http::HeaderMap, routing::post};
+        use std::{
+            net::SocketAddr,
+            sync::{Arc, Mutex},
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let captured = seen.clone();
+        let app = Router::new().route("/v1/live/sessions", post(move |ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap| {
+            let captured = captured.clone();
+            async move {
+                captured.lock().unwrap().push((peer, headers["authorization"].to_str().unwrap().to_owned()));
+                Json(json!({"session":{"id":"live_pool"},"transport":{"sdp":"v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n"}}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        for key in ["fixture-first", "fixture-second"] {
+            let mut provider = OpenAi::new(Zeroizing::new(key.into())).unwrap();
+            provider.http_origin = format!("http://{address}");
+            provider
+                .create(
+                    "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+                    "fixture",
+                    "marin",
+                    "fixture-model",
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            seen[0].0, seen[1].0,
+            "The second call must reuse the TCP connection"
+        );
+        assert_eq!(seen[0].1, "Bearer fixture-first");
+        assert_eq!(seen[1].1, "Bearer fixture-second");
+        server.abort();
     }
 }
 
