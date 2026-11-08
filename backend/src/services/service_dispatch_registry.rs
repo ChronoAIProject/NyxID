@@ -23,7 +23,7 @@ enum AdmissionState {
     Unprotected,
     Protected {
         policy: Policy,
-        binding: Binding,
+        binding: Box<Binding>,
         guard: Box<dyn ServiceDispatchGuard>,
     },
 }
@@ -119,7 +119,7 @@ pub(crate) async fn admit(
     Ok(DispatchAdmission {
         state: AdmissionState::Protected {
             policy,
-            binding,
+            binding: Box::new(binding),
             guard,
         },
     })
@@ -146,7 +146,7 @@ pub(crate) fn verify<'a>(
             }),
         ) if expected == *policy => {
             let caller = caller.ok_or_else(refused)?;
-            if *binding != Binding::current(target, caller)? {
+            if binding.as_ref() != &Binding::current(target, caller)? {
                 return Err(refused());
             }
             Ok(Some(guard.as_ref()))
@@ -164,7 +164,7 @@ pub(crate) fn test_admission(
     DispatchAdmission {
         state: AdmissionState::Protected {
             policy: Policy::Cma,
-            binding: Binding::current(target, caller).unwrap(),
+            binding: Box::new(Binding::current(target, caller).unwrap()),
             guard,
         },
     }
