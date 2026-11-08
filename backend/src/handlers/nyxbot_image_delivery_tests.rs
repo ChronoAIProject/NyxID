@@ -3247,6 +3247,7 @@ async fn shared_post_fixture(
             description: "Specialist".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             machines: None,

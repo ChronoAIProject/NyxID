@@ -2955,6 +2955,7 @@ mod integration_tests {
                 description: "Read only my own conversations".into(),
                 display_name: None,
                 persona: None,
+                voice_instructions: None,
                 targets: Default::default(),
                 account_read: false,
                 specialty: None,

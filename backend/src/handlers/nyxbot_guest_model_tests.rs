@@ -56,6 +56,7 @@ async fn lark_model_turns(profile: &str, legacy: bool) {
             description: "Group specialist".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: GrantTargets {
                 service_ids: vec![],
                 platform_service_ids: vec![],

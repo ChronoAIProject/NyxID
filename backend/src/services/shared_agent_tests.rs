@@ -964,6 +964,7 @@ async fn shared_agent_live_acl_role_and_billing_matrix() {
         team::AgentStyle {
             display_name: Some("Research"),
             persona: Some("Explain sources clearly"),
+            voice_instructions: None,
         },
     )
     .await
@@ -1557,6 +1558,29 @@ async fn shared_agent_consent_once_race_always_revoke_and_full_access() {
     .unwrap();
     let operation =
         serde_json::json!({"kind":"http","method":"POST","path":"/events","body":"digest-only"});
+    let mut voice_chat = chat.clone();
+    voice_chat.execution_voice_task = true;
+    assert!(matches!(
+        consent::authorize(
+            &f.state.db,
+            &voice_chat,
+            access,
+            &service,
+            &binding,
+            &operation
+        )
+        .await,
+        Err(crate::errors::AppError::ApprovalUnsupported)
+    ));
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>("assistant_agent_consents")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
     let mut wrong_chat = chat.clone();
     wrong_chat.agent_id = uuid::Uuid::new_v4().to_string();
     assert!(
@@ -1595,6 +1619,19 @@ async fn shared_agent_consent_once_race_always_revoke_and_full_access() {
         second.unwrap().err().unwrap()["consent_id"]
     );
     let id = card["consent_id"].as_str().unwrap();
+    assert!(matches!(
+        consent::authorize(
+            &f.state.db,
+            &voice_chat,
+            access,
+            &service,
+            &binding,
+            &operation
+        )
+        .await,
+        Err(crate::errors::AppError::ApprovalUnsupported)
+    ));
+
     assert!(
         consent::decide(&f.state.db, &f.admin, id, ConsentDecision::Once)
             .await
@@ -1640,6 +1677,20 @@ async fn shared_agent_consent_once_race_always_revoke_and_full_access() {
         .unwrap()
         .ok()
         .unwrap();
+    assert!(
+        consent::authorize(
+            &f.state.db,
+            &voice_chat,
+            access,
+            &service,
+            &binding,
+            &operation
+        )
+        .await
+        .unwrap()
+        .is_ok(),
+        "Voice can use already approved consent"
+    );
     permit
         .revalidate(&f.state.db, access, &f.outsider)
         .await

@@ -935,11 +935,18 @@ pub async fn input_context(
     let Some(w) = bound(db, row).await? else {
         return Ok(zeroize::Zeroizing::new(String::new()));
     };
+    quoted_result(keys, &w).await
+}
+
+async fn quoted_result(
+    keys: &EncryptionKeys,
+    w: &AsyncServiceOperation,
+) -> AppResult<zeroize::Zeroizing<String>> {
     let expired = Utc::now() >= w.expires_at.min(w.created_at + Duration::hours(4));
     let data = if expired {
         zeroize::Zeroizing::new(String::new())
     } else {
-        result_text(keys, &w).await?
+        result_text(keys, w).await?
     };
     #[derive(serde::Serialize)]
     struct QuotedResult<'a> {
@@ -977,6 +984,115 @@ pub async fn input_context(
         quoted.as_str()
     )))
 }
+
+pub(crate) struct CompletedResults {
+    pub contexts: Vec<zeroize::Zeroizing<String>>,
+    pub succeeded: bool,
+}
+
+/// A connected tool consumer can receive its own async results without starting
+/// a second inference. Keep the ordinary watch worker, contract and cancellation
+/// lifecycle; atomically consume the result/event under the originating live turn.
+/// None means its watches are still pending; an empty list means no async work.
+pub(crate) async fn take_results_for_live_turn(
+    db: &Database,
+    keys: &EncryptionKeys,
+    row: &AssistantConversation,
+) -> AppResult<Option<CompletedResults>> {
+    let turn = row
+        .active_turn
+        .as_ref()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    let filter = doc! {"user_id":&row.user_id,"conversation_id":&row.id,
+    "turn_id":&turn.turn_id,"api_key_id":&row.credential_api_key_id,
+    "state":{"$ne":"delivered"}};
+    let watches = db.collection::<AsyncServiceOperation>(WATCHES);
+    let rows: Vec<_> = watches.find(filter.clone()).await?.try_collect().await?;
+    if rows.is_empty() {
+        return Ok(Some(CompletedResults {
+            contexts: Vec::new(),
+            succeeded: true,
+        }));
+    }
+    if rows
+        .iter()
+        .any(|w| !matches!(w.state.as_str(), "ready" | "queued" | "cancelled"))
+    {
+        return Ok(None);
+    }
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run(
+            (db.clone(), keys, row.clone(), filter),
+            |session, (db, keys, row, filter)| {
+                Box::pin(async move {
+                    let result = consume_results_in_session(db, keys, row, filter, session).await;
+                    transactions::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+async fn consume_results_in_session(
+    db: &Database,
+    keys: &EncryptionKeys,
+    row: &AssistantConversation,
+    filter: &bson::Document,
+    session: &mut ClientSession,
+) -> AppResult<Option<CompletedResults>> {
+    let turn = row
+        .active_turn
+        .as_ref()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    let conversations = db.collection::<AssistantConversation>(CONVERSATIONS);
+    let current = conversations.find_one_and_update(
+        doc! {"_id":&row.id,"user_id":&row.user_id,"credential_api_key_id":&row.credential_api_key_id,
+            "active_turn.turn_id":&turn.turn_id,"active_turn.stop_requested":false},
+        doc! {"$inc":{"async_operation_generation":1}},
+    ).session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?;
+    if super::assistant_nyxagent::live_turn(&current, Utc::now()).is_none() {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    // Reload under the same snapshot/fence used to consume the queued events.
+    let watches = db.collection::<AsyncServiceOperation>(WATCHES);
+    let mut cursor = watches.find(filter.clone()).session(&mut *session).await?;
+    let rows: Vec<AsyncServiceOperation> = cursor.stream(&mut *session).try_collect().await?;
+    if rows
+        .iter()
+        .any(|w| !matches!(w.state.as_str(), "ready" | "queued" | "cancelled"))
+    {
+        return Ok(None);
+    }
+    let mut contexts = Vec::with_capacity(rows.len());
+    for w in &rows {
+        contexts.push(quoted_result(keys, w).await?);
+        watches.update_one(
+            doc! {"_id":&w.id,"user_id":&row.user_id,"state":{"$in":["ready","queued","cancelled"]}},
+            doc! {"$unset":{"secret_context_versions.result_encrypted":""},
+                "$set":{"state":"delivered","result_encrypted":null,"lease_id":null,"lease_until":null}},
+        ).session(&mut *session).await?;
+    }
+    let ids: Vec<_> = rows.iter().map(|w| w.id.clone()).collect();
+    conversations
+        .update_one(
+            doc! {"_id":&row.id,"user_id":&row.user_id,"active_turn.turn_id":&turn.turn_id},
+            doc! {"$pull":{"pending_events":{"kind":EVENT_KIND,"id":{"$in":ids}}}},
+        )
+        .session(&mut *session)
+        .await?;
+    let succeeded = rows.iter().all(|w| {
+        w.reason.as_deref() == Some("completed")
+            && Utc::now() < w.expires_at.min(w.created_at + Duration::hours(4))
+    });
+    Ok(Some(CompletedResults {
+        contexts,
+        succeeded,
+    }))
+}
+
 pub async fn delivered_in_session(
     db: &Database,
     row: &AssistantConversation,

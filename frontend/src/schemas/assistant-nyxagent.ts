@@ -472,6 +472,7 @@ export type AssistantAgentRequest = z.infer<typeof assistantAgentRequestSchema>;
 
 export const ASSISTANT_AGENT_DISPLAY_NAME_MAX = 40;
 export const ASSISTANT_AGENT_PERSONA_MAX = 2000;
+export const ASSISTANT_AGENT_VOICE_INSTRUCTIONS_MAX = 2000;
 
 export const guestReadinessSchema = z.object({
   status: z.enum(["ready", "setting_up", "not_ready"]),
@@ -502,6 +503,7 @@ export const assistantAgentSchema = z.object({
   display_name: z.string().nullable().default(null),
   /** Personality and tone the user asked for; style only, never authority. */
   persona: z.string().nullable().default(null),
+  voice_instructions: z.string().nullable().optional(),
   description: z.string().default(""),
   model: z.string().optional(),
   model_unavailable: z.boolean().optional(),
@@ -614,6 +616,10 @@ const agentPersona = z
     ASSISTANT_AGENT_PERSONA_MAX,
     `Keep the persona under ${String(ASSISTANT_AGENT_PERSONA_MAX)} characters`,
   );
+const agentVoiceInstructions = z.string().trim().max(
+  ASSISTANT_AGENT_VOICE_INSTRUCTIONS_MAX,
+  `Keep voice instructions under ${String(ASSISTANT_AGENT_VOICE_INSTRUCTIONS_MAX)} characters`,
+);
 
 /** "New agent": a specialist with its role, optional style and starting grants. */
 export const assistantAgentCreateSchema = z.object({
@@ -622,6 +628,7 @@ export const assistantAgentCreateSchema = z.object({
   display_name: agentDisplayName.optional(),
   description: agentDescription,
   persona: agentPersona.optional(),
+  voice_instructions: agentVoiceInstructions.optional(),
   machines: z.array(z.string()).max(64).optional(),
   logins: z.array(z.string()).max(64).optional(),
   services: z.array(z.string()),
@@ -637,6 +644,7 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
         display_name: agentDisplayName,
         description: z.string().trim().max(2048, "Keep the notes under 2048 characters"),
         persona: agentPersona,
+        voice_instructions: agentVoiceInstructions.optional(),
         model: z.string().optional(),
         access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
         channel_checking_notice: z.boolean().optional(),
@@ -646,6 +654,7 @@ export function assistantAgentProfileSchema(kind: AssistantAgentKind) {
         display_name: agentDisplayName,
         description: agentDescription,
         persona: agentPersona,
+        voice_instructions: agentVoiceInstructions.optional(),
         model: z.string().optional(),
         access_mode_override: nyxAgentAccessModeSchema.nullable().optional(),
         channel_checking_notice: z.boolean().optional(),
@@ -657,6 +666,7 @@ export type AssistantAgentUpdate = {
   description?: string;
   display_name?: string;
   persona?: string;
+  voice_instructions?: string;
   model?: string;
   access_mode_override?: NyxAgentAccessMode | null;
   channel_checking_notice?: boolean;
@@ -666,6 +676,7 @@ export type AssistantAgentProfile = {
   display_name: string;
   description: string;
   persona: string;
+  voice_instructions?: string;
   model?: string;
   access_mode_override?: "autopilot" | "nyxmode" | "ask_every_time" | null;
   channel_checking_notice?: boolean;

@@ -798,6 +798,7 @@ async fn assert_shared_transports_managed_actor_funding_once_consent_and_pre_dis
             description: "Managed service".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             machines: None,

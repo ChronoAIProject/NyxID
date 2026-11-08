@@ -112,6 +112,7 @@ async fn sharing_agent(f: &Fixture) -> (String, String, String) {
             description: "Shared researcher".into(),
             display_name: Some("Team Researcher".into()),
             persona: None,
+            voice_instructions: None,
             targets: team::GrantTargets {
                 service_ids: vec![service.clone()],
                 ..Default::default()
@@ -1154,6 +1155,7 @@ async fn full_access_set_agent_operations_widens_with_receipt_while_auto_asks() 
                 description: "Use service operations".into(),
                 display_name: None,
                 persona: None,
+                voice_instructions: None,
                 targets: Default::default(),
                 account_read: false,
                 specialty: None,

@@ -214,7 +214,17 @@ async fn phase_b_voice_task_covered_gap_and_prohibition_keep_chat_proposals_out(
         for outcome in ["covered", "gap", "prohibited"] {
             let (f, row) = assistant_for_cohort("phase_b_voice", global).await;
             if outcome == "gap" {
-                legacy_review(&f.state, &f.owner).await;
+                // This path must refuse before any waiting/notification setup.
+                super::super::assistant_settings_service::update(
+                    &f.state.db,
+                    &f.owner,
+                    super::super::assistant_settings_service::Update {
+                        access_mode: Some(crate::models::assistant_settings::AccessMode::Nyxmode),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
             }
             let request = Uuid::new_v4().to_string();
             f.state
@@ -262,16 +272,8 @@ async fn phase_b_voice_task_covered_gap_and_prohibition_keep_chat_proposals_out(
                 f.no_prompts().await;
             }
             if outcome == "gap" {
-                assert!(
-                    f.state
-                        .db
-                        .collection::<Document>("approval_requests")
-                        .count_documents(doc! {})
-                        .await
-                        .unwrap()
-                        > 0,
-                    "voice gap retains its legacy service review"
-                );
+                assert!(text.contains("approval_unsupported"), "{text}");
+                f.no_prompts().await;
             }
             f.cleanup().await;
         }

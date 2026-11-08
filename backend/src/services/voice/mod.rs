@@ -31,6 +31,7 @@ mod speech;
 #[cfg(test)]
 mod tests;
 mod tokens;
+mod tools;
 pub mod transcript;
 mod transport;
 

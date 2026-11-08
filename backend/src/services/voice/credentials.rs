@@ -583,13 +583,16 @@ async fn authorize_operation(
             auth.assistant_chat.as_deref(),
         )
         .await?;
-        if !matches!(
-            outcome,
-            crate::services::approval_service::ApprovalOutcome::Allowed { .. }
-        ) {
-            return Err(AppError::Forbidden(
-                "The selected voice service requires approval".into(),
-            ));
+        match outcome {
+            crate::services::approval_service::ApprovalOutcome::Allowed { .. } => {}
+            crate::services::approval_service::ApprovalOutcome::NeedsApproval(_) => {
+                return Err(AppError::ApprovalUnsupported);
+            }
+            _ => {
+                return Err(AppError::Forbidden(
+                    "The selected voice service is denied".into(),
+                ));
+            }
         }
     }
     Ok(())

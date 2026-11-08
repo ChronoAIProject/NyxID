@@ -195,6 +195,7 @@ async fn specialist_fixture(name: &str, assigned: bool) -> Fixture {
             description: "Help with the user's account".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,

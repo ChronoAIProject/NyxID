@@ -271,6 +271,7 @@ pub(super) async fn finalize(
     state: &AppState,
     reservation: &Reservation,
     binding: &Value,
+    approval: super::super::approval_service::ApprovalOptions,
 ) -> AppResult<AssistantAcknowledgement> {
     let db = state.db.clone();
     let reservation = reservation.clone();
@@ -307,11 +308,13 @@ pub(super) async fn finalize(
                 requested_turn_id: claim.requested_turn_id.clone(), voice_request_id: claim.voice_request_id.clone(),
                 trigger_run_id: claim.trigger_run_id.clone(), routing: claim.routing.clone(),
             };
+            // Interaction capability belongs to the recovering caller. The
+            // source chat retains review identity and may now host another turn.
             acks::request_in_session(db, &chat, acks::Request {
                 kind:"action", service:None, tool:Some(review::TOOL), arguments:Some(binding),
                 summary:"Review the complete skill draft, publish it privately to Ornn and attach its exact version to this agent.",
                 platform:false,
-            }, Some(&origin), session).await
+            }, Some(&origin), approval, session).await
         }).await;
         mutations::transaction_result(result)
     }).await.map_err(mutations::map_transaction_error)

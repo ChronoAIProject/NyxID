@@ -344,6 +344,7 @@ pub(super) async fn org_channel(
             description: "Organization support".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             machines: None,

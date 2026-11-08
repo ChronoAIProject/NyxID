@@ -2363,6 +2363,7 @@ mod tests {
             "client-alpha",
             None,
             approval_service::ApprovalRequestOperation {
+                approval: Default::default(),
                 assistant_group: None,
                 operation_summary: "write".to_string(),
                 action_description: None,

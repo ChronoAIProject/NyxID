@@ -2282,6 +2282,7 @@ async fn channel_media_first_photo_org_bot_and_specialist_thread_bind_to_correct
                     description: "Receipts".into(),
                     display_name: None,
                     persona: None,
+                    voice_instructions: None,
                     targets: Default::default(),
                     account_read: false,
                     specialty: None,

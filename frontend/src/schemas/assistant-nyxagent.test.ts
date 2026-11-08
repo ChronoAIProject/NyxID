@@ -540,6 +540,8 @@ describe("agent display name and persona", () => {
       persona: "",
     };
     expect(assistantAgentCreateSchema.safeParse(create).success).toBe(true);
+    expect(assistantAgentCreateSchema.safeParse({ ...create, voice_instructions: "Read live device state." }).success).toBe(true);
+    expect(assistantAgentCreateSchema.safeParse({ ...create, voice_instructions: "x".repeat(2001) }).success).toBe(false);
     expect(
       assistantAgentCreateSchema.safeParse({ ...create, display_name: "x".repeat(41) }).success,
     ).toBe(false);

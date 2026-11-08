@@ -1747,6 +1747,7 @@ async fn dispatch_specialists(
                 description: text_arg(args, "description").to_owned(),
                 display_name: args["display_name"].as_str().map(str::to_owned),
                 persona: args["persona"].as_str().map(str::to_owned),
+                voice_instructions: None,
                 targets: targets.clone(),
                 account_read: args["account_read"].as_bool().unwrap_or(false),
                 specialty: args["specialty"].as_str().map(str::to_owned),
@@ -2382,6 +2383,7 @@ async fn dispatch_agent_settings(
                 team::AgentStyle {
                     display_name: args["display_name"].as_str(),
                     persona: args["persona"].as_str(),
+                    voice_instructions: None,
                 },
             )
             .await?;
@@ -3324,6 +3326,8 @@ pub struct CreateAgentRequest {
     #[serde(default)]
     persona: Option<String>,
     #[serde(default)]
+    voice_instructions: Option<String>,
+    #[serde(default)]
     services: Vec<String>,
     #[serde(default)]
     account_read: bool,
@@ -3358,6 +3362,7 @@ pub async fn create_agent(
         description: body.description,
         display_name: body.display_name,
         persona: body.persona,
+        voice_instructions: body.voice_instructions,
         targets,
         account_read: body.account_read,
         specialty: None,
@@ -3481,6 +3486,9 @@ pub struct UpdateAgentRequest {
     /// Empty clears it.
     #[serde(default)]
     persona: Option<String>,
+    /// Empty clears it. Applies to new voice calls.
+    #[serde(default)]
+    voice_instructions: Option<String>,
     /// NyxAgent model for the agent's new threads, from the live list.
     #[serde(default)]
     model: Option<String>,
@@ -3526,6 +3534,7 @@ pub async fn update_agent(
         team::AgentStyle {
             display_name: body.display_name.as_deref(),
             persona: body.persona.as_deref(),
+            voice_instructions: body.voice_instructions.as_deref(),
         },
     )
     .await?;
@@ -3546,7 +3555,7 @@ pub async fn update_agent(
     }
     Ok(Json(json!({"id": agent.id, "name": agent.name,
         "description": agent.description, "display_name": agent.display_name,
-        "persona": agent.persona, "model": agent.model,
+        "persona": agent.persona, "voice_instructions": agent.voice_instructions, "model": agent.model,
         "access_mode_override": agent.access_mode_override,
         "channel_checking_notice": agent.channel_checking_notice})))
 }

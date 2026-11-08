@@ -576,7 +576,9 @@ fn error_result_inner(
         AppError::Conflict(_) => {
             "The resource changed. Inspect it and request a new acknowledgement."
         }
-        AppError::AssistantAttachmentExpired => body.message.as_str(),
+        AppError::AssistantAttachmentExpired | AppError::ApprovalUnsupported => {
+            body.message.as_str()
+        }
         _ => "The account operation could not be completed. Review it in the NyxID UI.",
     };
     ToolResult {

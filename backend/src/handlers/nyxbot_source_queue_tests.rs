@@ -468,6 +468,7 @@ async fn specialist_owner_private_home_keeps_its_original_delivery_authority() {
             description: "Support".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,

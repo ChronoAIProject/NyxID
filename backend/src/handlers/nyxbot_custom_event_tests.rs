@@ -85,6 +85,7 @@ async fn custom_provider_key_isolated_for_two_channels_on_one_specialist() {
             description: "Receives independent custom events".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,

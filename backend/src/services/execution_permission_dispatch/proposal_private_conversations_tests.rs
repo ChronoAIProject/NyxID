@@ -377,6 +377,7 @@ async fn private_conversations_inputs_and_other_agents_still_need_their_own_perm
             description: "A separate specialist".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: crate::services::assistant_team_service::GrantTargets {
                 service_ids: vec![f.connection.clone()],
                 ..Default::default()

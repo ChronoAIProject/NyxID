@@ -1681,3 +1681,129 @@ async fn device_voice_cannot_inherit_enrolled_owner_permissions_or_task_root() {
         .await;
     }
 }
+
+#[tokio::test]
+async fn direct_voice_tools_use_bot_authority_without_widening_the_device_key() {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::services::assistant_team_service as team;
+    use axum::{Extension, Router, routing::post};
+    use serde_json::json;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    Box::pin(async {
+        let (mut f, voice, voice_service, raw) = setup("voice_device_vs_bot_tools").await;
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"ready"})))
+            .mount(&upstream)
+            .await;
+        let target = crate::services::assistant_authority_tests::connected(
+            &f.state.db,
+            &f.owner,
+            "panel-state",
+            &upstream.uri(),
+        )
+        .await;
+        let agent = team::agent_for_conversation(&f.state.db, &f.row)
+            .await
+            .unwrap();
+        team::set_grants(
+            &f.state.db,
+            &f.owner,
+            &agent.id,
+            team::GrantChange::Add(AgentGrants {
+                service_ids: vec![target.clone()],
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        let caller = auth(&f, &raw).await;
+        let board_key = caller.api_key_id.clone().unwrap();
+        let proof = keys::authorize(&f.state.db, &caller, &f.row.id)
+            .await
+            .unwrap();
+        let call = session::admit_for_client_key(
+            &f.state.db,
+            &f.owner,
+            &f.row.id,
+            &Uuid::new_v4().to_string(),
+            platform(&voice),
+            "fixture".into(),
+            "worker",
+            proof,
+        )
+        .await
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        f.state.config.base_url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/mcp", post(crate::handlers::mcp_transport::mcp_post))
+            .layer(Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Mcp,
+                ),
+            ))
+            .with_state(f.state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let read = super::tools::Invocation::parse(
+            "nyx__call_tool",
+            &json!({"tool_name":"panel-state__request",
+            "arguments_json":json!({"method":"GET","path":"/status"}).to_string()})
+            .to_string(),
+        )
+        .unwrap()
+        .unwrap();
+        let mut tools = super::tools::Executions::default();
+        let result = tools
+            .invoke(&f.state, &call, "delegation", "read", &read)
+            .await
+            .unwrap();
+        assert_ne!(result["isError"], true, "{result}");
+        assert!(result.to_string().contains("ready"), "{result}");
+        // Real MCP chat-key responses store camera pixels as turn attachments.
+        // The native Responses client must supply them as actual visual input.
+        use base64::Engine;
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a8ioAAAAASUVORK5CYII=";
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/snapshot"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(
+                base64::engine::general_purpose::STANDARD.decode(png).unwrap(),
+            ).insert_header("Content-Type", "image/png"))
+            .with_priority(1)
+            .mount(&upstream).await;
+        let photo = super::tools::Invocation::parse("nyx__call_tool",
+            &json!({"tool_name":"panel-state__request", "arguments_json":
+                json!({"method":"GET","path":"/snapshot"}).to_string()}).to_string(),
+        ).unwrap().unwrap();
+        let image = tools.invoke(&f.state, &call, "delegation", "photo", &photo).await.unwrap();
+        let (image_result, images) = super::tools::presentation(image);
+        assert_eq!(image_result["isError"], false, "{image_result}");
+        assert_eq!(images.len(), 1, "{image_result}");
+        assert_eq!(images[0]["image_url"], format!("data:image/png;base64,{png}"));
+        let list = super::tools::Invocation::parse("nyx__list_connected_services", "{}").unwrap().unwrap();
+        let repeated = tools.invoke(&f.state, &call, "delegation", "list", &list).await.unwrap();
+        assert!(super::tools::presentation(repeated).1.is_empty(), "Old pixels are not resent");
+        let board = key_service::get_api_key(&f.state.db, &f.owner, &board_key)
+            .await
+            .unwrap();
+        assert_eq!(board.allowed_service_ids, vec![voice_service]);
+        assert!(!board.allow_all_services);
+        assert!(!board.allowed_service_ids.contains(&target));
+        f.state
+            .db
+            .collection::<bson::Document>(KEYS)
+            .update_one(doc! {"_id":&board_key}, doc! {"$set":{"is_active":false}})
+            .await
+            .unwrap();
+        assert!(
+            tools
+                .invoke(&f.state, &call, "delegation", "revoked-board", &read)
+                .await
+                .is_err()
+        );
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 2);
+        tools.close(&f.state).await;
+        server.abort();
+    })
+    .await;
+}
