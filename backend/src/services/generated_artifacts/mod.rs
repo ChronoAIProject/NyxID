@@ -36,6 +36,7 @@ pub const GUIDANCE: &str = "\nA completed cloud execution does not prove file de
 
 pub fn eligible(chat: &super::assistant_acknowledgement_service::ChatAuthority) -> bool {
     !chat.guest
+        && !chat.execution_voice_task
         && !chat.platform_thread
         && chat.platform_origin.is_none()
         && !chat.invocation_controlled

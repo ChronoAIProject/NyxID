@@ -1530,34 +1530,19 @@ async fn specialist_guest_turns_never_use_owner_tools_or_ssh() {
         operation_descriptor::SshOperationKind::Exec,
         Some("ls"),
     );
-    let refused =
-        authorize_mcp_operation(&f.state, &auth, target.clone(), &ssh, Some(json!(1)), false)
-            .await
-            .unwrap_err();
+    let refused = authorize_mcp_operation(&f.state, &auth, target.clone(), &ssh, Some(json!(1)))
+        .await
+        .unwrap_err();
     assert_eq!(result(refused, true).await["error"], "owner_only");
-    authorize_mcp_operation(
-        &f.state,
-        &auth,
-        target.clone(),
-        &delete,
-        Some(json!(1)),
-        false,
-    )
-    .await
-    .unwrap_or_else(|_| panic!("DELETE"));
+    authorize_mcp_operation(&f.state, &auth, target.clone(), &delete, Some(json!(1)))
+        .await
+        .unwrap_or_else(|_| panic!("DELETE"));
     for method in ["GET", "POST", "PUT", "PATCH"] {
         let operation =
             operation_descriptor::build_mcp_descriptor(method, "/api/services/light/turn_on", None);
-        authorize_mcp_operation(
-            &f.state,
-            &auth,
-            target.clone(),
-            &operation,
-            Some(json!(1)),
-            false,
-        )
-        .await
-        .unwrap_or_else(|_| panic!("{method}"));
+        authorize_mcp_operation(&f.state, &auth, target.clone(), &operation, Some(json!(1)))
+            .await
+            .unwrap_or_else(|_| panic!("{method}"));
     }
 }
 

@@ -34,7 +34,6 @@ const CONTEXT_SECONDS: u64 = 120;
 pub(super) struct Completion {
     pub delegation: String,
     pub call_id: String,
-    pub can_execute: bool,
     pub result: AppResult<Value>,
 }
 
@@ -46,6 +45,7 @@ type Pending = Pin<Box<dyn Future<Output = Completion> + Send>>;
 pub(super) struct Workers {
     contexts: HashMap<String, Arc<tokio::sync::Mutex<Executions>>>,
     pending: FuturesUnordered<Pending>,
+    running: HashSet<String>,
 }
 
 impl Workers {
@@ -68,6 +68,7 @@ impl Workers {
             call_id.to_owned(),
             input.clone(),
         );
+        self.running.insert(call_id.clone());
         self.pending.push(Box::pin(async move {
             let result = context
                 .lock()
@@ -77,7 +78,6 @@ impl Workers {
             Completion {
                 delegation,
                 call_id,
-                can_execute: input.can_execute() && !result.as_ref().is_ok_and(task_required),
                 result,
             }
         }));
@@ -89,7 +89,18 @@ impl Workers {
     }
 
     pub(super) async fn next(&mut self) -> Option<Completion> {
-        self.pending.next().await
+        let completed = self.pending.next().await?;
+        self.running.remove(&completed.call_id);
+        Some(completed)
+    }
+
+    pub(super) fn status(&self) -> Value {
+        json!(
+            self.running
+                .iter()
+                .map(|id| json!({"call_id":id,"state":"pending"}))
+                .collect::<Vec<_>>()
+        )
     }
 
     pub(super) async fn finish(
@@ -129,16 +140,8 @@ impl Workers {
 
     pub(super) fn cancel_pending(&mut self) {
         self.pending = FuturesUnordered::new();
+        self.running.clear();
     }
-}
-
-/// This marker is authored by the authenticated MCP transport, outside service
-/// content. A service payload cannot turn a dispatched action into a safe retry.
-fn task_required(result: &Value) -> bool {
-    let meta = &result["_meta"][crate::services::mcp_service::RESULT_MODE_META];
-    result["isError"] == true
-        && meta["status"] == crate::services::mcp_service::TASK_REQUIRED
-        && meta["dispatched"] == false
 }
 
 pub(super) fn definitions() -> Vec<Value> {
@@ -310,12 +313,11 @@ impl Execution {
 #[derive(Default)]
 pub(super) struct Executions {
     active: HashMap<String, Execution>,
-    closed: HashSet<String>,
 }
 
 fn unavailable() -> Value {
     json!({"status":"outcome_unknown", "retry_allowed":false,
-        "detail":"No verified tool result is available. The operation may have executed. Report that uncertainty and end this delegation. Do not repeat it or submit the same work as another task. Wait for a new caller request before checking state or taking further action."})
+        "detail":"No verified tool result is available. The operation may have executed. Report that uncertainty. Do not repeat this operation or resubmit it as another task. A safe state query or other requested work may continue."})
 }
 
 pub(super) async fn validate_call(state: &AppState, call: &VoiceSession) -> AppResult<()> {
@@ -438,16 +440,21 @@ impl Executions {
         call_id: &str,
         input: &Invocation,
     ) -> AppResult<Value> {
-        if self.closed.contains(delegation) {
-            return Ok(unavailable());
-        }
         if !self.active.contains_key(delegation) {
             Box::pin(self.admit(state, call, delegation, input)).await?;
         }
         let execution = self
             .active
-            .get(delegation)
+            .get_mut(delegation)
             .ok_or(AppError::AssistantTurnRequired)?;
+        if input.can_execute() {
+            // Async service work may outlive a short inference, but never the
+            // authenticated call. HTTP itself keeps its separate 30s deadline.
+            execution.deadline = tokio::time::Instant::now()
+                + (call.deadline - chrono::Utc::now())
+                    .to_std()
+                    .map_err(|_| AppError::AssistantTurnRequired)?;
+        }
         let turn = execution
             .row
             .active_turn
@@ -468,79 +475,96 @@ impl Executions {
         // Configured server origin only. No provider-selected URL, session
         // fallback, redirect, retry, or forwarding of the caller's credential.
         let endpoint = format!("{}/mcp", state.config.base_url.trim_end_matches('/'));
-        let request = async {
-            let mut response = crate::services::proxy_service::no_redirect_http_client()
-                .post(&endpoint)
-                .header("x-api-key", credential.raw_key.as_str())
-                .header("accept", "application/json")
-                .json(
-                    &json!({"jsonrpc":"2.0", "id":call_id, "method":"tools/call",
-                    "params":{"name":input.name,"arguments":input.arguments,
-                        "_meta":{(crate::services::mcp_service::RESULT_MODE_META):crate::services::mcp_service::INLINE_ONLY}}}),
-                )
-                .send()
-                .await
-                .map_err(|_| AppError::VoiceProviderUnavailable)?;
-            if !response.status().is_success()
-                || response
-                    .content_length()
-                    .is_some_and(|n| n > MAX_BYTES as u64)
-            {
-                return Err(AppError::VoiceProviderUnavailable);
-            }
-            let mut bytes = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|_| AppError::VoiceProviderUnavailable)?
-            {
-                if bytes.len().saturating_add(chunk.len()) > MAX_BYTES {
+        let mut result = {
+            let request = async {
+                let mut response = crate::services::proxy_service::no_redirect_http_client()
+                    .post(&endpoint)
+                    .timeout(Duration::from_secs(REQUEST_SECONDS))
+                    .header("x-api-key", credential.raw_key.as_str())
+                    .header("accept", "application/json")
+                    .json(
+                        &json!({"jsonrpc":"2.0", "id":call_id, "method":"tools/call",
+                    "params":{"name":input.name,"arguments":input.arguments}}),
+                    )
+                    .send()
+                    .await
+                    .map_err(|_| AppError::VoiceProviderUnavailable)?;
+                if !response.status().is_success()
+                    || response
+                        .content_length()
+                        .is_some_and(|n| n > MAX_BYTES as u64)
+                {
                     return Err(AppError::VoiceProviderUnavailable);
                 }
-                bytes.extend_from_slice(&chunk);
-            }
-            let result: Value =
-                serde_json::from_slice(&bytes).map_err(|_| AppError::VoiceProviderUnavailable)?;
-            if result["jsonrpc"] != "2.0" || result["id"] != call_id {
-                return Err(AppError::VoiceProviderUnavailable);
-            }
-            if let Some(error) = result.get("error") {
-                return Ok(
-                    json!({"isError":true,"content":[{"type":"text","text":error.to_string()}]}),
-                );
-            }
-            result
-                .get("result")
-                .cloned()
-                .ok_or(AppError::VoiceProviderUnavailable)
-        };
-        tokio::pin!(request);
-        let limit = tokio::time::sleep_until(
-            execution
-                .deadline
-                .min(tokio::time::Instant::now() + Duration::from_secs(REQUEST_SECONDS)),
-        );
-        tokio::pin!(limit);
-        let mut renew = tokio::time::interval(Duration::from_secs(3));
-        let mut result = loop {
-            tokio::select! {
-                result = &mut request => break result.unwrap_or_else(|_| unavailable()),
-                _ = &mut limit => break unavailable(),
-                _ = execution.permit.cancelled() => break unavailable(),
-                _ = renew.tick() => {
-                    validate_call(state, call).await?;
-                    if engine::stop_requested(&state.db, &call.user_id, &execution.row.id, &turn.turn_id).await?
-                        || !engine::heartbeat(&state.db, &call.user_id, &execution.row.id, &turn.turn_id).await? {
-                        break unavailable();
+                let mut bytes = Vec::new();
+                while let Some(chunk) = response
+                    .chunk()
+                    .await
+                    .map_err(|_| AppError::VoiceProviderUnavailable)?
+                {
+                    if bytes.len().saturating_add(chunk.len()) > MAX_BYTES {
+                        return Err(AppError::VoiceProviderUnavailable);
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                let result: Value = serde_json::from_slice(&bytes)
+                    .map_err(|_| AppError::VoiceProviderUnavailable)?;
+                if result["jsonrpc"] != "2.0" || result["id"] != call_id {
+                    return Err(AppError::VoiceProviderUnavailable);
+                }
+                if let Some(error) = result.get("error") {
+                    return Ok(
+                        json!({"isError":true,"content":[{"type":"text","text":error.to_string()}]}),
+                    );
+                }
+                let mut result = result
+                    .get("result")
+                    .cloned()
+                    .ok_or(AppError::VoiceProviderUnavailable)?;
+                if result["isError"] == true {
+                    return Ok(result);
+                }
+                // Serial execution within this ordinary turn associates its watches
+                // with this exact call_id. The existing worker owns status/result
+                // polling; Voice only consumes its fenced, encrypted final result.
+                loop {
+                    if let Some(results) =
+                        crate::services::async_service_operation::take_results_for_live_turn(
+                            &state.db,
+                            &state.encryption_keys,
+                            &execution.row,
+                        )
+                        .await?
+                    {
+                        if !results.contexts.is_empty() {
+                            result = json!({"isError": !results.succeeded, "content":results.contexts.iter().map(|text|
+                            json!({"type":"text","text":text.as_str()})).collect::<Vec<_>>()});
+                        }
+                        return Ok(result);
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            };
+            tokio::pin!(request);
+            let limit = tokio::time::sleep_until(execution.deadline);
+            tokio::pin!(limit);
+            let mut renew = tokio::time::interval(Duration::from_secs(3));
+            loop {
+                tokio::select! {
+                    result = &mut request => break result.unwrap_or_else(|_| unavailable()),
+                    _ = &mut limit => break unavailable(),
+                    _ = execution.permit.cancelled() => break unavailable(),
+                    _ = renew.tick() => {
+                        validate_call(state, call).await?;
+                        if engine::stop_requested(&state.db, &call.user_id, &execution.row.id, &turn.turn_id).await?
+                            || !engine::heartbeat(&state.db, &call.user_id, &execution.row.id, &turn.turn_id).await? {
+                            break unavailable();
+                        }
                     }
                 }
             }
         };
         validate_call(state, call).await?;
-        let execution = self
-            .active
-            .get_mut(delegation)
-            .ok_or(AppError::AssistantTurnRequired)?;
         // Optional image delivery cannot turn an already verified action into
         // a failed/unknown action or trigger replay.
         if let Err(error) = execution.append_images(state, &mut result).await {
@@ -552,6 +576,12 @@ impl Executions {
                 content.push(json!({"type":"text","text":"Optional image input is unavailable. Keep the verified tool result; do not repeat the operation."}));
             }
         }
+        if result["status"] == "outcome_unknown" {
+            // End this exact turn before accepting another call. Any accepted
+            // async watch belongs to this call_id; a later tool must not consume
+            // its late result. Ordinary Stop owns upstream cancellation.
+            self.finish(state, delegation, true).await?;
+        }
         Ok(result)
     }
 
@@ -562,6 +592,9 @@ impl Executions {
         interrupted: bool,
     ) -> AppResult<()> {
         if let Some(execution) = self.active.get(delegation) {
+            if interrupted {
+                engine::request_stop_row(&state.db, &execution.row).await?;
+            }
             let result = engine::TurnResult {
                 text: String::new(),
                 session_id: None,
@@ -578,7 +611,6 @@ impl Executions {
             ))
             .await?;
             self.active.remove(delegation);
-            self.closed.insert(delegation.into());
         }
         Ok(())
     }

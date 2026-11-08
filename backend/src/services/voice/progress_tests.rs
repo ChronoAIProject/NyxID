@@ -1470,7 +1470,7 @@ async fn voice_loads_selected_bot_profile_and_service_guidance_for_all_clients()
 }
 
 #[tokio::test]
-async fn native_voice_direct_tools_do_not_replay_or_resubmit_as_backend_work() {
+async fn native_voice_tools_deduplicate_call_ids_and_allow_followup_work() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
     Box::pin(async {
         for unknown in [false, true] {
@@ -1496,11 +1496,11 @@ async fn native_voice_direct_tools_do_not_replay_or_resubmit_as_backend_work() {
             native.complete(&state, &call, &mut socket, completed).await.unwrap();
             assert_eq!(mcp.received_requests().await.unwrap().len(), 1);
             assert_eq!(state.db.collection::<VoiceRequest>(REQUESTS).count_documents(doc!{}).await.unwrap(),0);
-            // Even a fresh provider call ID cannot repeat an attempted effect
-            // via the full NyxBot task runner in this same delegation.
+            // A distinct tool call can request further work. Call-ID deduplication
+            // must not turn a read or unknown result into a delegation-wide ban.
             let mut next = native_created();
             next["event"]["response"]["id"] = json!("next-response");
-            let mut retry = native_item(json!({"request":"Read the temperature"}));
+            let mut retry = native_item(json!({"request":"Explain what temperature is suitable for the requested plants"}));
             retry["event"]["item"]["call_id"] = json!("repeat-as-task");
             let mut done = native_completed();
             done["event"]["response"]["id"] = json!("next-response");
@@ -1514,10 +1514,9 @@ async fn native_voice_direct_tools_do_not_replay_or_resubmit_as_backend_work() {
             let output: Value = serde_json::from_str(commands[0]["item"]["output"].as_str().unwrap()).unwrap();
             if unknown { assert_eq!(output["status"],"outcome_unknown"); assert_eq!(output["retry_allowed"],false); }
             else { assert_eq!(output["isError"],false); }
-            let refusal: Value = serde_json::from_str(commands[2]["item"]["output"].as_str().unwrap()).unwrap();
-            assert_eq!(refusal["status"],"refused");
-            assert_eq!(refusal["retry_allowed"],false);
-            assert_eq!(state.db.collection::<VoiceRequest>(REQUESTS).count_documents(doc!{}).await.unwrap(),0);
+            let receipt: Value = serde_json::from_str(commands[2]["item"]["output"].as_str().unwrap()).unwrap();
+            assert_eq!(receipt["status"],"queued");
+            assert_eq!(state.db.collection::<VoiceRequest>(REQUESTS).count_documents(doc!{}).await.unwrap(),1);
             assert_eq!(mcp.received_requests().await.unwrap().len(),1);
             native.close(&state).await;
             assert_eq!(state.db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
@@ -1796,8 +1795,7 @@ async fn native_voice_tool_argument_error_can_be_corrected_without_ending_the_ca
 }
 
 #[tokio::test]
-async fn native_voice_inline_refusal_routes_once_to_existing_durable_task() {
-    use crate::services::mcp_service::{INLINE_ONLY, RESULT_MODE_META, TASK_REQUIRED};
+async fn native_voice_tool_refusal_does_not_change_the_mcp_protocol_or_block_followup() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
     Box::pin(async {
         let (mut state, _, mut call)=super::super::tests::setup("voice_inline_route").await;
@@ -1806,8 +1804,7 @@ async fn native_voice_inline_refusal_routes_once_to_existing_durable_task() {
         state.config.base_url=mcp.uri();
         Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "jsonrpc":"2.0","id":"native-call","result":{"isError":true,
-                "content":[{"type":"text","text":"No operation dispatched; task-capable client required."}],
-                "_meta":{(RESULT_MODE_META):{"status":TASK_REQUIRED,"dispatched":false}}}
+                "content":[{"type":"text","text":"Invalid service arguments; no operation dispatched."}]}
         }))).mount(&mcp).await;
         let (mut socket,server,events)=fixture_socket().await;
         let mut native=native_state();
@@ -1817,12 +1814,11 @@ async fn native_voice_inline_refusal_routes_once_to_existing_durable_task() {
             native.event(&state,&mut call,&mut socket,&event,false).await.unwrap();
         }
         let completed=native.next().await.unwrap();
-        assert!(!completed.can_execute,"The transport proves nothing was dispatched");
         native.complete(&state,&call,&mut socket,completed).await.unwrap();
         let requests=mcp.received_requests().await.unwrap();
         assert_eq!(requests.len(),1);
         let params=requests[0].body_json::<Value>().unwrap();
-        assert_eq!(params["params"]["_meta"][RESULT_MODE_META],INLINE_ONLY);
+        assert!(params["params"].get("_meta").is_none());
         assert_eq!(state.db.collection::<VoiceRequest>(REQUESTS).count_documents(doc!{}).await.unwrap(),0);
         let mut next=native_created();next["event"]["response"]["id"]=json!("route-response");
         let text="Run the requested script and report its verified asynchronous result.";

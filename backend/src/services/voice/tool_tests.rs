@@ -208,9 +208,10 @@ async fn voice_tools_use_selected_bot_grants_and_live_revocation_through_real_mc
             tools
                 .invoke(&f.state, &call, "delegation", "closed", &read)
                 .await
-                .unwrap()["retry_allowed"],
-            false
+                .unwrap()["isError"],
+            true
         );
+        tools.close(&f.state).await;
         assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
         server.abort();
     })
@@ -249,9 +250,10 @@ async fn voice_tool_context_expiry_settles_the_turn_and_keeps_the_call_open() {
             tools
                 .invoke(&state, &call, "delegation", "again", &list)
                 .await
-                .unwrap()["retry_allowed"],
+                .unwrap()["isError"],
             false
         );
+        tools.close(&state).await;
         server.abort();
     })
     .await;
@@ -296,7 +298,23 @@ async fn voice_mcp_client_does_not_follow_redirects_with_bot_credentials() {
         assert_eq!(result["retry_allowed"], false);
         assert!(destination.received_requests().await.unwrap().is_empty());
         assert_eq!(origin.received_requests().await.unwrap().len(), 1);
+        assert!(
+            tools.active.is_empty(),
+            "Uncertain work cannot share a later call's turn"
+        );
+        let server = mcp_server(&mut state).await;
+        let followup = tools
+            .invoke(&state, &call, "delegation", "followup", &list)
+            .await
+            .unwrap();
+        assert_eq!(followup["isError"], false, "{followup}");
+        assert_eq!(
+            origin.received_requests().await.unwrap().len(),
+            1,
+            "No replay"
+        );
         tools.close(&state).await;
+        server.abort();
     })
     .await;
 }
@@ -323,8 +341,10 @@ async fn voice_tool_wait_keeps_coordinator_pollable_and_close_settles_pending_tu
             }
         }).await.unwrap();
         assert!(workers.pending());
+        assert_eq!(workers.status()[0]["call_id"],"list");
         tokio::time::timeout(Duration::from_secs(3), workers.close(&state)).await.unwrap();
         assert!(!workers.pending());
+        assert!(workers.status().as_array().unwrap().is_empty());
         assert_eq!(state.db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
             .count_documents(doc!{"voice_parent_conversation_id":&call.conversation_id,"active_turn":{"$ne":null}}).await.unwrap(),0);
         assert!(!super::super::session::refresh(&state.db,&call).await.unwrap().end_requested);
@@ -470,16 +490,282 @@ async fn voice_tool_cancel_after_durable_admission_keeps_exact_cleanup_identity(
     .await;
 }
 
-#[test]
-fn inline_refusal_marker_cannot_be_forged_by_service_content() {
-    use crate::services::mcp_service::{RESULT_MODE_META, TASK_REQUIRED};
-    let mode = json!({(RESULT_MODE_META):{"status":TASK_REQUIRED,"dispatched":false}});
-    assert!(task_required(&json!({"isError":true,"_meta":mode})));
-    for result in [
-        json!({"isError":false,"_meta":mode}),
-        json!({"isError":true,"content":[{"type":"text","text":json!({"_meta":mode}).to_string()}]}),
-        json!({"isError":true,"_meta":{(RESULT_MODE_META):{"status":TASK_REQUIRED,"dispatched":true}}}),
-    ] {
-        assert!(!task_required(&result), "{result}");
-    }
+#[tokio::test]
+async fn voice_async_tool_reuses_existing_watch_without_a_second_task() {
+    Box::pin(async {
+        use crate::models::async_service_operation::{AsyncServiceOperation, COLLECTION_NAME as WATCHES};
+        use crate::handlers::mcp_transport::async_operations;
+        use wiremock::matchers::path;
+        let mut f = direct_fixture("voice_async_tool_watch").await;
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/executions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"operation_id":"voice-op-1","status":"queued"})))
+            .expect(1).mount(&upstream).await;
+        Mock::given(method("GET")).and(path("/executions/voice-op-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status":"succeeded"})))
+            .mount(&upstream).await;
+        Mock::given(method("GET")).and(path("/executions/voice-op-1/result"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"output":"script finished"})))
+            .mount(&upstream).await;
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id=uuid::Uuid::new_v4().to_string(); catalog.slug="chrono-sandbox".into();
+        catalog.base_url=upstream.uri(); catalog.auth_method="none".into();
+        catalog.requires_user_credential=false; catalog.created_by="admin".into();
+        f.state.db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME).insert_one(&catalog).await.unwrap();
+        crate::services::catalog_spec_sync::sync_seeded_service_endpoints(&f.state.db).await.unwrap();
+        let service=crate::services::assistant_authority_tests::connected(
+            &f.state.db,&f.owner,"sandbox",&upstream.uri()).await;
+        f.state.db.collection::<Document>(crate::models::user_service::COLLECTION_NAME)
+            .update_one(doc!{"_id":&service},doc!{"$set":{"catalog_service_id":&catalog.id}}).await.unwrap();
+        let agent=team::agent_for_conversation(&f.state.db,&f.row).await.unwrap();
+        team::set_grants(&f.state.db,&f.owner,&agent.id,team::GrantChange::Add(AgentGrants{
+            service_ids:vec![service],..Default::default()})).await.unwrap();
+        crate::services::feature_flag_service::set_platform_override(&f.state.db,
+            crate::services::feature_flag_service::ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,true,&f.owner).await.unwrap();
+        let call=call(&f.state,&f.owner,&f.row.id).await;
+        let server=mcp_server(&mut f.state).await;
+        let state=f.state.clone();
+        let sweeper=tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                // Make polling due only after submission has completed. Advancing
+                // a submitting row invokes crash recovery, not normal polling.
+                state.db.collection::<Document>(WATCHES).update_many(doc!{"state":"waiting"},
+                    doc!{"$set":{"poll_at":bson::DateTime::from_millis(0)}}).await.unwrap();
+                Box::pin(async_operations::sweep(&state)).await.unwrap();
+            }
+        });
+        let mut tools=Executions::default();
+        let submit=invocation("nyx__call_tool",json!({"tool_name":"sandbox__submit_execution_handler",
+            "arguments_json":json!({"Idempotency-Key":"voice-async","script":"print('hello')","language":"python"}).to_string()}));
+        let result=tokio::time::timeout(Duration::from_secs(20),
+            tools.invoke(&f.state,&call,"delegation","async-call",&submit)).await.unwrap().unwrap();
+        assert!(result.to_string().contains("script finished"),"{result}");
+        let watch=f.state.db.collection::<AsyncServiceOperation>(WATCHES).find_one(doc!{}).await.unwrap().unwrap();
+        assert_eq!(watch.operation_id.as_deref(),Some("voice-op-1"));
+        assert_eq!(watch.state,"delivered");
+        assert!(watch.artifact_mode.is_none(), "Voice must not enter the web-only attachment workflow");
+        assert!(watch.result_encrypted.is_none());
+        assert_eq!(f.state.db.collection::<Document>(crate::models::assistant_voice::REQUESTS)
+            .count_documents(doc!{}).await.unwrap(),0,"No second Voice task is created");
+        tools.finish(&f.state,"delegation",false).await.unwrap();
+        sweeper.abort(); server.abort(); upstream.verify().await;
+    }).await;
+}
+
+#[tokio::test]
+async fn voice_service_policy_refuses_new_approval_but_uses_existing_live_grant() {
+    Box::pin(async {
+        use crate::services::approval_service as approvals;
+        let mut f = direct_fixture("voice_service_existing_approval").await;
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"temperature":22})))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let service = crate::services::assistant_authority_tests::connected(
+            &f.state.db,
+            &f.owner,
+            "sensor",
+            &upstream.uri(),
+        )
+        .await;
+        let agent = team::agent_for_conversation(&f.state.db, &f.row)
+            .await
+            .unwrap();
+        team::set_grants(
+            &f.state.db,
+            &f.owner,
+            &agent.id,
+            team::GrantChange::Add(AgentGrants {
+                service_ids: vec![service.clone()],
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        approvals::set_service_approval_config(
+            &f.state.db,
+            &f.owner,
+            &service,
+            "Sensor",
+            Some(true),
+            Some(&crate::models::service_approval_config::ApprovalMode::Grant),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let call = call(&f.state, &f.owner, &f.row.id).await;
+        let server = mcp_server(&mut f.state).await;
+        let mut tools = Executions::default();
+        let read = invocation(
+            "nyx__call_tool",
+            json!({"tool_name":"sensor__request",
+            "arguments_json":json!({"method":"GET", "path":"/temperature"}).to_string()}),
+        );
+        let refused = tools
+            .invoke(&f.state, &call, "delegation", "needs-approval", &read)
+            .await
+            .unwrap();
+        assert_eq!(refused["isError"], true, "{refused}");
+        assert!(
+            refused
+                .to_string()
+                .contains("Voice does not support approvals"),
+            "{refused}"
+        );
+        assert!(upstream.received_requests().await.unwrap().is_empty());
+        let auth = crate::mw::auth::api_key_auth_user_for_voice(
+            &f.state.db,
+            &tools.active["delegation"].row,
+        )
+        .await
+        .unwrap();
+        let now = chrono::Utc::now();
+        let grant = crate::models::approval_grant::ApprovalGrant {
+            execution_review: None,
+            execution_last_used_at: None,
+            execution_use: None,
+            execution: None,
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: f.owner.clone(),
+            service_id: service,
+            service_name: "Sensor".into(),
+            requester_type: auth.approval_requester_type().unwrap().into(),
+            requester_id: auth.approval_requester_id(),
+            requester_label: None,
+            approval_request_id: uuid::Uuid::new_v4().to_string(),
+            scope: None,
+            granted_at: now,
+            expires_at: now + chrono::Duration::hours(1),
+            revoked: false,
+            org_scoped: false,
+        };
+        f.state
+            .db
+            .collection::<crate::models::approval_grant::ApprovalGrant>("approval_grants")
+            .insert_one(&grant)
+            .await
+            .unwrap();
+        let allowed = tools
+            .invoke(&f.state, &call, "delegation", "existing-grant", &read)
+            .await
+            .unwrap();
+        assert_ne!(allowed["isError"], true, "{allowed}");
+        assert!(allowed.to_string().contains("22"), "{allowed}");
+        approvals::revoke_grant(&f.state.db, &f.owner, &grant.id)
+            .await
+            .unwrap();
+        let revoked = tools
+            .invoke(&f.state, &call, "delegation", "revoked", &read)
+            .await
+            .unwrap();
+        assert_eq!(revoked["isError"], true, "{revoked}");
+        for collection in ["approval_requests", "assistant_acknowledgements"] {
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "{collection}"
+            );
+        }
+        tools.close(&f.state).await;
+        server.abort();
+        upstream.verify().await;
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn voice_action_and_permission_requests_refuse_without_creating_cards() {
+    Box::pin(async {
+        use crate::services::assistant_acknowledgement_service as acks;
+        let (mut state, _, call) = super::super::tests::setup("voice_no_new_approvals").await;
+        let server = mcp_server(&mut state).await;
+        let mut tools = Executions::default();
+        let list = invocation("nyx__list_connected_services", json!({}));
+        tools
+            .invoke(&state, &call, "delegation", "list", &list)
+            .await
+            .unwrap();
+        let row = &tools.active["delegation"].row;
+        let chat = acks::for_key(&state.db, &call.user_id, Some(&row.credential_api_key_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(chat.execution_voice_task);
+        let need = acks::ConfirmationNeed {
+            org_instruction: Default::default(),
+            class: acks::OwnerActionClass::Change,
+            mode: None,
+            webhook: false,
+            policy: true,
+            delegation: false,
+        };
+        let refusal = acks::confirm_action(
+            &state.db,
+            &chat,
+            "test_action",
+            &json!({}),
+            &need,
+            "Needs a decision",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(refusal["error"], "voice_approval_unsupported");
+        let refusal = acks::confirm_action(
+            &state.db,
+            &chat,
+            "test_action",
+            &json!({"acknowledgement_id":"unknown"}),
+            &need,
+            "Needs a decision",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(refusal["error"], "voice_approval_unsupported");
+        let request = acks::request(
+            &state.db,
+            &chat,
+            acks::Request {
+                kind: "service",
+                service: Some(("service", "catalog", "Test")),
+                tool: None,
+                arguments: None,
+                summary: "New access",
+                platform: false,
+            },
+        )
+        .await;
+        assert!(matches!(request, Err(AppError::VoiceApprovalUnsupported)));
+        for collection in [
+            "assistant_acknowledgements",
+            "approval_requests",
+            crate::models::assistant_sharing::CONSENTS_COLLECTION_NAME,
+        ] {
+            assert_eq!(
+                state
+                    .db
+                    .collection::<Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "{collection}"
+            );
+        }
+        tools.close(&state).await;
+        server.abort();
+    })
+    .await;
 }

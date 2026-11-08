@@ -83,10 +83,13 @@ async fn device_task(
 async fn audit_device_voice_cannot_decide_an_owner_action_but_owner_can() {
     Box::pin(async {
         let (f, _, call, _) = device_task("audit_device_owner_decision").await;
-        let chat = acks::for_key(&f.state.db, &f.owner, Some(&f.row.credential_api_key_id))
+        let mut chat = acks::for_key(&f.state.db, &f.owner, Some(&f.row.credential_api_key_id))
             .await
             .unwrap()
             .unwrap();
+        // Seed a legacy owner card. New Voice requests cannot create cards,
+        // but device authority must still never decide an existing owner card.
+        chat.execution_voice_task = false;
         let card = Box::pin(acks::request(
             &f.state.db,
             &chat,

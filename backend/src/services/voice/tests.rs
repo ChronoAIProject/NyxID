@@ -861,10 +861,13 @@ pub(super) async fn pending_card(
     ))
     .await
     .unwrap();
-    let authority = acks::for_key(db, &call.user_id, Some(&thread.credential_api_key_id))
+    let mut authority = acks::for_key(db, &call.user_id, Some(&thread.credential_api_key_id))
         .await
         .unwrap()
         .unwrap();
+    // Seed a legacy owner card to exercise existing-card races and presentation.
+    // Production Voice requests are separately tested to create no new cards.
+    authority.execution_voice_task = false;
     Box::pin(acks::request(
         db,
         &authority,
@@ -1940,11 +1943,8 @@ async fn execution_permission_voice_hidden_task_retains_root_and_cancellation() 
 }
 
 #[tokio::test]
-async fn execution_proposal_v2_voice_approval_resumes_original_hidden_task_without_model_retry() {
-    use crate::services::{
-        assistant_voice as voice,
-        execution_permission_dispatch::{phase_b_tests, proposals},
-    };
+async fn voice_backend_task_refuses_approval_before_proposal_or_dispatch() {
+    use crate::services::{assistant_voice as voice, execution_permission_dispatch::phase_b_tests};
     use axum::{Extension, Router, body::Body, http::Request, routing::any};
     use tower::ServiceExt;
     let (state, visible, mut call) = setup("proposal_voice_v2").await;
@@ -1986,7 +1986,7 @@ async fn execution_proposal_v2_voice_approval_resumes_original_hidden_task_witho
         .respond_with(
             wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true})),
         )
-        .expect(1)
+        .expect(0)
         .mount(&server)
         .await;
     let mut service = test_auto_connected_catalog_service();
@@ -2066,99 +2066,21 @@ async fn execution_proposal_v2_voice_approval_resumes_original_hidden_task_witho
         "{}",
         String::from_utf8_lossy(&body)
     );
-    let pending = state
-        .db
-        .collection::<crate::models::approval_request::ApprovalRequest>("approval_requests")
-        .find_one(doc! {"execution_proposal.version":2})
-        .await
-        .unwrap()
-        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"], "voice_approval_unsupported", "{body}");
+    for collection in ["approval_requests", "assistant_acknowledgements"] {
+        assert_eq!(
+            state
+                .db
+                .collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+            "{collection}"
+        );
+    }
     assert!(server.received_requests().await.unwrap().is_empty());
-    let p = proposals::v2::proposal(&pending).unwrap();
-    assert_eq!(
-        p.task.as_ref().unwrap().task,
-        row.active_turn
-            .as_ref()
-            .unwrap()
-            .execution_task
-            .as_ref()
-            .unwrap()
-            .task
-    );
-    let choice = p.choices.iter().find(|c| c.id == "operation").unwrap();
-    proposals::decide(
-        &state,
-        &visible.user_id,
-        &pending.id,
-        &proposals::Decision {
-            approved: true,
-            expected_revision: p.revision,
-            choice_id: Some(choice.id.clone()),
-            choice_digest: Some(choice.digest.clone()),
-            idempotency_key: Uuid::new_v4().to_string(),
-        },
-    )
-    .await
-    .unwrap();
-    engine::finish_turn(
-        &state.db,
-        &row,
-        &row.credential_api_key_id,
-        &Uuid::new_v4().to_string(),
-        &engine::TurnResult {
-            text: "Review the permission request".into(),
-            session_id: None,
-            response_id: None,
-            error: None,
-        },
-    )
-    .await
-    .unwrap();
-    let continuation = state
-        .db
-        .collection::<crate::models::assistant_voice::VoiceRequest>(
-            crate::models::assistant_voice::REQUESTS,
-        )
-        .find_one(doc! {"source_id":format!("execution-decision-v2:{}",pending.id)})
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        continuation.root_request_id.as_deref(),
-        Some(request.id.as_str())
-    );
-    assert_eq!(
-        continuation.task_conversation_id,
-        request.task_conversation_id
-    );
-    let input = state
-        .db
-        .collection::<crate::models::assistant_message::AssistantMessage>("assistant_messages")
-        .find_one(doc! {"_id": &continuation.message_id})
-        .await
-        .unwrap()
-        .unwrap();
-    let mut next = engine::TurnStart::from(&turn(Some(hidden), &input.text));
-    next.execution_enrollment = true;
-    let next = Box::pin(engine::begin_turn_with_voice(
-        &state.db,
-        &visible.user_id,
-        next,
-        &state.encryption_keys,
-        Some(&continuation.id),
-    ))
-    .await
-    .unwrap();
-    let egress = crate::handlers::assistant_nyxagent::http_egress(
-        state.clone(),
-        test_auth_user(&visible.user_id),
-    );
-    let result = proposals::resume_turn(&state, egress.as_ref(), &next)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(result.contains("completed"), "{result}");
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
     server.verify().await;
     state.db.drop().await.unwrap();
 }

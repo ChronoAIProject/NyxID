@@ -256,6 +256,7 @@ pub async fn create_request(
         chat.as_ref(),
     )
     .await?;
+    approval_service::require_voice_approval_supported(&outcome, chat.as_ref())?;
     let pending = match outcome {
         approval_service::ApprovalOutcome::NeedsApproval(pending)
             if pending.resolution.mode == ApprovalMode::PerRequest =>

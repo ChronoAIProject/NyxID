@@ -1373,6 +1373,10 @@ pub(crate) async fn authorize_ssh_access_for_connection(
         auth_user.assistant_chat.as_deref(),
     )
     .await?;
+    approval_service::require_voice_approval_supported(
+        &approval_outcome,
+        auth_user.assistant_chat.as_deref(),
+    )?;
     if let Some(connection) = connection {
         auth_context.mode = connection.ssh_auth_mode;
         auth_context.service_slug.clone_from(&connection.slug);

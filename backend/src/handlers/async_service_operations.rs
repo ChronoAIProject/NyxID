@@ -157,7 +157,6 @@ pub(super) async fn call(
             service,
             &prepared.operation_descriptor(),
             None,
-            false,
         )
         .await
         .map_err(|_| denied())?;

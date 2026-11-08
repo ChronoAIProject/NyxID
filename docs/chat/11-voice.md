@@ -23,6 +23,11 @@ authorizes access to that Bot's Voice connection; it is never the tool credentia
 Voice is a client of the authenticated MCP protocol, not a second authorization
 or service executor. The web Voice authentication routes remain unchanged.
 
+Voice uses already granted authority and does not initiate new approvals.
+Calls that still require a decision return `voice_approval_unsupported` before
+creating an approval request or executing the operation. The confirmation
+protocol below remains for preexisting cards and continuations only.
+
 Use OpenAI **`gpt-live-1`**, native Responses delegation, browser WebRTC audio and a
 server-owned sideband. Use xAI **`grok-voice-think-fast-2.0`**, pinned rather than
 the mutable `grok-voice-latest` alias, through a NyxID WebSocket relay. Both use
@@ -182,34 +187,37 @@ revocation. Stop outstanding turns and close voice on detected access loss.
   Every tool request authenticates again, so grant and operation-scope revocation
   applies immediately. Provider output cannot select an acting person, Bot,
   credential, endpoint origin or approval identity.
-* The coordinator renews the turn during provider thinking and tool requests.
-  A tool request is bounded to 30 seconds and 256 KiB; the delegation's execution
-  context lasts at most 120 seconds. Terminal Responses output, call closure,
-  Stop or expiry settles the normal turn and releases the slot. Native sessions
-  are never reconstructed or replayed after a worker restart. Direct tool turns
-  keep the existing activity/audit trail, linked to the visible voice thread.
-* Direct tool calls declare the generic MCP `inline-only` result capability.
-  When an existing service policy requires a pending approval, MCP refuses
-  before creating a card or dispatching. The same Bot can submit the complete
-  request to its ordinary task path, which owns the existing approval and
-  durable result continuation. Short Voice tool timeouts must not turn a known
-  approval wait into an unknown action outcome.
-  The transport refuses published asynchronous operations and native workflow
-  tools before dispatch or creating watches/approval requests. Its structured
-  `task-required` / `dispatched:false` receipt allows the native model to submit
-  the complete request through the existing task runner, provided no earlier
-  direct operation was attempted. Normal task-capable MCP clients retain their
-  watch, result, Stop and confirmation lifecycle. This is a per-request transport
-  restriction, not another authorization rule or a Voice-dependent MCP executor.
-* A possibly dispatched operation is never automatically resubmitted as a full
-  task, including when the connection fails or its result exceeds the bound.
-  An uncertain result explicitly prohibits retry and ends that delegation; a new caller request is required before checking state. Discovery may be followed by
-  full task submission before any executable tool has been attempted.
-* `get_task_status({})` remains a read-only view of at most eight already accepted
-  full tasks from the exact call, actor and conversation. It cannot select a
-  foreign task, start, repeat, cancel or approve work. Direct MCP results return
-  through native function outputs; accepted full tasks retain detached result
-  announcements and their existing Stop/confirmation flow.
+* The coordinator renews the ordinary turn while a tool is running. HTTP calls
+  are bounded to 30 seconds and 256 KiB. Discovery contexts expire after 120
+  seconds; service operations can remain active within the authenticated call's
+  deadline. Pending tools keep the existing call idle timer alive. Terminal
+  output, call closure or expiry settles the turn and releases the pool slot.
+* Published asynchronous services use their existing `async_operation` contract
+  and `assistant_async_operations` watch. The existing worker owns submit,
+  status/result polling, authority checks, encrypted result retention and cancel.
+  Voice correlates the final result with the native function's `call_id`. It
+  consumes the originating turn's result/event transactionally, without launching
+  another inference or submitting the operation again as a full Bot task.
+  Closing an active tool context requests cancellation through the same watch
+  lifecycle. Cancellation does not undo an already completed remote effect.
+* Voice does not initiate approvals, for either direct tools or backend tasks.
+  Existing grants, exact previously approved authority and automatically allowed
+  policy outcomes remain usable. The refusal check runs after existing
+  execution-permission coverage, at each transport's final approval gate.
+  An operation needing a new decision returns
+  `voice_approval_unsupported` before creating a card, proposal, consent request or
+  dispatching the operation. Ordinary text and other MCP clients retain their
+  approval behavior. No MCP protocol extension or per-client capability flag is
+  needed; the existing server-owned Voice execution source identifies the caller.
+* Duplicate native events are deduplicated by call ID. An unknown result prohibits
+  blindly repeating that operation, while safe state reads and other requested
+  work may continue. Performing a direct read does not prevent a later complex
+  task. Tool content never grants authority or turns uncertainty into success.
+* `get_task_status({})` shows pending direct tool calls by their native `call_id`
+  and at most eight accepted full tasks from the exact call, actor and conversation.
+  Direct calls return
+  their final results through native function outputs; full tasks keep their
+  existing result announcements and Stop lifecycle.
 * xAI retains its current full-task adapter. Its built-in `web_search`, `x_search`,
   `file_search` and `mcp` stay disabled; they would bypass NyxID authority.
 
@@ -625,7 +633,8 @@ remain readable; complete instrumentation requires upgraded coordinators.
 * With multiple tasks, ask which one or use its on-screen Stop. A stale cancel
   cannot stop whichever unrelated turn happens to be active later: compare the
   request's expected turn ID in the same transaction as Stop.
-* "Cancel my booking" is a domain operation and delegates with normal approvals;
+* "Cancel my booking" is a domain operation and uses existing permissions;
+  if a new approval is needed, Voice reports that approvals are unsupported;
   it is not a synonym for stopping NyxAgent execution. Stopping cannot undo an
   already committed remote effect. Report uncertain outcome rather than success.
 * A changed date/target is a new request version. Do not silently mutate a running
@@ -1024,7 +1033,10 @@ then ask for a real interruption. Store only pass/fail/device-class metadata,
 no recording. Suggest lower volume, headphones or PTT on repeated failures.
 Mute/end must work locally even if NyxID or the provider is unavailable.
 
-## 11. Spoken confirmation: server-enforced read-back
+## 11. Existing spoken confirmations: server-enforced read-back
+
+Compatibility behavior for preexisting approval cards follows. New Voice work
+cannot raise these cards; it follows the refusal policy in the Quick path above.
 
 Voice confirmation is a two-turn exchange. The existing one-use acknowledgement
 remains the authority and transcript record; its on-screen card is an optional

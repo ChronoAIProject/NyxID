@@ -368,6 +368,20 @@ pub async fn evaluate_for_chat(
     Ok((outcome, None))
 }
 
+/// Check the final outcome, after execution-permission coverage is applied.
+/// Policy evaluation alone cannot tell whether an existing grant covers it.
+pub(crate) fn require_voice_approval_supported(
+    outcome: &ApprovalOutcome,
+    chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
+) -> AppResult<()> {
+    if matches!(outcome, ApprovalOutcome::NeedsApproval(_))
+        && chat.is_some_and(|chat| chat.execution_voice_task)
+    {
+        return Err(AppError::VoiceApprovalUnsupported);
+    }
+    Ok(())
+}
+
 pub async fn record_chat_approval(
     db: &Database,
     chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,

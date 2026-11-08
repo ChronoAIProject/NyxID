@@ -210,8 +210,14 @@ async fn authorize_inner(
                     json!({"error": "shared_connection_skipped", "connection_id": service.id}),
                 ));
             }
+            _ if voice || chat.execution_voice_task => {
+                return Err(AppError::VoiceApprovalUnsupported);
+            }
             _ => return Ok(Err(card(&row))),
         }
+    }
+    if voice || chat.execution_voice_task {
+        return Err(AppError::VoiceApprovalUnsupported);
     }
     let now = Utc::now();
     let scope_key = super::mcp_service::canonical_sha256(json!({

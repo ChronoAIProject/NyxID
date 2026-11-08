@@ -818,6 +818,11 @@ pub async fn confirm_action_with(
         if consume_action(db, chat, id, tool, args).await? {
             return Ok(None);
         }
+        if chat.execution_voice_task {
+            return Ok(Some(json!(
+                AppError::VoiceApprovalUnsupported.response_body()
+            )));
+        }
         if on_invalid == InvalidCard::Refuse {
             // Only explain this caller's exact card. A foreign or mismatched
             // id must not disclose another conversation or operation.
@@ -843,6 +848,11 @@ pub async fn confirm_action_with(
                     the call. Ask the user before requesting a new action card.",
             })));
         }
+    }
+    if chat.execution_voice_task {
+        return Ok(Some(json!(
+            AppError::VoiceApprovalUnsupported.response_body()
+        )));
     }
     let summary = if need.webhook {
         format!("Webhook automation requests: {summary}. Review this action before allowing it.")
@@ -1524,6 +1534,41 @@ pub async fn for_key(
     Box::pin(for_key_with_access(db, user, key, None)).await
 }
 
+// Follow the existing server-authored reporting lineage so a Voice task cannot
+// create an approval indirectly by assigning the operation to a specialist.
+async fn voice_execution(db: &Database, row: &AssistantConversation) -> AppResult<bool> {
+    let mut current = row.clone();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if current.voice_parent_conversation_id.is_some()
+            || current
+                .active_turn
+                .as_ref()
+                .is_some_and(|t| t.voice_request_id.is_some())
+        {
+            return Ok(true);
+        }
+        let Some(parent) = current
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.report_to.as_deref())
+        else {
+            return Ok(false);
+        };
+        if seen.len() >= 16 || !seen.insert(parent.to_owned()) {
+            return Ok(false);
+        }
+        let Some(row) = db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(doc! {"_id":parent,"user_id":&row.user_id})
+            .await?
+        else {
+            return Ok(false);
+        };
+        current = row;
+    }
+}
+
 pub async fn for_key_with_access(
     db: &Database,
     user: &str,
@@ -1622,11 +1667,7 @@ pub async fn for_key_with_access(
             .as_ref()
             .map(|b| b.group_id.clone())
             .or_else(|| conversation.group_id.clone()),
-        execution_voice_task: conversation.voice_parent_conversation_id.is_some()
-            || conversation
-                .active_turn
-                .as_ref()
-                .is_some_and(|t| t.voice_request_id.is_some()),
+        execution_voice_task: voice_execution(db, &conversation).await?,
         execution_unsupported: (conversation.automation_thread
             && conversation.voice_parent_conversation_id.is_none())
             || conversation.platform_thread.is_some()
@@ -2433,6 +2474,9 @@ async fn request_candidate_in_session(
             .await?
     {
         return Ok((existing, false));
+    }
+    if chat.execution_voice_task {
+        return Err(AppError::VoiceApprovalUnsupported);
     }
     let mut row = candidate.clone();
     row.routing = routing;

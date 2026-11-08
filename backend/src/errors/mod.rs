@@ -154,6 +154,8 @@ pub enum AppError {
     VoiceQueueFull,
     #[error("Voice provider adapters are not enabled")]
     VoiceProviderUnavailable,
+    #[error("Voice does not support approvals. This operation was not executed.")]
+    VoiceApprovalUnsupported,
 
     #[error("Service monitoring is unavailable")]
     MonitoringUnavailable,
@@ -893,6 +895,7 @@ impl AppError {
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive | Self::ErasurePreparing => StatusCode::CONFLICT,
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
+            Self::VoiceApprovalUnsupported => StatusCode::FORBIDDEN,
             Self::SecurityReadinessUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::VoiceProviderUnavailable | Self::MonitoringUnavailable => {
                 StatusCode::SERVICE_UNAVAILABLE
@@ -1127,6 +1130,7 @@ impl AppError {
             Self::Conflict(_) => 1004,
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
+            Self::VoiceApprovalUnsupported => 12502,
             Self::SecurityReadinessUnavailable => 12900,
             Self::VoiceProviderUnavailable => 12501,
             Self::MonitoringUnavailable => 13300,
@@ -1411,6 +1415,7 @@ impl AppError {
             Self::AssistantTurnActive => "turn_active",
             Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
+            Self::VoiceApprovalUnsupported => "voice_approval_unsupported",
             Self::SecurityReadinessUnavailable => "security_readiness_unavailable",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
             Self::MonitoringUnavailable => "monitoring_unavailable",
