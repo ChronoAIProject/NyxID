@@ -273,6 +273,16 @@ const RECOVERY_COOLDOWN_SECONDS: i64 = 5;
 // separate permanent ledger; generic allocations need a conservative bound.
 const GENERIC_CREATION_REPLAY_HOURS: i64 = 23;
 
+// Admission-only selector from the human recovery gateway; never forwarded.
+// It narrows ordinary admission to an existing submission and grants no authority.
+pub(super) const RECOVERY_SUBMISSION_HEADER: &str = "x-nyxid-cma-recovery-submission";
+pub(super) fn recovery_submission(creation: &NyxbotCmaCreation) -> String {
+    format!(
+        "{}:{}:{}",
+        creation.id, creation.sandbox_generation, creation.submission_generation
+    )
+}
+
 // No Debug: the binding includes an idempotency key and no caller may log it.
 pub struct CmaDispatchPermit {
     db: Database,
@@ -763,6 +773,26 @@ pub async fn admit(
             return Err(completed());
         }
     }
+    let recovery = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case(RECOVERY_SUBMISSION_HEADER))
+        .map(|(_, value)| value)
+        .collect::<Vec<_>>();
+    if recovery.len() > 1 {
+        return Err(invalid());
+    }
+    if let Some(identity) = recovery.first() {
+        let previous = pending_creation.as_ref().ok_or_else(drift)?;
+        if !creates_sandbox || **identity != recovery_submission(previous) {
+            return Err(drift());
+        }
+        require_recovery_current(&db, previous).await?;
+        let parent = sandboxes::get_owned(&db, owner, &previous.sandbox_ref_id).await?;
+        require_parent(previous, &parent)?;
+        permit.sandbox = Some(parent);
+        permit.creation = Some(previous.clone());
+        return Ok(permit);
+    }
     let sandbox = if creates_sandbox {
         sandboxes::begin_creation(
             &db,
@@ -970,8 +1000,9 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
                 self.owner.clone(),
                 sandbox.clone(),
                 self.operation.clone(),
+                self.key.clone(),
             );
-            super::transaction_service::run_db_only(&self.db, &context, |tx, (db, owner, before, operation)| {
+            super::transaction_service::run_db_only(&self.db, &context, |tx, (db, owner, before, operation, key)| {
                 Box::pin(async move {
                     super::erasure_admission::fence_in_session(db, owner, tx).await?;
                     let collection = db.collection::<NyxbotCmaSandbox>(crate::models::nyxbot_cma_sandbox::COLLECTION_NAME);
@@ -979,7 +1010,8 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
                         .return_document(ReturnDocument::After).session(&mut *tx).await?.ok_or_else(drift)?;
                     if matches!(operation, Operation::Agent { admission:true,.. } | Operation::Sandbox { admission:true,.. }) { require_available_parent(&fresh)?; }
                     if matches!(operation, Operation::Sandbox { retire:true,.. }) && fresh.admission_state != SandboxAdmissionState::Retired {
-                        let result = collection.update_one(sandboxes::observation_filter(&fresh), doc! {"$set":{"admission_state":"retiring","retire_requested_at":fresh.retire_requested_at.map(bson::DateTime::from_chrono).unwrap_or_else(bson::DateTime::now),"updated_at":bson::DateTime::now()}}).session(tx).await?;
+                        let set = sandboxes::retirement_intent_set(&fresh, key.as_deref().ok_or_else(invalid)?)?;
+                        let result = collection.update_one(sandboxes::observation_filter(&fresh), doc! {"$set":set}).session(tx).await?;
                         if result.matched_count != 1 { return Err(drift()); }
                     }
                     Ok(())
@@ -1010,7 +1042,12 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
         })
         .await
         .map_err(|_| AppError::Conflict("cma_creation_result_unknown".into()))??;
-        if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+        let parsed = serde_json::from_slice::<Value>(&bytes);
+        // Keep dispatched creations uncertain when a successful receipt cannot be decoded.
+        if self.creation.is_some() && status.is_success() && parsed.is_err() {
+            return Err(AppError::Conflict("cma_creation_result_unknown".into()));
+        }
+        if let Ok(value) = parsed {
             if let Some(creation) = &self.creation {
                 if status.is_success() {
                     let receipt = receipt_for(&self.operation, &value)?;
@@ -1226,6 +1263,104 @@ pub async fn record_creation_observation(
     }
     // A failed/unknown lifecycle without an Agent is not absence proof. Keep
     // both the slot and encrypted request, independent of chat/watch retention.
+    Ok(())
+}
+
+/// Explicit owner recovery of the original Sandbox creation. The local identity
+/// and generation select recovery material; the caller cannot replace it.
+pub async fn recover_creation(
+    db: &Database,
+    keys: &EncryptionKeys,
+    gateway: &CatalogCmaGateway,
+    owner: &str,
+    id: &str,
+    generation: i64,
+) -> AppResult<sandboxes::SandboxCommandDto> {
+    super::nyxbot_cma_agent_service::require_enabled(db, owner).await?;
+    let parent = sandboxes::get_owned(db, owner, id).await?;
+    sandboxes::require_generation(&parent, generation)?;
+    let creation = db
+        .collection::<NyxbotCmaCreation>(COLLECTION_NAME)
+        .find_one(doc! {
+            "user_id":owner,"cma_service_id":&parent.cma_service_id,
+            "sandbox_ref_id":id,"sandbox_generation":generation,"creates_sandbox":true,
+            "idempotency_key":parent.idempotency_key.as_deref().ok_or_else(drift)?,
+        })
+        .await?
+        .ok_or_else(|| AppError::Conflict("cma_creation_recovery_unavailable".into()))?;
+    require_parent(&creation, &parent)?;
+    verify_creation(gateway, &creation).await?;
+    if creation.submission_state == "confirmed_not_created" {
+        return Err(drift());
+    }
+    if creation.submission_state != "confirmed" {
+        if let Some(operation) = &creation.operation_id {
+            let value = gateway.get_lifecycle(owner, operation).await?;
+            record_creation_observation(
+                db,
+                gateway,
+                owner,
+                &creation.cma_service_id,
+                operation,
+                &value,
+            )
+            .await?;
+        } else if let Some(agent) = &creation.cma_agent_id {
+            finish_agent(db, gateway, &creation, agent).await?;
+        } else if let Some(sandbox) = &creation.cma_sandbox_id {
+            finish_sandbox(db, gateway, &creation, sandbox).await?;
+        } else {
+            require_recovery_current(db, &creation).await?;
+            let body = sandboxes::recover_creation_request(db, keys, owner, id, generation).await?;
+            if sandboxes::prepare_creation_request(&body)?.hash != creation.request_hash {
+                return Err(drift());
+            }
+            gateway.replay_creation(keys, &creation, &body).await?;
+        }
+    }
+    let current = db
+        .collection::<NyxbotCmaCreation>(COLLECTION_NAME)
+        .find_one(creation_filter(&creation))
+        .await?
+        .ok_or_else(drift)?;
+    let parent = sandboxes::get_owned(db, owner, id).await?;
+    require_parent(&current, &parent)?;
+    Ok(sandboxes::SandboxCommandDto {
+        sandbox: sandboxes::SandboxDto::from(&parent),
+        pending: current.submission_state != "confirmed",
+    })
+}
+
+/// Recheck the exact saved submission after ordinary admission as well. Its
+/// dispatch guard then fences this generation transactionally before sending.
+pub(super) async fn require_recovery_current(
+    db: &Database,
+    expected: &NyxbotCmaCreation,
+) -> AppResult<()> {
+    let current = db
+        .collection::<NyxbotCmaCreation>(COLLECTION_NAME)
+        .find_one(creation_filter(expected))
+        .await?
+        .ok_or_else(drift)?;
+    if !current.creates_sandbox
+        || !matches!(current.submission_state.as_str(), "unknown" | "submitted")
+        || current.first_dispatched_at.is_none()
+        || current.operation_id.is_some()
+        || current.cma_agent_id.is_some()
+        || current.cma_sandbox_id.is_some()
+    {
+        return Err(drift());
+    }
+    require_replay_window(&current, Utc::now())?;
+    let parent = sandboxes::get_owned(db, &current.user_id, &current.sandbox_ref_id).await?;
+    require_parent(&current, &parent)?;
+    require_available_parent(&parent)?;
+    if parent.cma_sandbox_id.is_some()
+        || parent.idempotency_key.as_deref() != Some(current.idempotency_key.as_str())
+        || parent.request_hash.as_deref() != Some(current.request_hash.as_str())
+    {
+        return Err(drift());
+    }
     Ok(())
 }
 

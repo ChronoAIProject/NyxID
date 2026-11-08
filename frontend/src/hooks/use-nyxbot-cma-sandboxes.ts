@@ -118,22 +118,25 @@ interface LifecycleRequest {
   generation: number;
   idempotencyKey: string;
 }
+type SandboxCommandRequest = Omit<LifecycleRequest, "idempotencyKey"> &
+  (
+    | { command: "pause" | "revive"; idempotencyKey: string }
+    | { command: "recover_creation"; idempotencyKey?: never }
+  );
 export function useCmaSandboxCommand() {
   return useCmaMutation(
     async (
-      {
-        id,
-        generation,
-        command,
-        idempotencyKey,
-      }: LifecycleRequest & { command: "pause" | "revive" },
+      { id, generation, command, idempotencyKey }: SandboxCommandRequest,
       authorityGuard,
     ) =>
       cmaSandboxMutationSchema.parse(
         await assistantJson(`${BASE}/${encodeURIComponent(id)}/commands`, {
           method: "POST",
           body: { command, generation },
-          headers: { "Idempotency-Key": idempotencyKey },
+          headers:
+            command === "recover_creation"
+              ? undefined
+              : { "Idempotency-Key": idempotencyKey! },
           authorityGuard,
         }),
       ),

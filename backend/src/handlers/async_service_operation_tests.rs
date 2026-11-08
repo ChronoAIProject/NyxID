@@ -4,6 +4,9 @@ use crate::models::assistant_conversation::{
 };
 use crate::models::async_service_operation::{AsyncServiceOperation, COLLECTION_NAME as WATCHES};
 use crate::services::{assistant_nyxagent as engine, async_service_operation as watches};
+use crate::{errors::AppResult, mw::auth::AuthUser};
+use axum::extract::{Path, Query};
+use chrono::Utc;
 
 const CMA_TEST_AUDIENCE: &str = "cma-async-test";
 
@@ -51,6 +54,7 @@ struct AsyncFixture {
     mutations: Arc<std::sync::atomic::AtomicUsize>,
     cma_gate: Arc<tokio::sync::Semaphore>,
     drop_receipt: Arc<std::sync::atomic::AtomicBool>,
+    cma_retire_keys: Arc<std::sync::Mutex<Vec<String>>>,
 }
 impl Drop for AsyncFixture {
     fn drop(&mut self) {
@@ -65,6 +69,8 @@ impl AsyncFixture {
         let f = orchestrator_fixture("async_service").await;
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured = calls.clone();
+        let cma_retire_keys = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let retire_keys = cma_retire_keys.clone();
         let status_gate = Arc::new(tokio::sync::Semaphore::new(1));
         let gate = status_gate.clone();
         let submission_gate = Arc::new(tokio::sync::Semaphore::new(1));
@@ -94,6 +100,9 @@ impl AsyncFixture {
             "/{*path}",
             any(move |method: axum::http::Method, uri: axum::http::Uri, headers: HeaderMap| {
                 captured.lock().unwrap().push(uri.path().into());
+                if method == axum::http::Method::DELETE && uri.path() == "/api/v1/sandboxes/sbx_coffee" {
+                    retire_keys.lock().unwrap().push(headers.get("idempotency-key").unwrap().to_str().unwrap().to_owned());
+                }
                 if method != axum::http::Method::GET && method != axum::http::Method::HEAD {
                     captured_mutations.fetch_add(1, Ordering::SeqCst);
                 }
@@ -153,7 +162,7 @@ impl AsyncFixture {
                         "revision":1,"callback_url":callback
                     });
                     let exists = remote_sandbox_exists.load(Ordering::SeqCst);
-                    if method == axum::http::Method::POST && lost_receipt.swap(false, Ordering::SeqCst) {
+                    if matches!(method, axum::http::Method::POST | axum::http::Method::DELETE) && lost_receipt.swap(false, Ordering::SeqCst) {
                         // The provider accepted the mutation; only its receipt is lost.
                         remote_sandbox_exists.store(true, Ordering::SeqCst);
                         return (StatusCode::OK, [("content-type", "application/json")],
@@ -175,6 +184,7 @@ impl AsyncFixture {
                         }),
                         ("GET", "/api/v1/sandboxes") => json!({"sandboxes":if exists {vec![sandbox.clone()]} else {vec![]},"next_cursor":null}),
                         ("GET", "/api/v1/sandboxes/sbx_coffee") if exists => sandbox,
+                        ("DELETE", "/api/v1/sandboxes/sbx_coffee") if exists => json!({"pending":true}),
                         ("GET", "/api/v1/workspaces/wks_coffee") if exists => json!({"id":"wks_coffee","sandbox_id":"sbx_coffee"}),
                         ("GET", "/api/v1/sandbox-profiles/sbp_coffee/revisions/1") => json!({
                             "profile_id":"sbp_coffee","revision":1,"digest":"test-profile","published_at":"2026-11-01T00:00:00Z",
@@ -270,6 +280,7 @@ impl AsyncFixture {
             mutations,
             cma_gate,
             drop_receipt,
+            cma_retire_keys,
         }
     }
     async fn submit(&self) -> AsyncServiceOperation {
@@ -1248,6 +1259,846 @@ async fn async_submission_distinguishes_lost_cma_receipt_from_unreachable_provid
             }
         }
     }
+}
+
+async fn assert_unreadable_cma_creation_receipt(status: u16, body: &str, reason: &str) {
+    use crate::{
+        crypto::aes::RecordContext,
+        models::{
+            nyxbot_cma_creation::{COLLECTION_NAME as CREATIONS, NyxbotCmaCreation},
+            nyxbot_cma_sandbox::{COLLECTION_NAME as SANDBOXES, NyxbotCmaSandbox},
+            user_endpoint::COLLECTION_NAME as ENDPOINTS,
+            user_service::{COLLECTION_NAME as SERVICES, UserService},
+        },
+        services::nyxbot_cma_sandbox_service::prepare_creation_request,
+    };
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let mut outcomes = Vec::new();
+    for universal in [false, true] {
+        let a = cma_fixture().await;
+        let provider = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/agents"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string(body),
+            )
+            .expect(1)
+            .mount(&provider)
+            .await;
+        let db = &a.f.state.db;
+        let connection = db
+            .collection::<UserService>(SERVICES)
+            .find_one(doc! {"_id":&a.service})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            db.collection::<bson::Document>(ENDPOINTS)
+                .update_one(
+                    doc! {"_id":&connection.endpoint_id},
+                    doc! {"$set":{"url":provider.uri()}},
+                )
+                .await
+                .unwrap()
+                .matched_count,
+            1
+        );
+        assert_eq!(
+            db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":connection.catalog_service_id.as_deref().unwrap()},
+                    doc! {"$set":{"base_url":provider.uri()}},
+                )
+                .await
+                .unwrap()
+                .matched_count,
+            1
+        );
+        let auth = authenticate(&a.f).await;
+        let key = format!("unreadable-receipt-{status}-{universal}");
+        let args = json!({"name":"Receipt fixture","Idempotency-Key":key});
+        let response = if universal {
+            call(&a.f, &auth, "sandbox__post_api_v1_agents", args).await
+        } else {
+            direct_call(&a.f, &auth, "sandbox__post_api_v1_agents", args).await
+        };
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        let watch = a.watch().await;
+        assert!(watch.operation_id.is_none());
+        assert_eq!(
+            watch.cma.as_ref().unwrap().idempotency_key.as_deref(),
+            Some(key.as_str())
+        );
+
+        let requests = provider.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.headers["idempotency-key"], key.as_str());
+        assert_eq!(
+            serde_json::from_slice::<Value>(&request.body).unwrap(),
+            json!({"name":"Receipt fixture"})
+        );
+        let creation = db
+            .collection::<NyxbotCmaCreation>(CREATIONS)
+            .find_one(doc! {"user_id":&a.f.owner,"idempotency_key":&key})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(creation.submission_state, "unknown");
+        assert_eq!(creation.idempotency_key, key);
+        assert_eq!(
+            creation.request_hash,
+            prepare_creation_request(&request.body).unwrap().hash
+        );
+        assert!(creation.operation_id.is_none());
+        assert!(creation.first_dispatched_at.is_some());
+        assert_eq!(creation.request_context_version, Some(3));
+        let context =
+            RecordContext::new(CREATIONS, &creation.id, &a.f.owner, &["request_ciphertext"])
+                .unwrap();
+        let recovered =
+            a.f.state
+                .encryption_keys
+                .decrypt_record(creation.request_ciphertext.as_deref().unwrap(), &context)
+                .await
+                .unwrap();
+        assert_eq!(recovered.as_slice(), request.body.as_slice());
+        let parent = db
+            .collection::<NyxbotCmaSandbox>(SANDBOXES)
+            .find_one(doc! {"_id":&creation.sandbox_ref_id,"user_id":&a.f.owner})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(parent.occupies_account_slot);
+        assert_eq!(parent.submission_state, "unknown");
+        assert_eq!(parent.generation, creation.sandbox_generation);
+        assert_eq!(parent.idempotency_key.as_deref(), Some(key.as_str()));
+        assert_eq!(
+            parent.request_hash.as_deref(),
+            Some(creation.request_hash.as_str())
+        );
+        outcomes.push((watch.reason, value["result"]["isError"].clone()));
+        db.drop().await.unwrap();
+    }
+    assert_eq!(outcomes, vec![(Some(reason.to_owned()), json!(true)); 2]);
+}
+
+#[tokio::test]
+async fn async_submission_malformed_cma_creation_receipt_remains_uncertain() {
+    assert_unreadable_cma_creation_receipt(202, "{not-json", "submission_uncertain").await;
+}
+
+#[tokio::test]
+async fn async_submission_empty_cma_creation_receipt_remains_uncertain() {
+    for status in [202, 204] {
+        assert_unreadable_cma_creation_receipt(status, "", "submission_uncertain").await;
+    }
+}
+
+#[tokio::test]
+async fn async_submission_unreadable_cma_rejection_remains_failed() {
+    assert_unreadable_cma_creation_receipt(502, "{not-json", "submission_failed").await;
+}
+
+async fn lost_creation_fixture(path: &str) -> (AsyncFixture, wiremock::MockServer, Vec<u8>) {
+    use crate::models::{
+        downstream_service::COLLECTION_NAME as CATALOG,
+        service_endpoint::COLLECTION_NAME as ENDPOINTS,
+    };
+    use crate::services::feature_flag_service as flags;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path as request_path},
+    };
+    let a = cma_fixture().await;
+    let provider = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(request_path(path))
+        .respond_with(ResponseTemplate::new(202).set_body_string("{lost-receipt"))
+        .mount(&provider)
+        .await;
+    let db = &a.f.state.db;
+    let connection = db
+        .collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&a.service})
+        .await
+        .unwrap()
+        .unwrap();
+    let catalog = connection.catalog_service_id.unwrap();
+    db.collection::<bson::Document>(crate::models::user_endpoint::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&connection.endpoint_id},
+            doc! {"$set":{"url":provider.uri()}},
+        )
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(CATALOG)
+        .update_one(
+            doc! {"_id":&catalog},
+            doc! {"$set":{"base_url":provider.uri()}},
+        )
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(ENDPOINTS)
+        .update_one(
+            doc! {"service_id":&catalog,"name":"post_api_v1_agents"},
+            doc! {"$set":{"path":path}},
+        )
+        .await
+        .unwrap();
+    flags::set_platform_override(
+        db,
+        flags::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
+        &flags::FlagTarget::User(a.f.owner.clone()),
+        true,
+        &a.f.owner,
+    )
+    .await
+    .unwrap();
+    if path == "/api/v1/agents" {
+        let auth = authenticate(&a.f).await;
+        let response = direct_call(
+            &a.f,
+            &auth,
+            "sandbox__post_api_v1_agents",
+            json!({"name":"Original recovery request", "Idempotency-Key":"lost-creation-key"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            a.watch().await.reason.as_deref(),
+            Some("submission_uncertain")
+        );
+    } else {
+        use crate::services::{
+            catalog_service, identity_service, proxy_service, service_dispatch_registry as registry,
+        };
+        // A raw HTTP producer may include whitespace, object order and JSON
+        // escapes that cannot be reconstructed by serializing parsed values.
+        let raw = br#"{ "name" : "Original \u0072ecovery request", "machine_included" : false }"#;
+        let service = catalog_service::get_downstream_service_by_slug(db, "cma", &a.f.owner)
+            .await
+            .unwrap();
+        let user = db
+            .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .find_one(doc! {"_id":&a.f.owner})
+            .await
+            .unwrap()
+            .unwrap();
+        let assertion = identity_service::generate_identity_assertion(
+            &a.f.state.jwt_keys,
+            &a.f.state.config,
+            &identity_service::Principal::from(&user),
+            &service,
+            db,
+        )
+        .await
+        .unwrap();
+        let target = proxy_service::resolve_proxy_target(
+            db,
+            &a.f.state.encryption_keys,
+            &a.f.owner,
+            &service.id,
+            a.f.state.platform_user_rate_limit,
+        )
+        .await
+        .unwrap();
+        let caller = registry::DispatchCaller {
+            actor_user_id: &a.f.owner,
+            resource_owner_id: &a.f.owner,
+            user_service_id: None,
+        };
+        let admission = registry::admit(
+            db,
+            &a.f.state.encryption_keys,
+            &a.f.state.jwt_keys,
+            &a.f.state.config,
+            &caller,
+            true,
+            &target,
+            "POST",
+            path,
+            None,
+            raw,
+            || Ok(vec![("Idempotency-Key".into(), "lost-creation-key".into())].into()),
+            false,
+        )
+        .await
+        .unwrap();
+        let request = crate::services::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
+            .post(format!("{}{path}", provider.uri()))
+            .header("Idempotency-Key", "lost-creation-key")
+            .header("X-NyxID-Identity-Token", assertion)
+            .header("Content-Type", "application/json")
+            .body(raw.to_vec())
+            .build()
+            .unwrap();
+        let guard = registry::verify(Some(&admission), &target, Some(&caller))
+            .unwrap()
+            .unwrap();
+        guard.before_send(&request).await.unwrap();
+        let response = crate::services::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
+            .execute(request)
+            .await
+            .unwrap();
+        assert!(guard.observe_response(response).await.is_err());
+    }
+    let requests = provider.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let bytes = requests[0].body.clone();
+    engine::delete(db, &a.f.owner, &a.f.row.id).await.unwrap();
+    assert_eq!(
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .count_documents(doc! {"_id":&a.f.row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.collection::<bson::Document>(WATCHES)
+            .count_documents(doc! {"conversation_id":&a.f.row.id})
+            .await
+            .unwrap(),
+        0
+    );
+    (a, provider, bytes)
+}
+
+#[tokio::test]
+async fn generic_cma_retirement_preserves_original_key_for_management_retry() {
+    use crate::models::{
+        nyxbot_cma_sandbox::{COLLECTION_NAME as SANDBOXES, NyxbotCmaSandbox},
+        service_endpoint::{COLLECTION_NAME as ENDPOINTS, ServiceEndpoint},
+    };
+    use crate::services::feature_flag_service as flags;
+    let a = cma_existing_agent_fixture().await;
+    let db = &a.f.state.db;
+    flags::set_platform_override(
+        db,
+        flags::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
+        &flags::FlagTarget::User(a.f.owner.clone()),
+        true,
+        &a.f.owner,
+    )
+    .await
+    .unwrap();
+    let collection = db.collection::<ServiceEndpoint>(ENDPOINTS);
+    let mut endpoint = collection
+        .find_one(doc! {"name":"get_agent"})
+        .await
+        .unwrap()
+        .unwrap();
+    endpoint.id = uuid::Uuid::new_v4().to_string();
+    endpoint.name = "delete_sandbox".into();
+    endpoint.method = "DELETE".into();
+    endpoint.path = "/api/v1/sandboxes/{id}".into();
+    endpoint.risk = Some(crate::models::service_endpoint::EndpointRisk::Write);
+    endpoint.supports_idempotency_key = true;
+    endpoint.parameters = Some(json!([
+        {"name":"id","in":"path","required":true,"schema":{"type":"string"}},
+        {"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string"}}
+    ]));
+    collection.insert_one(endpoint).await.unwrap();
+    a.drop_receipt.store(true, Ordering::SeqCst);
+    let auth = authenticate(&a.f).await;
+    let response = direct_call(
+        &a.f,
+        &auth,
+        "sandbox__delete_sandbox",
+        json!({"id":"sbx_coffee","Idempotency-Key":"original-tool-retirement"}),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    assert!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["result"]["isError"]
+            .as_bool()
+            .unwrap()
+    );
+    let parent = db
+        .collection::<NyxbotCmaSandbox>(SANDBOXES)
+        .find_one(doc! {"user_id":&a.f.owner})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(parent.occupies_account_slot && parent.retire_requested_at.is_some());
+    let document = db
+        .collection::<bson::Document>(SANDBOXES)
+        .find_one(doc! {"_id":&parent.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        document.get_str("retirement_idempotency_key").unwrap(),
+        "original-tool-retirement"
+    );
+    let mut human = crate::test_utils::test_auth_user(&a.f.owner);
+    human.auth_method = crate::mw::auth::AuthMethod::AccessToken;
+    let mut headers = HeaderMap::new();
+    headers.insert("idempotency-key", "new-dialog-candidate".parse().unwrap());
+    let (_, Json(pending)) = crate::handlers::nyxbot_cma_sandboxes::retire(
+        State(a.f.state.clone()),
+        human,
+        Path(parent.id.clone()),
+        headers,
+        Json(crate::handlers::nyxbot_cma_sandboxes::GenerationRequest {
+            generation: parent.generation,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(pending.pending && pending.sandbox.occupies_account_slot);
+    assert_eq!(
+        *a.cma_retire_keys.lock().unwrap(),
+        ["original-tool-retirement", "original-tool-retirement"]
+    );
+    let response = direct_call(
+        &a.f,
+        &auth,
+        "sandbox__delete_sandbox",
+        json!({"id":"sbx_coffee","Idempotency-Key":"different-tool-retirement"}),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap()["result"]["isError"],
+        true
+    );
+    assert_eq!(a.cma_retire_keys.lock().unwrap().len(), 2);
+    db.drop().await.unwrap();
+}
+
+async fn recover_lost_creation(
+    a: &AsyncFixture,
+    generation: i64,
+    auth: Option<AuthUser>,
+) -> AppResult<(
+    StatusCode,
+    Json<crate::services::nyxbot_cma_sandbox_service::SandboxCommandDto>,
+)> {
+    use crate::handlers::nyxbot_cma_sandboxes as management;
+    let parent =
+        a.f.state
+            .db
+            .collection::<crate::models::nyxbot_cma_sandbox::NyxbotCmaSandbox>(
+                crate::models::nyxbot_cma_sandbox::COLLECTION_NAME,
+            )
+            .find_one(doc! {"user_id":&a.f.owner})
+            .await
+            .unwrap()
+            .unwrap();
+    let mut human = crate::test_utils::test_auth_user(&a.f.owner);
+    human.auth_method = crate::mw::auth::AuthMethod::AccessToken;
+    let body = serde_json::from_value::<management::CommandRequest>(
+        json!({"command":"recover_creation", "generation":generation}),
+    )
+    .expect("explicit creation recovery must be available on the existing commands route");
+    management::commands(
+        State(a.f.state.clone()),
+        auth.unwrap_or(human),
+        Path(parent.id),
+        HeaderMap::new(),
+        Json(body),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn explicit_cma_creation_recovery_survives_deleted_chat_and_replays_exact_request() {
+    use crate::models::{
+        nyxbot_cma_creation::{COLLECTION_NAME as CREATIONS, NyxbotCmaCreation},
+        nyxbot_cma_sandbox::COLLECTION_NAME as SANDBOXES,
+    };
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{method, path},
+    };
+    for endpoint in ["/api/v1/agents", "/api/v1/sandboxes"] {
+        let (a, provider, original) = lost_creation_fixture(endpoint).await;
+        let db = &a.f.state.db;
+        let creation = db
+            .collection::<NyxbotCmaCreation>(CREATIONS)
+            .find_one(doc! {"user_id":&a.f.owner})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            creation.operation_id.is_none()
+                && creation.cma_agent_id.is_none()
+                && creation.cma_sandbox_id.is_none()
+        );
+        assert!(creation.first_dispatched_at.is_some());
+        let generation = creation.sandbox_generation;
+        // Neither management GET may replay a creation, even after chat deletion.
+        let mut human = crate::test_utils::test_auth_user(&a.f.owner);
+        human.auth_method = crate::mw::auth::AuthMethod::AccessToken;
+        let _ = crate::handlers::nyxbot_cma_sandboxes::list(
+            State(a.f.state.clone()),
+            human.clone(),
+            Query(Default::default()),
+        )
+        .await
+        .unwrap();
+        let _ = crate::handlers::nyxbot_cma_sandboxes::detail(
+            State(a.f.state.clone()),
+            human,
+            Path(creation.sandbox_ref_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            provider
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.method == "GET" || request.body == original)
+        );
+        assert_eq!(
+            provider
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.method == "POST")
+                .count(),
+            1
+        );
+
+        // An uncertain explicit replay must retain the same unknown occupied slot.
+        assert!(recover_lost_creation(&a, generation, None).await.is_err());
+        let parent = crate::services::nyxbot_cma_sandbox_service::get_owned(
+            db,
+            &a.f.owner,
+            &creation.sandbox_ref_id,
+        )
+        .await
+        .unwrap();
+        assert!(parent.occupies_account_slot && parent.cma_sandbox_id.is_none());
+        let attempts = provider.received_requests().await.unwrap();
+        let posts: Vec<_> = attempts
+            .iter()
+            .filter(|request| request.method == "POST")
+            .collect();
+        assert_eq!(posts.len(), 2);
+        assert!(posts.iter().all(|request| request.body == original
+            && request.headers["idempotency-key"] == "lost-creation-key"));
+        assert!(cma_fixture_identity(
+            &posts[1].headers,
+            &a.f.state.jwt_keys,
+            &a.f.state.config.jwt_issuer,
+            &a.f.owner,
+            &creation.cma_service_id
+        ));
+
+        provider.reset().await;
+        let response = if endpoint == "/api/v1/agents" {
+            json!({"id":"op_recovered","status":"queued"})
+        } else {
+            json!({"id":"sbx_coffee"})
+        };
+        Mock::given(method("POST"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .mount(&provider)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/agent-lifecycle/op_recovered"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id":"op_recovered","status":"succeeded","agent_id":"agt_coffee"
+            })))
+            .mount(&provider)
+            .await;
+        Mock::given(method("GET")).and(path("/api/v1/agents/agt_coffee")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id":"agt_coffee","owner":a.f.owner,"status":"ready","revision":1,
+            "sandbox":{"id":"sbx_coffee","status":"active"},"workspace":{"id":"wks_coffee"},"worktree":{"id":"wkt_coffee"},
+            "profile":{"model":"test-model","permission_level":"guarded"}
+        }))).mount(&provider).await;
+        Mock::given(method("GET")).and(path("/api/v1/sandboxes/sbx_coffee")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id":"sbx_coffee","owner":a.f.owner,"status":"active","revision":1,
+            "profile":{"id":"sbp_coffee","revision":1},"limits":{"max_workspaces":4,"max_agents_per_workspace":8},"lifecycle":{}
+        }))).mount(&provider).await;
+        let (mut status, Json(mut result)) =
+            recover_lost_creation(&a, generation, None).await.unwrap();
+        if endpoint == "/api/v1/agents" {
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert!(result.pending && result.sandbox.occupies_account_slot);
+            // Once a receipt exists, the explicit action observes it instead
+            // of dispatching another POST, independently of the deleted watch.
+            let observed = recover_lost_creation(&a, generation, None).await.unwrap();
+            status = observed.0;
+            result = observed.1.0;
+        }
+        assert_eq!(status, StatusCode::OK);
+        assert!(!result.pending && result.sandbox.occupies_account_slot);
+        assert_eq!(result.sandbox.cma_sandbox_id.as_deref(), Some("sbx_coffee"));
+        let recorded = db
+            .collection::<NyxbotCmaCreation>(CREATIONS)
+            .find_one(doc! {"_id":&creation.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.submission_state, "confirmed");
+        assert!(recorded.request_ciphertext.is_none());
+        assert_eq!(
+            db.collection::<bson::Document>(SANDBOXES)
+                .count_documents(doc! {"user_id":&a.f.owner})
+                .await
+                .unwrap(),
+            1
+        );
+        let sent = provider.received_requests().await.unwrap();
+        let sent: Vec<_> = sent
+            .iter()
+            .filter(|request| request.method == "POST")
+            .collect();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].body, original);
+        assert_eq!(sent[0].headers["idempotency-key"], "lost-creation-key");
+        assert!(
+            !sent[0]
+                .headers
+                .contains_key("x-nyxid-cma-recovery-submission")
+        );
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(
+            !json.contains("lost-creation-key")
+                && !json.contains("Original recovery request")
+                && !json.contains("ciphertext")
+        );
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn explicit_cma_creation_recovery_rejects_invalid_authority_and_material_without_sends() {
+    use crate::{
+        crypto::aes::RecordContext,
+        models::{
+            nyxbot_cma_creation::{COLLECTION_NAME as CREATIONS, NyxbotCmaCreation},
+            nyxbot_cma_sandbox::COLLECTION_NAME as SANDBOXES,
+        },
+    };
+    for invalid in [
+        "credential",
+        "owner",
+        "generation",
+        "expired",
+        "body",
+        "deployment",
+        "disabled",
+    ] {
+        let (a, provider, _) = lost_creation_fixture("/api/v1/sandboxes").await;
+        let db = &a.f.state.db;
+        let creation = db
+            .collection::<NyxbotCmaCreation>(CREATIONS)
+            .find_one(doc! {"user_id":&a.f.owner})
+            .await
+            .unwrap()
+            .unwrap();
+        let mut generation = creation.sandbox_generation;
+        let mut auth = None;
+        match invalid {
+            "credential" | "owner" => {
+                let mut caller = crate::test_utils::test_auth_user(if invalid == "owner" {
+                    "00000000-0000-4000-8000-000000000000"
+                } else {
+                    &a.f.owner
+                });
+                caller.auth_method = if invalid == "credential" {
+                    crate::mw::auth::AuthMethod::ApiKey
+                } else {
+                    crate::mw::auth::AuthMethod::AccessToken
+                };
+                auth = Some(caller);
+            }
+            "generation" => generation += 1,
+            "expired" => {
+                db.collection::<bson::Document>(CREATIONS).update_one(doc! {"_id":&creation.id}, doc! {"$set":{"first_dispatched_at":bson::DateTime::from_chrono(Utc::now() - chrono::Duration::hours(24))}}).await.unwrap();
+            }
+            "body" => {
+                let context = RecordContext::new(
+                    SANDBOXES,
+                    &creation.sandbox_ref_id,
+                    &a.f.owner,
+                    &["request_ciphertext"],
+                )
+                .unwrap();
+                let ciphertext =
+                    a.f.state
+                        .encryption_keys
+                        .encrypt_record(br#"{"name":"changed"}"#, &context)
+                        .await
+                        .unwrap();
+                db.collection::<bson::Document>(SANDBOXES).update_one(doc! {"_id":&creation.sandbox_ref_id}, doc! {"$set":{"request_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext}}}).await.unwrap();
+            }
+            "deployment" => {
+                db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id":&creation.cma_service_id},
+                        doc! {"$set":{"base_url":format!("{}/changed-deployment", provider.uri())}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "disabled" => {
+                crate::services::feature_flag_service::set_platform_override(
+                    db,
+                    crate::services::feature_flag_service::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
+                    &crate::services::feature_flag_service::FlagTarget::User(a.f.owner.clone()),
+                    false,
+                    &a.f.owner,
+                )
+                .await
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        provider.reset().await;
+        assert!(
+            recover_lost_creation(&a, generation, auth).await.is_err(),
+            "{invalid}"
+        );
+        assert!(
+            provider.received_requests().await.unwrap().is_empty(),
+            "{invalid}"
+        );
+        let parent = crate::services::nyxbot_cma_sandbox_service::get_owned(
+            db,
+            &a.f.owner,
+            &creation.sandbox_ref_id,
+        )
+        .await
+        .unwrap();
+        assert!(
+            parent.occupies_account_slot && parent.cma_sandbox_id.is_none(),
+            "{invalid}"
+        );
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn explicit_cma_creation_recovery_does_not_reacquire_a_confirmed_absence() {
+    use crate::models::nyxbot_cma_creation::{COLLECTION_NAME as CREATIONS, NyxbotCmaCreation};
+    use crate::services::{catalog_service, proxy_service, service_dispatch_registry as registry};
+    let (a, provider, raw) = lost_creation_fixture("/api/v1/sandboxes").await;
+    let db = &a.f.state.db;
+    let creation = db
+        .collection::<NyxbotCmaCreation>(CREATIONS)
+        .find_one(doc! {"user_id":&a.f.owner})
+        .await
+        .unwrap()
+        .unwrap();
+    let service = catalog_service::get_downstream_service_by_slug(db, "cma", &a.f.owner)
+        .await
+        .unwrap();
+    let target = proxy_service::resolve_proxy_target(
+        db,
+        &a.f.state.encryption_keys,
+        &a.f.owner,
+        &service.id,
+        a.f.state.platform_user_rate_limit,
+    )
+    .await
+    .unwrap();
+    let caller = registry::DispatchCaller {
+        actor_user_id: &a.f.owner,
+        resource_owner_id: &a.f.owner,
+        user_service_id: None,
+    };
+    let original = registry::admit(
+        db,
+        &a.f.state.encryption_keys,
+        &a.f.state.jwt_keys,
+        &a.f.state.config,
+        &caller,
+        true,
+        &target,
+        "POST",
+        &creation.path,
+        None,
+        &raw,
+        || Ok(vec![("Idempotency-Key".into(), creation.idempotency_key.clone())].into()),
+        false,
+    )
+    .await
+    .unwrap();
+    // A late authoritative refusal may arrive after the recovery identity was
+    // selected. Its released slot must not be reacquired by explicit recovery.
+    let response = http::Response::builder()
+        .status(409)
+        .body(serde_json::to_vec(&json!({"code":"sandbox_credential_setup_required"})).unwrap())
+        .unwrap();
+    let _ = registry::verify(Some(&original), &target, Some(&caller))
+        .unwrap()
+        .unwrap()
+        .observe_response(reqwest::Response::from(response))
+        .await
+        .unwrap();
+    let recovery_identity = format!(
+        "{}:{}:{}",
+        creation.id, creation.sandbox_generation, creation.submission_generation
+    );
+    let replay = registry::admit(
+        db,
+        &a.f.state.encryption_keys,
+        &a.f.state.jwt_keys,
+        &a.f.state.config,
+        &caller,
+        true,
+        &target,
+        "POST",
+        &creation.path,
+        None,
+        &raw,
+        || {
+            Ok(vec![
+                ("Idempotency-Key".into(), creation.idempotency_key.clone()),
+                ("x-nyxid-cma-recovery-submission".into(), recovery_identity),
+            ]
+            .into())
+        },
+        false,
+    )
+    .await;
+    assert!(replay.is_err());
+    let parent = crate::services::nyxbot_cma_sandbox_service::get_owned(
+        db,
+        &a.f.owner,
+        &creation.sandbox_ref_id,
+    )
+    .await
+    .unwrap();
+    assert!(!parent.occupies_account_slot);
+    assert_eq!(parent.generation, creation.sandbox_generation);
+    let unchanged = db
+        .collection::<NyxbotCmaCreation>(CREATIONS)
+        .find_one(doc! {"_id":&creation.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.submission_state, "confirmed_not_created");
+    assert_eq!(
+        unchanged.submission_generation,
+        creation.submission_generation
+    );
+    assert_eq!(provider.received_requests().await.unwrap().len(), 1);
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]

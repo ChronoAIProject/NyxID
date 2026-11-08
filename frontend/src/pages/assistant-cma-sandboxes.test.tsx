@@ -90,6 +90,85 @@ beforeEach(() => {
   mocks.command.mockResolvedValue({ sandbox: row, pending: true });
 });
 
+it("explicitly recovers an unknown creation using only its local identity and generation", async () => {
+  render(
+    <CmaSandboxCard
+      sandbox={{
+        ...row,
+        cma_sandbox_id: null,
+        admission_state: "unknown",
+        observation_state: "unknown",
+      }}
+    />,
+  );
+  expect(mocks.command).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Recover creation" }));
+  const dialog = screen.getByRole("dialog");
+  expect(mocks.command).not.toHaveBeenCalled();
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Recover creation" }),
+  );
+  await waitFor(() =>
+    expect(mocks.command).toHaveBeenCalledWith({
+      id: row.id,
+      generation: row.generation,
+      command: "recover_creation",
+    }),
+  );
+});
+
+it("offers retirement retry after a failed dialog is closed and the page reopens", async () => {
+  mocks.retire.mockRejectedValueOnce(new Error("Connection lost"));
+  const page = render(<CmaSandboxCard sandbox={row} />);
+  fireEvent.click(screen.getByRole("button", { name: "Retire environment" }));
+  let dialog = screen.getByRole("dialog");
+  fireEvent.change(
+    within(dialog).getByLabelText(`Type ${row.label} to confirm`),
+    { target: { value: row.label } },
+  );
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Retire environment" }),
+  );
+  await waitFor(() =>
+    expect(within(dialog).getByRole("alert")).toHaveTextContent(
+      "Connection lost",
+    ),
+  );
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  page.unmount();
+
+  render(
+    <CmaSandboxCard
+      sandbox={{
+        ...row,
+        admission_state: "retiring",
+        observation_state: "ready",
+        retire_requested_at: "2026-11-08T00:00:00Z",
+      }}
+    />,
+  );
+  const retry = screen.getByRole("button", { name: "Retry retirement" });
+  expect(retry).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Pause" })).toBeDisabled();
+  fireEvent.click(retry);
+  dialog = screen.getByRole("dialog");
+  expect(
+    within(dialog).getByRole("button", { name: "Retire environment" }),
+  ).toBeDisabled();
+  fireEvent.change(
+    within(dialog).getByLabelText(`Type ${row.label} to confirm`),
+    { target: { value: row.label } },
+  );
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Retire environment" }),
+  );
+  await waitFor(() => expect(mocks.retire).toHaveBeenCalledTimes(2));
+  expect(mocks.retire.mock.calls[1]?.[0]).toMatchObject({
+    id: row.id,
+    generation: row.generation,
+  });
+});
+
 it("renders the environment with real capacity and no Agent or Desktop management", () => {
   render(<AssistantCmaSandboxesPage />);
   expect(

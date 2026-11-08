@@ -451,6 +451,138 @@ impl CatalogCmaGateway {
         Ok(())
     }
 
+    /// A fresh human recovery uses the saved request through the same catalog
+    /// admission and final dispatch hooks as ordinary CMA execution.
+    pub(super) async fn replay_creation(
+        &self,
+        keys: &crate::crypto::aes::EncryptionKeys,
+        creation: &crate::models::nyxbot_cma_creation::NyxbotCmaCreation,
+        body: &[u8],
+    ) -> crate::errors::AppResult<()> {
+        use super::{proxy_service, service_dispatch_registry as registry};
+        let owner_id = &creation.user_id;
+        let (service, owner, base) = self.resolve(owner_id).await?;
+        if service.id != creation.cma_service_id
+            || catalog_execution_fingerprint(&service) != creation.deployment_fingerprint
+        {
+            return Err(CmaGatewayError::ConfigurationRequired.into());
+        }
+        authorize_native_route(&service, &creation.method, &creation.path)?;
+        let target = proxy_service::resolve_proxy_target(
+            &self.db,
+            keys,
+            owner_id,
+            &service.id,
+            crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
+                self.config.platform_service_rate_limit_per_second,
+                self.config.platform_service_rate_limit_burst,
+            ),
+        )
+        .await?;
+        let caller = registry::DispatchCaller {
+            actor_user_id: owner_id,
+            resource_owner_id: owner_id,
+            user_service_id: None,
+        };
+        let admission = registry::admit(
+            &self.db,
+            keys,
+            &self.jwt_keys,
+            &self.config,
+            &caller,
+            true,
+            &target,
+            &creation.method,
+            &creation.path,
+            None,
+            body,
+            || {
+                Ok(vec![
+                    ("Idempotency-Key".into(), creation.idempotency_key.clone()),
+                    (
+                        super::nyxbot_cma_admission::RECOVERY_SUBMISSION_HEADER.into(),
+                        super::nyxbot_cma_admission::recovery_submission(creation),
+                    ),
+                ]
+                .into())
+            },
+            false,
+        )
+        .await?;
+        let identity = crate::models::default_request_header::SecretHeaders::from(
+            self.identity_headers(&service, &owner)
+                .await?
+                .iter()
+                .map(|(name, value)| {
+                    Ok((
+                        name.as_str().to_owned(),
+                        value
+                            .to_str()
+                            .map_err(|_| CmaGatewayError::InvalidRequest)?
+                            .to_owned(),
+                    ))
+                })
+                .collect::<CmaResult<Vec<_>>>()?,
+        );
+        let headers = proxy_service::build_effective_outbound_headers(
+            &target,
+            vec![
+                ("Idempotency-Key".into(), creation.idempotency_key.clone()),
+                ("Accept".into(), "application/json".into()),
+                ("Content-Type".into(), "application/json".into()),
+            ],
+            &identity,
+            &[],
+            &[],
+        );
+        // Do not use the inventory URL builder: its pagination parameters are
+        // not part of the original creation request.
+        let url = format!(
+            "{}/{}",
+            base.as_str().trim_end_matches('/'),
+            creation.path.trim_start_matches('/')
+        );
+        let mut request = super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
+            .request(
+                reqwest::Method::from_bytes(creation.method.as_bytes())
+                    .map_err(|_| CmaGatewayError::InvalidRequest)?,
+                url,
+            )
+            .timeout(Duration::from_secs(20))
+            .body(body.to_vec());
+        for (name, value) in headers.iter() {
+            let mut value = reqwest::header::HeaderValue::from_str(value)
+                .map_err(|_| CmaGatewayError::InvalidRequest)?;
+            value.set_sensitive(true);
+            request = request.header(name.as_str(), value);
+        }
+        let request = request
+            .build()
+            .map_err(|_| CmaGatewayError::InvalidRequest)?;
+        super::nyxbot_cma_agent_service::require_enabled(&self.db, owner_id).await?;
+        super::nyxbot_cma_admission::require_recovery_current(&self.db, creation).await?;
+        let guard = registry::verify(Some(&admission), &target, Some(&caller))?
+            .ok_or(CmaGatewayError::ConfigurationRequired)?;
+        guard.before_send(&request).await?;
+        let response = super::nyxbot_gateway_service::GATEWAY_HTTP_CLIENT
+            .execute(request)
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    CmaGatewayError::Timeout
+                } else {
+                    CmaGatewayError::Unavailable
+                }
+            })?;
+        let response = guard.observe_response(response).await?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let body = bounded_body(response).await;
+            return Err(map_status(status, body.as_ref().ok(), &base).into());
+        }
+        Ok(())
+    }
+
     async fn identity_headers(
         &self,
         service: &DownstreamService,

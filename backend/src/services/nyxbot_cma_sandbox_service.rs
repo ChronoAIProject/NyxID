@@ -345,6 +345,7 @@ pub async fn begin_creation(
         capacity_source: None,
         last_activity_at: None,
         retire_requested_at: None,
+        retirement_idempotency_key: None,
         retired_at: None,
         idempotency_key: Some(idempotency_key.to_owned()),
         request_hash: Some(normalized.hash.clone()),
@@ -406,8 +407,7 @@ pub async fn begin_creation(
     }
 }
 
-#[cfg(test)]
-async fn recover_creation_request(
+pub(super) async fn recover_creation_request(
     db: &Database,
     keys: &EncryptionKeys,
     owner_id: &str,
@@ -1122,6 +1122,30 @@ pub enum SandboxCommand {
     Retire,
 }
 
+/// Shared by management and the final dispatch guard. A keyless, already
+/// pending intent cannot safely be replaced with a different request.
+pub(super) fn retirement_intent_set(row: &NyxbotCmaSandbox, key: &str) -> AppResult<Document> {
+    validate_idempotency_key(key)?;
+    match row.retirement_idempotency_key.as_deref() {
+        Some(original) if original != key => {
+            return Err(AppError::Conflict(
+                "cma_retirement_idempotency_conflict".into(),
+            ));
+        }
+        None if row.retire_requested_at.is_some() => {
+            return Err(AppError::Conflict(
+                "cma_retirement_recovery_unavailable".into(),
+            ));
+        }
+        _ => {}
+    }
+    Ok(
+        doc! {"admission_state":"retiring", "retirement_idempotency_key":key,
+        "retire_requested_at":row.retire_requested_at.map(bson::DateTime::from_chrono).unwrap_or_else(bson::DateTime::now),
+        "updated_at":bson::DateTime::now()},
+    )
+}
+
 pub async fn command(
     db: &Database,
     gateway: &dyn CmaGateway,
@@ -1156,11 +1180,23 @@ pub async fn command(
         let mut filter = binding_filter(&row);
         filter.extend(doc! {"occupies_account_slot": true, "retire_requested_at": null});
         let collection = db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME);
-        row = match collection.find_one_and_update(filter, doc! {"$set": {"admission_state": "retiring", "retire_requested_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()}}).return_document(ReturnDocument::After).await? {
+        row = match collection
+            .find_one_and_update(
+                filter,
+                doc! {"$set": retirement_intent_set(&row, idempotency_key)?},
+            )
+            .return_document(ReturnDocument::After)
+            .await?
+        {
             Some(changed) => changed,
-            None => collection.find_one(binding_filter(&row)).await?.filter(|current| {
-                current.retire_requested_at.is_some() || current.admission_state == SandboxAdmissionState::Retired
-            }).ok_or_else(stale)?,
+            None => collection
+                .find_one(binding_filter(&row))
+                .await?
+                .filter(|current| {
+                    current.retire_requested_at.is_some()
+                        || current.admission_state == SandboxAdmissionState::Retired
+                })
+                .ok_or_else(stale)?,
         };
         if row.admission_state == SandboxAdmissionState::Retired {
             return Ok(SandboxCommandDto {
@@ -1169,8 +1205,15 @@ pub async fn command(
             });
         }
     }
-    // Retain the caller's stable key across retries of this reviewed intent.
-    let key = idempotency_key;
+    // A reopened dialog supplies only a candidate. Retry the persisted intent,
+    // including retirements first admitted by the ordinary CMA dispatch guard.
+    let key = if command == SandboxCommand::Retire {
+        row.retirement_idempotency_key
+            .as_deref()
+            .ok_or_else(|| AppError::Conflict("cma_retirement_recovery_unavailable".into()))?
+    } else {
+        idempotency_key
+    };
     let result = match command {
         SandboxCommand::Pause => gateway.pause_sandbox(owner_id, &remote_id, key).await,
         SandboxCommand::Revive => gateway.revive_sandbox(owner_id, &remote_id, key).await,
@@ -1258,6 +1301,7 @@ mod tests {
         current: Mutex<CmaSandbox>,
         timeout: AtomicBool,
         calls: Mutex<Vec<String>>,
+        retirement_keys: Mutex<Vec<(String, String)>>,
     }
 
     impl FakeGateway {
@@ -1266,6 +1310,7 @@ mod tests {
                 current: Mutex::new(remote_sandbox(SandboxObservationState::Ready)),
                 timeout: AtomicBool::new(false),
                 calls: Mutex::new(Vec::new()),
+                retirement_keys: Mutex::new(Vec::new()),
             }
         }
         fn lifecycle(&self, remote_id: &str, command: &str) -> CmaResult<CmaLifecycleResult> {
@@ -1325,8 +1370,12 @@ mod tests {
             &self,
             _: &str,
             id: &str,
-            _: &str,
+            key: &str,
         ) -> CmaResult<CmaLifecycleResult> {
+            self.retirement_keys
+                .lock()
+                .unwrap()
+                .push((id.into(), key.into()));
             self.lifecycle(id, "retire")
         }
         async fn list_sandbox_events(
@@ -2379,6 +2428,171 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn retirement_retry_reuses_persisted_intent_until_exact_retired_observation() {
+        let db = test_db()
+            .await
+            .expect("writable test replica set is required");
+        ensure_indexes(&db).await.unwrap();
+        let gateway = FakeGateway::new();
+        let row = fixture_row();
+        db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        gateway.timeout.store(true, Ordering::Relaxed);
+        assert!(
+            retire(&db, &gateway, "owner", &row.id, 1, "first-retirement")
+                .await
+                .is_err()
+        );
+        let persisted = get_owned(&db, "owner", &row.id).await.unwrap();
+        assert!(persisted.occupies_account_slot);
+        assert!(persisted.retire_requested_at.is_some());
+        gateway.timeout.store(false, Ordering::Relaxed);
+
+        // A newly opened dialog supplies a new candidate, but it is the same
+        // durable retirement intent for this exact environment and generation.
+        let pending = retire(&db, &gateway, "owner", &row.id, 1, "reopened-dialog")
+            .await
+            .unwrap();
+        assert!(pending.pending && pending.sandbox.occupies_account_slot);
+        assert_eq!(
+            pending.sandbox.admission_state,
+            SandboxAdmissionState::Retiring
+        );
+        assert_eq!(
+            pending.sandbox.observation_state,
+            SandboxObservationState::Ready
+        );
+        assert_eq!(
+            *gateway.retirement_keys.lock().unwrap(),
+            vec![
+                ("remote-sandbox".into(), "first-retirement".into()),
+                ("remote-sandbox".into(), "first-retirement".into()),
+            ]
+        );
+        let document = db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            document.get_str("retirement_idempotency_key").unwrap(),
+            "first-retirement"
+        );
+        assert_eq!(
+            get_owned(&db, "owner", &row.id)
+                .await
+                .unwrap()
+                .retire_requested_at,
+            persisted.retire_requested_at
+        );
+        let public = serde_json::to_string(&pending).unwrap();
+        assert!(!public.contains("first-retirement") && !public.contains("idempotency"));
+        assert!(!format!("{persisted:?}").contains("first-retirement"));
+
+        gateway.current.lock().unwrap().state = SandboxObservationState::Retired;
+        let retired = retire(&db, &gateway, "owner", &row.id, 1, "reloaded-page")
+            .await
+            .unwrap();
+        assert!(!retired.pending && !retired.sandbox.occupies_account_slot);
+        assert_eq!(
+            gateway.retirement_keys.lock().unwrap().last().unwrap().1,
+            "first-retirement"
+        );
+        let calls = gateway.calls.lock().unwrap().len();
+        retire(&db, &gateway, "owner", &row.id, 1, "already-retired")
+            .await
+            .unwrap();
+        assert_eq!(gateway.calls.lock().unwrap().len(), calls);
+        db.drop().await.unwrap();
+    }
+
+    #[test]
+    fn keyless_pending_retirement_cannot_invent_a_replacement_intent() {
+        let mut row = fixture_row();
+        row.retire_requested_at = Some(Utc::now());
+        assert!(retirement_intent_set(&row, "new-dialog-candidate").is_err());
+        row.retirement_idempotency_key = Some("original-retirement".into());
+        assert!(retirement_intent_set(&row, "new-dialog-candidate").is_err());
+        let set = retirement_intent_set(&row, "original-retirement").unwrap();
+        assert_eq!(
+            set.get_str("retirement_idempotency_key").unwrap(),
+            "original-retirement"
+        );
+        assert_eq!(
+            *set.get_datetime("retire_requested_at").unwrap(),
+            bson::DateTime::from_chrono(row.retire_requested_at.unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn retirement_intent_cannot_cross_owner_environment_generation_or_deployment() {
+        let db = test_db()
+            .await
+            .expect("writable test replica set is required");
+        let gateway = FakeGateway::new();
+        gateway.timeout.store(true, Ordering::Relaxed);
+        let row = fixture_row();
+        db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        assert!(
+            retire(&db, &gateway, "owner", &row.id, 1, "first-retirement")
+                .await
+                .is_err()
+        );
+        let calls = gateway.calls.lock().unwrap().len();
+        for (owner, id, generation) in [
+            ("other", row.id.as_str(), 1),
+            ("owner", "other", 1),
+            ("owner", row.id.as_str(), 2),
+        ] {
+            assert!(
+                retire(&db, &gateway, owner, id, generation, "wrong-intent")
+                    .await
+                    .is_err()
+            );
+        }
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"cma_service_id":"other-deployment"}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            retire(&db, &gateway, "owner", &row.id, 1, "wrong-deployment")
+                .await
+                .is_err()
+        );
+        assert_eq!(gateway.calls.lock().unwrap().len(), calls);
+        let mut other = fixture_row();
+        other.id = Uuid::new_v4().to_string();
+        other.cma_sandbox_id = Some("other-sandbox".into());
+        other.generation = 2;
+        db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+            .insert_one(&other)
+            .await
+            .unwrap();
+        assert!(
+            retire(&db, &gateway, "owner", &other.id, 2, "other-retirement")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            *gateway.retirement_keys.lock().unwrap(),
+            vec![
+                ("remote-sandbox".into(), "first-retirement".into()),
+                ("other-sandbox".into(), "other-retirement".into()),
+            ]
+        );
+        db.drop().await.unwrap();
+    }
+
     fn fixture_row() -> NyxbotCmaSandbox {
         let now = Utc::now();
         NyxbotCmaSandbox {
@@ -2402,6 +2616,7 @@ mod tests {
             capacity_source: None,
             last_activity_at: None,
             retire_requested_at: None,
+            retirement_idempotency_key: None,
             retired_at: None,
             idempotency_key: Some("request-key".into()),
             request_hash: Some("request-hash".into()),

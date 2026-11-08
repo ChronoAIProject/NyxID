@@ -120,6 +120,9 @@ pub struct NyxbotCmaSandbox {
     pub last_activity_at: Option<DateTime<Utc>>,
     #[serde(default, with = "bson_datetime::optional")]
     pub retire_requested_at: Option<DateTime<Utc>>,
+    /// The first confirmed retirement intent, scoped to this exact binding.
+    #[serde(default)]
+    pub retirement_idempotency_key: Option<String>,
     #[serde(default, with = "bson_datetime::optional")]
     pub retired_at: Option<DateTime<Utc>>,
     #[serde(default)]
@@ -187,6 +190,7 @@ mod tests {
             capacity_source: None,
             last_activity_at: Some(now),
             retire_requested_at: Some(now),
+            retirement_idempotency_key: Some("private-retirement-key".into()),
             retired_at: Some(now),
             idempotency_key: Some("idem".into()),
             request_hash: Some("hash".into()),
@@ -254,6 +258,7 @@ mod tests {
             capacity_source: None,
             last_activity_at: None,
             retire_requested_at: None,
+            retirement_idempotency_key: Some("private-retirement-key".into()),
             retired_at: None,
             idempotency_key: None,
             request_hash: None,
@@ -271,5 +276,10 @@ mod tests {
         let debug = format!("{row:?}");
         assert!(!debug.contains("deadbeef"));
         assert!(!debug.contains("request_ciphertext"));
+        assert!(!debug.contains("private-retirement-key"));
+        assert_eq!(
+            document.get_str("retirement_idempotency_key").unwrap(),
+            "private-retirement-key"
+        );
     }
 }

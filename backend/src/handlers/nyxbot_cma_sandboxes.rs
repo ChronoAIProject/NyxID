@@ -32,6 +32,7 @@ pub struct LabelRequest {
 pub enum Command {
     Pause,
     Revive,
+    RecoverCreation,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -124,19 +125,32 @@ pub async fn commands(
     let row = sandboxes::get_owned(&state.db, &owner, &id).await?;
     let gateway = CatalogCmaGateway::for_service(&state, &row.cma_service_id);
     let (command, action) = match body.command {
-        Command::Pause => (sandboxes::SandboxCommand::Pause, "pause"),
-        Command::Revive => (sandboxes::SandboxCommand::Revive, "revive"),
+        Command::Pause => (Some(sandboxes::SandboxCommand::Pause), "pause"),
+        Command::Revive => (Some(sandboxes::SandboxCommand::Revive), "revive"),
+        Command::RecoverCreation => (None, "recover_creation"),
     };
-    let result = sandboxes::command(
-        &state.db,
-        &gateway,
-        &owner,
-        &id,
-        body.generation,
-        command,
-        idempotency_key(&headers)?,
-    )
-    .await?;
+    let result = if let Some(command) = command {
+        sandboxes::command(
+            &state.db,
+            &gateway,
+            &owner,
+            &id,
+            body.generation,
+            command,
+            idempotency_key(&headers)?,
+        )
+        .await?
+    } else {
+        crate::services::nyxbot_cma_admission::recover_creation(
+            &state.db,
+            &state.encryption_keys,
+            &gateway,
+            &owner,
+            &id,
+            body.generation,
+        )
+        .await?
+    };
     audit(&state, &owner, &id, action);
     Ok((
         if result.pending {

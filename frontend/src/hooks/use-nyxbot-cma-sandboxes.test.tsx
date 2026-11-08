@@ -158,3 +158,70 @@ it("retains lifecycle identity and invalidates the inventory even on an uncertai
     client.getQueryState(cmaQueryKeys.sandboxes("owner"))?.isInvalidated,
   ).toBe(true);
 });
+
+it("requests explicit creation recovery without sending a replacement key or body", async () => {
+  const client = new QueryClient();
+  client.setQueryData(cmaQueryKeys.sandboxes("owner"), { sandboxes: [] });
+  transport.mockRejectedValue(new Error("Connection lost"));
+  const { result } = renderHook(() => useCmaSandboxCommand(), {
+    wrapper: setup(client),
+  });
+  expect(transport).not.toHaveBeenCalled();
+  await act(async () => {
+    await expect(
+      result.current.mutateAsync({
+        id: "local-creation",
+        generation: 3,
+        command: "recover_creation",
+      }),
+    ).rejects.toThrow();
+  });
+  expect(transport).toHaveBeenCalledTimes(1);
+  const [url, request] = transport.mock.calls[0]!;
+  expect(url).toBe(
+    "/api/v1/assistant/nyxagent/sandboxes/local-creation/commands",
+  );
+  expect(JSON.parse(String(request?.body))).toEqual({
+    command: "recover_creation",
+    generation: 3,
+  });
+  expect(new Headers(request?.headers).has("Idempotency-Key")).toBe(false);
+  expect(
+    client.getQueryState(cmaQueryKeys.sandboxes("owner"))?.isInvalidated,
+  ).toBe(true);
+});
+
+it.each(["owner", "feature"])(
+  "rejects queued creation recovery when %s authority changes",
+  async (changed) => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client = new QueryClient({
+      mutationCache: new MutationCache({ onMutate: () => gate }),
+    });
+    const { result } = renderHook(() => useCmaSandboxCommand(), {
+      wrapper: setup(client),
+    });
+    let pending!: Promise<unknown>;
+    act(() => {
+      pending = result.current.mutateAsync({
+        id: "local-creation",
+        generation: 3,
+        command: "recover_creation",
+      });
+    });
+    const rejected = expect(pending).rejects.toThrow();
+    act(() =>
+      useAuthStore.setState({
+        user: { id: changed === "owner" ? "other" : "owner" } as User,
+      }),
+    );
+    await act(async () => {
+      release();
+      await rejected;
+    });
+    expect(transport).not.toHaveBeenCalled();
+  },
+);

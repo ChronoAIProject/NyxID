@@ -42,7 +42,7 @@ import {
 } from "@/schemas/nyxbot-cma-sandbox";
 import { cn } from "@/lib/utils";
 
-type Action = "rename" | "pause" | "revive" | "retire";
+type Action = "rename" | "pause" | "revive" | "retire" | "recover_creation";
 const statusLabels: Record<string, string> = {
   ready: "Running",
   provisioning: "Preparing",
@@ -106,7 +106,9 @@ export function AssistantCmaSandboxesPage() {
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="mb-2 type-secondary text-text-tertiary">Workspace</p>
-          <h1 className="type-compact-page-title sm:type-page-title tracking-tight">Sandboxes</h1>
+          <h1 className="type-compact-page-title sm:type-page-title tracking-tight">
+            Sandboxes
+          </h1>
           <p className="mt-2 text-13 text-text-tertiary">
             Only Sandboxes created through NyxID appear here and use this
             allocation.
@@ -222,6 +224,15 @@ export function CmaSandboxCard({
   const retired = status === "retired" || Boolean(sandbox.retired_at);
   const actionable =
     Boolean(sandbox.cma_sandbox_id) && !pending && !unknown && !retired;
+  const recoveryAvailable =
+    !sandbox.cma_sandbox_id &&
+    sandbox.occupies_account_slot &&
+    !sandbox.retire_requested_at &&
+    !retired;
+  const retirementRetry =
+    Boolean(sandbox.cma_sandbox_id && sandbox.retire_requested_at) &&
+    sandbox.occupies_account_slot &&
+    !retired;
   const capacitySource = sandbox.capacity?.source;
   const capacityConfirmed =
     Boolean(sandbox.cma_sandbox_id) &&
@@ -257,9 +268,7 @@ export function CmaSandboxCard({
             </span>
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2.5">
-                <h2 className="break-words type-card-title">
-                  {sandbox.label}
-                </h2>
+                <h2 className="break-words type-card-title">{sandbox.label}</h2>
                 <span
                   className={cn(
                     "rounded-full border border-hairline px-2 py-0.5 type-badge",
@@ -333,6 +342,12 @@ export function CmaSandboxCard({
             <p>Last observed {dateLabel(sandbox.last_observed)}</p>
           </div>
           <div className="flex flex-wrap gap-2">
+            {recoveryAvailable && (
+              <Button onClick={() => setAction("recover_creation")}>
+                <RefreshCw />
+                Recover creation
+              </Button>
+            )}
             <Button
               disabled={!actionable || !["ready", "paused"].includes(status)}
               onClick={() =>
@@ -355,18 +370,18 @@ export function CmaSandboxCard({
             )}
             <Button
               variant="destructive"
-              disabled={!actionable}
+              disabled={!actionable && !retirementRetry}
               onClick={() => setAction("retire")}
             >
               <Trash2 />
-              Retire environment
+              {retirementRetry ? "Retry retirement" : "Retire environment"}
             </Button>
           </div>
         </div>
       </section>
       {action && (
         <SandboxActionDialog
-          key={`${sandbox.id}:${action}`}
+          key={`${sandbox.id}:${sandbox.generation}:${action}`}
           sandbox={sandbox}
           action={action}
           onClose={() => setAction(undefined)}
@@ -399,11 +414,13 @@ function SandboxActionDialog({
   const title =
     action === "rename"
       ? "Rename environment"
-      : action === "pause"
-        ? "Pause environment"
-        : action === "revive"
-          ? "Resume environment"
-          : "Retire environment";
+      : action === "recover_creation"
+        ? "Recover creation"
+        : action === "pause"
+          ? "Pause environment"
+          : action === "revive"
+            ? "Resume environment"
+            : "Retire environment";
   async function submit() {
     setSubmitting(true);
     setError(undefined);
@@ -423,9 +440,15 @@ function SandboxActionDialog({
           idempotencyKey: key,
         };
         const result =
-          action === "retire"
-            ? await retire.mutateAsync(identity)
-            : await command.mutateAsync({ ...identity, command: action });
+          action === "recover_creation"
+            ? await command.mutateAsync({
+                id: sandbox.id,
+                generation: sandbox.generation,
+                command: action,
+              })
+            : action === "retire"
+              ? await retire.mutateAsync(identity)
+              : await command.mutateAsync({ ...identity, command: action });
         toast.success(
           result.pending
             ? "Request accepted. Waiting for CMA confirmation."
@@ -456,11 +479,13 @@ function SandboxActionDialog({
           <DialogDescription>
             {action === "rename"
               ? "This is a local display name. The CMA resource ID stays the same."
-              : action === "retire"
-                ? "Permanently remove this environment, all Agents, workspaces and files. Submitting retirement does not mean cleanup or billing has completed."
-                : action === "pause"
-                  ? "All Agents in this Sandbox may become unavailable. Active work and shared desktop sessions may be interrupted."
-                  : "CMA will resume the environment. Task continuation depends on each Agent’s state."}
+              : action === "recover_creation"
+                ? "Check or retry the original creation request. This allocation stays reserved until CMA confirms the result."
+                : action === "retire"
+                  ? "Permanently remove this environment, all Agents, workspaces and files. Submitting retirement does not mean cleanup or billing has completed."
+                  : action === "pause"
+                    ? "All Agents in this Sandbox may become unavailable. Active work and shared desktop sessions may be interrupted."
+                    : "CMA will resume the environment. Task continuation depends on each Agent’s state."}
           </DialogDescription>
         </DialogHeader>
         <form
