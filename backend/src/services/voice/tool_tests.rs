@@ -615,7 +615,7 @@ async fn voice_service_policy_refuses_new_approval_but_uses_existing_live_grant(
         assert!(
             refused
                 .to_string()
-                .contains("Voice does not support approvals"),
+                .contains(&AppError::ApprovalUnsupported.to_string()),
             "{refused}"
         );
         assert!(upstream.received_requests().await.unwrap().is_empty());
@@ -721,7 +721,7 @@ async fn voice_action_and_permission_requests_refuse_without_creating_cards() {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(refusal["error"], "voice_approval_unsupported");
+        assert_eq!(refusal["error"], "approval_unsupported");
         let refusal = acks::confirm_action(
             &state.db,
             &chat,
@@ -733,7 +733,7 @@ async fn voice_action_and_permission_requests_refuse_without_creating_cards() {
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(refusal["error"], "voice_approval_unsupported");
+        assert_eq!(refusal["error"], "approval_unsupported");
         let request = acks::request(
             &state.db,
             &chat,
@@ -747,7 +747,7 @@ async fn voice_action_and_permission_requests_refuse_without_creating_cards() {
             },
         )
         .await;
-        assert!(matches!(request, Err(AppError::VoiceApprovalUnsupported)));
+        assert!(matches!(request, Err(AppError::ApprovalUnsupported)));
         for collection in [
             "assistant_acknowledgements",
             "approval_requests",

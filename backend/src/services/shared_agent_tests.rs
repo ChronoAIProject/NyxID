@@ -1570,7 +1570,7 @@ async fn shared_agent_consent_once_race_always_revoke_and_full_access() {
             &operation
         )
         .await,
-        Err(crate::errors::AppError::VoiceApprovalUnsupported)
+        Err(crate::errors::AppError::ApprovalUnsupported)
     ));
     assert_eq!(
         f.state
@@ -1629,7 +1629,7 @@ async fn shared_agent_consent_once_race_always_revoke_and_full_access() {
             &operation
         )
         .await,
-        Err(crate::errors::AppError::VoiceApprovalUnsupported)
+        Err(crate::errors::AppError::ApprovalUnsupported)
     ));
 
     assert!(

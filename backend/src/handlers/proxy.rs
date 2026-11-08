@@ -4871,10 +4871,6 @@ async fn execute_resolved_proxy_inner<'a>(
         resolved_user_service_id.as_deref(),
         approval_outcome,
     );
-    approval_service::require_voice_approval_supported(
-        &approval_outcome,
-        auth_user.assistant_chat.as_deref(),
-    )?;
 
     *assistant_approval_slot =
         crate::services::assistant_service_execution::HttpApprovalReceipt::new(

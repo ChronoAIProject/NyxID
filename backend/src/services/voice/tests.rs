@@ -2067,7 +2067,7 @@ async fn voice_backend_task_refuses_approval_before_proposal_or_dispatch() {
         String::from_utf8_lossy(&body)
     );
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(body["error"], "voice_approval_unsupported", "{body}");
+    assert_eq!(body["error"], "approval_unsupported", "{body}");
     for collection in ["approval_requests", "assistant_acknowledgements"] {
         assert_eq!(
             state

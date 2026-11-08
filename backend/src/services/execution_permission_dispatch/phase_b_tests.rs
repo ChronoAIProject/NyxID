@@ -272,7 +272,7 @@ async fn phase_b_voice_task_covered_gap_and_prohibition_keep_chat_proposals_out(
                 f.no_prompts().await;
             }
             if outcome == "gap" {
-                assert!(text.contains("voice_approval_unsupported"), "{text}");
+                assert!(text.contains("approval_unsupported"), "{text}");
                 f.no_prompts().await;
             }
             f.cleanup().await;

@@ -586,7 +586,7 @@ async fn authorize_operation(
         match outcome {
             crate::services::approval_service::ApprovalOutcome::Allowed { .. } => {}
             crate::services::approval_service::ApprovalOutcome::NeedsApproval(_) => {
-                return Err(AppError::VoiceApprovalUnsupported);
+                return Err(AppError::ApprovalUnsupported);
             }
             _ => {
                 return Err(AppError::Forbidden(

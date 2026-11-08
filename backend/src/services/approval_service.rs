@@ -25,6 +25,35 @@ use crate::services::operation_descriptor::OperationDescriptor;
 use crate::services::push_service::{ApnsAuth, FcmAuth};
 use crate::telemetry::{TelemetryClient, TelemetryContext, TelemetryEvent, emit_event};
 
+/// Caller interaction capability, independent of authorization and transport.
+/// Disabling requests never bypasses policy or invalidates an existing grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApprovalOptions {
+    pub allow_request: bool,
+}
+
+impl Default for ApprovalOptions {
+    fn default() -> Self {
+        Self {
+            allow_request: true,
+        }
+    }
+}
+
+impl ApprovalOptions {
+    pub const NO_REQUEST: Self = Self {
+        allow_request: false,
+    };
+
+    pub fn require_request_support(self) -> AppResult<()> {
+        if self.allow_request {
+            Ok(())
+        } else {
+            Err(AppError::ApprovalUnsupported)
+        }
+    }
+}
+
 /// Resolve the approval mode for a (user, service) pair.
 pub async fn resolve_approval_mode(
     db: &Database,
@@ -100,6 +129,7 @@ pub struct ApprovalResolution {
 
 #[derive(Debug, Clone)]
 pub struct PendingApproval {
+    pub options: ApprovalOptions,
     pub resolution: ApprovalResolution,
     pub primary_owner_user_id: String,
     pub requester_type: String,
@@ -238,6 +268,34 @@ pub async fn evaluate_and_check(
     bypass_approval_flow: bool,
     is_auto_connected: bool,
 ) -> AppResult<ApprovalOutcome> {
+    evaluate_and_check_with_options(
+        db,
+        actor_user_id,
+        service_owner_user_id,
+        service_id,
+        descriptor,
+        requester_type,
+        requester_id,
+        bypass_approval_flow,
+        is_auto_connected,
+        ApprovalOptions::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn evaluate_and_check_with_options(
+    db: &Database,
+    actor_user_id: &str,
+    service_owner_user_id: &str,
+    service_id: &str,
+    descriptor: &OperationDescriptor,
+    requester_type: Option<&str>,
+    requester_id: &str,
+    bypass_approval_flow: bool,
+    is_auto_connected: bool,
+    options: ApprovalOptions,
+) -> AppResult<ApprovalOutcome> {
     let resolution = resolve_org_aware_approval(
         db,
         actor_user_id,
@@ -283,6 +341,7 @@ pub async fn evaluate_and_check(
     }
 
     Ok(ApprovalOutcome::NeedsApproval(PendingApproval {
+        options,
         resolution,
         primary_owner_user_id,
         requester_type: requester_type.to_string(),
@@ -330,7 +389,7 @@ pub async fn evaluate_for_chat(
             ));
         }
     }
-    let outcome = evaluate_and_check(
+    let outcome = evaluate_and_check_with_options(
         db,
         actor,
         service_owner,
@@ -340,6 +399,7 @@ pub async fn evaluate_for_chat(
         requester_id,
         bypass,
         auto_connected,
+        chat.map_or_else(ApprovalOptions::default, |chat| chat.approval_options()),
     )
     .await?;
     if let ApprovalOutcome::NeedsApproval(ref pending) = outcome
@@ -366,20 +426,6 @@ pub async fn evaluate_for_chat(
         return Ok((outcome, receipt));
     }
     Ok((outcome, None))
-}
-
-/// Check the final outcome, after execution-permission coverage is applied.
-/// Policy evaluation alone cannot tell whether an existing grant covers it.
-pub(crate) fn require_voice_approval_supported(
-    outcome: &ApprovalOutcome,
-    chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
-) -> AppResult<()> {
-    if matches!(outcome, ApprovalOutcome::NeedsApproval(_))
-        && chat.is_some_and(|chat| chat.execution_voice_task)
-    {
-        return Err(AppError::VoiceApprovalUnsupported);
-    }
-    Ok(())
 }
 
 pub async fn record_chat_approval(
@@ -409,6 +455,9 @@ pub async fn approval_notification_recipients(
     approval_owner_user_id: &str,
     pending: &PendingApproval,
 ) -> AppResult<Vec<String>> {
+    // Called only after the dispatcher applies existing execution grants.
+    // Refuse before materializing notification defaults or creating a request.
+    pending.options.require_request_support()?;
     if !pending.resolution.from_org_policy {
         return Ok(vec![approval_owner_user_id.to_string()]);
     }
@@ -539,6 +588,7 @@ pub async fn check_approval(
 /// mint an org-scoped grant on approval (see ChronoAIProject/NyxID#364).
 #[derive(Clone, Debug)]
 pub struct ApprovalRequestOperation {
+    pub approval: ApprovalOptions,
     pub assistant_group: Option<crate::models::approval_request::GroupApprovalBinding>,
     pub operation_summary: String,
     pub action_description: Option<String>,
@@ -552,6 +602,7 @@ pub struct ApprovalRequestOperation {
 impl ApprovalRequestOperation {
     pub fn from_descriptor(descriptor: &OperationDescriptor, grant_scope: Option<String>) -> Self {
         Self {
+            approval: ApprovalOptions::default(),
             assistant_group: None,
             operation_summary: descriptor.operation_summary(),
             action_description: Some(descriptor.summary.clone()),
@@ -589,6 +640,7 @@ pub async fn create_approval_request(
     notify_user_ids: Vec<String>,
     from_org_policy: bool,
 ) -> AppResult<ApprovalRequest> {
+    operation.approval.require_request_support()?;
     let notify_user_ids = if let Some(group) = &operation.assistant_group {
         vec![group.actor_user_id.clone()]
     } else if notify_user_ids.is_empty() {
@@ -889,7 +941,9 @@ pub async fn create_tool_approval_request(
     requester_type: &str,
     requester_id: &str,
     requester_label: Option<&str>,
+    options: ApprovalOptions,
 ) -> AppResult<ApprovalRequest> {
+    options.require_request_support()?;
     // Materialize notification delivery/lifetime defaults without choosing a
     // global approval preference on the user's behalf.
     let timeout_secs = notification_service::get_or_create_channel(db, user_id)
@@ -2398,6 +2452,237 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn noninteractive_callers_refuse_new_service_and_tool_requests_before_side_effects() {
+        let db = crate::test_utils::connect_test_database("approval_no_request_writers")
+            .await
+            .expect("configured Mongo required");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let owner = Uuid::new_v4().to_string();
+        let descriptor = test_operation();
+        let mut operation = ApprovalRequestOperation::from_descriptor(&descriptor, None);
+        operation.approval = ApprovalOptions::NO_REQUEST;
+        let service_request = create_approval_request(
+            &db,
+            &state.config,
+            &state.http_client,
+            None,
+            None,
+            &owner,
+            "test-service",
+            "Test service",
+            "test-service",
+            "api_key",
+            "test-caller",
+            None,
+            operation,
+            ApprovalMode::PerRequest,
+            300,
+            vec![owner.clone()],
+            false,
+        )
+        .await;
+        assert!(matches!(
+            service_request,
+            Err(AppError::ApprovalUnsupported)
+        ));
+        let tool_request = create_tool_approval_request(
+            &db,
+            &state.config,
+            &state.http_client,
+            None,
+            None,
+            &owner,
+            "test_tool",
+            None,
+            None,
+            false,
+            "api_key",
+            "test-caller",
+            None,
+            ApprovalOptions::NO_REQUEST,
+        )
+        .await;
+        assert!(matches!(tool_request, Err(AppError::ApprovalUnsupported)));
+        for name in [REQUESTS, CHANNELS] {
+            assert_eq!(
+                db.collection::<Document>(name)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "{name}"
+            );
+        }
+        // Other callers retain the ordinary default, including request creation.
+        let supported = create_tool_approval_request(
+            &db,
+            &state.config,
+            &state.http_client,
+            None,
+            None,
+            &owner,
+            "test_tool",
+            None,
+            None,
+            false,
+            "api_key",
+            "test-caller",
+            None,
+            ApprovalOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(supported.status, "pending");
+        assert_eq!(
+            db.collection::<Document>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn noninteractive_policy_retains_denials_and_existing_grants() {
+        let db = crate::test_utils::connect_test_database("approval_no_request_policy")
+            .await
+            .expect("configured Mongo required");
+        let owner = Uuid::new_v4().to_string();
+        let service = Uuid::new_v4().to_string();
+        db.collection(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let read =
+            crate::services::operation_descriptor::build_http_descriptor("GET", "/status", None);
+        assert!(matches!(
+            evaluate_and_check_with_options(
+                &db,
+                &owner,
+                &owner,
+                &service,
+                &read,
+                Some("api_key"),
+                "ordinary-client",
+                false,
+                false,
+                ApprovalOptions::NO_REQUEST,
+            )
+            .await
+            .unwrap(),
+            ApprovalOutcome::Allowed { required: false }
+        ));
+        set_service_approval_config(
+            &db,
+            &owner,
+            &service,
+            "Test",
+            Some(true),
+            Some(&ApprovalMode::Grant),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let descriptor = test_operation();
+        let evaluate = || {
+            evaluate_and_check_with_options(
+                &db,
+                &owner,
+                &owner,
+                &service,
+                &descriptor,
+                Some("api_key"),
+                "ordinary-client",
+                false,
+                false,
+                ApprovalOptions::NO_REQUEST,
+            )
+        };
+        let ApprovalOutcome::NeedsApproval(pending) = evaluate().await.unwrap() else {
+            panic!("The missing grant must still require approval");
+        };
+        assert!(matches!(
+            approval_notification_recipients(&db, &owner, &pending).await,
+            Err(AppError::ApprovalUnsupported)
+        ));
+        assert!(matches!(
+            evaluate_and_check_with_options(
+                &db,
+                &owner,
+                &owner,
+                &service,
+                &descriptor,
+                Some("api_key"),
+                "ordinary-client",
+                true,
+                false,
+                ApprovalOptions::NO_REQUEST,
+            )
+            .await
+            .unwrap(),
+            ApprovalOutcome::Allowed { required: true }
+        ));
+        insert_grant(
+            &db,
+            &make_grant(&owner, &service, "api_key", "ordinary-client", false, 1),
+        )
+        .await;
+        assert!(matches!(
+            evaluate().await.unwrap(),
+            ApprovalOutcome::Allowed { required: true }
+        ));
+        set_service_approval_config(
+            &db,
+            &owner,
+            &service,
+            "Test",
+            Some(true),
+            Some(&ApprovalMode::Grant),
+            None,
+            Some(&ApprovalEffect::Deny),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(evaluate().await.unwrap(), ApprovalOutcome::Denied));
+        assert!(matches!(
+            evaluate_and_check_with_options(
+                &db,
+                &owner,
+                &owner,
+                &service,
+                &descriptor,
+                Some("api_key"),
+                "ordinary-client",
+                true,
+                false,
+                ApprovalOptions::NO_REQUEST,
+            )
+            .await
+            .unwrap(),
+            ApprovalOutcome::Denied
+        ));
+        assert_eq!(
+            db.collection::<Document>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<Document>(CHANNELS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
 
     #[tokio::test]
     async fn first_tool_request_uses_new_timeout_and_preserves_legacy_read_default() {
@@ -2437,6 +2722,7 @@ mod tests {
                 "api_key",
                 "fixture_requester",
                 None,
+                ApprovalOptions::default(),
             )
             .await
             .unwrap();
@@ -2753,6 +3039,7 @@ mod tests {
             "api_key",
             "agent",
             None,
+            ApprovalOptions::default(),
         )
         .await
         .unwrap();

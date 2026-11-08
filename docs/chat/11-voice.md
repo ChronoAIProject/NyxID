@@ -24,7 +24,7 @@ Voice is a client of the authenticated MCP protocol, not a second authorization
 or service executor. The web Voice authentication routes remain unchanged.
 
 Voice uses already granted authority and does not initiate new approvals.
-Calls that still require a decision return `voice_approval_unsupported` before
+Calls that still require a decision return `approval_unsupported` before
 creating an approval request or executing the operation. The confirmation
 protocol below remains for preexisting cards and continuations only.
 
@@ -202,13 +202,16 @@ revocation. Stop outstanding turns and close voice on detected access loss.
   lifecycle. Cancellation does not undo an already completed remote effect.
 * Voice does not initiate approvals, for either direct tools or backend tasks.
   Existing grants, exact previously approved authority and automatically allowed
-  policy outcomes remain usable. The refusal check runs after existing
-  execution-permission coverage, at each transport's final approval gate.
+  policy outcomes remain usable. It selects the common approval option
+  `ApprovalOptions { allow_request: false }`. The approval creation functions
+  enforce this option after existing execution-permission coverage, before
+  materializing notification settings or creating new requests.
   An operation needing a new decision returns
-  `voice_approval_unsupported` before creating a card, proposal, consent request or
+  `approval_unsupported` before creating a card, proposal, consent request or
   dispatching the operation. Ordinary text and other MCP clients retain their
-  approval behavior. No MCP protocol extension or per-client capability flag is
-  needed; the existing server-owned Voice execution source identifies the caller.
+  approval behavior. The option is independent of Voice and available to other
+  noninteractive callers; omitted options keep the existing request flow. No MCP
+  protocol extension is needed.
 * Duplicate native events are deduplicated by call ID. An unknown result prohibits
   blindly repeating that operation, while safe state reads and other requested
   work may continue. Performing a direct read does not prevent a later complex

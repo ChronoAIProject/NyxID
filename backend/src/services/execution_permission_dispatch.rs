@@ -1027,9 +1027,10 @@ pub(crate) fn prepare<'a>(
                 .unwrap_or(contract::Gap::MissingPermission),
         ));
         context.observation.stage(diagnostics::Stage::Proposal);
-        if context.voice_task {
-            return Err(AppError::VoiceApprovalUnsupported);
-        }
+        chat.map_or_else(super::approval_service::ApprovalOptions::default, |c| {
+            c.approval_options()
+        })
+        .require_request_support()?;
         if context.authoring_allowed()
             && context.descendant.is_none()
             && context.native.is_none()

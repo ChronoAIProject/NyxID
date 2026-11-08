@@ -1119,7 +1119,7 @@ async fn shared_transports_voice_provider_revocation_and_actor_billing() {
         let request = Uuid::new_v4().to_string();
         assert!(matches!(
             super::shared::admit(&f.state.db, &f.owner, &f.row, &request, &preferences).await,
-            Err(crate::errors::AppError::VoiceApprovalUnsupported)
+            Err(crate::errors::AppError::ApprovalUnsupported)
         ));
         let consents = f
             .state

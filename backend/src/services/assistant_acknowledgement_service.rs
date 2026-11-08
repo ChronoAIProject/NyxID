@@ -818,10 +818,8 @@ pub async fn confirm_action_with(
         if consume_action(db, chat, id, tool, args).await? {
             return Ok(None);
         }
-        if chat.execution_voice_task {
-            return Ok(Some(json!(
-                AppError::VoiceApprovalUnsupported.response_body()
-            )));
+        if let Err(error) = chat.approval_options().require_request_support() {
+            return Ok(Some(json!(error.response_body())));
         }
         if on_invalid == InvalidCard::Refuse {
             // Only explain this caller's exact card. A foreign or mismatched
@@ -849,10 +847,8 @@ pub async fn confirm_action_with(
             })));
         }
     }
-    if chat.execution_voice_task {
-        return Ok(Some(json!(
-            AppError::VoiceApprovalUnsupported.response_body()
-        )));
+    if let Err(error) = chat.approval_options().require_request_support() {
+        return Ok(Some(json!(error.response_body())));
     }
     let summary = if need.webhook {
         format!("Webhook automation requests: {summary}. Review this action before allowing it.")
@@ -1106,6 +1102,14 @@ pub struct ChatAuthority {
     pub with_nyxbot: bool,
 }
 impl ChatAuthority {
+    /// The adapter chooses interaction capability once; approval writers use
+    /// the same transport-independent options as every other caller.
+    pub(crate) fn approval_options(&self) -> super::approval_service::ApprovalOptions {
+        super::approval_service::ApprovalOptions {
+            allow_request: !self.execution_voice_task,
+        }
+    }
+
     /// NyxBot threads run with Full access; specialists only with their grants.
     pub fn is_orchestrator(&self) -> bool {
         self.role == AgentRole::Orchestrator
@@ -2475,9 +2479,7 @@ async fn request_candidate_in_session(
     {
         return Ok((existing, false));
     }
-    if chat.execution_voice_task {
-        return Err(AppError::VoiceApprovalUnsupported);
-    }
+    chat.approval_options().require_request_support()?;
     let mut row = candidate.clone();
     row.routing = routing;
     // Ordinary denials stay bound to the initiating user/orchestrator

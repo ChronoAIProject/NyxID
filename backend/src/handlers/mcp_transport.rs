@@ -3836,8 +3836,6 @@ async fn authorize_mcp_operation(
         &target.service_id,
         approval_outcome,
     );
-    approval_service::require_voice_approval_supported(&approval_outcome, auth.chat.as_ref())
-        .map_err(|e| tool_result(request_id.clone(), &e.to_string(), true))?;
     let pending = match approval_outcome {
         // An approval the owner granted for their own requests is theirs: a
         // guest in the same chat shares the chat's key, not the approval.

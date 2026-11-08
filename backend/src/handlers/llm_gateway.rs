@@ -2812,10 +2812,6 @@ pub(super) async fn check_llm_approval_descriptor(
         service_id,
         approval_outcome,
     );
-    approval_service::require_voice_approval_supported(
-        &approval_outcome,
-        auth_user.assistant_chat.as_deref(),
-    )?;
     crate::services::agent_operation_scope_service::check_guest_approval(
         operation_guest,
         &approval_outcome,

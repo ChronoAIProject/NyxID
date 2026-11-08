@@ -937,6 +937,7 @@ pub async fn create_request(
         &requester_type,
         &requester_id,
         requester_label,
+        approval_service::ApprovalOptions::default(),
     )
     .await?;
 
