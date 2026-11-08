@@ -459,7 +459,7 @@ pub async fn create(
     if automatic {
         return publish_automatically(state, chat, &agent, id, &binding, reader).await;
     }
-    let card = claims::finalize(state, &reservation, &binding).await?;
+    let card = claims::finalize(state, &reservation, &binding, chat.approval_options()).await?;
     Ok(reused_result(state, &card, id, &agent.id))
 }
 

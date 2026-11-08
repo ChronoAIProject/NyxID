@@ -2245,16 +2245,19 @@ pub struct RequestOrigin {
 /// Insert or reuse a card in a caller-owned transaction. The caller must
 /// commit its claim in this same transaction; this helper performs the usual
 /// authority fence, deduplication and voice-confirmation bookkeeping.
+/// Pass the initiating caller's approval capability separately from a recovered
+/// origin's authority, which may now describe an unrelated active turn.
 pub async fn request_in_session(
     db: &Database,
     chat: &ChatAuthority,
     request: Request<'_>,
     origin: Option<&RequestOrigin>,
+    approval: super::approval_service::ApprovalOptions,
     session: &mut ClientSession,
 ) -> AppResult<AssistantAcknowledgement> {
     let candidate = prepare_request_candidate(db, chat, request, None, None).await?;
     Ok(
-        request_candidate_in_session(db, chat, &candidate, origin, session)
+        request_candidate_in_session(db, chat, &candidate, origin, approval, session)
             .await?
             .0,
     )
@@ -2278,7 +2281,12 @@ async fn request_tracked_with_machine_context(
         .start_transaction()
         .and_run2(async move |session| {
             let operation = Box::pin(request_candidate_in_session(
-                &db, &chat, &candidate, None, session,
+                &db,
+                &chat,
+                &candidate,
+                None,
+                chat.approval_options(),
+                session,
             ))
             .await;
             mutations::transaction_result(operation)
@@ -2431,6 +2439,7 @@ async fn request_candidate_in_session(
     chat: &ChatAuthority,
     candidate: &AssistantAcknowledgement,
     origin: Option<&RequestOrigin>,
+    approval: super::approval_service::ApprovalOptions,
     session: &mut ClientSession,
 ) -> AppResult<(AssistantAcknowledgement, bool)> {
     let now = candidate.created_at;
@@ -2479,7 +2488,7 @@ async fn request_candidate_in_session(
     {
         return Ok((existing, false));
     }
-    chat.approval_options().require_request_support()?;
+    approval.require_request_support()?;
     let mut row = candidate.clone();
     row.routing = routing;
     // Ordinary denials stay bound to the initiating user/orchestrator

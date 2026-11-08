@@ -3892,10 +3892,13 @@ async fn voice_queue_claims_one_message_and_preserves_initiating_identity() {
             .execution_pending
     );
     use crate::services::assistant_acknowledgement_service as acks;
-    let chat = acks::for_key(&db, &user, Some(&credential.api_key_id))
+    let mut chat = acks::for_key(&db, &user, Some(&credential.api_key_id))
         .await
         .unwrap()
         .unwrap();
+    // Seed a legacy card to exercise queue identity and continuation races.
+    // New Voice work cannot request approvals.
+    chat.execution_voice_task = false;
     let card = Box::pin(acks::request(
         &db,
         &chat,

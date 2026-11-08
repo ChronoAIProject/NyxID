@@ -1,5 +1,6 @@
 //! Transport regressions use real thread keys, live Mongo authority and provider stubs.
 use super::*;
+use crate::errors::AppError;
 use crate::models::{
     assistant_conversation::AssistantConversation,
     assistant_sharing::{AgentConsent, ConsentDecision, SharedExecution},
@@ -360,6 +361,57 @@ impl TransportFixture {
             .unwrap()
             .unwrap();
         consent::decide(&self.f.state.db, &self.f.outsider, &row.id, choice)
+            .await
+            .unwrap();
+    }
+    async fn seed_voice_consent(
+        &self,
+        request: &str,
+        preferences: &crate::models::assistant_voice::VoicePreferences,
+    ) {
+        let auth = crate::mw::auth::api_key_auth_user_for_voice(&self.f.state.db, &self.row)
+            .await
+            .unwrap();
+        let access = auth.org_agent_access.as_ref().unwrap().shared().unwrap();
+        let binding = execution::connection_binding(
+            &self.f.state.db,
+            &self.actor_connection,
+            &self.row.credential_api_key_id,
+        )
+        .await
+        .unwrap();
+        let now = chrono::Utc::now();
+        let card = AgentConsent {
+            id: Uuid::new_v4().to_string(),
+            actor_user_id: self.f.outsider.clone(),
+            agent_id: self.agent.id.clone(),
+            owner_id: self.f.admin.clone(),
+            conversation_id: self.row.id.clone(),
+            turn_id: request.into(),
+            api_key_id: self.row.credential_api_key_id.clone(),
+            connection_id: self.actor_connection.clone(),
+            catalog_service_id: self.catalog.clone(),
+            policy_revision: access.revision(),
+            behavior_digest: consent::behavior(access),
+            authority_digest: binding,
+            operation_digest: crate::services::mcp_service::canonical_sha256(
+                json!({"kind":"voice_session", "preferences":preferences}),
+            ),
+            scope_key: Uuid::new_v4().to_string(),
+            stateless_model: false,
+            operation_summary: "Legacy exact Voice consent".into(),
+            decision: ConsentDecision::Pending,
+            acknowledgement_id: None,
+            expires_at: Some(now + chrono::Duration::minutes(25)),
+            claim_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        self.f
+            .state
+            .db
+            .collection("assistant_agent_consents")
+            .insert_one(card)
             .await
             .unwrap();
     }
@@ -990,7 +1042,7 @@ async fn shared_transports_voice_once_is_one_session_and_revocation_stops_refres
         notify_on_completion: false,
     };
     let request = Uuid::new_v4().to_string();
-    assert!(
+    assert!(matches!(
         session::admit(
             &f.f.state.db,
             &f.f.outsider,
@@ -1000,9 +1052,16 @@ async fn shared_transports_voice_once_is_one_session_and_revocation_stops_refres
             "identity".into(),
             "worker"
         )
-        .await
-        .is_err()
-    );
+        .await,
+        Err(AppError::ApprovalUnsupported)
+    ));
+    let consents =
+        f.f.state
+            .db
+            .collection::<AgentConsent>("assistant_agent_consents");
+    assert_eq!(consents.count_documents(doc! {}).await.unwrap(), 0);
+    // Existing exact consents remain valid; Voice itself creates no new card.
+    f.seed_voice_consent(&request, &preferences).await;
     f.decide(ConsentDecision::Once).await;
     let call = session::admit(
         &f.f.state.db,
@@ -1020,22 +1079,43 @@ async fn shared_transports_voice_once_is_one_session_and_revocation_stops_refres
     session::close(&f.f.state.db, &call, "test_closed", true)
         .await
         .unwrap();
-    assert!(
+    let second = Uuid::new_v4().to_string();
+    assert!(matches!(
         session::admit(
             &f.f.state.db,
             &f.f.outsider,
             &f.row.id,
-            &Uuid::new_v4().to_string(),
-            preferences,
+            &second,
+            preferences.clone(),
             "identity".into(),
             "worker"
         )
-        .await
-        .is_err()
+        .await,
+        Err(AppError::ApprovalUnsupported)
+    ));
+    assert_eq!(
+        consents
+            .count_documents(doc! {"decision":"pending"})
+            .await
+            .unwrap(),
+        0
     );
+    f.seed_voice_consent(&second, &preferences).await;
     f.decide(ConsentDecision::Always).await;
+    let always = session::admit(
+        &f.f.state.db,
+        &f.f.outsider,
+        &f.row.id,
+        &second,
+        preferences,
+        "identity".into(),
+        "worker",
+    )
+    .await
+    .unwrap();
+    session::refresh(&f.f.state.db, &always).await.unwrap();
     f.revoke().await;
-    assert!(session::refresh(&f.f.state.db, &call).await.is_err());
+    assert!(session::refresh(&f.f.state.db, &always).await.is_err());
     f.f.state.db.drop().await.unwrap();
 }
 
