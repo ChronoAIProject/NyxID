@@ -574,7 +574,18 @@ export function SharedConsentCards({
   );
 }
 
-const profileSchema = z.object({ display_name: z.string().max(40), description: z.string().min(1).max(2000), persona: z.string().max(2000) });
+const profileSchema = z.object({
+  display_name: z.string().max(40),
+  description: z.string().min(1).max(2000),
+  persona: z.string().max(2000),
+  voice_instructions: z.string().max(2000).optional(),
+});
+const PROFILE_FIELDS = [
+  { key: "display_name", label: "Display name" },
+  { key: "description", label: "Description" },
+  { key: "persona", label: "Persona" },
+  { key: "voice_instructions", label: "Voice instructions" },
+] as const;
 export function SharedAgentProfile({
   agent,
 }: {
@@ -588,6 +599,7 @@ export function SharedAgentProfile({
       display_name: agent.display_name ?? "",
       description: agent.description,
       persona: agent.persona ?? "",
+      voice_instructions: agent.voice_instructions ?? "",
     },
   });
   if (agent.share_role !== "manager" || agent.status === "destroyed")
@@ -595,6 +607,7 @@ export function SharedAgentProfile({
       <GroupedList title="Profile">
         <GroupedRow search={{ id: "shared-description", title: "Description", keywords: agent.description }} title="Description" description={agent.description} />
         <GroupedRow search={{ id: "shared-persona", title: "Persona", keywords: agent.persona ?? "" }} title="Persona" description={agent.persona} />
+        <GroupedRow search={{ id: "shared-voice-instructions", title: "Voice instructions", keywords: agent.voice_instructions ?? "" }} title="Voice instructions" description={agent.voice_instructions} />
       </GroupedList>
     );
   const submit = form.handleSubmit(async (values) => {
@@ -617,7 +630,7 @@ export function SharedAgentProfile({
                   {update.error.message}
                 </p>
               ) : null}
-              {(["display_name", "description", "persona"] as const).map((field) =>
+              {PROFILE_FIELDS.map(({ key: field }) =>
                 form.formState.errors[field] ? (
                   <p key={field} id={`shared-profile-error-${field}`} role="alert" className="text-destructive">
                     {form.formState.errors[field]?.message}
@@ -627,16 +640,12 @@ export function SharedAgentProfile({
             </>
           }
         >
-          {(["display_name", "description", "persona"] as const).map(
-            (field) => (
-              <GroupedRow search={{ id: `shared-profile-${field}`, title: field === "display_name" ? "Display name" : field === "description" ? "Description" : "Persona", keywords: form.watch(field) }} key={field} asChild className="grouped-field">
+          {PROFILE_FIELDS.map(
+            ({ key: field, label }) => (
+              <GroupedRow search={{ id: `shared-profile-${field}`, title: label, keywords: form.watch(field) }} key={field} asChild className="grouped-field">
                 <Label>
                   <span>
-                    {field === "display_name"
-                      ? "Display name"
-                      : field === "description"
-                        ? "Description"
-                        : "Persona"}
+                    {label}
                   </span>
                   <GroupedTextarea
                     aria-invalid={!!form.formState.errors[field]}
@@ -649,7 +658,7 @@ export function SharedAgentProfile({
           )}
         </GroupedList>
         <GroupedFormActions
-          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "display_name", label: "Display name" }, { key: "description", label: "Description" }, { key: "persona", label: "Persona" }])}
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), PROFILE_FIELDS)}
           label="profile"
           dirty={form.formState.isDirty}
           pending={update.isPending}

@@ -467,6 +467,7 @@ async fn channel_model_turns_for(
             description: "Customer service".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: GrantTargets {
                 service_ids: if matches!(scenario, Scenario::Merchant) {
                     vec![]

@@ -26,7 +26,7 @@ use crate::{
         assistant_agent::{
             AgentGrants, AgentKind, AssistantAgent, COLLECTION_NAME as AGENTS, GuestAccess,
             MAX_DISPLAY_NAME_CHARS, MAX_MEMORY_NOTE_CHARS, MAX_MEMORY_NOTES, MAX_PERSONA_CHARS,
-            MemoryNote,
+            MAX_VOICE_INSTRUCTIONS_CHARS, MemoryNote,
         },
         assistant_conversation::{
             AccessMode, AgentEvent, AgentRole, AssistantConversation,
@@ -227,6 +227,7 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         memory: Vec::new(),
         display_name: None,
         persona: None,
+        voice_instructions: None,
         destroyed_at: None,
         created_at: now,
         updated_at: now,
@@ -1208,6 +1209,7 @@ pub struct CreateRequest {
     /// Optional friendly name and persona (tone, personality).
     pub display_name: Option<String>,
     pub persona: Option<String>,
+    pub voice_instructions: Option<String>,
     pub targets: GrantTargets,
     pub account_read: bool,
     pub specialty: Option<String>,
@@ -1447,6 +1449,12 @@ async fn create_specialist_inner(
             "A persona",
             true,
         )?,
+        voice_instructions: style_value(
+            request.voice_instructions.as_deref().unwrap_or_default(),
+            MAX_VOICE_INSTRUCTIONS_CHARS,
+            "Voice instructions",
+            true,
+        )?,
         destroyed_at: None,
         created_at: now,
         updated_at: now,
@@ -1557,6 +1565,7 @@ async fn create_specialist_inner(
 pub struct AgentStyle<'a> {
     pub display_name: Option<&'a str>,
     pub persona: Option<&'a str>,
+    pub voice_instructions: Option<&'a str>,
 }
 
 /// A bounded, credential-free display name or persona; empty clears it.
@@ -1656,6 +1665,13 @@ pub async fn update_agent(
             style.persona,
             MAX_PERSONA_CHARS,
             "A persona",
+            true,
+        ),
+        (
+            "voice_instructions",
+            style.voice_instructions,
+            MAX_VOICE_INSTRUCTIONS_CHARS,
+            "Voice instructions",
             true,
         ),
     ] {
@@ -2734,6 +2750,7 @@ pub struct AgentSummary {
     pub name: String,
     pub display_name: Option<String>,
     pub persona: Option<String>,
+    pub voice_instructions: Option<String>,
     pub description: String,
     pub specialty: Option<String>,
     pub created_by: String,
@@ -3140,6 +3157,7 @@ pub(crate) async fn summaries_for_agents(
             name: agent.name.clone(),
             display_name: agent.display_name.clone(),
             persona: agent.persona.clone(),
+            voice_instructions: agent.voice_instructions.clone(),
             description: agent.description.clone(),
             specialty: agent.specialty.clone(),
             created_by: agent.created_by.clone(),

@@ -80,6 +80,7 @@ fn prepare_org_watch(
                     description: "Async org worker".into(),
                     display_name: None,
                     persona: None,
+                    voice_instructions: None,
                     targets: Default::default(),
                     account_read: false,
                     machines: None,

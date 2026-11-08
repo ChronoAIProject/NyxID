@@ -13,13 +13,15 @@ and [review and verification evidence](../SPECIALIST_BOT_VOICE_REVIEW.md).
 
 ## 1. Decision
 
-Voice is another surface of the person's existing NyxAgent thread. The voice
-model converses, listens, clarifies and narrates; **every operation involving
-NyxID, connected services, durable memory, skills or machines runs as a normal
-NyxAgent turn using that thread's existing Agent Key**. NyxBot retains Full
-authority and specialists retain their grants, B1 operation scopes, B2 skills
-and B3a organization checks. Voice creates no second tool executor or general
-"call any NyxID API" bridge.
+Voice is another surface of the person's selected NyxBot. The Live model listens
+and speaks; its native Responses model can discover and call existing MCP tools
+for straightforward service reads/actions. Complex or lengthy work runs through
+the existing NyxAgent task runner. Both use ordinary execution conversations and
+credentials derived from the selected Bot, with its current grants, operation
+scopes, organization checks, approvals, audit and billing. The device Key only
+authorizes access to that Bot's Voice connection; it is never the tool credential.
+Voice is a client of the authenticated MCP protocol, not a second authorization
+or service executor. The web Voice authentication routes remain unchanged.
 
 Use OpenAI **`gpt-live-1`**, native Responses delegation, browser WebRTC audio and a
 server-owned sideband. Use xAI **`grok-voice-think-fast-2.0`**, pinned rather than
@@ -40,6 +42,49 @@ person's private specialist threads, including organization specialists, qualify
 This limits the audio surface, not what the agent can do through its existing
 tools. Channel and group work remains reachable through NyxBot's ordinary routing.
 
+A valid native Responses `failed`, `incomplete` or `cancelled` reply ends only
+that inference. Its buffered function calls never execute. The healthy audio
+call stays open, prior effects are retained, and accepted tasks keep their
+ordinary lifecycle and status. No automatic retry or task resubmission follows.
+Failed/incomplete replies receive a language-neutral presentation fact; cancelled
+replies receive silent context. This never replaces a task result or proves an
+action failed. Protocol identity violations, lost authorization and transport
+failures still close the call.
+
+When Live reports only an uncorrelated request error, recovery requires exactly
+one known active native inference and a bounded read of that exact response from
+the same provider/project. Only a provider-confirmed failed/incomplete/cancelled
+record enters the recovery path, retaining reported usage. No error-message
+matching is used. Command-correlated errors, ambiguous inference identity,
+missing or nonterminal records, failed retrieval and revoked access fail closed.
+The read cannot execute tools or replay work.
+
+The direct-service policy is shared by all Bots and Voice clients and applies to
+every authorized service. It works without any Bot-specific instructions.
+The native executor returns verified findings for the spoken reply. If its
+conversation contains no caller request or question, it returns an empty answer
+without starting work. Empty answers supply no new findings: the spoken model
+waits quietly rather than adding a greeting, readiness message or request to
+repeat accepted work. Completed findings are not repeated without a caller
+request. A request for current service state or task progress requires a fresh
+lookup; a previous finding is conversation history, not a current read. Only an
+explicit request to repeat a previous result reuses it without a lookup. These
+are shared conversation rules, not service-specific workflows.
+Bot profiles can supplement it with an optional `voice_instructions` setting
+(2,000 characters; empty clears it). This is shared by all Voice clients (web, devices and other
+authorized callers) and applies to every service the selected Bot may use.
+It is not tied to a client or service type. It supplies call behavior and
+service-use guidance to both Live and its native Responses executor, alongside
+the same selected Bot's name, persona and language preference. Changes apply to
+new calls. It does not grant
+permissions or replace service schemas, live authorization, or approval policy.
+Cross-service rules belong here; service-specific descriptions and argument
+schemas remain on the existing service definitions and are discovered at runtime.
+No tablet, device model or particular connected service is required by this setting.
+Normal text turns retain their existing prompt. Skills continue to load through
+the ordinary NyxAgent task path; this field does not claim to load skills into
+native Voice delegation.
+
 ## 2. Provider contracts and verification limits
 
 The linked official pages were fetched, including their Markdown versions and
@@ -52,7 +97,7 @@ Live/Realtime guides; their Realtime examples are a different protocol.
 | OpenAI browser connection | [WebRTC guide][oa-webrtc]: trusted server calls `POST /v1/live/sessions` with `{session:{model,instructions,delegation:{type:"responses",responses:{model:catalog.delegation_model,...}},...},transport:{type:"webrtc",sdp}}`; answer is `transport.sdp`, identity is `session.id`. Browser channel label is `oai-events`. Wait for `session.started`; do not send `session.start` again. No ephemeral token is necessary. |
 | OpenAI sideband | [Server controls][oa-controls]: attach to `wss://api.openai.com/v1/live/sessions/{session_id}/attach` with the creating project's authentication and required connection headers. It receives subsequent events, including reflected audio. Attach before releasing the answer to the browser; discard reflected audio immediately without persistence. No documented replay guarantee for events before attachment. |
 | Browser control permissions | [Live sideband reference][oa-sideband] describes `session.client.data_channel.allowed_client_events` and `allowed_server_events`. Omission allows all. Explicitly restrict them at creation; see §5. Trusted sideband permissions are unaffected. |
-| Responses delegation | [Delegation][oa-delegation]: Live prepares conversational context for the catalog-selected Responses model. `request_nyxbot({request})` submits work; `get_task_status({})` reads bounded status for tasks already accepted in the same call. Complete function items become tasks only after a successful `response.completed`; caption pauses, fragments and offsets never select task text. Appends use `delegation_id:null` and remain bounded to 500 tokens. |
+| Responses delegation | [Delegation][oa-delegation]: Live prepares conversational context for the catalog-selected Responses model. `nyx__search_tools`, `nyx__list_connected_services` and `nyx__call_tool` reuse the MCP schemas and selected-Bot authority for direct work. `request_nyxbot({request})` submits complex work; `get_task_status({})` reads bounded status for accepted tasks. Complete function items execute only after a successful `response.completed`; caption pauses, fragments and offsets never select task text. Appends use `delegation_id:null` and remain bounded to 500 tokens. |
 | OpenAI configuration/usage | [Session guide][oa-sessions]: model, voice, input, store and delegation mode are startup choices. `session.update` only updates supported Responses delegation settings, not arbitrary Live configuration. `session.usage.updated.usage.seconds` is cumulative; `session.closed` contains final usage. Appended acknowledgements describe context injection, not speech completion. There is no client-delegation cancel event. |
 | OpenAI pricing/storage | [Model][oa-model] lists $0.05/minute billed per second, backend work separate. [Cost guide][oa-cost] says silence, mute and backend waiting count. WebRTC creation bills 15 initialization seconds credited against running duration: a 90-second session is 90, not 105. `store:false` is explicit; no recording download, forking or raw-audio storage. Provider retention policy is separate from NyxID retention. |
 | xAI model/transport | [Voice guide][xai-voice] now redirects to Speech to Speech: `wss://api.x.ai/v1/realtime?model=grok-voice-think-fast-2.0`; `grok-voice-latest` currently aliases it. Server Bearer authentication, bidirectional WebSocket, PCM and other codecs, JSON or binary audio transport. |
@@ -126,30 +171,56 @@ revocation. Stop outstanding turns and close voice on detected access loss.
 
 ### Quick path
 
-Choose the simple option for the first release:
+* Live handles conversation, clarification and repetition from supplied context.
+  Its native Responses model chooses direct service tools for straightforward
+  work, or `request_nyxbot` for complex reasoning, skills and lengthy tasks.
+  No transcript-fragment execution, language keyword router or service allowlist
+  is added. Service descriptions and argument schemas come from existing MCP.
+* Direct tools authenticate at `/mcp` through `X-API-Key`, with an ordinary credential for a private
+  execution conversation derived from the selected Bot. Each delegation holds
+  one normal live turn and team-pool slot; it starts no extra NyxAgent inference.
+  Every tool request authenticates again, so grant and operation-scope revocation
+  applies immediately. Provider output cannot select an acting person, Bot,
+  credential, endpoint origin or approval identity.
+* The coordinator renews the turn during provider thinking and tool requests.
+  A tool request is bounded to 30 seconds and 256 KiB; the delegation's execution
+  context lasts at most 120 seconds. Terminal Responses output, call closure,
+  Stop or expiry settles the normal turn and releases the slot. Native sessions
+  are never reconstructed or replayed after a worker restart. Direct tool turns
+  keep the existing activity/audit trail, linked to the visible voice thread.
+* Direct tool calls declare the generic MCP `inline-only` result capability.
+  When an existing service policy requires a pending approval, MCP refuses
+  before creating a card or dispatching. The same Bot can submit the complete
+  request to its ordinary task path, which owns the existing approval and
+  durable result continuation. Short Voice tool timeouts must not turn a known
+  approval wait into an unknown action outcome.
+  The transport refuses published asynchronous operations and native workflow
+  tools before dispatch or creating watches/approval requests. Its structured
+  `task-required` / `dispatched:false` receipt allows the native model to submit
+  the complete request through the existing task runner, provided no earlier
+  direct operation was attempted. Normal task-capable MCP clients retain their
+  watch, result, Stop and confirmation lifecycle. This is a per-request transport
+  restriction, not another authorization rule or a Voice-dependent MCP executor.
+* A possibly dispatched operation is never automatically resubmitted as a full
+  task, including when the connection fails or its result exceeds the bound.
+  An uncertain result explicitly prohibits retry and ends that delegation; a new caller request is required before checking state. Discovery may be followed by
+  full task submission before any executable tool has been attempted.
+* `get_task_status({})` remains a read-only view of at most eight already accepted
+  full tasks from the exact call, actor and conversation. It cannot select a
+  foreign task, start, repeat, cancel or approve work. Direct MCP results return
+  through native function outputs; accepted full tasks retain detached result
+  announcements and their existing Stop/confirmation flow.
+* xAI retains its current full-task adapter. Its built-in `web_search`, `x_search`,
+  `file_search` and `mcp` stay disabled; they would bypass NyxID authority.
 
-* Voice handles conversation, clarification and repetition from already supplied
-  context. It cannot fetch data or mutate state.
-* Everything touching NyxID or a provider service delegates to the same agent
-  turn, including "read my calendar", "remember this" and "turn on the light".
-* Session controls (mute/end/Stop/queue inspection) are closed coordinator
-  operations. The displayed task list is not a general account-data fast path.
-  The OpenAI Responses delegation exposes `get_task_status({})` for progress
-  questions. It revalidates the call's current authority and returns at most
-  eight task records, prioritizing pending work, scoped to the exact call,
-  person and conversation. It exposes task state and verified progress only,
-  accepts no caller-selected identity or task ID, and does not submit, cancel
-  or approve work.
-* Disable xAI built-in `web_search`, `x_search`, `file_search` and `mcp`. Otherwise
-  voice would bypass the thread's grants, scopes, approval and metering path.
-
-For a short service read, expected normal-turn latency is 1–4 s median and
-3–8 s p95 before useful results, plus external service variation. A dedicated
-vetted read tool could remove roughly 0.5–2 s of agent routing and model startup,
-but would need the same authenticated thread-key constructor, current grants,
-B1 canonical operation matching, B3a checks, approval/confirmation, audit and
-billing as MCP. Defer it until measured data demonstrates a need. Never use
-speculative transcript fragments to execute side effects.
+Direct reads avoid an additional NyxAgent model/tool loop. Latency still includes
+native Responses thinking, existing execution policies and the target service.
+Tool images are queued as untrusted visual input for the Responses model,
+not exposed to Live as base64 text. For chat-key results, the adapter reads new
+images from the producing live turn through the existing attachment/retention
+gate. At most four images, each at most 256 KiB after base64 encoding, are
+supplied per execution context; omitted images are explicitly unavailable,
+without repeating an already completed action. No tool-result URL is fetched.
 
 ### Specialists and context
 
@@ -405,9 +476,11 @@ available without merging execution histories.
    accepts only an empty object and reads already accepted work. Bind nested events to the
    observed delegation, response and call IDs. Ignore argument deltas/done events
    as execution triggers; wait for a complete function item and a successful
-   terminal response. Reject unknown tools/fields, oversized or empty tasks,
+   terminal response. Direct service calls use the same event identity/deduplication
+   fence and the authenticated MCP path described above. Reject unknown tools/fields, oversized or empty tasks,
    mismatched identities and incomplete responses. Model output never selects
-   a user, Key, Bot, service or permission.
+   an acting user, Key, Bot, endpoint origin or permission. Service/tool selection
+   is constrained by the authenticated MCP inventory and execution policies.
 2. Admit through the existing session-fenced transaction and queue, deduplicated
    by `(session_id, call_id)`. Store explicit `model_task` provenance separately
    from ASR metadata; never relabel model text as a user transcript. Revalidate
@@ -815,8 +888,8 @@ centrally in `errors/mod.rs` during implementation.
 | `session.input_transcript.delta` | Timed user caption for display/history; never constructs tasks or grants authority. Existing literal confirmation gates remain separate. |
 | `session.output_transcript.delta` | Timed assistant caption/segment; delivery tracked separately. |
 | `session.delegation.created` | Register Responses delegation/response identity; no task admission yet. |
-| `response.event` | Collect complete function items, checkpoint terminal reported tokens, then admit a successfully completed model task. Deltas and incomplete responses start no work. |
-| `response.item.create` / `response.create` | Return a function receipt and continue once; verified results arrive separately through existing announcements. |
+| `response.event` | Collect complete function items, checkpoint terminal reported tokens, then execute direct MCP work or admit a complex task only on successful completion. Deltas and incomplete responses start no work. |
+| `response.item.create` / `response.create` | Return the verified direct-tool output or task receipt, then continue once; full task results arrive through existing announcements. |
 | `session.thinking.append` | Bounded factual quiet task state; may later be spoken, no secrets/reasoning. |
 | `session.commentary.append` | Accepted/queued/progress/result/cancellation fact, `delegation_id:null` in Responses mode. |
 | `session.instructions.append` | Application-authored behavior only; never verbatim user/tool text. Can steer speech; cannot undo audio or cancel work. |
@@ -1283,12 +1356,12 @@ On closure, append exactly one compact **Call receipt** through the existing
 thread message/sequence path with `via: "voice"`. Its deterministic server
 snapshot shows duration without cost or pending-cost lines. Personal charges
 remain in **Billing & Usage → Usage**; creating the receipt does not query usage
-meters. It then lists
-each handed-off request using a bounded title from the user's source message,
+meters. Under **Tasks**, it lists each accepted full task using a bounded title from the user's source message,
 its `Done`, `Running`, `Queued`, `Cancelled` or `Needs your OK` state, an
 existing-thread result link when available, and any confirmation inline. Zero
-counters are omitted; a call with no delegated work says **Just a
-conversation, nothing handed off**. The receipt is metadata-only, never an LLM
+counters and empty task lists are omitted. Direct service calls retain their
+ordinary activity/audit trail; an empty full-task list does not mean the call
+performed no actions. The receipt is metadata-only, never an LLM
 summary or a claim that queued work completed. Its durable session-bound
 identity and transactional marker deduplicate normal close, disconnect recovery
 and reconciliation. Results that settle later remain in the thread through the
@@ -1337,7 +1410,7 @@ browser/device class and network condition using timestamps/counts only.
 | Delegation -> accepted/queued receipt | <=150 ms p50, <=500 ms p95 excluding delayed input transcript | Provider event, durable admission, receipt send |
 | Request -> spoken acknowledgement | <=800 ms p50, <=1.5 s p95 | Input endpoint, acknowledgement playback; not just append ACK |
 | Delegation -> normal backend admission | 50–250 ms p50 idle; <=750 ms p95 | Queue claim, key/authority transaction, turn start; busy time separately |
-| Quick service read -> usable answer | 1–4 s p50, 3–8 s p95 estimate | NyxAgent first response/tool/settlement; no fabricated fixed provider SLA |
+| Quick service read -> usable answer | Measure per provider/service; no fixed SLA | Native Responses discovery/tool loop, ordinary MCP authorization and service time; no extra NyxAgent model turn |
 | Activity -> UI / spoken progress | <=500 ms UI p95; first useful spoken progress around 2 s | Event receipt, UI render, coalesced output start |
 | Durable result -> announced | <=1 s p50, <=2 s p95 at next conversational pause | Commit, append, first result audio; queue while user speaks separately |
 | Grok relay overhead | 40–150 ms network estimate + 20–60 ms loopback; provider transcript gating adds unverified delay | Compare regional direct timing in lab, relay queue and player timestamps |
@@ -1941,3 +2014,17 @@ No audio/transcript/provider prose is added to diagnostics. The browser retains
 close code, clean/unclean status and capture stage, accepts only fixed close
 reasons, and leaves partial text reviewable. The 120-second audio and lifetime
 frame budgets remain unchanged and include room for Stop and transport controls.
+
+### GPT-Live result-context representation
+
+Settled task results and owner-review statuses use bounded plain-text context in
+the Live adapter. Each part carries its task state, presentation availability,
+error and part number; the original findings are preserved byte for byte. Parts
+are sent contiguously, with quiet thinking appends followed by one commentary
+append. These facts are presentation data and never authorize a caller request, approval or a new task. The
+Grok adapter and native Responses function outputs keep their typed contracts.
+This avoids serializing a large JSON envelope into GPT-Live's spoken context;
+independent silent-input controls observed spurious input captions, partial
+presentation and wrong-language speech with JSON while paired plain-text
+controls preserved the caller's language and findings. This is a tested
+mitigation, not a guarantee against every provider transcription anomaly.

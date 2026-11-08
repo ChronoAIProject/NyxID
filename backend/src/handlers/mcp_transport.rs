@@ -220,6 +220,27 @@ fn tool_result(id: Option<serde_json::Value>, text: &str, is_error: bool) -> Res
     )
 }
 
+fn inline_only(request: &JsonRpcRequest) -> bool {
+    request.params.as_ref().is_some_and(|params| {
+        params["_meta"][mcp_service::RESULT_MODE_META] == mcp_service::INLINE_ONLY
+    })
+}
+
+/// A transport capability refusal, before watches, approvals or dispatch.
+/// The ordinary task-capable client may submit the work under its own authority.
+fn task_required(id: Option<serde_json::Value>) -> Response {
+    rpc_success(
+        id,
+        serde_json::json!({
+            "isError": true,
+            "content": [{"type":"text", "text":"This operation requires a task-capable client. No operation was dispatched. Submit the complete request through the existing task runner before taking action."}],
+            "_meta": {(mcp_service::RESULT_MODE_META): {
+                "status":mcp_service::TASK_REQUIRED, "dispatched":false
+            }}
+        }),
+    )
+}
+
 fn concurrency_limited_response(id: Option<serde_json::Value>) -> Response {
     let error = crate::errors::AppError::ServiceConcurrencyLimited;
     let mut response = rpc_error(
@@ -2810,6 +2831,14 @@ async fn dispatch_tools_call(
         None => return rpc_error(request.id.clone(), -32602, "Missing tool name"),
     };
 
+    if params
+        .get("_meta")
+        .and_then(|meta| meta.get(mcp_service::RESULT_MODE_META))
+        .is_some_and(|mode| mode != mcp_service::INLINE_ONLY)
+    {
+        return rpc_error(request.id.clone(), -32602, "Unsupported MCP result mode");
+    }
+
     let arguments = params
         .get("arguments")
         .cloned()
@@ -2862,6 +2891,19 @@ async fn dispatch_tools_call(
 
     if let Some(refused) = guest_tool_refusal(auth, tool_name, request.id.clone()) {
         return refused;
+    }
+
+    if inline_only(request)
+        && (tool_name.starts_with("nyx__") || tool_name.starts_with("nyxid__"))
+        && !matches!(
+            tool_name,
+            "nyx__search_tools"
+                | "nyx__list_connected_services"
+                | "nyx__discover_services"
+                | "nyx__call_tool"
+        )
+    {
+        return task_required(request.id.clone());
     }
 
     if tool_name.starts_with("nyxid__") {
@@ -3106,6 +3148,7 @@ fn dispatch_meta_tool<'a>(
             arguments,
             request.id.clone(),
             client_accepts_sse,
+            inline_only(request),
             billing_egress_permit,
         )),
         // NyxID's built-in oracle is permanently retired. The tools are no
@@ -3367,6 +3410,10 @@ fn dispatch_service_tool<'a>(
             }
         };
 
+        if inline_only(request) && endpoint.async_operation.is_some() {
+            return task_required(request.id.clone());
+        }
+
         if let Some((row, _)) = &resource
             && !crate::services::assistant_resource_service::matches_endpoint(
                 row, service, endpoint,
@@ -3478,7 +3525,14 @@ fn dispatch_service_tool<'a>(
         };
         let operation = prepared.operation_descriptor();
         match box_tool_future(|| {
-            authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone())
+            authorize_mcp_tool_operation(
+                state,
+                auth,
+                service,
+                &operation,
+                request.id.clone(),
+                inline_only(request),
+            )
         })
         .await
         {
@@ -3773,6 +3827,7 @@ async fn authorize_mcp_tool_operation(
     service: &mcp_service::McpToolService,
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
+    inline_only: bool,
 ) -> Result<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>, Response> {
     let target = crate::services::mcp_approval::approval_target_for_tool(
         &state.db,
@@ -3788,7 +3843,7 @@ async fn authorize_mcp_tool_operation(
             true,
         )
     })?;
-    authorize_mcp_operation(state, auth, target, operation, request_id).await
+    authorize_mcp_operation(state, auth, target, operation, request_id, inline_only).await
 }
 
 #[allow(clippy::result_large_err)]
@@ -3798,6 +3853,7 @@ async fn authorize_mcp_operation(
     target: crate::services::mcp_approval::McpApprovalTarget,
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
+    inline_only: bool,
 ) -> Result<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>, Response> {
     // A shell can do anything: SSH stays the owner's. Service calls were
     // checked against the owner's guest access before this point.
@@ -3854,6 +3910,12 @@ async fn authorize_mcp_operation(
         // would look like the owner's own.
         approval_service::ApprovalOutcome::NeedsApproval(_) if guest_turn(auth) => {
             return Err(guest_refused(request_id));
+        }
+        approval_service::ApprovalOutcome::NeedsApproval(_) if inline_only => {
+            // This client has no durable approval/result continuation. Refuse
+            // before creating a card or dispatching; its task-capable path can
+            // preserve the existing approval workflow under the same authority.
+            return Err(task_required(request_id));
         }
         approval_service::ApprovalOutcome::NeedsApproval(pending) => pending,
     };
@@ -4844,6 +4906,7 @@ fn handle_machine_tool<'a>(
 /// tool by name, bypassing the need for a `tools/list` refresh.  The AI
 /// discovers tools via `nyx__search_tools` and then calls them through this
 /// meta-tool, which is always in the static tool list.
+#[allow(clippy::too_many_arguments)]
 async fn handle_meta_call_tool(
     state: &AppState,
     auth: &McpAuthContext,
@@ -4851,6 +4914,7 @@ async fn handle_meta_call_tool(
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
     client_accepts_sse: bool,
+    inline_only: bool,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Response {
     let tool_name = match arguments.get("tool_name").and_then(|n| n.as_str()) {
@@ -4860,6 +4924,10 @@ async fn handle_meta_call_tool(
 
     if tool_name.len() > 200 {
         return tool_result(request_id, "tool_name too long (max 200 chars)", true);
+    }
+
+    if inline_only && (tool_name.starts_with("nyx__") || tool_name.starts_with("nyxid__")) {
+        return task_required(request_id);
     }
 
     let result_query =
@@ -5036,6 +5104,10 @@ async fn handle_meta_call_tool(
         }
     };
 
+    if inline_only && endpoint.async_operation.is_some() {
+        return task_required(request_id);
+    }
+
     if result_query.is_some()
         && (endpoint.method != "GET"
             || endpoint.path != "/v1/blocks/{block_id}/children"
@@ -5131,7 +5203,14 @@ async fn handle_meta_call_tool(
     };
     let operation = prepared.operation_descriptor();
     match box_tool_future(|| {
-        authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone())
+        authorize_mcp_tool_operation(
+            state,
+            auth,
+            service,
+            &operation,
+            request_id.clone(),
+            inline_only,
+        )
     })
     .await
     {
@@ -6432,6 +6511,7 @@ async fn handle_mcp_ssh_exec(
         },
         &operation,
         request_id.clone(),
+        false,
     )
     .await
     {
@@ -7857,6 +7937,7 @@ mod tests {
                         &serde_json::json!({"tool_name":name,"arguments":{}}),
                         None,
                         false,
+                        false,
                         crate::services::billing::route_inventory::internal_node_dispatch_permit(),
                     )),
                 )
@@ -8215,7 +8296,7 @@ mod tests {
         let proxy_auto_allowed = proxy_call(proxy_request()).await.unwrap();
         assert_eq!(proxy_auto_allowed.status(), StatusCode::OK);
         assert!(
-            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None, true)
                 .await
                 .is_ok()
         );
@@ -8254,7 +8335,7 @@ mod tests {
         let proxy_grant_covered = proxy_call(proxy_request()).await.unwrap();
         assert_eq!(proxy_grant_covered.status(), StatusCode::OK);
         assert!(
-            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None, true)
                 .await
                 .is_ok()
         );
@@ -8266,6 +8347,43 @@ mod tests {
             )
             .await
             .unwrap();
+        // Inline clients must receive a pre-dispatch capability refusal,
+        // without a waiting card/channel that outlives their short request.
+        let approvals_before = db
+            .collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None, true),
+        )
+        .await
+        .expect("Inline approval handling must not wait")
+        .expect_err("Per-request approval requires a task-capable client");
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body["result"]["_meta"][mcp_service::RESULT_MODE_META],
+            serde_json::json!({"status":mcp_service::TASK_REQUIRED,"dispatched":false})
+        );
+        assert_eq!(
+            db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            approvals_before
+        );
+        assert_eq!(
+            db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+
         db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
             .insert_one(NotificationChannel {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -8293,7 +8411,7 @@ mod tests {
             crate::errors::AppError::ApprovalFailed { .. }
         ));
         assert!(
-            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None, false)
                 .await
                 .is_err()
         );
@@ -9992,6 +10110,7 @@ mod org_agent_mcp_tests {
                 }),
                 Some(serde_json::json!(5)),
                 false,
+                false,
                 crate::services::billing::route_inventory::internal_node_dispatch_permit(),
             )
             .await,
@@ -10023,6 +10142,7 @@ mod org_agent_mcp_tests {
                     "arguments": {}
                 }),
                 Some(serde_json::json!(6)),
+                false,
                 false,
                 crate::services::billing::route_inventory::internal_node_dispatch_permit(),
             )
@@ -10129,6 +10249,7 @@ mod org_agent_mcp_tests {
                     "arguments": {}
                 }),
                 Some(serde_json::json!(13)),
+                false,
                 false,
                 crate::services::billing::route_inventory::internal_node_dispatch_permit(),
             )
@@ -10592,6 +10713,7 @@ mod org_agent_mcp_tests {
                 }),
                 Some(serde_json::json!(10)),
                 false,
+                false,
                 crate::services::billing::route_inventory::internal_node_dispatch_permit(),
             )
             .await,
@@ -10805,6 +10927,7 @@ mod org_agent_mcp_tests {
                     "arguments": {"path": "/repository"}
                 }),
                 Some(serde_json::json!(1)),
+                false,
                 false,
                 permit,
             )

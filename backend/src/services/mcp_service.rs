@@ -1,5 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
+/// Optional per-request capability for clients without a background-result
+/// consumer. This only narrows dispatch; it never changes execution authority.
+pub const RESULT_MODE_META: &str = "io.nyxid/result-mode";
+pub const INLINE_ONLY: &str = "inline-only";
+pub const TASK_REQUIRED: &str = "task-required";
+
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};

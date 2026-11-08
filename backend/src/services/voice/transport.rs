@@ -81,59 +81,93 @@ fn append(kind: &str, content: String) -> Value {
         "delegation_id":null,"content":content})
 }
 
-fn presentation_appends(mut facts: Value) -> AppResult<Vec<Value>> {
+fn presentation_appends(facts: Value) -> AppResult<Vec<Value>> {
     validate_context(&facts)?;
-    let content = facts.to_string();
-    if content.len() <= super::runtime::COMMENTARY_MAX_BYTES {
-        return Ok(vec![append("session.commentary.append", content)]);
-    }
-    let answer = facts["answer"]
-        .as_str()
-        .ok_or_else(|| AppError::Internal("Voice presentation has no answer".into()))?
-        .to_owned();
-    facts["answer"] = json!("");
-    facts["result_id"] = json!(uuid::Uuid::new_v4().to_string());
-    // At most one part per original byte. Reserve the largest possible part
-    // numbers so JSON quoting and metadata always fit the provider append bound.
-    facts["part"] = json!(super::speech::CONTEXT_MAX_BYTES);
-    facts["parts"] = json!(super::speech::CONTEXT_MAX_BYTES);
+    // Live consumes plain spoken context, unlike Responses' typed tool outputs.
+    // Serializing a large JSON envelope into that context reproduced spurious
+    // caller captions and incomplete/wrong-language speech with silent input.
+    let invalid = || AppError::Internal("Invalid voice presentation facts".into());
+    let (header, body) = match facts["type"].as_str() {
+        Some("task_result") => {
+            let state = match facts["state"].as_str() {
+                Some(state @ ("completed" | "failed")) => state,
+                _ => return Err(invalid()),
+            };
+            let presentation = match facts["presentation"].as_str() {
+                Some(value @ ("original" | "unavailable")) => value,
+                _ => return Err(invalid()),
+            };
+            let error = match &facts["error_code"] {
+                Value::Null => "none",
+                Value::String(code)
+                    if code.len() <= 128
+                        && code.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') =>
+                {
+                    code
+                }
+                _ => return Err(invalid()),
+            };
+            let body = match facts.get("answer") {
+                Some(Value::String(text)) => text.as_str(),
+                None if presentation == "unavailable" => "No findings are supplied.",
+                _ => return Err(invalid()),
+            };
+            (
+                format!(
+                    "Quoted task result. State: {state}. Presentation: {presentation}. Error: {error}."
+                ),
+                body,
+            )
+        }
+        Some("owner_review_required")
+            if facts["approval_surface"] == "nyxid_owner_card"
+                && facts["speech_can_approve"] == false =>
+        {
+            let body = match facts.get("summary") {
+                Some(Value::String(text)) => text.as_str(),
+                None => "The action is pending owner review.",
+                _ => return Err(invalid()),
+            };
+            ("Quoted action status: owner review required on the NyxID owner card. Speech cannot approve this action.".to_owned(), body)
+        }
+        _ => return Err(invalid()),
+    };
+    // One complete result is sent contiguously before returning to the caller.
+    // Reserve the largest possible part numbers before any I/O; split only on
+    // UTF-8 boundaries, preserving every character without sentence heuristics.
+    let envelope = |part, count| format!("{header}\nPart {part} of {count}.\nQuoted findings:\n");
     let budget = super::runtime::COMMENTARY_MAX_BYTES
-        .checked_sub(facts.to_string().len())
-        .filter(|budget| *budget >= 6)
-        .ok_or_else(|| {
-            AppError::Internal("Voice presentation metadata exceeds its bound".into())
-        })?;
+        .checked_sub(
+            envelope(
+                super::speech::CONTEXT_MAX_BYTES,
+                super::speech::CONTEXT_MAX_BYTES,
+            )
+            .len(),
+        )
+        .filter(|budget| *budget >= 4)
+        .ok_or_else(invalid)?;
     let mut chunks = vec![String::new()];
     let mut size = 0;
-    for ch in answer.chars() {
-        // Count the JSON-escaped character without the enclosing quotes. Split
-        // only at Unicode boundaries; no findings are selected or discarded.
-        let encoded_size = serde_json::to_string(&ch)
-            .expect("a character is serializable")
-            .len()
-            - 2;
-        if size + encoded_size > budget {
+    for ch in body.chars() {
+        if size + ch.len_utf8() > budget {
             chunks.push(String::new());
             size = 0;
         }
-        chunks.last_mut().expect("answer chunk").push(ch);
-        size += encoded_size;
+        chunks.last_mut().expect("context chunk").push(ch);
+        size += ch.len_utf8();
     }
     let count = chunks.len();
     Ok(chunks
         .into_iter()
         .enumerate()
         .map(|(index, chunk)| {
-            facts["answer"] = json!(chunk);
-            facts["part"] = json!(index + 1);
-            facts["parts"] = json!(count);
             append(
                 if index + 1 == count {
                     "session.commentary.append"
                 } else {
                     "session.thinking.append"
                 },
-                facts.to_string(),
+                format!("{}{chunk}", envelope(index + 1, count)),
             )
         })
         .collect())
@@ -173,7 +207,6 @@ mod tests {
             let facts = json!({"type":"task_result","state":"completed",
                 "presentation":"original","answer":answer,"error_code":null});
             let mut complete = String::new();
-            let mut result_id = None;
             let mut event_ids = std::collections::HashSet::new();
             let read = async {
                 let mut index = 0;
@@ -184,23 +217,28 @@ mod tests {
                     assert!(event["delegation_id"].is_null());
                     let content = event["content"].as_str().unwrap();
                     assert!(content.len() <= super::super::runtime::COMMENTARY_MAX_BYTES);
-                    let part: Value = serde_json::from_str(content).unwrap();
                     index += 1;
-                    assert_eq!(part["part"], index);
-                    assert_eq!(part["type"], facts["type"]);
-                    assert_eq!(part["state"], facts["state"]);
-                    assert_eq!(part["error_code"], facts["error_code"]);
-                    let id = part["result_id"].as_str().unwrap();
-                    assert_eq!(result_id.get_or_insert_with(|| id.to_owned()), id);
-                    complete.push_str(part["answer"].as_str().unwrap());
+                    let (metadata, body) = content.split_once("\nQuoted findings:\n").unwrap();
+                    assert!(metadata.starts_with(
+                        "Quoted task result. State: completed. Presentation: original. Error: none."
+                    ));
+                    let numbers: Vec<_> = metadata
+                        .lines()
+                        .last()
+                        .unwrap()
+                        .split_whitespace()
+                        .collect();
+                    assert_eq!(numbers[1].parse::<usize>().unwrap(), index);
+                    let count = numbers[3].trim_end_matches('.').parse::<usize>().unwrap();
+                    complete.push_str(body);
                     if event["type"] == "session.commentary.append" {
                         assert!(index > 1);
-                        assert_eq!(part["parts"], index);
+                        assert_eq!(count, index);
                         assert_eq!(complete, answer);
                         break;
                     }
                     assert_eq!(event["type"], "session.thinking.append");
-                    assert!(index < part["parts"].as_u64().unwrap());
+                    assert!(index < count);
                 }
             };
             let send = transport.presentation_context(facts.clone());
@@ -218,10 +256,11 @@ mod tests {
         let events = presentation_appends(facts.clone()).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["type"], "session.commentary.append");
-        assert_eq!(
-            serde_json::from_str::<Value>(events[0]["content"].as_str().unwrap()).unwrap(),
-            facts
-        );
+        let content = events[0]["content"].as_str().unwrap();
+        assert!(content.starts_with(
+            "Quoted task result. State: failed. Presentation: original. Error: permission_denied."
+        ));
+        assert!(content.ends_with("\nQuoted findings:\npermission_denied"));
         assert!(
             presentation_appends(
                 json!({"answer":"x".repeat(super::super::speech::CONTEXT_MAX_BYTES)})
@@ -229,5 +268,7 @@ mod tests {
             .is_err()
         );
         assert!(presentation_appends(json!(["not an object"])).is_err());
+        assert!(presentation_appends(json!({"type":"task_result","state":"invented","presentation":"original","answer":"x"})).is_err());
+        assert!(presentation_appends(json!({"type":"owner_review_required","approval_surface":"nyxid_owner_card","speech_can_approve":true})).is_err());
     }
 }

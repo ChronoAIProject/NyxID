@@ -964,6 +964,7 @@ async fn shared_agent_live_acl_role_and_billing_matrix() {
         team::AgentStyle {
             display_name: Some("Research"),
             persona: Some("Explain sources clearly"),
+            voice_instructions: None,
         },
     )
     .await

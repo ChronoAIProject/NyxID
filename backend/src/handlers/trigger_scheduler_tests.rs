@@ -592,6 +592,7 @@ async fn specialist(state: &AppState) -> crate::models::assistant_agent::Assista
             description: "Research using only granted services".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,

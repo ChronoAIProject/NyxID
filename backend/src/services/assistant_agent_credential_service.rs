@@ -1568,6 +1568,7 @@ mod tests {
                 description: "Read things".into(),
                 display_name: None,
                 persona: None,
+                voice_instructions: None,
                 targets: Default::default(),
                 account_read: false,
                 specialty: None,

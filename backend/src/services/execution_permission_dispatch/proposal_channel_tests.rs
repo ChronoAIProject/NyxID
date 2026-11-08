@@ -955,6 +955,7 @@ async fn migration_channel_delegation_retains_audience_and_refuses_guest_descend
             description: "Channel specialist".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: crate::services::assistant_team_service::GrantTargets {
                 service_ids: vec![f.connection.clone()],
                 ..Default::default()

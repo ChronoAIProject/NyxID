@@ -251,10 +251,11 @@ async fn voice_slot_fences_recovery_controls_and_one_call_receipt() {
             .unwrap();
         assert!(receipt.text.starts_with("**Call receipt**"));
         assert!(
-            receipt
+            !receipt
                 .text
                 .contains("Just a conversation, nothing handed off")
         );
+        assert!(!receipt.text.contains("Handed to NyxBot"));
         assert!(receipt.execution_pending, "A receipt is not an instruction");
         db.drop().await.unwrap();
     })
@@ -937,7 +938,7 @@ async fn click_vs_voice_commits_exactly_one_continuation_and_audit_is_ids_only()
             .await
             .unwrap()
             .unwrap();
-        assert!(receipt.text.contains("Handed to NyxBot"));
+        assert!(receipt.text.contains("Tasks:\n"));
         assert!(receipt.text.contains("Confirmation:"));
         db.drop().await.unwrap();
     })

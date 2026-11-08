@@ -4337,6 +4337,7 @@ async fn http_turns_inherit_specialist_model_and_preserve_explicit_and_existing_
             description: "Answers restaurant questions".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,

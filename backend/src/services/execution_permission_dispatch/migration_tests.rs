@@ -708,6 +708,7 @@ async fn migration_delegated_task_uses_child_permission_and_keeps_report_target(
             description: "Test specialist".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: team::GrantTargets {
                 service_ids: vec![f.connection.clone()],
                 ..Default::default()

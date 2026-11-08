@@ -3015,3 +3015,44 @@ async fn execution_permission_watch_submission_has_legacy_gap_and_one_covered_se
         }
     }
 }
+
+#[tokio::test]
+async fn mcp_inline_only_refuses_async_before_dispatch_and_keeps_default_watches() {
+    Box::pin(async {
+        let a = AsyncFixture::new().await;
+        let auth = authenticate(&a.f).await;
+        let submit = json!({"Idempotency-Key":"inline-test","script":"print(1)","language":"python"});
+        for (name, arguments) in [
+            ("sandbox__submit_execution_handler", submit.clone()),
+            ("nyx__call_tool", json!({"tool_name":"sandbox__submit_execution_handler","arguments_json":submit.to_string()})),
+            ("nyx__call_tool", json!({"tool_name":"nyx__machine_exec","arguments_json":"{}"})),
+            ("nyx__machine_exec", json!({})),
+        ] {
+            let response = Box::pin(handle_tools_call(
+                &a.f.state, &auth, None,
+                &JsonRpcRequest { jsonrpc:"2.0".into(), id:Some(json!(1)), method:"tools/call".into(),
+                    params:Some(json!({"name":name,"arguments":arguments,
+                        "_meta":{(mcp_service::RESULT_MODE_META):mcp_service::INLINE_ONLY}})) },
+                false, crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+            )).await;
+            let bytes = axum::body::to_bytes(response.into_body(), 100_000).await.unwrap();
+            let body:Value=serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["result"]["isError"],true,"{body}");
+            let mode=&body["result"]["_meta"][mcp_service::RESULT_MODE_META];
+            assert_eq!(mode["status"],mcp_service::TASK_REQUIRED,"{body}");
+            assert_eq!(mode["dispatched"],false,"{body}");
+        }
+        assert!(a.calls.lock().unwrap().is_empty());
+        for collection in [WATCHES, crate::models::approval_request::COLLECTION_NAME,
+            crate::models::assistant_acknowledgement::COLLECTION_NAME] {
+            assert_eq!(a.f.state.db.collection::<bson::Document>(collection)
+                .count_documents(doc!{}).await.unwrap(),0, "{collection}");
+        }
+        // Ordinary task-capable clients keep the existing watch and wake path.
+        let watch=a.submit().await;
+        assert_eq!(watch.service_id,a.service);
+        assert_eq!(a.calls.lock().unwrap().iter().filter(|p|p.as_str()=="/executions").count(),1);
+        assert_eq!(a.f.state.db.collection::<bson::Document>(WATCHES)
+            .count_documents(doc!{}).await.unwrap(),1);
+    }).await;
+}

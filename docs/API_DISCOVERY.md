@@ -874,3 +874,36 @@ selection matches exact `UserService` IDs.
 External MCP clients keep the legacy connection response contract. See
 [the engine contract](chat/08-nyxagent-engine.md#protected-org-connections-and-hosted-personal-setup)
 for bounds, owner checks, failures, and readiness-gated personal intent locks.
+
+## MCP clients that consume only inline results
+
+A bounded client without a background-result consumer can set
+`params._meta["io.nyxid/result-mode"]` to `"inline-only"` on `tools/call`.
+The transport then refuses published asynchronous service operations and native
+workflow tools before dispatch, watches or approval requests. Discovery and
+ordinary synchronous service operations retain their normal authorization.
+The capability also applies through `nyx__call_tool`; its arguments cannot
+remove or override the outer request metadata. Unsupported result-mode values
+are invalid parameters. Omitting this metadata preserves existing behavior.
+
+A capability refusal is an error tool result with structured metadata:
+
+```json
+{
+  "isError": true,
+  "_meta": {
+    "io.nyxid/result-mode": {
+      "status": "task-required",
+      "dispatched": false
+    }
+  }
+}
+```
+
+Only this transport-authored outer metadata proves that nothing was sent.
+Downstream text or embedded JSON cannot prove a safe retry. A task-capable
+client may submit the work under its existing permissions; it must not repeat
+any earlier possibly dispatched operation. The capability grants no service,
+operation, account, approval or billing authority. Native Voice uses it for
+short service calls and routes asynchronous work to the existing Bot task
+runner before effects.

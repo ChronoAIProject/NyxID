@@ -345,6 +345,22 @@ it("sets a display name and persona, and clears them by emptying the fields", as
   );
 });
 
+it("saves and clears voice instructions without changing other Bot settings", async () => {
+  agent = agentRow({ voice_instructions: "Read live device state." });
+  const { user } = renderSheet();
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  const profile = await within(sheet).findByLabelText("Profile", { selector: "form" });
+  const guidance = within(profile).getByLabelText("Voice instructions", { selector: "textarea" });
+  expect(guidance).toHaveValue("Read live device state.");
+  await user.clear(guidance);
+  await user.click(screen.getByText("Save changes", { selector: "button" }));
+  await confirmChanges();
+  await waitFor(() => expect(writes).toContainEqual({
+    method: "PATCH", endpoint: "/assistant/nyxagent/agents/agent-researcher",
+    body: { voice_instructions: "" },
+  }));
+});
+
 it("shows the server's refusal of a display name", async () => {
   const { user } = renderSheet();
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });

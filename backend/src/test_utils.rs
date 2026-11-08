@@ -2988,6 +2988,7 @@ pub async fn scoped_specialist_auth(
             description: "Exercise member operation permissions".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: team::GrantTargets {
                 service_ids: selections.iter().map(|(id, _)| id.clone()).collect(),
                 ..Default::default()

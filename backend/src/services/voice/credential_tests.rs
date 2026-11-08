@@ -1069,6 +1069,7 @@ async fn shared_transports_voice_provider_revocation_and_actor_billing() {
                 description: "Voice specialist".into(),
                 display_name: None,
                 persona: None,
+                voice_instructions: None,
                 targets: Default::default(),
                 account_read: false,
                 machines: None,
