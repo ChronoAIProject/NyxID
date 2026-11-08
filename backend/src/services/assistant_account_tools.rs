@@ -24,7 +24,7 @@ use std::sync::Arc;
 pub const TOOL_NAMES: &[&str] = &[
     "list_cma_resources",
     "cma_save_attachment",
-    "cma_request_owner",
+    "cma_guide",
     "list_agent_keys",
     "get_agent_key",
     "update_agent_key",
@@ -54,12 +54,11 @@ const MAX_RESULT_BYTES: usize = 64 * 1024;
 
 /// Read-only tools a subagent may use with an `account_read` grant.
 pub fn read_only(name: &str) -> bool {
-    if name == "list_cma_resources" {
-        return true;
-    }
     matches!(
         name,
-        "list_agent_keys"
+        "list_cma_resources"
+            | "cma_guide"
+            | "list_agent_keys"
             | "get_agent_key"
             | "list_agent_key_bindings"
             | "list_channel_adapters"

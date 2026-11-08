@@ -1673,24 +1673,6 @@ async fn execute_turn_inner(
             _ => "\nPreloaded skills are unavailable for this turn. Continue with available information or another authorized source; do not assume their contents.\n".into(),
         });
     }
-    if !row.guest_model_setup
-        && !row.guest_turn
-        && row.agent_owner_id.is_none()
-        && row.collaboration.is_none()
-        && crate::services::nyxbot_cma_tools::eligible(&state.db, &row.user_id, agent.as_ref())
-            .await
-            .unwrap_or(false)
-    {
-        guidance.push_str(crate::services::nyxbot_cma_tools::GUIDANCE);
-        if let Ok(Ok(snapshot)) = tokio::time::timeout(
-            Duration::from_secs(5),
-            crate::services::nyxbot_cma_tools::snapshot(&state.db, &row.user_id, agent.as_ref()),
-        )
-        .await
-        {
-            decisions.push_str(&snapshot);
-        }
-    }
     let prepared = crate::services::assistant_instruction_context::Prepared::with_guidance(
         state.audit_chain_hmac_key.as_ref().as_ref(),
         row,

@@ -1,5 +1,5 @@
 //! Final-dispatch CMA admission. Names and user connection aliases never select
-//! this contract; callers pass the verified catalog slug and resolved target.
+//! this contract; the dispatch registry selects the resolved catalog target.
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::{
@@ -677,7 +677,6 @@ pub async fn admit(
     config: &AppConfig,
     owner: &str,
     personal: bool,
-    catalog_slug: Option<&str>,
     target: &ProxyTarget,
     method: &str,
     path: &str,
@@ -685,10 +684,7 @@ pub async fn admit(
     body: &[u8],
     headers: &[(String, String)],
     unsupported_transport: bool,
-) -> AppResult<Option<CmaDispatchPermit>> {
-    if catalog_slug != Some("cma") {
-        return Ok(None);
-    }
+) -> AppResult<CmaDispatchPermit> {
     if !personal
         || unsupported_transport
         || target.auth_method != "none"
@@ -732,7 +728,7 @@ pub async fn admit(
         creation: None,
     };
     if matches!(operation, Operation::Read) {
-        return Ok(Some(permit));
+        return Ok(permit);
     }
     let creates_sandbox = matches!(
         &operation,
@@ -867,7 +863,7 @@ pub async fn admit(
         permit.creation = Some(store_creation(&db, &candidate).await?);
     }
     permit.sandbox = Some(sandbox);
-    Ok(Some(permit))
+    Ok(permit)
 }
 
 pub(super) fn require_available_parent(row: &NyxbotCmaSandbox) -> AppResult<()> {
@@ -932,9 +928,10 @@ fn creation_refusal_confirms_no_resource(path: &str, status: u16, value: &Value)
         }
 }
 
-impl CmaDispatchPermit {
+#[async_trait::async_trait]
+impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
     /// Called after all header/body rewriting, directly before network dispatch.
-    pub async fn before_send(&self, request: &reqwest::Request) -> AppResult<()> {
+    async fn before_send(&self, request: &reqwest::Request) -> AppResult<()> {
         self.gateway
             .verify_catalog(&self.owner, &self.target)
             .await?;
@@ -991,10 +988,7 @@ impl CmaDispatchPermit {
         }
         Ok(())
     }
-    pub async fn observe_response(
-        &self,
-        response: reqwest::Response,
-    ) -> AppResult<reqwest::Response> {
+    async fn observe_response(&self, response: reqwest::Response) -> AppResult<reqwest::Response> {
         let observes_creation =
             self.creation.is_some() || self.path.starts_with("/api/v1/agent-lifecycle/");
         if !observes_creation {

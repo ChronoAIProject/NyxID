@@ -3519,7 +3519,7 @@ fn dispatch_service_tool<'a>(
         )
         .await;
 
-        let execution = mcp_service::execute_tool_response(
+        let execution = mcp_service::execute_tool_response_with_outcome(
             &state.http_client,
             &state.db,
             &state.encryption_keys,
@@ -3540,35 +3540,32 @@ fn dispatch_service_tool<'a>(
         )
         .await;
         if let Some(watch) = &async_watch
-            && let Err(error) = crate::services::async_service_operation::submitted(
-                state,
-                watch,
-                execution.as_ref().ok(),
-            )
-            .await
+            && let Err(error) =
+                crate::services::async_service_operation::submitted(state, watch, &execution).await
         {
             tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
         }
-        let mut response = match execution {
-            Ok(r) => r,
-            Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
-                return tool_result(request.id.clone(), &msg, true);
-            }
-            Err(error @ crate::errors::AppError::RequestBodyTooLarge { .. }) => {
-                return request_body_too_large_tool_result(request.id.clone(), &error);
-            }
-            Err(crate::errors::AppError::ServiceConcurrencyLimited) => {
-                return concurrency_limited_response(request.id.clone());
-            }
-            Err(e) => {
-                tracing::warn!("Tool execution failed for {tool_name}: {e}");
-                return tool_result(
-                    request.id.clone(),
-                    &format!("Tool execution failed: {e}"),
-                    true,
-                );
-            }
-        };
+        let mut response =
+            match execution.and_then(mcp_service::McpToolExecutionOutcome::into_response) {
+                Ok(r) => r,
+                Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
+                    return tool_result(request.id.clone(), &msg, true);
+                }
+                Err(error @ crate::errors::AppError::RequestBodyTooLarge { .. }) => {
+                    return request_body_too_large_tool_result(request.id.clone(), &error);
+                }
+                Err(crate::errors::AppError::ServiceConcurrencyLimited) => {
+                    return concurrency_limited_response(request.id.clone());
+                }
+                Err(e) => {
+                    tracing::warn!("Tool execution failed for {tool_name}: {e}");
+                    return tool_result(
+                        request.id.clone(),
+                        &format!("Tool execution failed: {e}"),
+                        true,
+                    );
+                }
+            };
 
         if async_watch.is_some() && (200..300).contains(&response.status) {
             response.text.push_str("\nNyxID will wake this originating thread with the asynchronous result and deliver to its original place. End this turn or do other work; do not poll this operation yourself.");
@@ -5151,7 +5148,7 @@ async fn handle_meta_call_tool(
     )
     .await;
 
-    let execution = mcp_service::execute_tool_response(
+    let execution = mcp_service::execute_tool_response_with_outcome(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -5172,16 +5169,13 @@ async fn handle_meta_call_tool(
     )
     .await;
     if let Some(watch) = &async_watch
-        && let Err(error) = crate::services::async_service_operation::submitted(
-            state,
-            watch,
-            execution.as_ref().ok(),
-        )
-        .await
+        && let Err(error) =
+            crate::services::async_service_operation::submitted(state, watch, &execution).await
     {
         tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
     }
-    let mut response = match execution {
+    let mut response = match execution.and_then(mcp_service::McpToolExecutionOutcome::into_response)
+    {
         Ok(r) => r,
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request_id, &msg, true);

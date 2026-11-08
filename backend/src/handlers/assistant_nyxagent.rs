@@ -1608,19 +1608,6 @@ pub async fn decide_acknowledgement(
         &row,
     )
     .await;
-    if acknowledgements::is_cma_owner_step(&row)
-        && row.continuation_receipt_id.is_some()
-        && row.voice_request_id.is_none()
-    {
-        // The event is already durable. Busy threads and failed wake-ups are
-        // retried by the ordinary event sweep without reapplying the decision.
-        Box::pin(super::assistant_team::wake(
-            &state,
-            &user,
-            &row.conversation_id,
-        ))
-        .await;
-    }
     // A user decision on a subagent's request resumes the subagent.
     if row.decider == "orchestrator" && row.invocation_id.is_none() {
         super::assistant_team::permission_decided(&state, &user, &row).await;

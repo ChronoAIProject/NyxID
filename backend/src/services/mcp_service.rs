@@ -5332,12 +5332,13 @@ fn resolve_tool_target(
                 // fallback for binding-based routes. Keep the same semantic
                 // here: a transient node failure on a platform service can
                 // fall back to direct HTTP if a server credential exists.
+                let catalog_service_slug = t.catalog_slug.clone();
                 (
                     t,
                     nr,
                     has_cred,
                     McpBillingRouteContextBuilder::for_platform_service(billing_principal_user_id),
-                    None,
+                    catalog_service_slug,
                 )
             }
         };
@@ -5388,6 +5389,52 @@ pub fn execute_tool_response<'a>(
     exec_ctx: &'a McpExecContext<'a>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> futures::future::BoxFuture<'a, AppResult<ToolResponse>> {
+    Box::pin(async move {
+        execute_tool_response_with_outcome(
+            http_client,
+            db,
+            encryption_keys,
+            node_ws_manager,
+            billing,
+            user_id,
+            billing_principal_user_id,
+            service,
+            endpoint,
+            prepared,
+            jwt_keys,
+            config,
+            connection_expiry_notifier,
+            token_exchange_cache,
+            cloud_response_cache,
+            exec_ctx,
+            billing_egress_permit,
+        )
+        .await?
+        .into_response()
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_tool_response_with_outcome<'a>(
+    http_client: &'a reqwest::Client,
+    db: &'a mongodb::Database,
+    encryption_keys: &'a std::sync::Arc<EncryptionKeys>,
+    node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
+    billing: &'a std::sync::Arc<crate::services::billing::BillingService>,
+    user_id: &'a str,
+    billing_principal_user_id: &'a str,
+    service: &'a McpToolService,
+    endpoint: &'a McpToolEndpoint,
+    prepared: PreparedProxyCall,
+    jwt_keys: &'a crate::crypto::jwt::JwtKeys,
+    config: &'a crate::config::AppConfig,
+    connection_expiry_notifier:
+        &'a crate::services::connection_expiry_service::ConnectionExpiryNotifier,
+    token_exchange_cache: &'a crate::services::provider_token_exchange_service::TokenExchangeCache,
+    cloud_response_cache: &'a crate::services::cloud_response_cache::CloudResponseCache,
+    exec_ctx: &'a McpExecContext<'a>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
     Box::pin(async move {
         super::org_agent_service::authorize_service_with_access(
             db,
@@ -5463,10 +5510,9 @@ pub fn execute_tool_response<'a>(
                         &response.text,
                     )?;
                 }
-                Ok(response)
+                Ok(McpToolExecutionOutcome::Response(response))
             }
-            McpToolExecutionOutcome::ProviderOutcomeUnknown(error) => Err(error),
-            McpToolExecutionOutcome::ProviderUnreachable(error) => Err(error),
+            outcome => Ok(outcome),
         }
     })
 }
@@ -5654,6 +5700,15 @@ pub enum McpToolExecutionOutcome {
     Response(ToolResponse),
     ProviderOutcomeUnknown(AppError),
     ProviderUnreachable(AppError),
+}
+
+impl McpToolExecutionOutcome {
+    pub(crate) fn into_response(self) -> AppResult<ToolResponse> {
+        match self {
+            Self::Response(response) => Ok(response),
+            Self::ProviderOutcomeUnknown(error) | Self::ProviderUnreachable(error) => Err(error),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6478,18 +6533,29 @@ async fn execute_tool_resolved_inner(
                 body_content_type.as_deref().ok_or_else(super::lark_attachment_tool::refused)?.parse()
                 .map_err(|_|super::lark_attachment_tool::refused())?);
         }
-        let cma_permit = if catalog_service_slug == Some("cma") {
-            let canonical = super::proxy_authorization::CanonicalPath::from_mcp_built(&path)?;
-            let prepared_headers = proxy_service::prepare_delegated_request(&path, query.as_deref(), &delegated)?;
-            let initial = proxy_service::collect_forward_headers_with_defaults(&req_headers, &[target.catalog_default_headers.as_slice(), target.user_service_default_headers.as_slice()]);
-            let effective = proxy_service::build_effective_outbound_headers(&target, initial, &identity_headers, &prepared_headers.delegated_headers, &server_owned_headers);
-            super::nyxbot_cma_admission::admit(db,encryption_keys,jwt_keys,config,user_id,
+        let dispatch_caller = super::service_dispatch_registry::DispatchCaller {
+            actor_user_id: exec_ctx.actor_user_id.unwrap_or(user_id),
+            resource_owner_id: match &service.source {
+                McpToolSource::UserManaged { effective_owner_id, .. } => effective_owner_id,
+                _ => user_id,
+            },
+            user_service_id: match &service.source {
+                McpToolSource::UserManaged { user_service_id, .. } => Some(user_service_id),
+                _ => None,
+            },
+        };
+        let dispatch_admission = {
+            super::service_dispatch_registry::admit(db,encryption_keys,jwt_keys,config,&dispatch_caller,
                 exec_ctx.org_agent_access.is_none()
                     && exec_ctx.actor_user_id.is_none_or(|actor| actor == user_id)
                     && exec_ctx.assistant_chat.is_none_or(|chat| !chat.guest && !super::assistant_service_execution::is_shared_chat(chat))
                     && match &service.source { McpToolSource::UserManaged { effective_owner_id, .. } => effective_owner_id == user_id, _ => true },
-                catalog_service_slug,&target,method.as_str(),&canonical.as_policy_path(),query.as_deref(),body.as_deref().unwrap_or_default(),&effective,node_route.is_some()).await?
-        } else { None };
+                &target,method.as_str(),&path,query.as_deref(),body.as_deref().unwrap_or_default(),|| {
+                    let prepared_headers = proxy_service::prepare_delegated_request(&path, query.as_deref(), &delegated)?;
+                    let initial = proxy_service::collect_forward_headers_with_defaults(&req_headers, &[target.catalog_default_headers.as_slice(), target.user_service_default_headers.as_slice()]);
+                    Ok(proxy_service::build_effective_outbound_headers(&target, initial, &identity_headers, &prepared_headers.delegated_headers, &server_owned_headers))
+                },node_route.is_some()).await?
+        };
         let auto_connected = billing_context_builder.auto_connected;
         let resource_owner_id = billing_context_builder.effective_owner_id.clone();
         let billing_ctx = billing_context_builder
@@ -6953,8 +7019,8 @@ async fn execute_tool_resolved_inner(
             billing_egress_permit,
             egress_guard.as_ref(),
             resource_proof.as_ref(),
-            catalog_service_slug,
-            cma_permit.as_ref(),
+            Some(&dispatch_admission),
+            Some(&dispatch_caller),
         )
         .await
         {
@@ -15057,6 +15123,7 @@ mod tests {
         let service = crate::models::downstream_service::test_helpers::dummy_service();
         proxy_service::UserServiceResolution {
             target: proxy_service::ProxyTarget {
+                catalog_slug: None,
                 execution_request: None,
                 execution_permission: None,
                 credential_deferred: false,

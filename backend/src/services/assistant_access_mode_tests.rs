@@ -625,10 +625,10 @@ async fn every_changing_account_tool_has_a_card_summary() {
         if !super::assistant_account_tools::read_only(name) {
             // CMA dispatch owns its cards before the generic account gate.
             // cma_native_write_tools_create_bound_cards_without_remote_mutation
-            // exercises both tools through AccountTools against a loopback mock.
+            // exercises attachment copying through AccountTools against a loopback mock.
             if super::nyxbot_cma_tools::owns(name) {
                 assert!(
-                    ["cma_save_attachment", "cma_request_owner"].contains(name),
+                    ["cma_save_attachment"].contains(name),
                     "no dedicated CMA card summary case for {name}"
                 );
                 continue;

@@ -1,5 +1,5 @@
 //! Durable, fenced async service watches. Only trusted catalog contracts enter here.
-use super::api_key_mutation_service as transactions;
+use super::{api_key_mutation_service as transactions, mcp_service::McpToolExecutionOutcome};
 use crate::{
     crypto::aes::EncryptionKeys,
     errors::{AppError, AppResult},
@@ -310,9 +310,16 @@ pub async fn reserve_with_artifacts(
 pub async fn submitted(
     state: &crate::AppState,
     watch: &AsyncServiceOperation,
-    response: Option<&super::mcp_service::ToolResponse>,
+    execution: &AppResult<McpToolExecutionOutcome>,
 ) -> AppResult<()> {
     let db = &state.db;
+    let response = match execution {
+        Ok(McpToolExecutionOutcome::Response(response)) => Some(response),
+        Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(_)) => {
+            return ready(db, watch, None, "submission_uncertain", None).await;
+        }
+        Ok(McpToolExecutionOutcome::ProviderUnreachable(_)) | Err(_) => None,
+    };
     // A server-authored consent/action card proves no provider dispatch took
     // place. Do not turn a pending human decision into a failed async event.
     // A downstream body or status can never select this cleanup path.
@@ -901,20 +908,9 @@ fn channel_question(event: &AgentEvent) -> bool {
     !event.source_event_ids.is_empty() || (event.kind == "message" && !event.reply_to.is_empty())
 }
 
-/// CMA approvals and human desktop decisions wake a fresh turn independently
-/// of the task's still-running result watch.
+/// CMA approvals wake a fresh turn independently of the task's result watch.
 pub(crate) fn cma_wake_event(event: &AgentEvent) -> bool {
-    matches!(
-        event.kind.as_str(),
-        super::assistant_acknowledgement_service::CMA_OWNER_EVENT_KIND
-            | super::cma_operation::APPROVAL_EVENT_KIND
-    )
-}
-
-/// A bound human decision can resume a thread parked by the autonomous loop
-/// guard. Provider approvals and unbound legacy notices cannot do so.
-pub(crate) fn cma_owner_wake_event(event: &AgentEvent) -> bool {
-    event.bound && event.kind == super::assistant_acknowledgement_service::CMA_OWNER_EVENT_KIND
+    event.kind == super::cma_operation::APPROVAL_EVENT_KIND
 }
 
 fn individual_event_turn(event: &AgentEvent) -> bool {
@@ -924,13 +920,6 @@ fn individual_event_turn(event: &AgentEvent) -> bool {
 /// Async results wait for their own event turn. Never redirect a web turn or
 /// coalesce results from different delivery places into a single reply.
 pub fn select_events(row: &mut AssistantConversation, origin: TurnOrigin) -> Vec<AgentEvent> {
-    // The same owner event that permits waking past the streak cap must be
-    // consumed on its own, before any unrelated automated result/invocation.
-    if origin == TurnOrigin::Event
-        && let Some(index) = row.pending_events.iter().position(cma_owner_wake_event)
-    {
-        return vec![row.pending_events.remove(index)];
-    }
     if row
         .pending_events
         .iter()
@@ -1402,7 +1391,7 @@ mod event_selection_tests {
     }
 
     #[test]
-    fn cma_owner_wake_precedes_automation_without_coalescing_other_work() {
+    fn approval_work_preserves_automation_and_result_partitioning() {
         let event = |kind| super::super::assistant_team_service::event(kind, "notice".into(), None);
         let mut coordinator = event("subagent_settled");
         coordinator.automation_work = Some(work("coordinator-run", "coordinator"));
@@ -1411,22 +1400,18 @@ mod event_selection_tests {
         approval.automation_work = Some(work("approval-run", "direct"));
         let mut result = event(EVENT_KIND);
         result.automation_work = Some(work("result-run", "direct"));
-        let mut owner =
-            event(super::super::assistant_acknowledgement_service::CMA_OWNER_EVENT_KIND);
-        owner.bound = true;
         let mut row = row();
         row.pending_events = vec![
             coordinator.clone(),
             notice.clone(),
             approval.clone(),
             result.clone(),
-            owner.clone(),
         ];
 
         let selected = select_events(&mut row, TurnOrigin::User);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].id, notice.id);
-        for expected in [&owner, &approval, &result] {
+        for expected in [&approval, &result] {
             let selected = select_events(&mut row, TurnOrigin::Event);
             assert_eq!(selected.len(), 1);
             assert_eq!(selected[0].id, expected.id);

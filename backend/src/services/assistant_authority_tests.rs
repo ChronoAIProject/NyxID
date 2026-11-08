@@ -935,11 +935,7 @@ fn native_inventory_is_closed_and_schemas_exclude_secret_inputs() {
     );
     assert_eq!(
         super::nyxbot_cma_tools::NAMES,
-        &[
-            "list_cma_resources",
-            "cma_save_attachment",
-            "cma_request_owner",
-        ]
+        &["list_cma_resources", "cma_save_attachment", "cma_guide",]
     );
     let service = tools::virtual_service(&orchestrator_chat());
     // NyxBot also gets the team and memory tools; specialists get read-only
@@ -2490,196 +2486,52 @@ async fn channel_setup_health_discovery_is_authorized_metadata_and_has_no_provid
     );
 }
 
-async fn cma_owner_card(f: &Fixture, reason: &str) -> (AssistantAcknowledgement, Value) {
-    let args = json!({
-        "agent_id": "agt_owner_step",
-        "agent_ref_id": Uuid::new_v4().to_string(),
-        "reason": reason,
-    });
-    let card = acks::request(
+async fn automation_action_card(f: &Fixture) -> AssistantAcknowledgement {
+    let mut card = acks::request(
         &f.state.db,
         &f.chat,
         acks::Request {
             kind: "action",
             service: None,
-            tool: Some(super::nyxbot_cma_tools::OWNER_TOOL),
-            arguments: Some(&args),
-            summary: reason,
-            platform: true,
+            tool: Some("nyxid__delete_node"),
+            arguments: Some(&json!({"node_id":"node"})),
+            summary: "Delete node",
+            platform: false,
         },
     )
     .await
     .unwrap();
-    (card, args)
-}
-
-#[tokio::test]
-async fn cma_owner_done_commits_one_exact_continuation_with_original_routing() {
-    let f = fixture("cma_owner_done_continuation").await;
-    let db = &f.state.db;
-    let (card, args) = cma_owner_card(&f, "Finish signing in on the shared desktop").await;
-    // A later direct turn must not replace the card's original report destination.
-    pin_assignment(db, &f.owner, &f.row.id, None).await;
-    let (first, replay) = tokio::join!(
-        acks::decide(db, &f.owner, &f.row.id, &card.id, true),
-        acks::decide(db, &f.owner, &f.row.id, &card.id, true),
-    );
-    assert_eq!(usize::from(first.is_ok()) + usize::from(replay.is_ok()), 1);
-    let decided = first.or(replay).unwrap();
-    let receipt = decided.continuation_receipt_id.as_deref().unwrap();
-    assert!(Uuid::parse_str(receipt).is_ok());
-    let current = engine::get(db, &f.owner, &f.row.id).await.unwrap();
-    assert_eq!(current.pending_events.len(), 1);
-    let event = &current.pending_events[0];
-    assert_eq!(event.id, receipt);
-    assert_eq!(event.kind, "cma_owner_step_decided");
-    assert!(event.bound);
-    assert_eq!(event.report_to.as_deref(), Some(f.nyxbot_thread.as_str()));
-    assert!(event.text.contains("marked the CMA desktop step as done"));
-    assert!(event.text.contains("Do not repeat the owner request"));
-    assert!(
-        engine::get(db, &f.owner, &f.nyxbot_thread)
-            .await
-            .unwrap()
-            .pending_events
-            .is_empty()
-    );
-    // A manual completion receipt cannot become a reusable provider approval.
-    assert!(
-        !acks::consume_action(
-            db,
-            &f.chat,
-            &card.id,
-            super::nyxbot_cma_tools::OWNER_TOOL,
-            &args,
-        )
-        .await
-        .unwrap()
-    );
-    db.drop().await.unwrap();
-}
-
-#[tokio::test]
-async fn cma_owner_cancel_queues_one_event_and_skips_generic_denial_retry() {
-    let f = direct_fixture("cma_owner_cancel_continuation").await;
-    let db = &f.state.db;
-    let (card, _) = cma_owner_card(&f, "Complete the checkout step").await;
-    let decided = acks::decide(db, &f.owner, &f.row.id, &card.id, false)
-        .await
-        .unwrap();
-    assert_eq!(decided.status, "denied");
-    assert!(decided.continuation_receipt_id.is_some());
-    crate::handlers::assistant_team::owner_denial_decided(&f.state, &f.owner, &decided).await;
-    let current = engine::get(db, &f.owner, &f.row.id).await.unwrap();
-    assert_eq!(current.pending_events.len(), 1);
-    let event = &current.pending_events[0];
-    assert!(event.bound && event.report_to.is_none());
-    assert!(event.text.contains("cancelled the CMA desktop step"));
-    assert!(event.text.contains("Do not treat the step as completed"));
-    assert!(
-        acks::decide(db, &f.owner, &f.row.id, &card.id, true)
-            .await
-            .is_err()
-    );
-    db.drop().await.unwrap();
-}
-
-#[tokio::test]
-async fn cma_owner_decision_keeps_original_task_and_is_removed_when_it_stops() {
-    let mut f = direct_fixture("cma_owner_original_task").await;
-    let db = &f.state.db;
-    super::execution_permission_dispatch::phase_b_tests::enroll(db, &f.owner).await;
-    let mut task = super::execution_permission_dispatch::phase_b_tests::task(db, &f.row).await;
-    task.hard_deadline = bson::DateTime::from_chrono(task.hard_deadline).to_chrono();
-    f.chat = acks::for_key(db, &f.owner, Some(&f.row.credential_api_key_id))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(f.chat.execution_task.as_ref(), Some(&task));
-    let (card, _) = cma_owner_card(&f, "Finish the desktop step for this task").await;
-    assert!(card.execution_task.is_some());
-    let decided = acks::decide(db, &f.owner, &f.row.id, &card.id, true)
-        .await
-        .unwrap();
-    let current = engine::get(db, &f.owner, &f.row.id).await.unwrap();
-    assert_eq!(current.pending_events.len(), 1);
-    assert_eq!(
-        current.pending_events[0].execution_task, card.execution_task,
-        "the exact original task, epoch, deadline, audience and parent turn must survive Done"
-    );
-    assert_eq!(
-        Some(&current.pending_events[0].id),
-        decided.continuation_receipt_id.as_ref()
-    );
-    super::execution_permission_dispatch::tasks::stop(db, &current)
-        .await
-        .unwrap();
-    assert!(
-        engine::get(db, &f.owner, &f.row.id)
-            .await
-            .unwrap()
-            .pending_events
-            .is_empty()
-    );
-    db.drop().await.unwrap();
-}
-
-#[tokio::test]
-async fn cma_owner_automation_decision_keeps_work_without_generic_retry_event() {
-    let f = direct_fixture("cma_owner_automation_work").await;
-    let db = &f.state.db;
-    let (mut card, _) = cma_owner_card(&f, "Complete the automation desktop step").await;
     let work = crate::models::trigger_run::AutomationWork {
         run_id: Uuid::new_v4().to_string(),
         work_id: Uuid::new_v4().to_string(),
-        coordinator_thread_id: f.nyxbot_thread.clone(),
+        coordinator_thread_id: f.row.id.clone(),
         role: "direct".into(),
         confirmation_policy: None,
     };
-    card.automation_work = Some(work.clone());
-    db.collection::<bson::Document>(ACKS)
+    f.state
+        .db
+        .collection::<bson::Document>(ACKS)
         .update_one(
-            doc! {"_id": &card.id},
-            doc! {"$set": {"automation_work": bson::to_bson(&work).unwrap()}},
+            doc! {"_id":&card.id},
+            doc! {"$set":{"automation_work":bson::to_bson(&work).unwrap()}},
         )
         .await
         .unwrap();
-    db.collection::<bson::Document>(super::trigger_schedule::WORK)
-        .insert_one(
-            doc! {"_id": &work.run_id, "at": bson::DateTime::now(), "wake_generation": 0_i64},
-        )
-        .await
-        .unwrap();
-    assert_eq!(card.automation_work.as_ref(), Some(&work));
-    let decided = acks::decide(db, &f.owner, &f.row.id, &card.id, true)
-        .await
-        .unwrap();
-    let current = engine::get(db, &f.owner, &f.row.id).await.unwrap();
-    assert_eq!(
-        current.pending_events.len(),
-        1,
-        "Done must not queue a second provider-retry instruction"
-    );
-    let event = &current.pending_events[0];
-    assert_eq!(event.kind, acks::CMA_OWNER_EVENT_KIND);
-    assert_eq!(event.automation_work, card.automation_work);
-    assert_eq!(Some(&event.id), decided.continuation_receipt_id.as_ref());
-    assert!(!event.text.contains("Retry the exact approved call"));
-    let queued = db
+    f.state
+        .db
         .collection::<bson::Document>(super::trigger_schedule::WORK)
-        .find_one(doc! {"_id": &work.run_id})
+        .insert_one(doc! {"_id":&work.run_id,"at":bson::DateTime::now(),"wake_generation":0_i64})
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(queued.get_i64("wake_generation").unwrap(), 1);
-    db.drop().await.unwrap();
+    card.automation_work = Some(work);
+    card
 }
 
 #[tokio::test]
-async fn cma_owner_decision_rolls_back_when_queue_is_full_and_cannot_be_evicted() {
-    let f = direct_fixture("cma_owner_queue_durability").await;
+async fn automation_decision_rolls_back_when_queue_is_full_and_cannot_be_evicted() {
+    let f = direct_fixture("automation_decision_queue_durability").await;
     let db = &f.state.db;
-    let (card, _) = cma_owner_card(&f, "Finish the desktop step").await;
+    let card = automation_action_card(&f).await;
     let mut events: Vec<_> = (0..engine::MAX_PENDING_EVENTS)
         .map(|_| super::assistant_team_service::event("notice", "existing".into(), None))
         .collect();
@@ -2720,48 +2572,46 @@ async fn cma_owner_decision_rolls_back_when_queue_is_full_and_cannot_be_evicted(
     let decided = acks::decide(db, &f.owner, &f.row.id, &card.id, true)
         .await
         .unwrap();
-    assert!(
-        engine::push_events(
-            db,
-            &f.owner,
-            &f.row.id,
-            vec![super::assistant_team_service::event(
-                "notice",
-                "later".into(),
-                None
-            )],
-        )
-        .await
-        .is_err()
-    );
+    engine::push_events(
+        db,
+        &f.owner,
+        &f.row.id,
+        vec![super::assistant_team_service::event(
+            "notice",
+            "later".into(),
+            None,
+        )],
+    )
+    .await
+    .unwrap();
     let current = engine::get(db, &f.owner, &f.row.id).await.unwrap();
     assert_eq!(current.pending_events.len(), engine::MAX_PENDING_EVENTS);
     assert!(
         current
             .pending_events
             .iter()
-            .any(|event| Some(&event.id) == decided.continuation_receipt_id.as_ref())
+            .any(|event| event.text == "later")
+    );
+    assert!(
+        current
+            .pending_events
+            .iter()
+            .any(|event| event.kind == "automation_confirmation_decided"
+                && event.text.contains(&decided.id))
     );
     db.drop().await.unwrap();
 }
 
 #[tokio::test]
-async fn automation_queue_notice_eviction_preserves_cma_owner_decision() {
-    let f = direct_fixture("automation_cma_queue_durability").await;
+async fn automation_queue_notice_eviction_preserves_provider_approval() {
+    let f = direct_fixture("automation_approval_queue_durability").await;
     let db = &f.state.db;
-    let (card, _) = cma_owner_card(&f, "Finish the desktop step").await;
-    let decided = acks::decide(db, &f.owner, &f.row.id, &card.id, true)
-        .await
-        .unwrap();
-    let mut events = engine::get(db, &f.owner, &f.row.id)
-        .await
-        .unwrap()
-        .pending_events;
-    assert_eq!(events.len(), 1);
-    assert_eq!(
-        Some(&events[0].id),
-        decided.continuation_receipt_id.as_ref()
+    let approval = super::assistant_team_service::event(
+        super::cma_operation::APPROVAL_EVENT_KIND,
+        "Approval needed".into(),
+        None,
     );
+    let mut events = vec![approval.clone()];
     let mut automation =
         super::assistant_team_service::event("automation_work", "pending work".into(), None);
     automation.automation_work = Some(crate::models::trigger_run::AutomationWork {
@@ -2797,7 +2647,7 @@ async fn automation_queue_notice_eviction_preserves_cma_owner_decision() {
         current
             .pending_events
             .iter()
-            .any(|event| { Some(&event.id) == decided.continuation_receipt_id.as_ref() })
+            .any(|event| { event.id == approval.id })
     );
     assert!(
         current
@@ -2821,109 +2671,25 @@ async fn automation_queue_notice_eviction_preserves_cma_owner_decision() {
 }
 
 #[tokio::test]
-async fn cma_manual_steps_survive_full_access_without_changing_ordinary_cards() {
-    let f = direct_fixture("cma_owner_full_access").await;
-    let db = &f.state.db;
-    let (manual, _) = cma_owner_card(&f, "Owner must sign in").await;
-    let ordinary = acks::request(
-        db,
-        &f.chat,
-        acks::Request {
-            kind: "action",
-            service: None,
-            tool: Some("nyxid__delete_node"),
-            arguments: Some(&json!({"node_id":"node"})),
-            summary: "Delete node",
-            platform: false,
-        },
-    )
-    .await
-    .unwrap();
-    super::assistant_settings_service::update(
-        db,
-        &f.owner,
-        super::assistant_settings_service::Update {
-            access_mode: Some(crate::models::assistant_settings::AccessMode::Autopilot),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    acks::retire_full_access_confirmations(db, Some(&f.owner), None)
-        .await
-        .unwrap();
-    let cards = db.collection::<AssistantAcknowledgement>(ACKS);
-    assert_eq!(
-        cards
-            .find_one(doc! {"_id":manual.id})
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        "pending"
-    );
-    assert_eq!(
-        cards
-            .find_one(doc! {"_id":ordinary.id})
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
-        "expired"
-    );
-    assert!(
-        engine::get(db, &f.owner, &f.row.id)
-            .await
-            .unwrap()
-            .pending_events
-            .is_empty()
-    );
-    db.drop().await.unwrap();
-}
-
-#[tokio::test]
-async fn cma_wake_events_wait_for_individual_event_turns() {
-    use super::{assistant_team_service as team, async_service_operation as operations};
-    use crate::models::assistant_conversation::TurnOrigin;
-    let f = direct_fixture("cma_dedicated_event_selection").await;
-    let mut row = f.row.clone();
-    for invocation in [None, Some("invocation")] {
-        let first =
-            team::event("cma_owner_step_decided", "Done".into(), None).for_invocation(invocation);
-        let second = team::event("cma_approval_requested", "Approval needed".into(), None)
-            .for_invocation(invocation);
-        let notice = team::event("notice", "Ordinary".into(), None);
-        row.pending_events = vec![notice.clone(), first.clone(), second.clone()];
-        let user = operations::select_events(&mut row, TurnOrigin::User);
-        assert_eq!(user.len(), 1);
-        assert_eq!(user[0].id, notice.id);
-        assert_eq!(row.pending_events.len(), 2);
-        for expected in [&first, &second] {
-            let selected = operations::select_events(&mut row, TurnOrigin::Event);
-            assert_eq!(selected.len(), 1);
-            assert_eq!(selected[0].id, expected.id);
-            assert_eq!(selected[0].invocation_id, expected.invocation_id);
-        }
-        assert!(row.pending_events.is_empty());
-    }
-    f.state.db.drop().await.unwrap();
-}
-
-#[tokio::test]
-async fn cma_owner_decision_wakes_a_capped_thread_without_releasing_other_events() {
+async fn provider_approvals_cannot_wake_a_thread_at_the_event_streak_cap() {
     use super::{assistant_team_service as team, async_service_operation as operations};
     use crate::models::assistant_conversation::{COLLECTION_NAME, TurnOrigin};
-    let f = orchestrator_fixture("cma_owner_capped_wake").await;
-    let (card, _) = cma_owner_card(&f, "View the shared desktop").await;
-    let rows = f.state.db.collection::<bson::Document>(COLLECTION_NAME);
-    rows.update_one(
-        doc! {"_id":&f.row.id},
-        doc! {"$set":{"active_turn":bson::Bson::Null,"event_streak":team::MAX_EVENT_STREAK}},
-    )
-    .await
-    .unwrap();
-    let result = team::event(operations::EVENT_KIND, "Earlier result".into(), None);
-    engine::push_events(&f.state.db, &f.owner, &f.row.id, vec![result.clone()])
+    let f = orchestrator_fixture("provider_approval_capped_wake").await;
+    f.state
+        .db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.row.id},
+            doc! {"$set":{"active_turn":bson::Bson::Null,"event_streak":team::MAX_EVENT_STREAK}},
+        )
+        .await
+        .unwrap();
+    let approval = team::event(
+        super::cma_operation::APPROVAL_EVENT_KIND,
+        "Approval needed".into(),
+        None,
+    );
+    engine::push_events(&f.state.db, &f.owner, &f.row.id, vec![approval.clone()])
         .await
         .unwrap();
     assert!(
@@ -2932,19 +2698,14 @@ async fn cma_owner_decision_wakes_a_capped_thread_without_releasing_other_events
             .unwrap()
             .is_empty()
     );
-    let decided = acks::decide(&f.state.db, &f.owner, &f.row.id, &card.id, true)
-        .await
-        .unwrap();
-    let mut queued = team::queued(&f.state.db, Some(&f.owner)).await.unwrap();
-    assert_eq!(queued.len(), 1);
-    let mut row = queued.remove(0);
+    crate::handlers::assistant_team::wake(&f.state, &f.owner, &f.row.id).await;
+    let mut row = engine::get(&f.state.db, &f.owner, &f.row.id).await.unwrap();
+    assert!(row.active_turn.is_none());
+    assert_eq!(row.event_streak, team::MAX_EVENT_STREAK);
+    assert_eq!(row.pending_events[0].id, approval.id);
+    assert!(operations::select_events(&mut row, TurnOrigin::User).is_empty());
     let selected = operations::select_events(&mut row, TurnOrigin::Event);
     assert_eq!(selected.len(), 1);
-    assert_eq!(
-        Some(selected[0].id.as_str()),
-        decided.continuation_receipt_id.as_deref()
-    );
-    assert_eq!(row.pending_events.len(), 1);
-    assert_eq!(row.pending_events[0].id, result.id);
+    assert_eq!(selected[0].id, approval.id);
     f.state.db.drop().await.unwrap();
 }

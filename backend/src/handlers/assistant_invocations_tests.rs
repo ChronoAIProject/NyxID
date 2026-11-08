@@ -219,26 +219,25 @@ async fn invocation_late_events_are_fenced_and_async_results_are_individual() {
 }
 
 #[tokio::test]
-async fn invocation_cma_owner_decision_keeps_lineage_and_is_cancelled_with_its_family() {
+async fn invocation_action_decision_keeps_lineage_and_is_cancelled_with_its_family() {
     use crate::services::assistant_acknowledgement_service as acks;
-    let (state, owner, admission) = admitted("invocation_cma_owner_decision").await;
+    let (state, owner, admission) = admitted("invocation_action_decision").await;
     let invocation = admission.invocation;
     let row = admission.claim.unwrap().conversation;
     let chat = acks::for_key(&state.db, &owner, Some(&row.credential_api_key_id))
         .await
         .unwrap()
         .unwrap();
-    let args =
-        json!({"agent_id":"agt_step","agent_ref_id":Uuid::new_v4().to_string(),"reason":"Sign in"});
+    let args = json!({"node_id":"node"});
     let card = acks::request(
         &state.db,
         &chat,
         acks::Request {
             kind: "action",
             service: None,
-            tool: Some(crate::services::nyxbot_cma_tools::OWNER_TOOL),
+            tool: Some("nyxid__delete_node"),
             arguments: Some(&args),
-            summary: "Sign in on the desktop",
+            summary: "Delete node",
             platform: true,
         },
     )
@@ -250,10 +249,10 @@ async fn invocation_cma_owner_decision_keeps_lineage_and_is_cancelled_with_its_f
     let current = engine::get(&state.db, &owner, &row.id).await.unwrap();
     assert_eq!(current.pending_events.len(), 1);
     let event = &current.pending_events[0];
-    assert_eq!(event.kind, acks::CMA_OWNER_EVENT_KIND);
+    assert_eq!(event.kind, "permission_decided");
     assert_eq!(event.invocation_id.as_deref(), Some(invocation.id.as_str()));
     assert_eq!(Some(&event.id), decided.continuation_receipt_id.as_ref());
-    assert!(event.text.contains("marked the CMA desktop step as done"));
+    assert!(event.text.contains("Continue within existing authority"));
     invocations::cancel(&state, &owner, &invocation.idempotency_key)
         .await
         .unwrap();

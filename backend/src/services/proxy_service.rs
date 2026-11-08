@@ -67,6 +67,9 @@ impl ProxyBody {
 
 /// Result of resolving a proxy target.
 pub struct ProxyTarget {
+    /// Server-resolved catalog identity; absent only for custom endpoints.
+    /// A missing catalog row or failed lookup must fail resolution.
+    pub catalog_slug: Option<String>,
     pub(crate) execution_request:
         Option<std::sync::Arc<super::execution_permission_dispatch::RequestContext>>,
     pub(crate) execution_permission:
@@ -1243,6 +1246,7 @@ pub async fn resolve_admin_proxy_target(
 
     if service.auth_method == "none" {
         return Ok(ProxyTarget {
+            catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -1271,6 +1275,7 @@ pub async fn resolve_admin_proxy_target(
     let credential = decrypt_master_credential_string(encryption_keys, &authorized).await?;
 
     Ok(ProxyTarget {
+        catalog_slug: Some(service.slug.clone()),
         execution_request: None,
         execution_permission: None,
         credential_deferred: false,
@@ -1364,6 +1369,7 @@ pub async fn resolve_curation_proxy_target(
     };
     Ok((
         ProxyTarget {
+            catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -1485,6 +1491,7 @@ pub async fn resolve_proxy_target(
             super::default_header_service::catalog(Some(encryption_keys), &service).await?;
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok(ProxyTarget {
+            catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -1539,6 +1546,7 @@ pub async fn resolve_proxy_target(
         super::default_header_service::catalog(Some(encryption_keys), &service).await?;
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok(ProxyTarget {
+        catalog_slug: Some(service.slug.clone()),
         execution_request: None,
         execution_permission: None,
         credential_deferred: false,
@@ -1570,6 +1578,7 @@ pub(crate) async fn resolve_catalog_platform_target(
     if super::platform_key_service::no_auth_platform_service(&service) {
         super::platform_key_service::require(db, &service, owner_id).await?;
         return Ok(ProxyTarget {
+            catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -1602,6 +1611,7 @@ pub(crate) async fn resolve_catalog_platform_target(
     service.auth_key_name = auth_key_name.clone();
     service.requires_user_credential = false;
     Ok(ProxyTarget {
+        catalog_slug: Some(service.slug.clone()),
         execution_request: None,
         execution_permission: None,
         credential_deferred: false,
@@ -1710,6 +1720,7 @@ pub async fn resolve_proxy_target_lenient(
         let ws_frame_injections = service.ws_frame_injections.clone();
         return Ok((
             ProxyTarget {
+                catalog_slug: Some(service.slug.clone()),
                 execution_request: None,
                 execution_permission: None,
                 credential_deferred: false,
@@ -1786,6 +1797,7 @@ pub async fn resolve_proxy_target_lenient(
     let ws_frame_injections = service.ws_frame_injections.clone();
     Ok((
         ProxyTarget {
+            catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -3169,8 +3181,8 @@ async fn finish_resolution(
     let catalog_default_headers: Vec<DefaultRequestHeader> = Vec::new();
     let catalog_proxy_authorization =
         box_resolution_future(|| load_catalog_proxy_authorization_for_user_service(db, &user_service)).await?;
-    let (catalog_billing, catalog_service_slug) =
-        box_resolution_future(|| load_catalog_metering_for_user_service(db, &user_service)).await;
+    let catalog_billing = catalog_proxy_authorization.billing.clone();
+    let catalog_service_slug = catalog_proxy_authorization.catalog_slug.clone();
     let catalog_ws_frame_injections =
         box_resolution_future(|| load_catalog_ws_frame_injections_for_user_service(db, &user_service)).await?;
     let effective_ws_frame_injections = if user_service.ws_frame_injections.is_empty() {
@@ -3267,6 +3279,7 @@ async fn finish_resolution(
         };
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            catalog_slug: catalog_service_slug.clone(),
             execution_request: None,
             execution_permission: None,
             credential_deferred: !materialize_credentials,
@@ -3314,6 +3327,7 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            catalog_slug: catalog_service_slug.clone(),
             execution_request: None,
             execution_permission: None,
             credential_deferred: !materialize_credentials,
@@ -3422,6 +3436,7 @@ async fn finish_resolution(
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
+            catalog_slug: catalog_service_slug.clone(),
             execution_request: None,
             execution_permission: None,
             credential_deferred: !materialize_credentials,
@@ -3492,6 +3507,7 @@ async fn finish_resolution(
 
     Ok(UserServiceResolution {
         target: ProxyTarget {
+            catalog_slug: catalog_service_slug.clone(),
             execution_request: None,
             execution_permission: None,
             credential_deferred: !materialize_credentials,
@@ -3570,6 +3586,9 @@ async fn load_catalog_service_for_user_service(
 
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
+    catalog_id: Option<String>,
+    catalog_slug: Option<String>,
+    billing: Option<crate::models::service_billing::ServiceBilling>,
     auth_scheme: Option<String>,
     platform_key: Option<crate::models::downstream_service::PlatformKeyConfig>,
     platform_key_configured: bool,
@@ -3595,15 +3614,14 @@ async fn load_catalog_proxy_authorization_for_user_service(
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(doc! { "_id": catalog_id })
         .await?;
-    let Some(service) = service else {
-        // Existing UserService resolution tolerates a missing catalog row and
-        // continues with its stored endpoint/credential data. Policy lookup is
-        // additive and must not turn that legacy shape into a new outage.
-        return Ok(CatalogProxyAuthorization::default());
-    };
+    let service =
+        service.ok_or_else(|| AppError::Conflict("Catalog service is unavailable".into()))?;
     super::destination_routing::validate_credential_source(&service)?;
     super::retired_service_service::require_available(&service)?;
     Ok(CatalogProxyAuthorization {
+        catalog_id: Some(service.id.clone()),
+        catalog_slug: Some(service.slug.clone()),
+        billing: service.billing.clone(),
         auth_scheme: service.auth_scheme.clone(),
         platform_key: service.platform_key.clone(),
         platform_key_configured: service.platform_key.is_some(),
@@ -3625,6 +3643,9 @@ fn apply_catalog_proxy_authorization(
     service: &mut DownstreamService,
     authorization: &CatalogProxyAuthorization,
 ) {
+    if let Some(id) = &authorization.catalog_id {
+        service.id = id.clone();
+    }
     service.offering_kind = authorization.offering_kind;
     service.auth_scheme = authorization.auth_scheme.clone();
     service.platform_key = authorization.platform_key.clone();
@@ -3672,34 +3693,6 @@ async fn load_catalog_ws_frame_injections_for_user_service(
         .await?
         .ok_or_else(|| AppError::Conflict("Catalog service is unavailable".into()))?;
     Ok(service.ws_frame_injections)
-}
-
-async fn load_catalog_metering_for_user_service(
-    db: &mongodb::Database,
-    user_service: &crate::models::user_service::UserService,
-) -> (
-    Option<crate::models::service_billing::ServiceBilling>,
-    Option<String>,
-) {
-    let Some(catalog_id) = user_service.catalog_service_id.as_deref() else {
-        return (None, None);
-    };
-    match db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! { "_id": catalog_id })
-        .await
-    {
-        Ok(Some(svc)) => (svc.billing, Some(svc.slug)),
-        Ok(None) => (None, None),
-        Err(e) => {
-            tracing::warn!(
-                catalog_id,
-                error = %e,
-                "Failed to load catalog metering metadata; proceeding without resale metering"
-            );
-            (None, None)
-        }
-    }
 }
 
 /// Resolve a per-agent credential override for the given API key + service.
@@ -4500,7 +4493,7 @@ pub(crate) fn forward_request_with_egress_guard<'a>(
         billing_egress_permit,
         egress_guard,
         None,
-        Some(target.service.slug.as_str()),
+        None,
         None,
     )
 }
@@ -4523,8 +4516,8 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     egress_guard: Option<&'a super::assistant_service_execution::HttpEgressGuard<'a>>,
     resource_proof: Option<&'a super::resource_request_proof::ReadProofIssuer<'a>>,
-    catalog_service_slug: Option<&'a str>,
-    cma_permit: Option<&'a super::nyxbot_cma_admission::CmaDispatchPermit>,
+    admission: Option<&'a super::service_dispatch_registry::DispatchAdmission>,
+    dispatch_caller: Option<&'a super::service_dispatch_registry::DispatchCaller<'a>>,
 ) -> futures::future::BoxFuture<'a, Result<reqwest::Response, ForwardRequestError>> {
     Box::pin(forward_request_with_egress_guard_inner(
         client,
@@ -4543,8 +4536,8 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
         billing_egress_permit,
         egress_guard,
         resource_proof,
-        catalog_service_slug,
-        cma_permit,
+        admission,
+        dispatch_caller,
     ))
 }
 
@@ -4566,15 +4559,16 @@ async fn forward_request_with_egress_guard_inner(
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
     resource_proof: Option<&super::resource_request_proof::ReadProofIssuer<'_>>,
-    catalog_service_slug: Option<&str>,
-    cma_permit: Option<&super::nyxbot_cma_admission::CmaDispatchPermit>,
+    admission: Option<&super::service_dispatch_registry::DispatchAdmission>,
+    dispatch_caller: Option<&super::service_dispatch_registry::DispatchCaller<'_>>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
     target.require_credential_materialized()?;
-    // User-managed targets carry the connection alias in service.slug. REST
-    // and MCP must use the resolved catalog identity for this protocol gate.
-    if catalog_service_slug == Some("cma") && cma_permit.is_none() {
+    let dispatch_guard =
+        super::service_dispatch_registry::verify(admission, target, dispatch_caller)
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+    if dispatch_guard.is_some() && !matches!(&body, ProxyBody::Buffered(_)) {
         return Err(ForwardRequestError::PreDispatchRejected(
-            AppError::Forbidden("CMA requires personal resource admission".into()),
+            AppError::Forbidden("Protected services require a buffered HTTP request".into()),
         ));
     }
     if let Some(permit) = &target.execution_permission {
@@ -5007,7 +5001,7 @@ async fn forward_request_with_egress_guard_inner(
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
     }
-    let response = if let Some(cma) = cma_permit {
+    let response = if let Some(guard) = dispatch_guard {
         let mut request = request.build()?;
         if let Some(proof) = resource_proof {
             proof
@@ -5015,7 +5009,8 @@ async fn forward_request_with_egress_guard_inner(
                 .await
                 .map_err(ForwardRequestError::PreDispatchRejected)?;
         }
-        cma.before_send(&request)
+        guard
+            .before_send(&request)
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
         if let Some(permit) = &target.execution_permission {
@@ -5035,7 +5030,8 @@ async fn forward_request_with_egress_guard_inner(
                 .map_err(ForwardRequestError::Application)?;
         }
         let response = result?;
-        cma.observe_response(response)
+        guard
+            .observe_response(response)
             .await
             .map_err(|_| ForwardRequestError::OutcomeUnknown)?
     } else if let Some(proof) = resource_proof {
@@ -5914,11 +5910,118 @@ mod tests {
             Some(&catalog_id),
             None,
         );
-        let (_, catalog_service_slug) =
-            load_catalog_metering_for_user_service(&db, &user_service).await;
+        let catalog_service_slug =
+            load_catalog_proxy_authorization_for_user_service(&db, &user_service)
+                .await
+                .unwrap()
+                .catalog_slug;
 
         assert_eq!(catalog_service_slug.as_deref(), Some("llm-openai"));
         assert_ne!(user_service.slug, catalog_service_slug.unwrap());
+    }
+
+    #[tokio::test]
+    async fn catalog_dispatch_resolution_distinguishes_custom_alias_missing_and_unreadable_catalogs()
+     {
+        let db =
+            crate::test_utils::connect_transaction_test_database("catalog_dispatch_resolution")
+                .await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let nodes = Arc::new(NodeWsManager::new(30, 100));
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let vendor = wiremock::MockServer::start().await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let endpoint =
+            test_user_endpoint(&endpoint_id, &owner, "Custom", &vendor.uri(), None, None);
+        db.collection(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        let connection = test_user_service(&id, &owner, "my-worker", &endpoint_id, None, None);
+        db.collection(USER_SERVICES)
+            .insert_one(connection)
+            .await
+            .unwrap();
+        let resolve = || {
+            resolve_proxy_target_from_user_service(
+                &db,
+                &keys,
+                &nodes,
+                &owner,
+                Some("my-worker"),
+                None,
+                test_execution_context(),
+            )
+        };
+        let custom = resolve().await.unwrap().unwrap();
+        assert!(custom.target.catalog_slug.is_none());
+        assert!(custom.catalog_service_slug.is_none());
+        let mut catalog = dummy_service();
+        catalog.slug = "cma".into();
+        catalog.base_url = vendor.uri();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        db.collection::<mongodb::bson::Document>(USER_SERVICES)
+            .update_one(
+                doc! {"_id":&id},
+                doc! {"$set":{"catalog_service_id":&catalog.id}},
+            )
+            .await
+            .unwrap();
+        let resolved = resolve().await.unwrap().unwrap();
+        assert_eq!(resolved.target.service.slug, "my-worker");
+        assert_eq!(resolved.target.service.id, catalog.id);
+        assert_eq!(resolved.target.catalog_slug.as_deref(), Some("cma"));
+        assert_eq!(resolved.catalog_service_slug, resolved.target.catalog_slug);
+        assert!(matches!(
+            forward_request(
+                &Client::new(),
+                &resolved.target,
+                reqwest::Method::GET,
+                "/status",
+                None,
+                reqwest::header::HeaderMap::new(),
+                ProxyBody::Buffered(None),
+                vec![],
+                vec![],
+                None,
+                &empty_token_cache(),
+                &empty_response_cache()
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        // Only the catalog record becomes unreadable; owner/connection/endpoint
+        // lookups continue to work. Deserialization failure must not downgrade.
+        db.collection::<mongodb::bson::Document>(DOWNSTREAM_SERVICES)
+            .update_one(doc! {"_id":&catalog.id}, doc! {"$set":{"slug":42}})
+            .await
+            .unwrap();
+        assert!(resolve().await.is_err());
+        assert!(
+            db.collection::<mongodb::bson::Document>(USER_SERVICES)
+                .find_one(doc! {"_id":&id})
+                .await
+                .unwrap()
+                .is_some()
+        );
+        db.collection::<mongodb::bson::Document>(DOWNSTREAM_SERVICES)
+            .delete_one(doc! {"_id":&catalog.id})
+            .await
+            .unwrap();
+        assert!(resolve().await.is_err());
+        assert!(vendor.received_requests().await.unwrap().is_empty());
+        db.drop().await.unwrap();
     }
 
     // ---- forward header allowlist tests (NyxID#161) ----
@@ -6920,6 +7023,7 @@ mod tests {
     fn make_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -7884,6 +7988,7 @@ mod tests {
             .await;
         let mut target = make_proxy_target(vendor.uri());
         target.service.slug = "my-worker".into();
+        target.catalog_slug = Some("cma".into());
         let error = super::forward_request_with_resource_proof(
             &Client::new(),
             &target,
@@ -7901,7 +8006,7 @@ mod tests {
             crate::services::billing::route_inventory::internal_node_dispatch_permit(),
             None,
             None,
-            Some("cma"),
+            None,
             None,
         )
         .await
@@ -8385,6 +8490,7 @@ mod tests {
     fn make_lark_proxy_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -8791,6 +8897,7 @@ mod tests {
     fn make_body_auth_target(base_url: String) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -9037,6 +9144,7 @@ mod tests {
     ) -> ProxyTarget {
         let now = Utc::now();
         ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -9474,6 +9582,7 @@ mod tests {
     #[test]
     fn credential_header_name_bearer_returns_authorization() {
         let target = ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -9498,6 +9607,7 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_custom_name() {
         let target = ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -9522,6 +9632,7 @@ mod tests {
     #[test]
     fn credential_header_name_header_with_empty_key() {
         let target = ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -9543,6 +9654,7 @@ mod tests {
     #[test]
     fn credential_header_name_none_method() {
         let target = ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -9564,6 +9676,7 @@ mod tests {
     #[test]
     fn credential_header_name_query_method() {
         let target = ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -9585,6 +9698,7 @@ mod tests {
     #[test]
     fn credential_header_name_aws_sigv4() {
         let target = ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -9640,6 +9754,7 @@ mod tests {
     #[test]
     fn extend_with_path_credential_skips_non_path() {
         let target = ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -9663,6 +9778,7 @@ mod tests {
     #[test]
     fn extend_with_path_credential_appends_for_path() {
         let target = ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -9889,6 +10005,7 @@ mod tests {
         let mut ds = test_minimal_downstream();
         ds.token_exchange_config = None;
         ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,

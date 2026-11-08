@@ -243,14 +243,7 @@ pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
         let automation =
             crate::services::trigger_schedule::continuation::event_can_resume(&state.db, &row)
                 .await?;
-        if !automation
-            && !row.is_subagent()
-            && row.event_streak >= team::MAX_EVENT_STREAK
-            && !row
-                .pending_events
-                .iter()
-                .any(crate::services::async_service_operation::cma_owner_wake_event)
-        {
+        if !automation && !row.is_subagent() && row.event_streak >= team::MAX_EVENT_STREAK {
             return Ok(());
         }
         // A destroyed agent never runs again; events that reached it late are dropped.
@@ -369,7 +362,6 @@ pub(crate) async fn owner_denial_decided(
     }
     if row.decider != "user"
         || row.status != "denied"
-        || acks::is_cma_owner_step(row)
         || row.trigger_run_id.is_some()
         || row.voice_request_id.is_some()
         || row.invocation_id.is_some()

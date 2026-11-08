@@ -2648,16 +2648,7 @@ pub(crate) async fn begin_owner_turn_in_session(
     row.guest_turn = guest;
     let (role, mut text) = match start.origin {
         TurnOrigin::Event => {
-            row.event_streak = if events
-                .iter()
-                .any(super::async_service_operation::cma_owner_wake_event)
-            {
-                // This exact event is a new human interaction, selected alone.
-                // Do not give automated approvals the same reset.
-                1
-            } else {
-                row.event_streak.saturating_add(1)
-            };
+            row.event_streak = row.event_streak.saturating_add(1);
             let text = event_turn_text(
                 &events,
                 row.group_request_id.as_ref().map(|_| start.text.as_str()),
@@ -3774,8 +3765,8 @@ pub async fn push_events(
         .map_err(transactions::map_transaction_error)
 }
 
-/// Invocation, CMA decision, automation and accepted source events are never
-/// evicted. Queued invocation/CMA continuations block ordinary notice eviction
+/// Invocation, provider approval, automation and accepted source events are never
+/// evicted. Queued invocation/approval continuations block ordinary notice eviction
 /// unless automation recovery can replace an ordinary notice.
 /// Delegated results follow ordinary FIFO eviction; images must not monopolize
 /// the queue. Capacity refusal aborts transactional producers unless they

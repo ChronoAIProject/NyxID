@@ -15,28 +15,12 @@ use mongodb::{
 };
 use serde_json::{Value, json};
 
-pub const NAMES: &[&str] = &[
-    "list_cma_resources",
-    "cma_save_attachment",
-    "cma_request_owner",
-];
-pub const OWNER_TOOL: &str = "nyxid__cma_request_owner";
+pub const NAMES: &[&str] = &["list_cma_resources", "cma_save_attachment", "cma_guide"];
 pub fn owns(name: &str) -> bool {
     NAMES.contains(&name)
 }
 fn refused() -> AppError {
     AppError::Forbidden("CMA requires this owner's enabled feature and current CMA grant".into())
-}
-
-pub async fn eligible(
-    db: &Database,
-    owner: &str,
-    agent: Option<&AssistantAgent>,
-) -> AppResult<bool> {
-    if !feature_enabled(db, owner).await? {
-        return Ok(false);
-    }
-    has_cma_grant(db, owner, agent).await
 }
 
 async fn feature_enabled(db: &Database, owner: &str) -> AppResult<bool> {
@@ -100,17 +84,17 @@ pub fn schema(name: &str) -> Value {
         "cma_save_attachment" => {
             json!({"type":"object","properties":{"agent_id":id,"attachment_id":id,"path":{"type":"string","minLength":1,"maxLength":4096,"description":"Path relative to the CMA filesystem API root /home/. Use the returned absolute_path in Agent commands."},"acknowledgement_id":id},"required":["agent_id","attachment_id","path"],"additionalProperties":false})
         }
-        "cma_request_owner" => {
-            json!({"type":"object","properties":{"agent_id":id,"reason":{"type":"string","minLength":1,"maxLength":500}},"required":["agent_id","reason"],"additionalProperties":false})
+        "cma_guide" => {
+            json!({"type":"object","properties":{},"required":[],"additionalProperties":false})
         }
         _ => json!({}),
     }
 }
 pub fn description(name: &str) -> String {
     match name {
-        "list_cma_resources" => "Read the personal allocation of Sandboxes created through NyxID and their live Agent facts with bounded pagination. Returns a fresh new_creation_idempotency_key: copy it into Idempotency-Key for one NEW creation intent; never replace an existing creation's key during confirmation or recovery. This does not allocate, reserve or select an Agent; Agents can share an environment and context across chats.",
-        "cma_save_attachment" => "Copy an original attachment from this conversation to a path relative to the CMA filesystem API root /home/. Returns path, absolute_path, size and SHA256. Use the returned absolute_path in Agent commands regardless of the Agent's working directory. A different existing file is not overwritten. Requires the current CMA grant and action policy.",
-        "cma_request_owner" => "Ask the owner to finish the stated step on the selected Agent's shared desktop. A card opens that exact Agent in NyxID. End this turn and wait; the owner's Done decision wakes a new event turn. Never click or infer completion yourself.",
+        "list_cma_resources" => "Read the personal allocation of Sandboxes created through NyxID and their live Agent facts with bounded pagination. Returns a fresh new_creation_idempotency_key: copy it into Idempotency-Key for one NEW creation intent; never replace an existing creation's key during confirmation or recovery. This does not allocate, reserve or select an Agent; Agents can share an environment and context across chats. Read nyxid__cma_guide first.",
+        "cma_save_attachment" => "Copy an original attachment from this conversation to a path relative to the CMA filesystem API root /home/. Returns path, absolute_path, size and SHA256. Use the returned absolute_path in Agent commands regardless of the Agent's working directory. A different existing file is not overwritten. Requires the current CMA grant and action policy. Read nyxid__cma_guide first.",
+        "cma_guide" => "Read the built-in CMA Worker Guide for cloud environments, cloud assistants, or shared desktops (云端环境、云端助手、共享桌面、带共享桌面的环境), including requests to only create an assistant without running tasks. These resources use CMA. Read this guide before using CMA. Returns versioned local instructions only; it does not query, select, allocate or change resources.",
         _ => "",
     }.into()
 }
@@ -480,6 +464,13 @@ pub async fn execute(
     if !chat_eligible(tools.db, chat).await? {
         return Err(refused());
     }
+    if name == "cma_guide" {
+        return Ok(ToolResult {
+            value: guide_result(),
+            is_error: false,
+            permission_request: None,
+        });
+    }
     let mode = acks::effective_access_mode(tools.db, chat).await?;
     // Select the producer-owned catalog identity, never a supplied connection.
     let catalog =
@@ -531,39 +522,6 @@ pub async fn execute(
     }
     let remote = remote_id(tools.db, &chat.user_id, field(args, "agent_id")?).await?;
     let row = agents::register_live(tools.db, &gateway, &chat.user_id, &remote, None).await?;
-    if name == "cma_request_owner" {
-        let descriptor = gateway.desktop_descriptor(&chat.user_id, &remote).await?;
-        if !descriptor.available {
-            return Err(AppError::Conflict(
-                descriptor
-                    .reason
-                    .unwrap_or_else(|| "desktop_unavailable".into()),
-            ));
-        }
-        let bound = json!({"agent_id":remote,"agent_ref_id":row.id,"reason":field(args,"reason")?});
-        let summary = format!(
-            "Complete on the CMA shared desktop: {}",
-            super::assistant_nyxagent::excerpt(field(args, "reason")?, 500)
-        );
-        let ack = acks::request(
-            tools.db,
-            chat,
-            acks::Request {
-                kind: "action",
-                service: Some((&catalog.id, "cma", "CMA")),
-                tool: Some(OWNER_TOOL),
-                arguments: Some(&bound),
-                summary: &summary,
-                platform: true,
-            },
-        )
-        .await?;
-        return Ok(ToolResult {
-            value: json!({"status":ack.status,"acknowledgement_id":ack.id,"desktop_url":ack.link,"instructions":"End this turn and wait. The owner completes the desktop step and clicks Done; NyxID then resumes this thread. Do not retry this request or infer completion."}),
-            is_error: false,
-            permission_request: None,
-        });
-    }
     let attachment = field(args, "attachment_id")?;
     let upload = super::assistant_upload_service::for_chat(tools.db, chat, attachment).await?;
     if upload.conversation_id != chat.conversation_id
@@ -659,66 +617,6 @@ pub(super) async fn write_attachment_to_created_parent(
 fn agent_summary(row: &NyxbotCmaAgent) -> Value {
     json!({"id":row.id,"agent_id":row.cma_agent_id,"label":row.label,"sandbox_id":row.cma_sandbox_id,"workspace_id":row.cma_workspace_id,"status":row.resource_state,"last_observed":row.last_observed,"last_known_response_id":row.source_response_id})
 }
-/// Bounded observations only. No transcript, prompt, profile or credentials.
-pub async fn snapshot(
-    db: &Database,
-    owner: &str,
-    agent: Option<&AssistantAgent>,
-) -> AppResult<String> {
-    if let Some(agent) = agent {
-        let service =
-            super::catalog_service::get_downstream_service_by_slug(db, "cma", owner).await?;
-        for (id, scope) in &agent.operation_scopes {
-            if id != &service.id && scope.catalog_service_id.as_deref() != Some(&service.id) {
-                continue;
-            }
-            for path in ["/api/v1/sandboxes", "/api/v1/agents"] {
-                if check_scope_inputs(
-                    &agent.operation_scopes,
-                    id,
-                    &service.id,
-                    "GET",
-                    path,
-                    None,
-                    &[],
-                )
-                .is_err()
-                {
-                    return Ok("\nCMA resource snapshot is limited by this role's operation permissions. Query an explicitly allowed resource when needed.\n".into());
-                }
-            }
-        }
-    }
-    let sandboxes = sandboxes::list(db, owner, None).await?;
-    let parents = sandboxes::active_created(db, owner).await?;
-    let bindings: Vec<_> = parents
-        .iter()
-        .filter_map(|parent| {
-            parent.cma_sandbox_id.as_ref().map(|remote| {
-                doc! {
-                    "cma_service_id":&parent.cma_service_id,
-                    "cma_sandbox_id":remote, "sandbox_generation":parent.generation,
-                }
-            })
-        })
-        .collect();
-    let agents: Vec<NyxbotCmaAgent> = if bindings.is_empty() {
-        Vec::new()
-    } else {
-        db.collection(crate::models::nyxbot_cma_agent::COLLECTION_NAME)
-            .find(doc! {"user_id":owner,"deleted_at":null,"$or":bindings})
-            .sort(doc! {"last_observed":-1})
-            .limit(8)
-            .await?
-            .try_collect()
-            .await?
-    };
-    let resources = json!({"sandboxes":sandboxes.sandboxes.iter().map(|s|json!({"id":s.cma_sandbox_id,"status":s.observation_state,"creation":s.admission_state,"occupied":s.occupies_account_slot,"observed_at":s.last_observed})).take(8).collect::<Vec<_>>(),"agents":agents.iter().map(agent_summary).collect::<Vec<_>>()});
-    Ok(format!(
-        "\nCMA resources (last observed facts; query live status before acting; this is not a reservation):\n{resources}\n"
-    ))
-}
-
 fn resource_list_result(
     sandbox_list: &sandboxes::SandboxListDto,
     rows: &[NyxbotCmaAgent],
@@ -734,77 +632,11 @@ fn resource_list_result(
     })
 }
 
-pub const GUIDANCE: &str = r#"
-Use CMA when it helps the task. Decide whether to reuse an existing CMA Agent,
-create a new Agent, or use other tools. Each account may have at most one
-non-retired Sandbox created through this NyxID instance. That Sandbox may contain
-several Agents. External CMA Sandboxes do not use this allocation and are not
-imported into NyxID management. CMA's own quotas still apply independently.
-Use nyxid__list_cma_resources to inspect the NyxID-created environment and its Agents.
-Match a user-named Agent to its returned label and agent_id. Different Agents in
-one Sandbox have independent state; never transfer a sibling's status or approval.
-last_known_response_id is a previously observed Response for that Agent, including
-work started in another NyxBot chat. It is a lookup hint, not proof of a current
-task. Use get_task to verify its conversation.id and get_task_controls to check
-target_active and the current revision before proposing any control. Never invent
-a response_id or treat an old/completed Response as the current task. If this hint
-is absent or no longer active, report that the current task cannot yet be identified.
-Create additional Agents inside that environment with sandbox_id or workspace_id.
-Create a Sandbox only when this allocation is empty, no creation is unresolved,
-and the task needs it. A list is not a reservation.
-Before preparing each NEW Agent or Sandbox creation, call nyxid__list_cma_resources
-and copy its new_creation_idempotency_key into the creation's Idempotency-Key.
-Use that key for only this creation intent. Do not invent date/counter keys or
-reuse a key from another creation or chat. Keep the chosen key and exact body
-through action confirmation, credential setup, and receipt-loss recovery.
-A later inventory read returns a key for a different future creation; it must
-never rotate the key of a pending or uncertain request. Do not automatically
-retry a conflicting creation with a new key to bypass the original identity.
-The inline create_agent profile.permission_mode accepts guarded or autonomous.
-When the user wants approval before commands or file changes, explicitly select
-guarded. Do not invent ask/default permission values or silently omit the requested mode.
-For an ordinary request for a shared desktop (including "带共享桌面" or
-"Include a shared desktop"), set machine_included=true when creating a new
-Sandbox. This option does not require desktop=true or initial_message. If the
-user only wants the Agent created, omit both fields and wait for later work;
-do not ask for or invent a first task just to include a shared desktop. When
-reusing an existing parent, omit machine_included and check its desktop capability.
-Only use desktop=true when the user specifically requests CMA's separate desktop
-preparation-and-first-task flow. That flow requires the user's exact first task
-in initial_message and verified runtime support. Its unsupported result does
-not establish that the machine_included shared-desktop option is unavailable.
-Preserve the requested options and the exact body/key when recovering a creation.
-Run work with cma__run_task using the selected agent_id, stream=true, and a stable
-Idempotency-Key. If conversation is supplied, it must equal that agent_id.
-After nyxid__cma_save_attachment, use the returned absolute_path in Agent commands.
-Its path field is relative to the CMA filesystem API root /home/; the Agent's
-working directory may be a separate worktree.
-Reusing an Agent shares its conversation and worktree, including across NyxBot chats.
-Keep the exact body and Idempotency-Key when recovering an uncertain request.
-Manage Agent lifecycle through tools. The user can inspect an Agent's events, history,
-and available shared desktop on its execution page. The Sandboxes page manages the
-parent environment and does not provide a desktop viewer.
-Distinguish task cancellation, Agent stop/delete, and whole-Sandbox retirement.
-Deleting an Agent does not retire its Sandbox or guarantee that resource charges stop.
-Report observed queueing, failures and cleanup outcomes without claiming unobserved success.
-NyxID action confirmation and CMA native approval are separate. Denying a NyxID
-card sends nothing to CMA; it does not reject a pending cloud approval or cancel
-the cloud task. Explain that the cloud request may still be waiting. If the user
-explicitly asks to refuse a cloud approval, send resolve_approval with decision=deny
-for the exact observed pending approval, subject to the normal NyxID confirmation.
-If they ask to stop the task, use the exact task cancellation instead. Never change
-an already confirmed control body to its opposite or retry a denied action.
-A queued control or allowed confirmation is not completed work. Check the control
-outcome and the exact Response or transcript before claiming that a file was written,
-an approval was resolved, or a task stopped. incomplete with interrupted denotes a
-cancelled CMA response; ordinary incomplete is not proof of cancellation. A NyxID
-tracking timeout only ends tracking: query the live task before describing its outcome.
-A completed response that asks a question in plain text is not a native pending
-approval. When its Agent is ready and the user answers, forward the answer with
-cma__run_task on that same Agent. Use resolve_approval only after observing the
-exact native pending approval and its current response/revision; never invent one
-from wording or a failed read. A failed read means unknown, not waiting_approval.
-"#;
+const GUIDE: &str = include_str!("../../../docs/assistant/CMA_WORKER_GUIDE.md");
+
+fn guide_result() -> Value {
+    json!({"contract_version": 1, "guide": GUIDE})
+}
 
 #[cfg(test)]
 mod tests {
@@ -813,6 +645,25 @@ mod tests {
         AgentOperationScope, OperationScopes, ScopedOperation,
     };
     use crate::models::downstream_service::ProxyOperationRule;
+
+    #[test]
+    fn cma_guide_is_versioned_read_only_and_has_a_closed_empty_input() {
+        assert_eq!(
+            guide_result(),
+            json!({"contract_version":1,"guide":include_str!("../../../docs/assistant/CMA_WORKER_GUIDE.md")})
+        );
+        assert!(super::super::assistant_account_tools::read_only(
+            "cma_guide"
+        ));
+        super::super::assistant_account_tools::validate_arguments("cma_guide", &json!({})).unwrap();
+        assert!(
+            super::super::assistant_account_tools::validate_arguments(
+                "cma_guide",
+                &json!({"agent_id":"untrusted"})
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn resource_reads_supply_distinct_creation_keys_without_allocating() {
@@ -931,7 +782,7 @@ mod tests {
             .unwrap();
         assert!(path.contains("/home/"));
         assert!(path.contains("absolute_path"));
-        assert!(GUIDANCE.contains("absolute_path"));
+        assert!(GUIDE.contains("absolute_path"));
     }
 
     #[test]

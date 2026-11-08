@@ -50,6 +50,7 @@ struct AsyncFixture {
     cma_sandbox_exists: Arc<std::sync::atomic::AtomicBool>,
     mutations: Arc<std::sync::atomic::AtomicUsize>,
     cma_gate: Arc<tokio::sync::Semaphore>,
+    drop_receipt: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Drop for AsyncFixture {
     fn drop(&mut self) {
@@ -87,6 +88,8 @@ impl AsyncFixture {
         let remote_sandbox_exists = cma_sandbox_exists.clone();
         let mutations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let captured_mutations = mutations.clone();
+        let drop_receipt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lost_receipt = drop_receipt.clone();
         let upstream = Router::new().route(
             "/{*path}",
             any(move |method: axum::http::Method, uri: axum::http::Uri, headers: HeaderMap| {
@@ -104,6 +107,7 @@ impl AsyncFixture {
                     || cma_fixture_identity(&headers, &identity_keys, &identity_issuer, &owner, &signed_catalog_id);
                 let owner = owner.clone();
                 let remote_sandbox_exists = remote_sandbox_exists.clone();
+                let lost_receipt = lost_receipt.clone();
                 async move {
                     use axum::response::IntoResponse;
                     if !authenticated {
@@ -149,6 +153,14 @@ impl AsyncFixture {
                         "revision":1,"callback_url":callback
                     });
                     let exists = remote_sandbox_exists.load(Ordering::SeqCst);
+                    if method == axum::http::Method::POST && lost_receipt.swap(false, Ordering::SeqCst) {
+                        // The provider accepted the mutation; only its receipt is lost.
+                        remote_sandbox_exists.store(true, Ordering::SeqCst);
+                        return (StatusCode::OK, [("content-type", "application/json")],
+                            Body::from_stream(futures::stream::once(async {
+                                Err::<bytes::Bytes, _>(std::io::Error::other("test receipt lost after acceptance"))
+                            }))).into_response();
+                    }
                     Json(match (method.as_str(), uri.path()) {
                         ("POST", "/api/v1/agents") => {
                             remote_sandbox_exists.store(true, Ordering::SeqCst);
@@ -257,6 +269,7 @@ impl AsyncFixture {
             cma_sandbox_exists,
             mutations,
             cma_gate,
+            drop_receipt,
         }
     }
     async fn submit(&self) -> AsyncServiceOperation {
@@ -524,6 +537,334 @@ async fn reserve_cma_submission(a: &AsyncFixture) -> AsyncServiceOperation {
 }
 
 #[tokio::test]
+async fn cma_guide_is_discovered_without_skills_and_has_no_provider_resource_or_card_effects() {
+    use crate::services::{
+        assistant_account_tools as tools, feature_flag_service as flags, nyxbot_cma_tools as cma,
+    };
+    let a = cma_fixture().await;
+    let db = &a.f.state.db;
+    let target = flags::FlagTarget::User(a.f.owner.clone());
+    flags::set_platform_override(
+        db,
+        flags::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
+        &target,
+        true,
+        &a.f.owner,
+    )
+    .await
+    .unwrap();
+    let agent = crate::services::assistant_team_service::agent(db, &a.f.owner, &a.f.chat.agent_id)
+        .await
+        .unwrap();
+    assert!(agent.skills.is_empty());
+    assert_eq!(
+        crate::services::assistant_acknowledgement_service::known_action_class(
+            "nyxid__cma_guide",
+            &json!({})
+        ),
+        Some(crate::services::assistant_acknowledgement_service::OwnerActionClass::Read)
+    );
+    for _ in 0..2 {
+        let inventory = tools::virtual_service_for(db, &a.f.chat).await;
+        assert_eq!(
+            inventory
+                .endpoints
+                .iter()
+                .filter(|endpoint| endpoint.name == "cma_guide")
+                .count(),
+            1
+        );
+        for name in ["list_cma_resources", "cma_save_attachment"] {
+            let endpoint = inventory
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == name)
+                .unwrap();
+            assert_eq!(
+                endpoint
+                    .description
+                    .as_deref()
+                    .unwrap()
+                    .matches("Read nyxid__cma_guide first.")
+                    .count(),
+                1
+            );
+        }
+    }
+    let collections = [
+        crate::models::nyxbot_cma_sandbox::COLLECTION_NAME,
+        crate::models::nyxbot_cma_agent::COLLECTION_NAME,
+        crate::models::nyxbot_cma_creation::COLLECTION_NAME,
+        crate::models::assistant_acknowledgement::COLLECTION_NAME,
+    ];
+    let mut counts = Vec::new();
+    for collection in collections {
+        counts.push(
+            db.collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+        );
+    }
+    let calls = a.calls.lock().unwrap().clone();
+    let guide =
+        a.f.tools()
+            .execute(&a.f.auth, "nyxid__cma_guide", &json!({}))
+            .await;
+    assert!(!guide.is_error, "{}", guide.value);
+    assert!(guide.permission_request.is_none());
+    assert_eq!(guide.value["contract_version"], 1);
+    assert_eq!(
+        guide.value["guide"],
+        include_str!("../../../docs/assistant/CMA_WORKER_GUIDE.md")
+    );
+    assert_eq!(*a.calls.lock().unwrap(), calls);
+    assert_eq!(a.mutations.load(Ordering::SeqCst), 0);
+    for (collection, count) in collections.into_iter().zip(counts) {
+        assert_eq!(
+            db.collection::<bson::Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            count,
+            "{collection}"
+        );
+    }
+    for collaboration in [false, true] {
+        let mut restricted = a.f.chat.clone();
+        restricted.guest = !collaboration;
+        restricted.collaboration_thread = collaboration;
+        assert!(!cma::chat_eligible(db, &restricted).await.unwrap());
+        let inventory = tools::virtual_service_for(db, &restricted).await;
+        assert!(
+            inventory
+                .endpoints
+                .iter()
+                .all(|endpoint| !cma::owns(&endpoint.name))
+        );
+    }
+    let org = super::connect_test_org(&a.f, true).await;
+    let mut org_chat = a.f.chat.clone();
+    org_chat.org_agent_access =
+        crate::services::org_agent_service::resolve_org_access(db, &a.f.owner, &org, true)
+            .await
+            .unwrap();
+    assert!(!cma::chat_eligible(db, &org_chat).await.unwrap());
+    assert!(
+        tools::virtual_service_for(db, &org_chat)
+            .await
+            .endpoints
+            .iter()
+            .all(|endpoint| !cma::owns(&endpoint.name))
+    );
+    // Only specialists can be shared. Use a real granted specialist thread so
+    // both recipient exclusion and live grant revocation exercise valid access.
+    let (agent, home) = crate::services::assistant_team_service::create_specialist(
+        db,
+        &a.f.state.encryption_keys,
+        &a.f.owner,
+        crate::services::assistant_team_service::CreateRequest {
+            machines: None,
+            logins: None,
+            name: "cma-guide-worker".into(),
+            description: "Exercise personal CMA guide access".into(),
+            display_name: None,
+            persona: None,
+            targets: crate::services::assistant_team_service::GrantTargets {
+                service_ids: vec![a.service.clone()],
+                ..Default::default()
+            },
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let row = engine::begin_turn(
+        db,
+        &a.f.owner,
+        &engine::TurnRequest {
+            conversation_id: Some(home.id),
+            agent_id: None,
+            text: "Read the CMA guide".into(),
+            model: None,
+            access_mode: None,
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+        },
+        &a.f.state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let specialist_chat =
+        crate::services::assistant_authority_tests::chat_for_row(&a.f.state, &a.f.owner, &row)
+            .await;
+    assert!(cma::chat_eligible(db, &specialist_chat).await.unwrap());
+    assert!(
+        cma::execute(&a.f.tools(), &specialist_chat, "cma_guide", &json!({}))
+            .await
+            .is_ok()
+    );
+    let recipient = uuid::Uuid::new_v4().to_string();
+    db.collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(
+            &recipient,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    for person in [&a.f.owner, &recipient] {
+        for flag in [
+            flags::SHARED_AGENTS_FLAG_KEY,
+            flags::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
+        ] {
+            flags::set_platform_override(
+                db,
+                flag,
+                &flags::FlagTarget::User(person.clone()),
+                true,
+                &a.f.owner,
+            )
+            .await
+            .unwrap();
+        }
+    }
+    db.collection::<bson::Document>(crate::models::assistant_sharing::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id":&agent.id,"owner_id":&a.f.owner,"enabled":true,
+            "version":1,"revision":1,"shared_access":{},"updated_at":bson::DateTime::now()
+        })
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(crate::models::assistant_sharing::SHARES_COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id":uuid::Uuid::new_v4().to_string(),"agent_id":&agent.id,"owner_id":&a.f.owner,
+            "subject_kind":"person","subject_id":&recipient,"role":"user",
+            "created_at":bson::DateTime::now()
+        })
+        .await
+        .unwrap();
+    let shared = crate::services::shared_agent_service::require(db, &recipient, &agent)
+        .await
+        .unwrap();
+    let mut shared_chat = specialist_chat.clone();
+    shared_chat.user_id = recipient;
+    shared_chat.org_agent_access = Some(Arc::new(
+        crate::services::org_agent_service::RequestAccess::from_shared(shared),
+    ));
+    assert!(!cma::chat_eligible(db, &shared_chat).await.unwrap());
+    assert!(
+        tools::virtual_service_for(db, &shared_chat)
+            .await
+            .endpoints
+            .iter()
+            .all(|endpoint| !cma::owns(&endpoint.name))
+    );
+    db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&agent.id},
+            doc! {"$set":{"grants.service_ids":[],"grants.platform_service_ids":[]}},
+        )
+        .await
+        .unwrap();
+    assert!(!cma::chat_eligible(db, &specialist_chat).await.unwrap());
+    assert!(
+        cma::execute(&a.f.tools(), &specialist_chat, "cma_guide", &json!({}))
+            .await
+            .is_err()
+    );
+    flags::set_platform_override(
+        db,
+        flags::ASSISTANT_CMA_SANDBOXES_FLAG_KEY,
+        &target,
+        false,
+        &a.f.owner,
+    )
+    .await
+    .unwrap();
+    assert!(
+        tools::virtual_service_for(db, &a.f.chat)
+            .await
+            .endpoints
+            .iter()
+            .all(|endpoint| !cma::owns(&endpoint.name))
+    );
+    assert!(
+        a.f.tools()
+            .execute(&a.f.auth, "nyxid__cma_guide", &json!({}))
+            .await
+            .is_error
+    );
+}
+
+#[tokio::test]
+async fn cma_catalog_identity_failure_stops_both_rest_and_mcp_before_provider_dispatch() {
+    let a = cma_fixture().await;
+    let db = &a.f.state.db;
+    let auth = authenticate(&a.f).await;
+    let connection = db
+        .collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&a.service})
+        .await
+        .unwrap()
+        .unwrap();
+    let catalog_id = connection.catalog_service_id.unwrap();
+    let calls = a.calls.lock().unwrap().clone();
+    let human = crate::test_utils::test_auth_user(&a.f.owner);
+    for missing in [false, true] {
+        let catalogs =
+            db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME);
+        if missing {
+            catalogs.delete_one(doc! {"_id":&catalog_id}).await.unwrap();
+        } else {
+            catalogs
+                .update_one(doc! {"_id":&catalog_id}, doc! {"$set":{"slug":42}})
+                .await
+                .unwrap();
+        }
+        let response = direct_call(
+            &a.f,
+            &auth,
+            "sandbox__get_agent",
+            json!({"agent_id":"agt_coffee"}),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            envelope["result"]["isError"] == true || envelope.get("error").is_some(),
+            "{envelope}"
+        );
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/v1/proxy/s/sandbox/api/v1/agents")
+            .body(Body::empty())
+            .unwrap();
+        let mut slug = String::new();
+        assert!(
+            crate::handlers::proxy::proxy_request_by_slug_inner(
+                &a.f.state,
+                &human,
+                "sandbox",
+                "/api/v1/agents",
+                request,
+                &mut slug
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(*a.calls.lock().unwrap(), calls);
+    }
+}
+
+#[tokio::test]
 async fn cma_native_write_tools_create_bound_cards_without_remote_mutation() {
     use crate::services::{
         assistant_settings_service as settings, assistant_upload_service as uploads,
@@ -575,20 +916,12 @@ async fn cma_native_write_tools_create_bound_cards_without_remote_mutation() {
     .unwrap();
     session.commit_transaction().await.unwrap();
 
-    for (name, args, expected, is_error) in [
-        (
-            "cma_save_attachment",
-            json!({"agent_id":"agt_coffee","attachment_id":upload.id,"path":"card-check.txt"}),
-            "Copy this conversation's attachment to CMA Agent agt_coffee",
-            true,
-        ),
-        (
-            "cma_request_owner",
-            json!({"agent_id":"agt_coffee","reason":"Review the local test desktop"}),
-            "Complete on the CMA shared desktop: Review the local test desktop",
-            false,
-        ),
-    ] {
+    for (name, args, expected, is_error) in [(
+        "cma_save_attachment",
+        json!({"agent_id":"agt_coffee","attachment_id":upload.id,"path":"card-check.txt"}),
+        "Copy this conversation's attachment to CMA Agent agt_coffee",
+        true,
+    )] {
         let tool = format!("nyxid__{name}");
         let result = a.f.tools().execute(&a.f.auth, &tool, &args).await;
         assert_eq!(result.is_error, is_error, "{}", result.value);
@@ -754,7 +1087,8 @@ async fn async_submission_receipt_cancel_and_terminal_states_fence_stale_worker(
         Some("text/event-stream"),
         b"data: {\"response\":{\"id\":\"resp_command\",\"status\":\"completed\",\"conversation\":{\"id\":\"agt_coffee\"}}}\n\n",
     );
-    watches::submitted(&a.f.state, &reserved, Some(&receipt))
+    let receipt = Ok(mcp_service::McpToolExecutionOutcome::Response(receipt));
+    watches::submitted(&a.f.state, &reserved, &receipt)
         .await
         .unwrap();
     watches::defer(&a.f.state.db, &stale).await.unwrap();
@@ -770,7 +1104,7 @@ async fn async_submission_receipt_cancel_and_terminal_states_fence_stale_worker(
         .await
         .unwrap();
     watches::defer(&a.f.state.db, &stale).await.unwrap();
-    watches::submitted(&a.f.state, &reserved, Some(&receipt))
+    watches::submitted(&a.f.state, &reserved, &receipt)
         .await
         .unwrap();
     assert_eq!(a.watch().await.state, "cancelling");
@@ -785,13 +1119,134 @@ async fn async_submission_receipt_cancel_and_terminal_states_fence_stale_worker(
             )
             .await
             .unwrap();
-        watches::submitted(&a.f.state, &reserved, Some(&receipt))
+        watches::submitted(&a.f.state, &reserved, &receipt)
             .await
             .unwrap();
         let unchanged = a.watch().await;
         assert_eq!(unchanged.state, terminal);
         assert!(unchanged.operation_id.is_none());
         assert!(unchanged.cma.unwrap().response_id.is_none());
+    }
+}
+
+#[tokio::test]
+async fn async_submission_distinguishes_lost_cma_receipt_from_unreachable_provider() {
+    for universal in [false, true] {
+        for sent in [false, true] {
+            let a = if sent {
+                cma_fixture().await
+            } else {
+                AsyncFixture::new().await
+            };
+            let auth = authenticate(&a.f).await;
+            let key = format!("receipt-classification-{universal}-{sent}");
+            let (tool, args) = if sent {
+                a.drop_receipt.store(true, Ordering::SeqCst);
+                (
+                    "sandbox__post_api_v1_agents",
+                    json!({"name":"Coffee","Idempotency-Key":key}),
+                )
+            } else {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let unavailable = format!("http://{}", listener.local_addr().unwrap());
+                drop(listener);
+                let connection =
+                    a.f.state
+                        .db
+                        .collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+                        .find_one(doc! {"_id":&a.service})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let endpoint_update =
+                    a.f.state
+                        .db
+                        .collection::<bson::Document>(crate::models::user_endpoint::COLLECTION_NAME)
+                        .update_one(
+                            doc! {"_id":connection.get_str("endpoint_id").unwrap()},
+                            doc! {"$set":{"url":&unavailable}},
+                        )
+                        .await
+                        .unwrap();
+                assert_eq!(endpoint_update.matched_count, 1);
+                let endpoint =
+                    a.f.state
+                        .db
+                        .collection::<crate::models::user_endpoint::UserEndpoint>(
+                            crate::models::user_endpoint::COLLECTION_NAME,
+                        )
+                        .find_one(doc! {"_id":connection.get_str("endpoint_id").unwrap()})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(endpoint.url, unavailable);
+                let catalog_update =
+                    a.f.state
+                        .db
+                        .collection::<bson::Document>(
+                            crate::models::downstream_service::COLLECTION_NAME,
+                        )
+                        .update_one(
+                            doc! {"_id":connection.get_str("catalog_service_id").unwrap()},
+                            doc! {"$set":{"base_url":&unavailable}},
+                        )
+                        .await
+                        .unwrap();
+                assert_eq!(catalog_update.matched_count, 1);
+                (
+                    "sandbox__submit_execution_handler",
+                    json!({"Idempotency-Key":key,"script":"print('hello')","language":"python"}),
+                )
+            };
+            let response = if universal {
+                call(&a.f, &auth, tool, args).await
+            } else {
+                direct_call(&a.f, &auth, tool, args).await
+            };
+            let body = axum::body::to_bytes(response.into_body(), 100_000)
+                .await
+                .unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["result"]["isError"], true, "{value}");
+            let watch = a.watch().await;
+            assert_eq!(
+                watch.reason.as_deref(),
+                Some(if sent {
+                    "submission_uncertain"
+                } else {
+                    "submission_failed"
+                }),
+                "universal={universal} sent={sent}"
+            );
+            assert!(watch.operation_id.is_none());
+            assert_eq!(a.mutations.load(Ordering::SeqCst), usize::from(sent));
+            if sent {
+                let creation =
+                    a.f.state
+                        .db
+                        .collection::<crate::models::nyxbot_cma_creation::NyxbotCmaCreation>(
+                            crate::models::nyxbot_cma_creation::COLLECTION_NAME,
+                        )
+                        .find_one(doc! {"user_id":&a.f.owner,"idempotency_key":&key})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(creation.submission_state, "unknown");
+                let parent =
+                    a.f.state
+                        .db
+                        .collection::<crate::models::nyxbot_cma_sandbox::NyxbotCmaSandbox>(
+                            crate::models::nyxbot_cma_sandbox::COLLECTION_NAME,
+                        )
+                        .find_one(doc! {"user_id":&a.f.owner})
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert!(parent.occupies_account_slot);
+            } else {
+                assert!(a.calls.lock().unwrap().is_empty());
+            }
+        }
     }
 }
 
@@ -859,7 +1314,6 @@ async fn cma_watch_observation_survives_flag_disable_without_widening_authority(
     )
     .await
     .unwrap();
-    assert!(!cma::eligible(db, &a.f.owner, None).await.unwrap());
     assert!(!cma::chat_eligible(db, &a.f.chat).await.unwrap());
     cma::watch_scope(
         db,

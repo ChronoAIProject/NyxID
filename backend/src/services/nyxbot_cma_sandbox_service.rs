@@ -1767,11 +1767,21 @@ mod tests {
             .is_err(),
             "a legacy Agent without a generation must not bypass created-parent provenance"
         );
-        let snapshot = super::super::nyxbot_cma_tools::snapshot(&db, "owner", None)
-            .await
-            .unwrap();
-        assert!(snapshot.contains("\"sandboxes\":[]"));
-        assert!(snapshot.contains("\"agents\":[]"));
+        assert!(list(&db, "owner", None).await.unwrap().sandboxes.is_empty());
+        let parents = active_created(&db, "owner").await.unwrap();
+        let parent_ids: Vec<_> = parents
+            .iter()
+            .filter_map(|parent| parent.cma_sandbox_id.as_ref())
+            .collect();
+        assert!(
+            db.collection::<Document>(crate::models::nyxbot_cma_agent::COLLECTION_NAME)
+                .find_one(
+                    doc! {"user_id":"owner","deleted_at":null,"cma_sandbox_id":{"$in":parent_ids}}
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
         assert!(
             gateway.calls.lock().unwrap().is_empty(),
             "external references must not reach the remote management API"

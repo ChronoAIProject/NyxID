@@ -188,7 +188,6 @@ pub async fn enforce_turn_gate(
 
 pub const PENDING_SECONDS: i64 = 15 * 60;
 pub const ACTION_SECONDS: i64 = 10 * 60;
-pub(crate) const CMA_OWNER_EVENT_KIND: &str = "cma_owner_step_decided";
 pub const DECISION_NARRATION: &str = "Then tell the user in one or two plain sentences what you actually did and observed. An allowed card is permission, not execution. A denied card means that action was not sent; it does not cancel work already running in an external service.";
 
 const ACTION_STATE_GUIDANCE: &str = " This confirmation authorizes only the exact requested action. While pending, that action has not been sent. Denying it sends nothing to the external service, including no native approval refusal or task cancellation. Do not claim work completed or stopped without an observed result. End this turn while waiting; never retry a denied action unless the user explicitly asks again.";
@@ -309,7 +308,6 @@ pub async fn retire_full_access_confirmations(
     let sweep_time = bson::DateTime::now();
     let mut filter = doc! {
         "kind": "action", "decider": "user", "status": "pending",
-        "tool_name": {"$ne": super::nyxbot_cma_tools::OWNER_TOOL},
         "confirmation.reason": {"$nin":["org_connection","delegation"]},
         "created_at": {"$lte": sweep_time},
     };
@@ -414,7 +412,7 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
     }
     let name = tool.strip_prefix("nyxid__")?;
     use super::{assistant_account_tools as account, assistant_team_tools as team};
-    if matches!(name, "cma_save_attachment" | "cma_request_owner") {
+    if name == "cma_save_attachment" {
         return Some(Change);
     }
     if account::TOOL_NAMES.contains(&name) {
@@ -2031,8 +2029,6 @@ pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
             "operations" => "operation scope".into(),
             "machine" => "machine access".into(),
             "saved_login" => "saved login access".into(),
-            "action" if is_cma_owner_step(row) => cma_owner_decision_text(row)
-                .unwrap_or_else(|| "CMA desktop owner step has no completion decision".into()),
             "action" if row.tool_name.as_deref()==Some("nyxid.service_execution") && row.status == "allowed" => format!(
                 "exact connection use decision recorded by NyxID (acknowledgement_id {}); continue the original requested operation using that exact connection; nyxid.service_execution is internal and must never be invoked",
                 identifier(Some(&row.id))),
@@ -2051,17 +2047,13 @@ pub fn decisions_note(rows: &[AssistantAcknowledgement]) -> String {
     {
         note.push_str("\nAllowed services, account access, machine access, saved logins and operation scopes are usable now.");
     }
-    if rows.iter().any(|row| {
-        row.status == "allowed"
-            && row.kind == "action"
-            && row.tool_name.as_deref() != Some(super::nyxbot_cma_tools::OWNER_TOOL)
-    }) {
-        note.push_str("\nRetry an allowed action through its original callable tool or route with its acknowledgement_id. Internal exact-connection approvals are applied by NyxID when that original operation resumes; never invoke an internal approval name.");
-    }
     if rows
         .iter()
-        .any(|row| row.kind == "action" && !is_cma_owner_step(row))
+        .any(|row| row.status == "allowed" && row.kind == "action")
     {
+        note.push_str("\nRetry an allowed action through its original callable tool or route with its acknowledgement_id. Internal exact-connection approvals are applied by NyxID when that original operation resumes; never invoke an internal approval name.");
+    }
+    if rows.iter().any(|row| row.kind == "action") {
         note.push_str(ACTION_STATE_GUIDANCE);
     }
     note.push_str("\nDo not request denied items again unless the user asks. Expired confirmations cannot be allowed; ask the owner before requesting a new confirmation. Never describe a terminal request as waiting for approval.");
@@ -2352,15 +2344,7 @@ async fn prepare_request_candidate(
         tool_name: request.tool.map(str::to_owned),
         arguments_digest: request.arguments.map(arguments_digest),
         summary: request.summary.into(),
-        link: if request.tool == Some(super::nyxbot_cma_tools::OWNER_TOOL) {
-            request
-                .arguments
-                .and_then(|args| args["agent_ref_id"].as_str())
-                .and_then(|id| Uuid::parse_str(id).ok())
-                .map(|id| format!("/assistant/cma-agents/{id}?tab=desktop"))
-        } else {
-            None
-        },
+        link: None,
         status: "pending".into(),
         requested_turn_id: None,
         creation_turn_id: None,
@@ -2755,7 +2739,7 @@ pub fn refusal(row: &AssistantAcknowledgement) -> Value {
             ),
         }
     };
-    if row.kind == "action" && !is_cma_owner_step(row) && row.authored_skill.is_none() {
+    if row.kind == "action" && row.authored_skill.is_none() {
         instructions.push_str(ACTION_STATE_GUIDANCE);
     }
     let mut value = json!({"error": if denied {"acknowledgement_denied"} else {"acknowledgement_required"},
@@ -3114,73 +3098,6 @@ pub enum Decider {
     NyxbotOwnerConfirmed,
 }
 
-pub(crate) fn is_cma_owner_step(card: &AssistantAcknowledgement) -> bool {
-    card.kind == "action"
-        && card.decider == "user"
-        && card.tool_name.as_deref() == Some(super::nyxbot_cma_tools::OWNER_TOOL)
-}
-
-/// A desktop completion records what the human reported. It never authorizes
-/// a provider operation or asks the model to replay the request that made it.
-pub(crate) fn cma_owner_decision_text(card: &AssistantAcknowledgement) -> Option<String> {
-    if !is_cma_owner_step(card) {
-        return None;
-    }
-    let instruction = match card.status.as_str() {
-        "allowed" => {
-            "marked the CMA desktop step as done. Continue the original task after checking the live Agent state. Do not repeat the owner request or replay a provider action because of this completion"
-        }
-        "denied" => {
-            "cancelled the CMA desktop step. Do not treat the step as completed, repeat the owner request, or retry the blocked action. Explain what remains blocked and continue only work that does not depend on that step"
-        }
-        _ => return None,
-    };
-    Some(format!(
-        "The owner {instruction} (acknowledgement_id {}). Requested step: {}.",
-        card.id,
-        super::assistant_nyxagent::excerpt(&card.summary, 500),
-    ))
-}
-
-async fn cma_owner_continuation_in_session(
-    db: &Database,
-    session: &mut ClientSession,
-    card: &AssistantAcknowledgement,
-) -> AppResult<Option<String>> {
-    let Some(text) = cma_owner_decision_text(card) else {
-        return Ok(None);
-    };
-    let mut event = crate::models::assistant_acknowledgement::bind_continuation(
-        card.routing.as_ref(),
-        super::assistant_team_service::event(
-            CMA_OWNER_EVENT_KIND,
-            text,
-            card.requester_agent_id.as_deref(),
-        ),
-    )
-    .for_invocation(card.invocation_id.as_deref());
-    event.execution_task = card.execution_task.clone();
-    event.automation_work = card.automation_work.clone();
-    event.id = Uuid::new_v5(
-        &Uuid::NAMESPACE_OID,
-        format!("cma-owner-step-decision:{}", card.id).as_bytes(),
-    )
-    .to_string();
-    event.created_at = card.decided_at.unwrap_or(card.created_at);
-    if !super::assistant_nyxagent::append_events_in_session(
-        db,
-        &card.user_id,
-        &card.conversation_id,
-        std::slice::from_ref(&event),
-        session,
-    )
-    .await?
-    {
-        return Err(not_found());
-    }
-    Ok(Some(event.id))
-}
-
 /// Decide a card as the owner from its own conversation.
 pub async fn decide(
     db: &Database,
@@ -3496,14 +3413,6 @@ pub(crate) async fn decide_in_session(
     }
     row.continuation_receipt_id = if target.collaboration.is_some() {
         None
-    } else if is_cma_owner_step(&row)
-        && row.voice_request_id.is_none()
-        && row.trigger_run_id.is_none()
-    {
-        // The decision, exact destination and server receipt commit together.
-        // Invocation lineage remains on the event; voice and triggers retain
-        // their existing continuation queues below.
-        cma_owner_continuation_in_session(db, session, &row).await?
     } else if row.invocation_id.is_some() {
         Box::pin(super::assistant_invocation_service::decision_in_session(
             db, session, &row,
@@ -3530,14 +3439,7 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     if let Some(work) = row.automation_work.as_ref() {
-        // The desktop decision already has its exact, non-replaying receipt.
-        // Voice and trigger continuations retain their existing notification.
-        if work.role != "coordinator"
-            && !(is_cma_owner_step(&row)
-                && row.voice_request_id.is_none()
-                && row.trigger_run_id.is_none()
-                && row.continuation_receipt_id.is_some())
-        {
+        if work.role != "coordinator" {
             let mut event = crate::models::assistant_acknowledgement::bind_continuation(
                 row.routing.as_ref(),
                 super::assistant_team_service::event(
@@ -3670,9 +3572,6 @@ async fn consume_action_with_reason(
     arguments: &Value,
     reason: Option<&str>,
 ) -> AppResult<bool> {
-    if tool == super::nyxbot_cma_tools::OWNER_TOOL {
-        return Ok(false);
-    }
     let db = db.clone();
     let chat = chat.clone();
     let id = id.to_owned();
@@ -3713,9 +3612,6 @@ pub(crate) async fn consume_action_in_session(
     arguments: &Value,
     session: &mut ClientSession,
 ) -> AppResult<bool> {
-    if tool == super::nyxbot_cma_tools::OWNER_TOOL {
-        return Ok(false);
-    }
     Box::pin(fence(db, chat, session)).await?;
     let result = db
         .collection::<AssistantAcknowledgement>(ACKS)

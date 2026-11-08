@@ -1630,6 +1630,7 @@ async fn workspace_platform_keys_are_rejected_before_target_selection_and_catalo
         assert!(matches!(effective_catalog_auth(&db, &service).await,
             Err(AppError::ValidationError(message)) if message == "Destination targets do not support platform keys"));
         let mut target = ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
@@ -1689,6 +1690,7 @@ fn user_owned_bearer_target_does_not_become_platform_by_catalog_category() {
     // master material. Catalog category/requirement flags alone do not select a key.
     assert!(service.credential_encrypted.is_empty());
     let mut target = ProxyTarget {
+        catalog_slug: None,
         execution_request: None,
         execution_permission: None,
         credential_deferred: false,
