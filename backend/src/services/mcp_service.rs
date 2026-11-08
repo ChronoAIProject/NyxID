@@ -10698,6 +10698,100 @@ mod tests {
     }
 
     #[test]
+    fn cma_remote_discovery_keeps_async_contracts_and_generic_http_effects() {
+        for names in [
+            [
+                "create_agent",
+                "get_provisioning",
+                "run_task",
+                "get_task",
+                "control_task",
+                "delete_agent",
+            ],
+            [
+                "post_api_v1_agents",
+                "get_api_v1_agent_lifecycle_id",
+                "post_api_v2_agents_agent_id_responses",
+                "get_api_v2_responses_response_id",
+                "post_api_v2_agents_agent_id_responses_response_id_controls",
+                "delete_api_v1_agents_id",
+            ],
+        ] {
+            let mut spec = serde_json::json!({
+                "openapi": "3.1.0",
+                "info": {"title": "CMA discovery fixture", "version": "1"},
+                "paths": {}
+            });
+            for (method, path, name) in [
+                ("post", "/api/v1/agents", names[0]),
+                ("get", "/api/v1/agent-lifecycle/{id}", names[1]),
+                ("post", "/api/v2/agents/{agent_id}/responses", names[2]),
+                ("get", "/api/v2/responses/{response_id}", names[3]),
+                (
+                    "post",
+                    "/api/v2/agents/{agent_id}/responses/{response_id}/controls",
+                    names[4],
+                ),
+                ("delete", "/api/v1/agents/{id}", names[5]),
+            ] {
+                spec["paths"][path][method] = serde_json::json!({
+                    "operationId": name,
+                    "responses": {"200": {"description": "Observed result"}}
+                });
+            }
+            let mut published =
+                parsed_endpoints_to_mcp(openapi_parser::parse_openapi_spec_value(&spec).unwrap());
+            assert_eq!(published.endpoints.len(), names.len());
+            assert!(
+                published
+                    .endpoints
+                    .iter()
+                    .all(|endpoint| endpoint.async_operation.is_none())
+            );
+
+            mark_catalog_operations(&mut published, "cma");
+
+            for (submit, status, presentation) in [
+                (
+                    names[0],
+                    names[1],
+                    crate::models::async_service_operation::CmaOperationKind::Provisioning,
+                ),
+                (
+                    names[2],
+                    names[3],
+                    crate::models::async_service_operation::CmaOperationKind::Response,
+                ),
+            ] {
+                let contract = published
+                    .endpoints
+                    .iter()
+                    .find(|endpoint| endpoint.name == submit)
+                    .unwrap()
+                    .async_operation
+                    .as_ref()
+                    .unwrap();
+                assert_eq!(contract.presentation, Some(presentation));
+                assert_eq!(contract.status_operation, status);
+                assert_eq!(contract.result_operation, status);
+            }
+            for endpoint in &published.endpoints {
+                let metadata = published.durable_metadata[&endpoint.endpoint_id];
+                assert!(!metadata.catalog_contract);
+                assert!(!metadata.destructive, "{}", endpoint.name);
+                assert_eq!(metadata.changes_existing, None, "{}", endpoint.name);
+                let effects = operation_effects(&endpoint.method.parse().unwrap(), metadata);
+                match endpoint.method.as_str() {
+                    "GET" => assert!(effects.reads && effects.uses && !effects.destructive),
+                    "POST" => assert!(!effects.reads && effects.uses && !effects.destructive),
+                    "DELETE" => assert!(!effects.reads && !effects.uses && effects.destructive),
+                    method => panic!("unexpected test method {method}"),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn generic_proxy_dispatch_requires_service_and_endpoint_identity() {
         let sentinel = build_generic_proxy_endpoint("custom");
         let mut fixed = make_endpoint("fixed_read", "Fixed read");

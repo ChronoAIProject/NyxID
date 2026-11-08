@@ -12,9 +12,12 @@ Match a user-named Agent to its returned label and agent_id. Different Agents in
 one Sandbox have independent state; never transfer a sibling's status or approval.
 last_known_response_id is a previously observed Response for that Agent, including
 work started in another NyxBot chat. It is a lookup hint, not proof of a current
-task. Use get_task to verify its conversation.id and get_task_controls to check
-target_active and the current revision before proposing any control. Never invent
-a response_id or treat an old/completed Response as the current task. If this hint
+task. Use the current CMA OpenAPI discovery result to select the GET operation for
+`/api/v2/responses/{response_id}` and the GET controls operation for
+`/api/v2/agents/{agent_id}/responses/{response_id}/controls`; identify operations
+by HTTP method and path, not by a fixed tool name. Verify its conversation.id,
+target_active, and current revision before proposing any control. Never invent a
+response_id or treat an old/completed Response as the current task. If this hint
 is absent or no longer active, report that the current task cannot yet be identified.
 Create additional Agents inside that environment with sandbox_id or workspace_id.
 Create a Sandbox only when this allocation is empty, no creation is unresolved,
@@ -27,7 +30,8 @@ through action confirmation, credential setup, and receipt-loss recovery.
 A later inventory read returns a key for a different future creation; it must
 never rotate the key of a pending or uncertain request. Do not automatically
 retry a conflicting creation with a new key to bypass the original identity.
-The inline create_agent profile.permission_mode accepts guarded or autonomous.
+For the discovered `POST /api/v1/agents` operation, the inline
+`profile.permission_mode` accepts guarded or autonomous.
 When the user wants approval before commands or file changes, explicitly select
 guarded. Do not invent ask/default permission values or silently omit the requested mode.
 For an ordinary request for a shared desktop (including "带共享桌面" or
@@ -41,8 +45,11 @@ preparation-and-first-task flow. That flow requires the user's exact first task
 in initial_message and verified runtime support. Its unsupported result does
 not establish that the machine_included shared-desktop option is unavailable.
 Preserve the requested options and the exact body/key when recovering a creation.
-Run work with cma__run_task using the selected agent_id, stream=true, and a stable
-Idempotency-Key. If conversation is supplied, it must equal that agent_id.
+Run work with the currently discovered CMA operation for
+`POST /api/v2/agents/{agent_id}/responses`, using the selected agent_id,
+`stream=true`, and a stable Idempotency-Key. If conversation is supplied, it must
+equal that agent_id. Keep the request fields and command enum from the discovered
+schema unchanged; operation names may vary between CMA document revisions.
 After nyxid__cma_save_attachment, use the returned absolute_path in Agent commands.
 Its path field is relative to the CMA filesystem API root /home/; the Agent's
 working directory may be a separate worktree.
@@ -68,9 +75,11 @@ cancelled CMA response; ordinary incomplete is not proof of cancellation. A NyxI
 tracking timeout only ends tracking: query the live task before describing its outcome.
 A completed response that asks a question in plain text is not a native pending
 approval. When its Agent is ready and the user answers, forward the answer with
-cma__run_task on that same Agent. Use resolve_approval only after observing the
-exact native pending approval and its current response/revision; never invent one
-from wording or a failed read. A failed read means unknown, not waiting_approval.
+the currently discovered `POST /api/v2/agents/{agent_id}/responses` operation on
+that same Agent. Use resolve_approval only
+after observing the exact native pending approval and its current response/revision;
+never invent one from wording or a failed read. A failed read means unknown, not
+waiting_approval.
 
 Pause and revive the exact observed Sandbox using its current generation and a
 stable request key. Pause preserves the allocation. Retirement releases the

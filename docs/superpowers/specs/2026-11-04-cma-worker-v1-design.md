@@ -76,16 +76,23 @@ All paths below use the prefix `/api/v1/assistant/nyxagent`. Resource IDs in the
 
 Handlers require a first-party human, active personal owner, and `assistant:cma-sandboxes`; they return dedicated DTOs. The existing delegated-read denial for the assistant route family covers every new read/stream/upgrade path, with explicit regression coverage. Accepted lifecycle commands return `202` while pending; acknowledgement alone is not completion.
 
-## Overlay, native tools, and assistant guidance
+## CMA discovery, native tools, and assistant guidance
 
-The embedded `backend/specs/catalog/cma.openapi.json` is registered for the canonical `cma` service. Its current operation IDs are:
-
-- Agent discovery/lifecycle: `list_agents`, `create_agent`, `get_agent`, `get_provisioning`, `stop_agent`, `delete_agent`.
-- Sandbox management: `list_sandboxes`, `get_sandbox`, `pause_sandbox`, `revive_sandbox`, `retire_sandbox`, `list_sandbox_events`.
-- Work and history: `run_task`, `get_task`, `list_messages`, `get_transcript`, `get_task_controls`, `control_task`, `interrupt_task`.
-- Files and observations: `list_files`, `read_file`, `download_file`, `write_file`, `get_resources`, `get_usage`.
-
-The overlay supplies `x-aevatar-tool` action classes. `cma__run_task` targets `POST /api/v2/agents/{agent_id}/responses` with `stream=true`. Control calls bind the exact Agent, response, turn sequence, revision, and approval identity where applicable. The hosted schema subset cannot express the full tagged control union, so the producer-owned execution boundary validates it. The controls snapshot does not invent pending approval IDs; approval identities come from bound Agent events.
+CMA no longer uses a NyxID-hosted OpenAPI overlay. Its operations come from the
+current OpenAPI document discovered from the configured CMA connection. Operation
+names may follow CMA's upstream names and can change between document revisions;
+the CMA adapter therefore selects operations by HTTP method and path. In
+particular, work uses the discovered
+`POST /api/v2/agents/{agent_id}/responses` operation with `stream=true`, response and
+controls reads use their discovered GET paths, and task controls use the
+discovered `POST /api/v2/agents/{agent_id}/responses/{response_id}/controls`
+operation. Agent and Sandbox deletion remains an explicit DELETE operation. The
+local CMA risk markers are gone; existing generic HTTP method classification now
+provides the default effects. The existing CMA adapter still binds the exact
+Agent, response, turn sequence, revision, and approval identity where applicable.
+The producer-owned execution boundary validates the full tagged control union.
+The controls snapshot does not invent pending approval IDs; approval identities
+come from bound Agent events.
 
 The three native tools are `nyxid__list_cma_resources`, `nyxid__cma_save_attachment`, and `nyxid__cma_guide`. Listing returns only created resources, preserves pagination and fresh creation-key behavior, and does not reserve/select resources. Attachment copying reads an original file from the current conversation, applies action policy and verifies the selected Agent. Its path is relative to CMA's `/home/` API root; it returns path, absolute_path, size and SHA256 without raw bytes. An identical existing file is idempotent; different content is not overwritten. These bridges exclude guests, shared/collaboration and organization contexts and require the live personal feature/grant authority.
 

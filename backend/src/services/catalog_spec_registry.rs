@@ -23,7 +23,6 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// Embedded overlay documents, keyed by the spec key used in the hosted
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
-    ("cma", include_str!("../../specs/catalog/cma.openapi.json")),
     (
         "nyx-panel",
         include_str!("../../specs/catalog/nyx-panel.openapi.json"),
@@ -196,7 +195,6 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
 
 /// Catalog service slug -> spec key.
 const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
-    ("cma", "cma"),
     ("chrono-sandbox", "chrono-sandbox"),
     ("api-ifttt", "ifttt"),
     ("api-ifttt-mcp", "ifttt-mcp"),
@@ -829,84 +827,28 @@ mod tests {
     }
 
     #[test]
-    fn cma_overlay_exposes_v1_operations_with_exact_effects() {
-        let spec = spec_for_slug("cma").expect("CMA hosted overlay");
-        let endpoints = openapi_parser::parse_hosted_openapi_spec_value(&spec).unwrap();
-        for name in [
-            "list_agents",
-            "get_agent",
-            "create_agent",
-            "get_provisioning",
-            "stop_agent",
-            "delete_agent",
-            "list_sandboxes",
-            "get_sandbox",
-            "pause_sandbox",
-            "revive_sandbox",
-            "retire_sandbox",
-            "run_task",
-            "get_task",
-            "list_messages",
-            "get_transcript",
-            "get_task_controls",
-            "control_task",
-            "interrupt_task",
-            "list_files",
-            "read_file",
-            "download_file",
-            "write_file",
-            "list_sandbox_events",
-            "get_resources",
-            "get_usage",
+    fn cma_uses_remote_discovery_without_a_hosted_overlay() {
+        assert!(spec_for_slug("cma").is_none());
+        assert!(spec_path_for_slug("cma").is_none());
+        for (method, path, name) in [
+            ("POST", "/api/v1/agents", "create_agent"),
+            ("POST", "/api/v1/agents", "post_api_v1_agents"),
+            (
+                "POST",
+                "/api/v2/agents/{agent_id}/responses/{response_id}/controls",
+                "control_task",
+            ),
+            (
+                "POST",
+                "/api/v2/agents/{agent_id}/responses/{response_id}/controls",
+                "post_api_v2_agents_agent_id_responses_response_id_controls",
+            ),
         ] {
-            assert!(endpoints.iter().any(|e| e.name == name), "{name}");
-        }
-        for name in [
-            "create_agent",
-            "delete_agent",
-            "retire_sandbox",
-            "control_task",
-        ] {
-            assert!(
-                endpoints
-                    .iter()
-                    .find(|e| e.name == name)
-                    .unwrap()
-                    .destructive,
-                "{name}"
-            );
-        }
-        for name in ["list_agents", "get_transcript", "get_task_controls"] {
             assert_eq!(
-                endpoints.iter().find(|e| e.name == name).unwrap().risk,
-                Some(crate::models::service_endpoint::EndpointRisk::Read)
+                operation_marks("cma", method, path, name),
+                OperationMarks::default()
             );
         }
-        let creation = endpoints
-            .iter()
-            .find(|endpoint| endpoint.name == "create_agent")
-            .unwrap()
-            .request_body_schema
-            .as_ref()
-            .unwrap();
-        assert_eq!(creation["properties"]["desktop"]["type"], "boolean");
-        assert_eq!(creation["properties"]["initial_message"]["type"], "string");
-        assert!(
-            creation["properties"]["desktop"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("initial_message")
-        );
-        assert_eq!(
-            creation["properties"]["machine_included"]["type"],
-            "boolean"
-        );
-        assert_eq!(creation["required"], serde_json::json!(["name"]));
-        assert_eq!(creation["additionalProperties"], false);
-        assert_eq!(
-            spec_path_for_slug("cma").as_deref(),
-            Some("/api/v1/catalog-specs/cma/openapi.json")
-        );
     }
 
     #[test]
