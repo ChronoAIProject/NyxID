@@ -89,15 +89,24 @@ pub async fn options(
     }
     let user = auth.user_id.to_string();
     voice::require_enabled(&state.db, &user).await?;
-    let options = if let Some(id) = q.conversation_id {
-        let thread = voice::thread(&state.db, &user, &id).await?;
-        voice::options(&state.db, &state.encryption_keys, &thread).await?
-    } else {
-        voice::settings_options(&state.db, &state.encryption_keys, &user).await?
-    };
-    Ok(serde_json::json!({"options":options,"limits": {
+    let (options, settings) = tokio::try_join!(
+        async {
+            if let Some(id) = q.conversation_id {
+                let thread = voice::thread(&state.db, &user, &id).await?;
+                voice::options(&state.db, &state.encryption_keys, &thread).await
+            } else {
+                voice::settings_options(&state.db, &state.encryption_keys, &user).await
+            }
+        },
+        crate::services::assistant_settings_service::get(&state.db, &user),
+    )?;
+    // A saved binding can prepare a call with one fresh settings request.
+    // Session creation still resolves the binding and provider authority live.
+    Ok(
+        serde_json::json!({"options":options,"preferences":settings.voice.map(Preferences::from),"greetings":true,"limits": {
         "call_seconds":crate::models::assistant_voice::MAX_CALL_SECONDS,"idle_seconds":crate::models::assistant_voice::IDLE_SECONDS,"idle_warning_seconds":crate::models::assistant_voice::IDLE_WARNING_SECONDS,
-        "transmitting_calls":1,"queued_requests":crate::models::assistant_voice::MAX_QUEUED},"recording":false}))
+        "transmitting_calls":1,"queued_requests":crate::models::assistant_voice::MAX_QUEUED},"recording":false}),
+    )
 }
 
 #[derive(Deserialize)]

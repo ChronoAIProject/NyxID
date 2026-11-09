@@ -37,6 +37,7 @@ pub async fn start_for_client_key(
     execution_enrolled: bool,
     client_key: Option<super::client_key::ClientKey>,
 ) -> AppResult<Started> {
+    let started_at = std::time::Instant::now();
     super::super::assistant_voice::require_enabled(&state.db, user)
         .await
         .map_err(|e| Stage::Flag.error(e))?;
@@ -48,6 +49,10 @@ pub async fn start_for_client_key(
     ))
     .await
     .map_err(|e| Stage::Credential.error(e))?;
+    tracing::info!(
+        elapsed_ms = started_at.elapsed().as_millis() as u64,
+        "Voice credentials resolved"
+    );
     if resolved.protocol == crate::models::downstream_service::VoiceProtocol::XaiRealtime {
         if !sdp.is_empty() {
             return Err(Stage::Transport.error(AppError::ValidationError(
@@ -125,6 +130,7 @@ pub(super) async fn start_with_provider(
     provider: openai::OpenAi,
     concurrency: Option<crate::services::service_concurrency_service::Lease>,
 ) -> AppResult<Started> {
+    let started_at = std::time::Instant::now();
     let StartInput {
         execution_enrolled,
         responses_billing,
@@ -171,6 +177,7 @@ pub(super) async fn start_with_provider(
         let instructions = initial_context(&state.db, &call)
             .await
             .map_err(|e| Stage::Thread.error(e))?;
+        tracing::info!(session_id = %call.id, elapsed_ms = started_at.elapsed().as_millis() as u64, "Voice startup context ready");
         let meter = super::super::billing::voice::reserve(
             &state.db,
             &state.billing,
@@ -190,6 +197,7 @@ pub(super) async fn start_with_provider(
             .await
             .map_err(|e| Stage::BillingReservation.error(e))?;
         super::shared::before_start(state, &call).await?;
+        let provider_started_at = std::time::Instant::now();
         provider_attempted = true;
         let created = provider
             .create(
@@ -205,6 +213,7 @@ pub(super) async fn start_with_provider(
                 provider_attempted = !failure.not_created;
                 failure.error
             })?;
+        tracing::info!(session_id = %call.id, elapsed_ms = provider_started_at.elapsed().as_millis() as u64, "Voice provider answer ready");
         created_session_id = Some(created.provider_id.clone());
         let expires = created
             .expires_at
@@ -222,6 +231,7 @@ pub(super) async fn start_with_provider(
             .attach(&created.provider_id)
             .await
             .map_err(|e| Stage::Transport.error(e))?;
+        tracing::info!(session_id = %call.id, elapsed_ms = started_at.elapsed().as_millis() as u64, "Voice provider attached");
         call = session::refresh(&state.db, &call).await?;
         call = session::write(
             &state.db,
@@ -306,28 +316,47 @@ pub(super) async fn initial_context(
         .find_one(doc! {"_id":&call.conversation_id,"user_id":&call.user_id})
         .await?
         .ok_or_else(|| AppError::NotFound("Voice conversation unavailable".into()))?;
-    let agent = if conversation.shared_agent_thread {
-        super::shared::revalidate(db, call).await?;
-        let id = conversation
-            .agent_id
-            .as_ref()
-            .ok_or_else(crate::services::shared_agent_service::missing)?;
-        Some(
-            crate::services::shared_agent_service::load(
-                db,
-                &call.user_id,
-                Some(std::slice::from_ref(id)),
+    let load_agent = async {
+        let agent = if conversation.shared_agent_thread {
+            super::shared::revalidate(db, call).await?;
+            let id = conversation
+                .agent_id
+                .as_ref()
+                .ok_or_else(crate::services::shared_agent_service::missing)?;
+            Some(
+                crate::services::shared_agent_service::load(
+                    db,
+                    &call.user_id,
+                    Some(std::slice::from_ref(id)),
+                )
+                .await?
+                .agents
+                .remove(id)
+                .ok_or_else(crate::services::shared_agent_service::missing)?
+                .agent()
+                .clone(),
             )
-            .await?
-            .agents
-            .remove(id)
-            .ok_or_else(crate::services::shared_agent_service::missing)?
-            .agent()
-            .clone(),
-        )
-    } else {
-        Some(super::super::assistant_team_service::agent_for_conversation(db, &conversation).await?)
+        } else {
+            Some(
+                super::super::assistant_team_service::agent_for_conversation(db, &conversation)
+                    .await?,
+            )
+        };
+        Ok::<_, AppError>(agent)
     };
+    let load_history = async {
+        let rows: Vec<AssistantMessage> = db
+            .collection(MESSAGES)
+            .find(doc! {"user_id":&call.user_id,"conversation_id":&call.conversation_id})
+            .sort(doc! {"seq":-1})
+            .limit(8)
+            .await?
+            .try_collect()
+            .await?;
+        Ok::<_, AppError>(rows)
+    };
+    // Independent reads; a failed binding check still fails the whole startup.
+    let (agent, rows) = tokio::try_join!(load_agent, load_history)?;
     let mut identity = match conversation.role {
         crate::models::assistant_conversation::AgentRole::Orchestrator => {
             "You are NyxBot, the owner's chief of staff. NyxBot can use the owner's connected services, automations, machines and specialists through NyxID."
@@ -362,14 +391,6 @@ pub(super) async fn initial_context(
             ));
         }
     }
-    let rows: Vec<AssistantMessage> = db
-        .collection(MESSAGES)
-        .find(doc! {"user_id":&call.user_id,"conversation_id":&call.conversation_id})
-        .sort(doc! {"seq":-1})
-        .limit(8)
-        .await?
-        .try_collect()
-        .await?;
     let history: Vec<_> = rows
         .into_iter()
         .rev()
