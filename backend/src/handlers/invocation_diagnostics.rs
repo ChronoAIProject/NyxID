@@ -201,8 +201,6 @@ pub async fn redeem(
             "Invocation diagnostic not found".into(),
         ));
     }
-    let actor_id = auth.user_id.to_string();
-    let execution_owner_id = auth.proxy_resolution_user_id();
     let supplied = proxy_service::caller_bearer_token_for_downstream(&headers, false);
     let caller_token = live_bearer(
         &auth.auth_method,
@@ -212,15 +210,7 @@ pub async fn redeem(
     match diagnostics::redeem(
         &state.db,
         &state.config,
-        &actor_id,
-        &execution_owner_id,
-        &auth.auth_method,
-        auth.api_key_id.as_deref(),
-        auth.acting_client_id
-            .as_deref()
-            .or(auth.oauth_client_id.as_deref()),
-        auth.allow_all_services,
-        &auth.allowed_service_ids,
+        &auth,
         &request.handle,
         caller_token,
     )

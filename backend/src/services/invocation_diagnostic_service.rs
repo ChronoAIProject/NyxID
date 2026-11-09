@@ -24,11 +24,13 @@ use crate::{
         user_endpoint::UserEndpoint,
         user_service::UserService,
     },
-    mw::auth::AuthMethod,
+    mw::auth::{AuthMethod, AuthUser},
     services::{
+        assistant_agent_credential_service::{self, ModelCatalogRef},
         coordination_service::TokenBucketStore,
         feature_flag_service,
         monitoring_service::{self, CheckResult, CheckStatus, Client, ProbeResult, Source},
+        org_agent_service,
         org_service::{self, OwnerAccess},
         service_concurrency_service, user_service_service,
     },
@@ -246,17 +248,10 @@ fn reserve_issue(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn redeem(
     db: &Database,
     config: &AppConfig,
-    actor_id: &str,
-    execution_owner_id: &str,
-    auth_method: &AuthMethod,
-    api_key_id: Option<&str>,
-    client_id: Option<&str>,
-    allow_all_services: bool,
-    allowed_service_ids: &[String],
+    auth: &AuthUser,
     handle: &str,
     caller_token: Option<&str>,
 ) -> AppResult<RedeemResult> {
@@ -264,19 +259,25 @@ pub(crate) async fn redeem(
         return Err(not_found());
     }
     let rows = db.collection::<InvocationDiagnostic>(COLLECTION_NAME);
-    let identity = identity_filter(actor_id, auth_method, api_key_id, client_id, handle);
+    let actor_id = auth.user_id.to_string();
+    let client_id = auth
+        .acting_client_id
+        .as_deref()
+        .or(auth.oauth_client_id.as_deref());
+    let identity = identity_filter(
+        &actor_id,
+        &auth.auth_method,
+        auth.api_key_id.as_deref(),
+        client_id,
+        handle,
+    );
     let Some(row) = rows.find_one(identity.clone()).await? else {
         return Err(not_found());
     };
     if row.expires_at <= Utc::now() {
         return Err(not_found());
     }
-    if !allow_all_services && !allowed_service_ids.contains(&row.exact_user_service_id) {
-        return Err(not_found());
-    }
-    let Some(service) =
-        authorized_service(db, execution_owner_id, &row.exact_user_service_id).await?
-    else {
+    let Some(service) = authorized_service(db, auth, &row.exact_user_service_id).await? else {
         return Err(not_found());
     };
     if let Some(result) = completed(&row)? {
@@ -287,10 +288,11 @@ pub(crate) async fn redeem(
         });
     }
 
-    let delegable = matches!(auth_method, AuthMethod::AccessToken)
+    let delegable = matches!(auth.auth_method, AuthMethod::AccessToken)
         && client_id != Some("chrono-probe")
         && caller_token.is_some();
-    if delegable && concurrency_capacity_exhausted(db, execution_owner_id, &service).await? {
+    let execution_owner_id = auth.proxy_resolution_user_id();
+    if delegable && concurrency_capacity_exhausted(db, &execution_owner_id, &service).await? {
         return Ok(RedeemResult::NotReady);
     }
 
@@ -312,9 +314,9 @@ pub(crate) async fn redeem(
     let Some(claimed) = claimed else {
         let Some(current) = rows
             .find_one(identity_filter(
-                actor_id,
-                auth_method,
-                api_key_id,
+                &actor_id,
+                &auth.auth_method,
+                auth.api_key_id.as_deref(),
                 client_id,
                 handle,
             ))
@@ -336,7 +338,7 @@ pub(crate) async fn redeem(
         diagnose(
             db,
             config,
-            actor_id,
+            &actor_id,
             &claimed.exact_user_service_id,
             caller_token,
         )
@@ -413,7 +415,7 @@ fn not_found() -> AppError {
 
 async fn authorized_service(
     db: &Database,
-    actor_id: &str,
+    auth: &AuthUser,
     exact_id: &str,
 ) -> AppResult<Option<UserService>> {
     let Some(service) = super::service_history::collection::<UserService>(
@@ -428,15 +430,64 @@ async fn authorized_service(
     if !service.is_active || service.deleted_at.is_some() || service.service_type != "http" {
         return Ok(None);
     }
-    let access = org_service::resolve_owner_access(db, actor_id, &service.user_id).await?;
+    let has_service_scope =
+        auth.allow_all_services || auth.allowed_service_ids.contains(&service.id);
+    let implicit_model_transport = if has_service_scope {
+        false
+    } else {
+        let catalog = service
+            .catalog_service_id
+            .as_deref()
+            .map(ModelCatalogRef::Id);
+        assistant_agent_credential_service::allows_implicit_model_transport(db, auth, catalog)
+            .await?
+    };
+    if !has_service_scope && !implicit_model_transport {
+        return Ok(None);
+    }
+
+    if implicit_model_transport {
+        let allowed = match auth.org_agent_access.as_deref() {
+            Some(access) => access.shared().map_or_else(
+                || access.allows_service(&service),
+                |shared| shared.allows_model_connection(&service),
+            ),
+            None => owner_acl_allows(db, auth, &service).await?,
+        };
+        if !allowed {
+            return Ok(None);
+        }
+    } else {
+        match org_agent_service::authorize_execution(db, auth, Some(exact_id)).await {
+            Ok(()) => {}
+            Err(AppError::Forbidden(_))
+            | Err(AppError::NotFound(_))
+            | Err(AppError::ApiKeyScopeForbidden(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        if auth.org_agent_access.is_none() && !owner_acl_allows(db, auth, &service).await? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(service))
+}
+
+async fn owner_acl_allows(
+    db: &Database,
+    auth: &AuthUser,
+    service: &UserService,
+) -> AppResult<bool> {
+    let execution_owner_id = auth.proxy_resolution_user_id();
+    let access =
+        org_service::resolve_owner_access(db, &execution_owner_id, &service.user_id).await?;
     let usable = match &access {
         OwnerAccess::Direct | OwnerAccess::AsOrgAdmin { .. } => true,
         OwnerAccess::AsOrgMember { role, .. } => {
-            user_service_service::role_can_proxy_service(*role, &service)
+            user_service_service::role_can_proxy_service(*role, service)
         }
         OwnerAccess::Forbidden => false,
     };
-    Ok((usable && access.allows_resource(exact_id)).then_some(service))
+    Ok(usable && access.allows_resource(&service.id))
 }
 
 async fn concurrency_capacity_exhausted(
