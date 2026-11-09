@@ -514,15 +514,124 @@ The real service's public config returned all three providers: GitHub, Google
 and Apple. After reloading the complete App, the actual Simulator accessibility
 tree and screenshot both showed **Continue with Google**, **Continue with GitHub**
 and **Continue with Apple**, with the sign-in-options error absent. Auth screen
-source was unchanged. The App is left at this restored sign-in screen; account
-reauthentication and authenticated voice verification remain outstanding.
+source was unchanged. At that checkpoint the App was left at the restored sign-in screen. The user
+subsequently authenticated; the live verification below supersedes that pending
+login status.
 
-**This run does not accept an authenticated iPad voice call or the new compact
-bar/transcription interaction against a live provider.** After sign-in against
-the restored service, exercise: existing/new chat one-tap entry, automatic speech
+**At the login-restoration checkpoint, authenticated voice was not yet
+accepted.** The subsequent live run below records the completed paths. The
+original acceptance list was: existing/new chat one-tap entry, automatic speech
 and same-bubble partial updates, microphone mute/unmute, header preferences,
 PTT press/release, End confirmation, reopening and details/Back scroll retention.
 No synthetic captions were inserted into the running app to claim acceptance.
 The acoustic checks recorded above are historical and do not verify this head.
 Physical-device, human-listening, Android, Grok and broader iPad route/layout
 coverage gaps recorded earlier also remain open.
+
+
+## 2026-11-09 — authenticated voice user paths and recovery fixes
+
+The user authenticated against the restored real service. Tests used the complete
+signed Debug App on iPad Pro 13-inch M5 / iOS 26.3 in landscape, with native
+OpenAI WebRTC and Marin. Source edits were delivered by restarting Metro 8096
+with a cleared cache and explicitly reloading the App. The runtime was not
+replaced by a mocked screen, fake media or injected captions.
+
+The actual run found and repaired mobile defects that the previous unit coverage
+did not catch:
+
+- Normal server idle close could leave a misleading microphone-permission error,
+  stale idle warning and incorrect Unable to start state. A confirmed idle terminal
+  state now clears the transient media error and hides the old warning.
+- End can legitimately return closing before the final receipt. Local teardown
+  removes the socket, so recovery now queries the exact known conversation and
+  session, checks identity and generation/revision, and publishes its verified
+  terminal state while preserving captions/tasks. Repeated failures rearm up to
+  six checks without repeating End or creating another call.
+- Non-JSON/empty HTTP errors previously discarded statusCode, preventing the
+  optional account-active route from falling back on 404/405. They now retain the
+  status with a fixed sanitized message; 401/403/503 do not trigger that fallback.
+- The preferences viewport contained all 34 voices before the mode, speaker and
+  pricing controls. The existing controls were reordered so those common actions
+  appear first; speaker/resume controls share a row.
+
+| Actual user path | Result and evidence |
+| --- | --- |
+| Home/new chat → one voice tap | Created one conversation and connected to Listening without a second Start or second transcript. |
+| Existing chat → voice | Connected with the compact bar and retained prior history. |
+| Automatic speech → main-chat transcription → reply | A distinct synthetic Chinese phrase traveled through the Mac speaker/microphone into the native call. One main user bubble updated during transcription and sealed; matching assistant reply and Assistant is speaking were observed. Minor acoustic recognition substitutions occurred. |
+| Microphone mute → speech → unmute | Off/Unmute states were shown; the distinct muted fixture did not enter chat. After unmute the recovery fixture was transcribed and answered. |
+| Header menu → preferences → dismiss | Opened the bounded preference tray while the call stayed connected. The menu did not jump chat to the top in this run. |
+| Speaker mute/enable, Resume audio | Speaker button changed Mute → Enable → Mute. Resume audio returned without a call error. Human listening quality was not measured. |
+| Voice pricing | Expanded the actual tariff text in the running App. |
+| Save PTT → next new chat call | The existing automatic call retained its mode. The next call opened with Hold to talk, without capture until activated. |
+| PTT capture/release through accessibility | The exposed native activate action toggled capture on/off. The known PTT phrase was recognized and answered; a distinct post-release phrase did not enter chat. This validates the accessibility path and capture gate, not a sustained finger gesture. |
+| Manual End → composer → reopen | After the recovery fix, a real 0:56 receipt appeared and the composer returned automatically, without manual Check. The same chat reconnected afterward. |
+| Muted idle timeout → Close | A real 4:46 receipt said The quiet call ended. The bar showed Call ended / Close, with no stale warning or permission error. Close restored the composer. |
+| Active PTT call → Details → Back | Navigation stopped the call; Back returned to the same chat with its real 4:03 receipt and composer, without auto-restarting voice. This run was following the latest messages; older paused-reading anchoring retains its earlier evidence, not a new acceptance here. |
+
+Ambient audio/noise was sometimes transcribed while capture was intentionally
+open. It is not evidence of duplicate test phrases. Unrelated captured speech is
+not reproduced in this report or the PR. No synthetic transcript was inserted.
+
+The foreground/background recovery path and final handoff are recorded in the
+follow-up below. Physical iPad/iPhone, sustained touch PTT, human speech/listening,
+Bluetooth/interruption, Android, Grok, task execution/approval effects, and the
+last rows of the long voice picker are not accepted by these checks. The earlier
+broader iPad coverage gaps remain open.
+
+
+### Final foreground recovery and handoff
+
+The first background run exposed a further recovery gap: a completed cleanup
+could clear retained conflict metadata before a final snapshot reached the hook,
+and foreground did not rearm a check whose timer fired in the background.
+Recovery now retains the owned snapshot's exact identity, resumes only the
+remaining six-check budget on foreground, and conveys verified terminal/empty
+results to the UI without fabricating a terminal session. A terminal result for
+another conversation clears recovery without publishing that conversation's
+snapshot into the current chat. Confirmed recovery closes the controls once and
+leaves retained unfinished captions marked as partial by the existing chat path.
+
+An intervening attempt still encountered an older call conflict; that attempt
+was not counted as a successful background test. A later fresh PTT call connected
+and was actually sent to the system Home screen and reopened. A temporary local
+DEV diagnostic observed only sanitized fields: state=closed, end_requested=true,
+identity/revision validation=true, same-chat=true. The App returned automatically
+to its composer and displayed the real 0:39 receipt, without manual Check, End
+again or an automatic replacement call. Diagnostic statements were then removed,
+Metro was restarted/cleared, and the same system Home → reopen path was repeated
+on the exact final source: real 1:33 receipt, composer restored, no lingering
+Confirming controls. Marin and Hands-free were selected again in preferences. The next same-chat call
+connected to Listening, confirming that the original mode was restored. A final
+fresh Chinese acoustic fixture entered the main chat once and received an
+assistant clarification reply (a recognition substitution changed the instruction,
+so a literal expected reply is not asserted). Final End produced a real 1:45
+receipt and automatically restored the composer. The logged-in App was left
+there with local capture/playback stopped and no Confirming controls.
+
+Final dependency-related verification, from `mobile/`:
+
+```sh
+pnpm exec tsx --test src/features/assistant/voice/AssistantVoiceClient.test.ts src/features/assistant/voice/useNativeVoice.test.ts src/features/assistant/voice/AssistantVoiceConversation.test.ts src/lib/api/http.session.test.ts src/lib/api/assistantVoiceTransport.test.ts src/lib/api/guardedTransport.test.ts src/lib/api/authenticatedTransport.test.ts
+# 256 passed, 0 failed, 0 skipped
+```
+
+From repository root:
+
+```sh
+frontend/node_modules/.bin/prettier --check mobile/src/features/assistant/voice/AssistantVoiceClient.ts mobile/src/features/assistant/voice/AssistantVoiceClient.test.ts mobile/src/features/assistant/voice/AssistantVoiceConversation.tsx mobile/src/features/assistant/voice/AssistantVoiceConversation.test.ts mobile/src/features/assistant/voice/useNativeVoice.ts mobile/src/features/assistant/voice/useNativeVoice.test.ts mobile/src/lib/api/http.session.test.ts
+# all 7 files passed
+
+git diff --check -- mobile
+# passed
+```
+
+The whole-file Prettier warning for `mobile/src/lib/api/http.ts` also reproduces
+on unmodified HEAD; only the new block was formatted. No repository-native
+reliable affected typecheck exists. Full frontend suite/typecheck/build remains
+delegated to GitHub CI. The 256-test run overlaps earlier runs and is not added
+to the historical 309 count. Independent read-only lifecycle, transcript and
+recovery reviews found no further actionable mobile blocker in this increment.
+The six preexisting backend/chat-document diffs retained the same binary SHA256
+and were excluded from delivery.

@@ -1246,6 +1246,75 @@ test("ending audio never cancels accepted work; Stop only cancels the chosen tas
   assert.equal(e.count().closed, 1);
 });
 
+test("media-first shutdown publishes the verified terminal control state with retained captions", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  const captions = [
+    {
+      id: requestId,
+      speaker: "user",
+      text: "recognized speech",
+      sealed: false,
+      complete: false,
+    },
+  ];
+  e.socket.receive({
+    type: "snapshot",
+    session: session({ muted: true, idle_warning: true }),
+    captions,
+    tasks: [],
+  });
+  const waiting = deferred<VoiceSession>();
+  e.responses.control = async () => waiting.promise;
+  e.media.emit({ type: "error", message: "private provider shutdown" });
+  assert.equal(e.client.isClosed, true);
+  assert.equal(e.media.input, false);
+  assert.equal(e.snapshots.at(-1)?.session.state, "active");
+
+  const ended = session({
+    state: "closed",
+    closed_at: "2026-10-16T00:04:25Z",
+    end_reason: "idle",
+    control_revision: 1,
+  });
+  waiting.resolve(ended);
+  await e.client.end();
+  assert.deepEqual(e.snapshots.at(-1)?.session, ended);
+  assert.deepEqual(e.snapshots.at(-1)?.captions, captions);
+  assert.deepEqual(e.snapshots.at(-1)?.tasks, []);
+  assert.equal(e.client.pendingEnd, undefined);
+  assert.equal(e.controls.length, 1);
+  assert.equal(e.count().closed, 1);
+  assert.equal(e.starts.length, 1);
+});
+
+test("a media-first closing response retains recovery without inventing a terminal snapshot", async () => {
+  const e = setup();
+  await e.open();
+  const before = e.snapshots.length;
+  e.responses.control = async () =>
+    session({ state: "closing", end_requested: true, control_revision: 1 });
+  e.media.emit({ type: "error", message: "private provider shutdown" });
+  await e.client.end();
+  assert.equal(e.snapshots.length, before);
+  assert.equal(e.client.pendingEnd?.state, "closing");
+  assert.equal(e.conflicts.at(-1)?.end_requested, true);
+});
+
+test("stale terminal cleanup cannot replace a newer owned session snapshot", async () => {
+  const e = setup();
+  await e.open();
+  e.snapshot({ generation: 2, control_revision: 2, idle_warning: true });
+  const before = e.snapshots.length;
+  e.responses.control = async () =>
+    session({ state: "closed", generation: 1, control_revision: 3 });
+  e.media.emit({ type: "error", message: "private provider shutdown" });
+  await e.client.end();
+  assert.equal(e.snapshots.length, before);
+  assert.equal(e.client.pendingEnd?.generation, 2);
+  assert.equal(e.client.pendingEnd?.state, "active");
+});
+
 test("closed server snapshot releases media once without another End or task cancellation", async () => {
   const e = setup();
   await e.open();

@@ -8,10 +8,7 @@ import type { nativeVoiceEnvironment } from "../../../lib/api/assistantVoiceApi"
 import { AssistantVoiceClient } from "./AssistantVoiceClient";
 import { NativeVoiceMedia } from "./VoiceMediaBridge";
 import type { VoiceStartRecovery } from "./voiceStartError";
-import {
-  discoverActiveVoiceCall,
-  VoiceCallDiscoveryIncompleteError,
-} from "./voiceActiveCall";
+import { discoverActiveVoiceCall } from "./voiceActiveCall";
 import { voiceSessionSchema } from "./voiceContracts";
 import type {
   VoicePreferences,
@@ -55,6 +52,8 @@ export function useNativeVoice(
   const [conflictUnknown, setConflictUnknown] = useState(false);
   const [endingConflict, setEndingConflict] = useState(false);
   const [checkingConflict, setCheckingConflict] = useState(false);
+  const [confirmedEnded, setConfirmedEnded] = useState(false);
+  const [conflictCheckAttempt, setConflictCheckAttempt] = useState(0);
   const current = useRef<AssistantVoiceClient | null>(null);
   const clientThread = useRef(thread);
   const ownership = useRef<object | undefined>(undefined);
@@ -180,6 +179,7 @@ export function useNativeVoice(
     setMedia(null);
     latestSnapshot.current = null;
     setSnapshot(null);
+    setConfirmedEnded(false);
     if (retainedRecovery?.epoch !== environment.epoch)
       retainedRecovery = undefined;
     ownership.current = retainedRecovery?.owner;
@@ -194,6 +194,7 @@ export function useNativeVoice(
         thread: target?.thread,
         unknown: target?.unknown ?? false,
       };
+      if (target?.session || target?.unknown) setConfirmedEnded(false);
       setConflict(target?.session ?? null);
       setConflictThread(target?.thread);
       setConflictUnknown(target?.unknown ?? false);
@@ -210,10 +211,15 @@ export function useNativeVoice(
     setEndingConflict(false);
     setCheckingConflict(false);
     const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") {
+        // A scheduled check may have fired while backgrounded. Resume only
+        // the remaining bounded checks; foreground never starts or ends a call.
+        if (sameScope()) setConflictCheckAttempt((attempt) => attempt + 1);
+        return;
+      }
       // System permission prompts may briefly inactivate the app before any
       // microphone is acquired. Actual background always cancels the attempt.
       if (
-        state !== "active" &&
         !(state === "inactive" && permissionAttempt.current === ticket.current)
       ) {
         const hadVoiceWork = busy.current || current.current !== null;
@@ -235,9 +241,18 @@ export function useNativeVoice(
   }, [thread, environment]);
 
   useEffect(() => {
+    const ownedDisconnected =
+      !starting &&
+      !connected &&
+      !confirmedEnded &&
+      snapshot &&
+      snapshot.session.state !== "closed" &&
+      snapshot.session.state !== "failed" &&
+      (!conflict ||
+        (conflict.id === snapshot.session.id && conflictThread === thread));
     if (
-      !conflict ||
-      (!conflict.end_requested && conflict.state !== "closing") ||
+      (!(conflict?.end_requested || conflict?.state === "closing") &&
+        !ownedDisconnected) ||
       conflictChecks.current >= 6
     )
       return;
@@ -248,7 +263,15 @@ export function useNativeVoice(
       }
     }, 1000);
     return () => clearTimeout(timer);
-  }, [conflict, conflictThread]);
+  }, [
+    conflict,
+    conflictThread,
+    conflictCheckAttempt,
+    starting,
+    connected,
+    confirmedEnded,
+    snapshot,
+  ]);
 
   async function start(preferences: VoicePreferences, protocol: VoiceProtocol) {
     if (
@@ -274,6 +297,7 @@ export function useNativeVoice(
       ticket.current === generation &&
       !controller.signal.aborted;
     setStarting(true);
+    setConfirmedEnded(false);
     setInputEnabled(false);
     reportError();
     latestSnapshot.current = null;
@@ -314,6 +338,7 @@ export function useNativeVoice(
       if (!valid()) return;
       const nextMedia = new NativeVoiceMedia();
       const owner = claimRecovery();
+      let connectedOnce = false;
       const next = new AssistantVoiceClient({
         conversationId: thread,
         media: nextMedia,
@@ -324,6 +349,12 @@ export function useNativeVoice(
           if (!valid()) return;
           const previous = latestSnapshot.current;
           latestSnapshot.current = value;
+          if (
+            connectedOnce &&
+            value.session.state === "closed" &&
+            value.session.end_reason === "idle"
+          )
+            reportError();
           if (
             value.session.state !== "active" ||
             value.session.muted ||
@@ -338,6 +369,7 @@ export function useNativeVoice(
         },
         onReady: () => {
           if (!valid() || current.current !== next) return;
+          connectedOnce = true;
           setStarting(false);
           setConnected(true);
         },
@@ -462,7 +494,18 @@ export function useNativeVoice(
     const generation = ++ticket.current;
     const controller = new AbortController();
     pending.current = controller;
-    const priorTarget = latestConflict.current;
+    const target = latestConflict.current;
+    const localSession = latestSnapshot.current?.session;
+    // A completed client cleanup can clear recovery after local End has
+    // fenced its final snapshot. Retain the owned snapshot's exact identity
+    // until a read confirms terminal state or an empty active-call result.
+    const priorTarget =
+      !target.session &&
+      localSession &&
+      localSession.state !== "closed" &&
+      localSession.state !== "failed"
+        ? { ...target, session: localSession, thread }
+        : target;
     const owner = claimRecovery();
     remember(priorTarget, owner);
     const valid = () =>
@@ -470,11 +513,68 @@ export function useNativeVoice(
       ticket.current === generation &&
       !controller.signal.aborted;
     setCheckingConflict(true);
+    setConfirmedEnded(false);
     if (manual) {
       conflictChecks.current = 0;
       reportError();
     }
     try {
+      if (priorTarget.session && priorTarget.thread) {
+        try {
+          const prior = voiceSessionSchema.parse(
+            await environment.api.status(
+              priorTarget.thread,
+              priorTarget.session.id,
+              controller.signal,
+            ),
+          );
+          if (!valid()) return false;
+          const previous = latestSnapshot.current;
+          const observed = [
+            priorTarget.session,
+            ...(priorTarget.thread === thread &&
+            previous?.session.id === prior.id
+              ? [previous.session]
+              : []),
+          ];
+          const currentStatus = observed.every(
+            (value) =>
+              prior.id === value.id &&
+              (prior.generation > value.generation ||
+                (prior.generation === value.generation &&
+                  prior.control_revision >= value.control_revision)),
+          );
+          if (
+            currentStatus &&
+            (prior.state === "closed" || prior.state === "failed")
+          ) {
+            // An owned call's terminal receipt does not depend on optional
+            // account discovery or a bounded scan of other conversations.
+            // A later explicit Start still passes backend account admission.
+            remember({ session: null, unknown: false }, owner);
+            setConfirmedEnded(true);
+            if (
+              priorTarget.thread === thread &&
+              (!previous || previous.session.id === prior.id)
+            ) {
+              const terminal: VoiceSnapshot = {
+                type: "snapshot",
+                session: prior,
+                captions: previous?.captions ?? [],
+                tasks: previous?.tasks ?? [],
+              };
+              latestSnapshot.current = terminal;
+              setSnapshot(terminal);
+            }
+            reportError();
+            refresh();
+            return true;
+          }
+        } catch {
+          if (!valid()) return false;
+          // Discovery can still identify a newer call or prove an empty slot.
+        }
+      }
       const call = await discoverActiveVoiceCall(
         environment.api,
         priorTarget.thread ?? thread,
@@ -489,38 +589,11 @@ export function useNativeVoice(
         },
         owner,
       );
+      setConfirmedEnded(!call);
       if (!call) reportError();
       return !call;
-    } catch (cause) {
+    } catch {
       if (valid()) {
-        if (
-          cause instanceof VoiceCallDiscoveryIncompleteError &&
-          priorTarget.session &&
-          priorTarget.thread
-        ) {
-          try {
-            const prior = voiceSessionSchema.parse(
-              await environment.api.status(
-                priorTarget.thread,
-                priorTarget.session.id,
-                controller.signal,
-              ),
-            );
-            if (!valid()) return false;
-            if (
-              prior.id === priorTarget.session.id &&
-              (prior.state === "closed" || prior.state === "failed")
-            ) {
-              // Only this verified target is released. A later explicit Start
-              // still goes through authoritative account-wide admission.
-              remember({ session: null, unknown: false }, owner);
-              reportError();
-              return true;
-            }
-          } catch {
-            if (!valid()) return false;
-          }
-        }
         remember({ ...priorTarget, unknown: true }, owner);
         reportError(
           "Call status could not be verified. Check status again before starting voice.",
@@ -531,6 +604,9 @@ export function useNativeVoice(
       if (valid()) {
         conflictBusy.current = false;
         setCheckingConflict(false);
+        // Even a repeated failure may preserve the same session object. Rearm
+        // bounded polling independently of session identity or error text.
+        setConflictCheckAttempt((attempt) => attempt + 1);
       }
     }
   }
@@ -662,6 +738,7 @@ export function useNativeVoice(
     conflictUnknown,
     endingConflict,
     checkingConflict,
+    confirmedEnded,
     start,
     end,
     endConflict,

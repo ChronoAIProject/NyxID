@@ -165,11 +165,15 @@ function buildApiError(payload: unknown, status: number): ApiError | Error {
     return new ApiError({ errorKey, errorCode, statusCode: status, message, reason, details: obj.details });
   }
 
-  if (typeof payload === "string" && payload.length > 0) {
-    return new Error(payload);
-  }
-
-  return new Error(`request_failed_${status}`);
+  // Routing/proxy failures may have no JSON body. Preserve their HTTP status
+  // for capability fallback without exposing an arbitrary upstream response.
+  const errorKey = `request_failed_${status}`;
+  return new ApiError({
+    errorKey,
+    errorCode: 0,
+    statusCode: status,
+    message: errorKey,
+  });
 }
 
 function computeAccessTokenExpiresAt(expiresInSec: number): number | undefined {

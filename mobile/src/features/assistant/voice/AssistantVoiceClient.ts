@@ -143,6 +143,7 @@ export class AssistantVoiceClient {
   private protocol: VoiceProtocol = "openai_live";
   private preferences?: VoicePreferences;
   private session?: VoiceSession;
+  private snapshot?: VoiceSnapshot;
   private socket?: VoiceControlSocket;
   private heartbeat?: unknown;
   private readinessTimeout?: unknown;
@@ -451,6 +452,7 @@ export class AssistantVoiceClient {
       if (generationChanged || this.inputBlocked(snapshot.session))
         this.releaseHeldInput();
       this.session = snapshot.session;
+      this.snapshot = snapshot;
       this.ready = true;
       this.updateInput();
       this.options.onSnapshot(snapshot);
@@ -708,9 +710,28 @@ export class AssistantVoiceClient {
           },
         ),
       );
-      if (next.id !== session.id) throw new Error("Voice session changed");
+      if (
+        next.id !== session.id ||
+        next.generation < session.generation ||
+        (next.generation === session.generation &&
+          next.control_revision < session.control_revision)
+      )
+        throw new Error("Voice session changed");
       this.outstandingEnd =
         next.state === "closed" || next.state === "failed" ? undefined : next;
+      if (!this.outstandingEnd) {
+        // Provider media may stop before the final control-socket snapshot.
+        // Teardown removes that listener, so publish the verified control result
+        // while preserving the last captions and accepted tasks for this call.
+        this.session = next;
+        this.options.onSnapshot({
+          type: "snapshot",
+          ...this.snapshot,
+          session: next,
+          captions: this.snapshot?.captions ?? [],
+          tasks: this.snapshot?.tasks ?? [],
+        });
+      }
     } catch {
       // Retain the verified owned identity so explicit recovery can retry End.
     }

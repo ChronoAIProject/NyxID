@@ -176,6 +176,7 @@ function setup(
     conflictUnknown: input.conflictUnknown ?? false,
     endingConflict: false,
     checkingConflict: false,
+    confirmedEnded: false,
     start: async (preferences: VoicePreferences, protocol: string) => {
       events.push(["start", preferences, protocol]);
     },
@@ -682,6 +683,70 @@ test("Listening follows actual input permission, Speaking follows playback, and 
   f.harness.unmount();
 });
 
+test("a verified quiet-call terminal state shows Close without the stale idle warning", () => {
+  const f = setup({
+    snapshot: {
+      ...snapshot,
+      session: {
+        ...snapshot.session,
+        state: "closed",
+        closed_at: "2026-10-16T04:04:25Z",
+        end_reason: "idle",
+        end_requested: true,
+        idle_warning: true,
+      },
+    },
+  });
+  assert.match(f.text(), /Call ended/);
+  assert.doesNotMatch(f.text(), /Unable to start/);
+  assert.deepEqual(f.notices(), []);
+  assert.ok(f.button("Return to chat"));
+  assert.equal(f.find("End voice"), undefined);
+  assert.equal(f.starts().length, 0);
+  f.button("Return to chat").props.onPress();
+  assert.deepEqual(f.events, [["close"]]);
+  f.harness.unmount();
+});
+
+for (const state of ["closed", "failed"] as const) {
+  test(`a terminal ${state} conflict with end_requested offers Close without starting a replacement`, () => {
+    const f = setup({
+      conflict: { ...snapshot.session, state, end_requested: true },
+    });
+    assert.match(f.text(), /Call ended/);
+    assert.doesNotMatch(f.text(), /Confirming|Call already active/);
+    assert.ok(f.button("Return to chat"));
+    assert.equal(f.find("Request end again"), undefined);
+    assert.equal(f.find("Check call status"), undefined);
+    assert.equal(f.starts().length, 0);
+    f.button("Return to chat").props.onPress();
+    assert.deepEqual(f.events, [["close"]]);
+    f.harness.unmount();
+  });
+}
+
+test("a terminal session supersedes its own pending cleanup without dismissing a different active call", () => {
+  const f = setup({
+    snapshot: {
+      ...snapshot,
+      session: { ...snapshot.session, state: "closed", end_requested: true },
+    },
+    conflict: { ...snapshot.session, state: "closing", end_requested: true },
+  });
+  assert.match(f.text(), /Call ended/);
+  assert.ok(f.button("Return to chat"));
+  assert.equal(f.find("Request end again"), undefined);
+  f.voice.conflict = {
+    ...snapshot.session,
+    id: "33333333-3333-4333-8333-333333333333",
+  };
+  f.harness.render();
+  assert.match(f.text(), /Call already active/);
+  assert.ok(f.button("End existing call"));
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
 test("the capture placeholder follows real input levels and clears immediately on mute", () => {
   const f = setup({ active: true });
   assert.deepEqual(f.captures.at(-1), { listening: true, inputActive: false });
@@ -801,6 +866,113 @@ test("only a verified terminal End returns to the text composer", async () => {
   await f.harness.settle();
   assert.deepEqual(f.events, [["end"], ["close"]]);
   f.harness.unmount();
+});
+
+test("a requested End closes after a terminal snapshot even when end_requested stays true", async () => {
+  const f = setup({ active: true });
+  f.setEnd(Promise.resolve(false));
+  f.button("End voice").props.onPress();
+  await f.harness.settle();
+  assert.match(f.text(), /Confirming call ended/);
+  f.voice.connected = false;
+  f.voice.snapshot = {
+    ...snapshot,
+    session: { ...snapshot.session, state: "closed", end_requested: true },
+  };
+  f.harness.render();
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["end"], ["close"]]);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("a requested End closes after verified empty discovery without a fabricated terminal snapshot", async () => {
+  const f = setup({ active: true });
+  f.setEnd(Promise.resolve(false));
+  f.button("End voice").props.onPress();
+  await f.harness.settle();
+  assert.match(f.text(), /Confirming call ended/);
+  f.voice.connected = false;
+  f.voice.confirmedEnded = true;
+  f.harness.render();
+  await f.harness.settle();
+  assert.equal(f.voice.snapshot?.session.state, "active");
+  assert.deepEqual(f.events, [["end"], ["close"]]);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("verified empty discovery closes disconnected controls once and preserves the truthful partial snapshot", async () => {
+  const retained: VoiceSnapshot = {
+    ...snapshot,
+    captions: [
+      {
+        id: "partial-caption",
+        speaker: "assistant",
+        text: "A retained partial reply",
+        sealed: false,
+        complete: false,
+      },
+    ],
+  };
+  const original = structuredClone(retained);
+  const f = setup({ snapshot: retained });
+  f.voice.checkingConflict = true;
+  f.voice.confirmedEnded = true;
+  f.harness.render();
+  await f.harness.settle();
+  assert.deepEqual(f.events, []);
+  f.voice.checkingConflict = false;
+  f.harness.render();
+  await f.harness.settle();
+  f.harness.render();
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["close"]]);
+  assert.deepEqual(f.voice.snapshot, original);
+  assert.deepEqual(f.snapshots.at(-1), original);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("a confirmed terminal call in another conversation closes recovery without a local snapshot or replacement call", async () => {
+  const f = setup({
+    conflict: { ...snapshot.session, state: "closing", end_requested: true },
+    conflictThread: `nyxa-${"b".repeat(32)}`,
+  });
+  assert.match(f.text(), /Confirming call ended/);
+  assert.equal(f.voice.snapshot, null);
+  f.voice.conflict = null;
+  f.voice.confirmedEnded = true;
+  f.harness.render();
+  await f.harness.settle();
+  f.harness.render();
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["close"]]);
+  assert.equal(f.voice.snapshot, null);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("empty discovery cannot close a connected, starting, unknown, or conflicting call", async () => {
+  for (const guard of [
+    "connected",
+    "starting",
+    "unknown",
+    "conflict",
+  ] as const) {
+    const f = setup({ snapshot });
+    f.voice.confirmedEnded = true;
+    if (guard === "connected") f.voice.connected = true;
+    if (guard === "starting") f.voice.starting = true;
+    if (guard === "unknown") f.voice.conflictUnknown = true;
+    if (guard === "conflict")
+      f.voice.conflict = { ...snapshot.session, id: "another-session" };
+    f.harness.render();
+    await f.harness.settle();
+    assert.deepEqual(f.events, [], guard);
+    assert.equal(f.starts().length, 0, guard);
+    f.harness.unmount();
+  }
 });
 
 test("a disconnected nonterminal snapshot cannot expose a new start while recovery catches up", () => {

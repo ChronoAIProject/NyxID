@@ -174,15 +174,33 @@ function VoiceConversation({
     (row) => row.id === currentVoice,
   )?.label;
   const session = voice.snapshot?.session;
+  const sessionTerminal =
+    session?.state === "closed" || session?.state === "failed";
+  const conflictTerminal =
+    voice.conflict?.state === "closed" || voice.conflict?.state === "failed";
+  // A terminal session may retain end_requested; it has already finished.
+  // Its final snapshot also supersedes the same call's pending cleanup metadata.
+  const conflict =
+    voice.conflict &&
+    !conflictTerminal &&
+    !(sessionTerminal && voice.conflict.id === session?.id)
+      ? voice.conflict
+      : null;
+  const confirmedEnd =
+    voice.confirmedEnded &&
+    !voice.starting &&
+    !voice.connected &&
+    !conflict &&
+    !voice.conflictUnknown;
+  const terminal =
+    sessionTerminal || (!session && conflictTerminal) || confirmedEnd;
   const active = voice.starting || voice.connected;
-  const conflict = voice.conflict;
   const uncertain = voice.conflictUnknown;
   const confirmingEnd =
-    endRequested ||
+    (endRequested && !terminal) ||
     !!conflict?.end_requested ||
     conflict?.state === "closing" ||
-    session?.state === "closing" ||
-    !!session?.end_requested;
+    (!terminal && (session?.state === "closing" || !!session?.end_requested));
   const checking = checkingLocal || voice.checkingConflict;
   const ending = endingLocal || voice.endingConflict;
   const muted = session?.muted ?? false;
@@ -205,7 +223,6 @@ function VoiceConversation({
   const running = tasks.some(
     (task) => task.state === "queued" || task.state === "claimed",
   );
-  const terminal = session?.state === "closed" || session?.state === "failed";
   const hasCall =
     active ||
     (!!session && !terminal) ||
@@ -329,7 +346,7 @@ function VoiceConversation({
     if (
       active ||
       voice.snapshot ||
-      conflict ||
+      voice.conflict ||
       uncertain ||
       voice.error ||
       voice.recovery
@@ -357,7 +374,7 @@ function VoiceConversation({
   }, [focused]);
   useEffect(() => {
     if (
-      endRequested &&
+      (endRequested || confirmedEnd) &&
       !ending &&
       !checking &&
       !conflict &&
@@ -366,7 +383,16 @@ function VoiceConversation({
       terminal
     )
       closeOnce();
-  }, [endRequested, ending, checking, conflict, uncertain, active, terminal]);
+  }, [
+    endRequested,
+    confirmedEnd,
+    ending,
+    checking,
+    conflict,
+    uncertain,
+    active,
+    terminal,
+  ]);
 
   function closeOnce() {
     if (!mounted.current || closed.current) return;
@@ -722,7 +748,7 @@ function VoiceConversation({
         {!isConnected ? (
           <Notice message="You’re offline. Reconnect to start a voice call." />
         ) : null}
-        {session?.idle_warning && !confirmingEnd ? (
+        {session?.idle_warning && !terminal && !confirmingEnd ? (
           <Notice
             message={
               inputMode === "automatic"
@@ -863,23 +889,6 @@ function VoiceConversation({
               <Label muted style={styles.footnote}>
                 Changes apply to your next call.
               </Label>
-              {option ? (
-                <View
-                  accessibilityRole="radiogroup"
-                  accessibilityLabel="Voice for next call"
-                  style={styles.preferencesChoices}
-                >
-                  {option.voice.voices.map((row) => (
-                    <Choice
-                      key={row.id}
-                      label={`${row.label} voice`}
-                      selected={nextVoice === row.id}
-                      disabled={!canChangePreferences}
-                      onPress={() => void savePreferences(nextMode, row.id)}
-                    />
-                  ))}
-                </View>
-              ) : null}
               {option && !isGrok ? (
                 <View
                   accessibilityRole="radiogroup"
@@ -915,6 +924,24 @@ function VoiceConversation({
                   tone="error"
                 />
               ) : null}
+              {voice.connected ? (
+                <View style={styles.recoveryActions}>
+                  <ActionButton
+                    label={
+                      voice.speakerMuted ? "Enable speaker" : "Mute speaker"
+                    }
+                    variant="secondary"
+                    compact
+                    onPress={() => voice.muteSpeaker(!voice.speakerMuted)}
+                  />
+                  <ActionButton
+                    label="No sound? Resume audio"
+                    variant="secondary"
+                    compact
+                    onPress={() => void voice.resumeAudio()}
+                  />
+                </View>
+              ) : null}
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={
@@ -933,23 +960,22 @@ function VoiceConversation({
                   {voiceTariff(currentOption)}
                 </Label>
               ) : null}
-              {voice.connected ? (
-                <>
-                  <ActionButton
-                    label={
-                      voice.speakerMuted ? "Enable speaker" : "Mute speaker"
-                    }
-                    variant="secondary"
-                    compact
-                    onPress={() => voice.muteSpeaker(!voice.speakerMuted)}
-                  />
-                  <ActionButton
-                    label="No sound? Resume audio"
-                    variant="secondary"
-                    compact
-                    onPress={() => void voice.resumeAudio()}
-                  />
-                </>
+              {option ? (
+                <View
+                  accessibilityRole="radiogroup"
+                  accessibilityLabel="Voice for next call"
+                  style={styles.preferencesChoices}
+                >
+                  {option.voice.voices.map((row) => (
+                    <Choice
+                      key={row.id}
+                      label={`${row.label} voice`}
+                      selected={nextVoice === row.id}
+                      disabled={!canChangePreferences}
+                      onPress={() => void savePreferences(nextMode, row.id)}
+                    />
+                  ))}
+                </View>
               ) : null}
             </ScrollView>
           </View>

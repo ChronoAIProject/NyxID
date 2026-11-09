@@ -755,6 +755,64 @@ test("a cancelled permission request cannot release a newer attempt's inactive e
   assert.equal(e.clients.length, 1);
 });
 
+test("a confirmed quiet-call end replaces a media-first error with the terminal snapshot", async (context) => {
+  const e = setup(context);
+  await e.connect();
+  const client = e.clients[0]!;
+  client.options.onSnapshot(snapshot({ muted: true, idle_warning: true }));
+  client.options.onError(
+    "Voice media stopped. Check microphone permission and start a new call.",
+  );
+  client.pendingEnd = session();
+  client.closed();
+  const stopped = e.harness.flush();
+  assert.equal(stopped.snapshot?.session.state, "active");
+  assert.match(stopped.error!, /Voice media stopped/);
+
+  client.pendingEnd = undefined;
+  client.options.onSnapshot(
+    snapshot({
+      state: "closed",
+      closed_at: "2026-10-16T00:04:25Z",
+      end_reason: "idle",
+    }),
+  );
+  client.options.onConflict?.(null);
+  const ended = e.harness.flush();
+  assert.equal(ended.snapshot?.session.state, "closed");
+  assert.equal(ended.error, undefined);
+  assert.equal(ended.conflict, null);
+  assert.equal(ended.connected, false);
+  assert.equal(ended.inputEnabled, false);
+  assert.equal(e.clients.length, 1);
+});
+
+test("late quiet-call terminal callbacks cannot replace another account or chat", async (context) => {
+  const e = setup(context);
+  await e.connect();
+  const client = e.clients[0]!;
+  e.replaceScope(secondThread, 2);
+  client.options.onSnapshot(snapshot({ state: "closed", end_reason: "idle" }));
+  client.options.onConflict?.(null);
+  const state = e.harness.flush();
+  assert.equal(state.snapshot, null);
+  assert.equal(state.error, undefined);
+  assert.equal(state.connected, false);
+  assert.equal(e.clients.length, 1);
+});
+
+test("a terminal cleanup does not clear an unrelated failed-start diagnostic", async (context) => {
+  const e = setup(context);
+  await e.start();
+  const client = e.clients[0]!;
+  client.options.onError("Voice provider rejected the session", creditRecovery);
+  client.closed();
+  client.options.onSnapshot(snapshot({ state: "closed", end_reason: "idle" }));
+  const state = e.harness.flush();
+  assert.equal(state.error, "Voice provider rejected the session");
+  assert.deepEqual(state.recovery, creditRecovery);
+});
+
 test("backgrounding an active call ends media and cannot restart through late callbacks", async (context) => {
   const e = setup(context);
   await e.connect();
@@ -1014,8 +1072,9 @@ test("legacy incomplete discovery without an owned target cannot use status to u
   assert.equal(e.clients.length, 0);
 });
 
-test("a network failure cannot unlock a verified target even if its last status might be terminal", async (context) => {
+test("a verified terminal call does not depend on account discovery being available", async (context) => {
   const e = setup(context);
+  let accountReads = 0;
   e.responses.start = async (client) => {
     client.options.onConflict?.(
       session({ state: "closing", end_requested: true }),
@@ -1025,14 +1084,332 @@ test("a network failure cannot unlock a verified target even if its last status 
   await e.start();
   Object.assign(e.api, {
     accountActive: async () => {
+      accountReads++;
       throw new Error("network");
     },
   });
   e.responses.status = async () => session({ state: "closed" });
-  await e.harness.value().checkConflict();
+  assert.equal(await e.harness.value().checkConflict(), true);
+  assert.equal(e.harness.flush().conflict, null);
+  assert.equal(e.harness.value().conflictUnknown, false);
+  assert.equal(accountReads, 0);
+  assert.equal(e.statusReads.length, 1);
+  assert.equal(e.clients.length, 1);
+  assert.deepEqual(e.controls, []);
+});
+
+test("a terminal call in another conversation retains an end proof without publishing its snapshot", async (context) => {
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(
+      session({ state: "closing", end_requested: true }),
+      secondThread,
+    );
+    client.closed();
+  };
+  await e.start();
+  e.responses.status = async () =>
+    session({ state: "closed", end_requested: true });
+  assert.equal(await e.harness.value().checkConflict(false), true);
+  const state = e.harness.flush();
+  assert.equal(state.confirmedEnded, true);
+  assert.equal(state.conflict, null);
+  assert.equal(state.conflictUnknown, false);
+  assert.equal(state.snapshot, null);
+  assert.equal(e.statusReads[0]!.thread, secondThread);
+  assert.equal(e.statusReads[0]!.id, firstId);
+  assert.equal(e.clients.length, 1);
+  assert.deepEqual(e.activeReads, []);
+  assert.deepEqual(e.controls, []);
+});
+
+for (const invalid of [
+  {
+    name: "another session",
+    value: session({ id: secondId, state: "closed" }),
+  },
+  {
+    name: "an older generation",
+    value: session({ generation: 0, state: "closed" }),
+  },
+  {
+    name: "an older control revision",
+    value: session({ control_revision: 1, state: "closed" }),
+  },
+  { name: "an invalid response", value: { state: "closed" } },
+]) {
+  test(`terminal status from ${invalid.name} cannot release a known call`, async (context) => {
+    const e = setup(context);
+    e.responses.start = async (client) => {
+      client.options.onConflict?.(
+        session({ state: "closing", end_requested: true, control_revision: 2 }),
+      );
+      client.closed();
+    };
+    await e.start();
+    Object.assign(e.api, {
+      accountActive: async () => {
+        throw new Error("network");
+      },
+    });
+    e.responses.status = async () => invalid.value;
+    assert.equal(await e.harness.value().checkConflict(), false);
+    const state = e.harness.flush();
+    assert.equal(state.conflict?.id, firstId);
+    assert.equal(state.conflictUnknown, true);
+    assert.equal(state.snapshot, null);
+    await e.start();
+    assert.equal(e.clients.length, 1);
+    assert.deepEqual(e.controls, []);
+  });
+}
+
+test("failed exact and account status reads keep the owned call blocked", async (context) => {
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(
+      session({ state: "closing", end_requested: true }),
+    );
+    client.closed();
+  };
+  await e.start();
+  e.responses.status = async () => {
+    throw new Error("network");
+  };
+  Object.assign(e.api, {
+    accountActive: async () => {
+      throw new Error("network");
+    },
+  });
+  assert.equal(await e.harness.value().checkConflict(), false);
   assert.equal(e.harness.flush().conflict?.id, firstId);
   assert.equal(e.harness.value().conflictUnknown, true);
-  assert.deepEqual(e.statusReads, []);
+  assert.equal(e.statusReads.length, 1);
+  await e.start();
+  assert.equal(e.clients.length, 1);
+});
+
+test("automatic status settlement publishes terminal state with the call transcript intact", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context);
+  await e.connect();
+  const callSnapshot: VoiceSnapshot = {
+    ...snapshot(),
+    captions: [
+      {
+        id: "last",
+        speaker: "assistant",
+        text: "Goodbye",
+        sealed: true,
+        complete: true,
+      },
+    ],
+    tasks: [
+      {
+        id: secondId,
+        turn_id: "turn",
+        state: "completed",
+        pending_acknowledgement_ids: [],
+        title: "Finished task",
+      },
+    ],
+  };
+  e.clients[0]!.options.onSnapshot(callSnapshot);
+  e.harness.flush();
+  e.clients[0]!.pendingEnd = session({
+    state: "closing",
+    end_requested: true,
+    control_revision: 1,
+  });
+  assert.equal(await e.harness.value().end(), false);
+  e.harness.flush();
+  let reads = 0;
+  e.responses.status = async () =>
+    session({
+      state: ++reads === 1 ? "closing" : "closed",
+      end_requested: true,
+      control_revision: 1,
+    });
+  Object.assign(e.api, {
+    accountActive: async () => {
+      throw new Error("optional discovery is unavailable");
+    },
+  });
+  context.mock.timers.tick(1000);
+  await e.harness.settle();
+  assert.equal(e.harness.value().conflict?.state, "closing");
+  context.mock.timers.tick(1000);
+  await e.harness.settle();
+  const state = e.harness.value();
+  assert.equal(reads, 2);
+  assert.equal(state.conflict, null);
+  assert.equal(state.conflictUnknown, false);
+  assert.equal(state.snapshot?.session.state, "closed");
+  assert.equal(state.snapshot?.session.end_requested, true);
+  assert.deepEqual(state.snapshot?.captions, callSnapshot.captions);
+  assert.deepEqual(state.snapshot?.tasks, callSnapshot.tasks);
+  assert.equal(state.error, undefined);
+  assert.equal(e.clients.length, 1);
+  assert.deepEqual(e.controls, []);
+});
+
+test("automatic settlement retries a transient status failure without another End", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context);
+  await e.connect();
+  e.clients[0]!.pendingEnd = session({ state: "closing", end_requested: true });
+  await e.harness.value().end();
+  e.harness.flush();
+  let reads = 0;
+  e.responses.status = async () => {
+    if (++reads === 1) throw new Error("temporary network failure");
+    return session({ state: "closed", end_requested: true });
+  };
+  Object.assign(e.api, {
+    accountActive: async () => {
+      throw new Error("optional discovery is unavailable");
+    },
+  });
+  for (let i = 0; i < 2; i++) {
+    context.mock.timers.tick(1000);
+    await e.harness.settle();
+  }
+  assert.equal(reads, 2);
+  assert.equal(e.harness.value().snapshot?.session.state, "closed");
+  assert.equal(e.harness.value().conflict, null);
+  assert.equal(e.clients.length, 1);
+  assert.deepEqual(e.controls, []);
+});
+
+test("automatic settlement retries unchanged failures only within its polling budget", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(
+      session({ state: "closing", end_requested: true }),
+    );
+    client.closed();
+  };
+  await e.start();
+  e.responses.status = async () => {
+    throw new Error("network");
+  };
+  Object.assign(e.api, {
+    accountActive: async () => {
+      throw new Error("network");
+    },
+  });
+  for (let i = 0; i < 10; i++) {
+    context.mock.timers.tick(1000);
+    await e.harness.settle();
+  }
+  assert.equal(e.statusReads.length, 6);
+  assert.equal(e.harness.value().conflict?.state, "closing");
+  assert.equal(e.harness.value().conflictUnknown, true);
+  assert.equal(e.clients.length, 1);
+  assert.deepEqual(e.controls, []);
+});
+
+test("foreground resumes an owned closing call after its polling timer fired in background", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context);
+  await e.connect();
+  const client = e.clients[0]!;
+  client.pendingEnd = session({ state: "closing", end_requested: true });
+  e.appState("background");
+  await e.harness.settle();
+  assert.equal(client.ends, 1);
+  assert.match(e.harness.value().error ?? "", /inactive/);
+  client.options.onCleanup?.(null, false);
+  assert.equal(e.harness.flush().conflict, null);
+  context.mock.timers.tick(10_000);
+  await e.harness.settle();
+  assert.equal(e.statusReads.length, 0);
+  e.responses.status = async () =>
+    session({ state: "closed", end_requested: true });
+  e.appState("active");
+  context.mock.timers.tick(1000);
+  await e.harness.settle();
+  const state = e.harness.value();
+  assert.equal(e.statusReads.length, 1);
+  assert.equal(state.snapshot?.session.state, "closed");
+  assert.equal(state.conflict, null);
+  assert.equal(state.conflictUnknown, false);
+  assert.equal(state.error, undefined);
+  assert.equal(client.ends, 1);
+  assert.equal(e.clients.length, 1);
+  assert.deepEqual(e.controls, []);
+});
+
+test("verified empty discovery is explicit without inventing a terminal session", async (context) => {
+  const e = setup(context);
+  await e.connect();
+  e.clients[0]!.pendingEnd = session({ state: "closing", end_requested: true });
+  await e.harness.value().end();
+  e.harness.flush();
+  e.responses.status = async () => {
+    throw new Error("exact status temporarily unavailable");
+  };
+  Object.assign(e.api, {
+    accountActive: async () => ({ session: null, conversation_id: null }),
+  });
+  assert.equal(await e.harness.value().checkConflict(false), true);
+  const state = e.harness.flush();
+  assert.equal(state.confirmedEnded, true);
+  assert.equal(state.conflict, null);
+  assert.equal(state.snapshot?.session.state, "active");
+  assert.equal(state.error, undefined);
+  assert.equal(e.clients.length, 1);
+  await e.start();
+  assert.equal(e.harness.value().confirmedEnded, false);
+  assert.equal(e.clients.length, 2);
+  assert.equal(e.replaceScope(secondThread, 2).confirmedEnded, false);
+});
+
+test("foreground recovery retains the remaining automatic status polling budget", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(
+      session({ state: "closing", end_requested: true }),
+    );
+    client.closed();
+  };
+  await e.start();
+  e.responses.status = async () => {
+    throw new Error("network");
+  };
+  Object.assign(e.api, {
+    accountActive: async () => {
+      throw new Error("network");
+    },
+  });
+  for (let i = 0; i < 2; i++) {
+    context.mock.timers.tick(1000);
+    await e.harness.settle();
+  }
+  assert.equal(e.statusReads.length, 2);
+  e.appState("background");
+  context.mock.timers.tick(10_000);
+  await e.harness.settle();
+  assert.equal(e.statusReads.length, 2);
+  e.appState("active");
+  for (let i = 0; i < 10; i++) {
+    context.mock.timers.tick(1000);
+    await e.harness.settle();
+  }
+  assert.equal(e.statusReads.length, 6);
+  e.appState("inactive");
+  e.appState("active");
+  for (let i = 0; i < 2; i++) {
+    context.mock.timers.tick(1000);
+    await e.harness.settle();
+  }
+  assert.equal(e.statusReads.length, 6);
+  assert.equal(e.harness.value().conflict?.state, "closing");
+  assert.equal(e.clients.length, 1);
+  assert.equal(e.clients[0]!.ends, 0);
+  assert.deepEqual(e.controls, []);
 });
 
 test("late terminal status after a scope change cannot clear another account's recovery", async (context) => {
