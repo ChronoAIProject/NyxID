@@ -2,6 +2,7 @@ import { z } from "zod";
 import { conversationIdSchema } from "../../features/assistant/assistantTypes";
 import {
   activeVoiceSessionSchema,
+  accountActiveVoiceSessionSchema,
   voiceControlRequestSchema,
   voiceIdentitySchema,
   voiceOptionsSchema,
@@ -15,6 +16,7 @@ import {
   type VoiceStartRequest,
 } from "../../features/assistant/voice/voiceContracts";
 import type { RequestOptions } from "./authenticatedTransport";
+import { VoiceCallDiscoveryIncompleteError } from "../../features/assistant/voice/voiceActiveCall";
 
 const ROOT = "/assistant/nyxagent";
 const localId = z.string().uuid();
@@ -132,6 +134,63 @@ export function createAssistantVoiceApi(
           signal,
         }),
       );
+    },
+    async accountActive(conversationId: string, signal?: AbortSignal) {
+      const current = conversationIdSchema.parse(conversationId);
+      const assertActive = () => {
+        if (signal?.aborted)
+          throw Object.assign(new Error("Voice request was cancelled."), {
+            name: "AbortError",
+          });
+      };
+      assertActive();
+      try {
+        return accountActiveVoiceSessionSchema.parse(
+          await request(`${ROOT}/voice/active`, { signal }),
+        );
+      } catch (error) {
+        const status =
+          error && typeof error === "object" && "statusCode" in error
+            ? error.statusCode
+            : undefined;
+        if (status !== 404 && status !== 405) throw error;
+      }
+      // Compatibility with deployed servers: metadata only, at most ten other
+      // recent conversations, with two reads in flight. Never read history.
+      const read = async (id: string) => {
+        assertActive();
+        return activeVoiceSessionSchema.parse(
+          await request(`${assistantVoiceSessionsPath(id)}/active`, { signal }),
+        ).session;
+      };
+      const own = await read(current);
+      if (own) return { session: own, conversation_id: current };
+      assertActive();
+      const index = z
+        .object({
+          conversations: z
+            .array(z.object({ id: conversationIdSchema }))
+            .max(50),
+          next_cursor: z.string().nullable(),
+        })
+        .parse(await request(`${ROOT}/conversations?limit=10`, { signal }));
+      const ids = [...new Set(index.conversations.map((row) => row.id))]
+        .filter((id) => id !== current)
+        .slice(0, 10);
+      for (let offset = 0; offset < ids.length; offset += 2) {
+        assertActive();
+        const results = await Promise.all(
+          ids.slice(offset, offset + 2).map(async (id) => ({
+            session: await read(id),
+            conversation_id: id,
+          })),
+        );
+        const live = results.find((result) => result.session);
+        if (live) return live;
+      }
+      if (index.next_cursor || index.conversations.length > 10)
+        throw new VoiceCallDiscoveryIncompleteError();
+      return { session: null, conversation_id: null };
     },
     async status(
       conversationId: string,

@@ -9,6 +9,7 @@ import type {
   VoiceSnapshot,
 } from "./voiceContracts";
 import type { VoiceStartRecovery } from "./voiceStartError";
+import { VoiceCallDiscoveryIncompleteError } from "./voiceActiveCall";
 
 type VoiceHook = ReturnType<typeof import("./useNativeVoice").useNativeVoice>;
 const firstThread = "nyxa-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -71,6 +72,8 @@ function setup(context: TestContext) {
   const cancellations: { thread: string; id: string; signal: AbortSignal }[] =
     [];
   const activeReads: string[] = [];
+  const statusReads: { thread: string; id: string; signal?: AbortSignal }[] =
+    [];
   const appListeners = new Set<(state: string) => void>();
   const native = {
     currentState: "active",
@@ -94,6 +97,7 @@ function setup(context: TestContext) {
     start: async (_client: Client): Promise<void> => {},
     control: async (): Promise<unknown> => session({ state: "closed" }),
     active: async (): Promise<any> => ({ session: null }),
+    status: async (): Promise<unknown> => session(),
     cancel: async (): Promise<void> => {},
     resume: async (_client: Client): Promise<void> => {},
     hold: (pressed: boolean) => pressed,
@@ -120,6 +124,14 @@ function setup(context: TestContext) {
       activeReads.push(selectedThread);
       return responses.active();
     },
+    status: async (
+      selectedThread: string,
+      id: string,
+      signal?: AbortSignal,
+    ) => {
+      statusReads.push({ thread: selectedThread, id, signal });
+      return responses.status();
+    },
     cancelRequest: async (
       selectedThread: string,
       id: string,
@@ -142,6 +154,8 @@ function setup(context: TestContext) {
     }
   }
   class Client {
+    pendingEnd?: VoiceSession;
+    pendingStart = false;
     isClosed = false;
     starts = 0;
     ends = 0;
@@ -209,11 +223,11 @@ function setup(context: TestContext) {
       onUpdate: () => void,
     ) => VoiceHook;
   };
-  harness.mount(() =>
+  const render = () =>
     loaded.useNativeVoice(thread, environment, () => {
       refreshCalls++;
-    }),
-  );
+    });
+  harness.mount(render);
   context.after(() => harness.unmount());
   const start = async () => {
     await harness.value().start(preferences, "openai_live");
@@ -226,18 +240,21 @@ function setup(context: TestContext) {
     return harness.flush();
   };
   return {
+    api,
     harness,
     clients,
     media,
     controls,
     cancellations,
     activeReads,
+    statusReads,
     available,
     responses,
     native,
     signals,
     start,
     connect,
+    remount: () => harness.mount(render),
     counts: () => ({
       optionCalls,
       savedCalls,
@@ -297,6 +314,62 @@ test("active control metadata stays Connecting until the client confirms media a
   client.options.onSnapshot(snapshot({ muted: true, input_muted: true }));
   assert.equal(e.harness.flush().connected, true);
 });
+
+test("capture state follows client input notifications independently of readiness and captions", async (context) => {
+  const e = setup(context);
+  await e.connect();
+  const client = e.clients[0]!;
+  assert.equal(e.harness.value().connected, true);
+  assert.equal(e.harness.value().inputEnabled, false);
+  client.options.onInputChanged?.(true);
+  assert.equal(e.harness.flush().inputEnabled, true);
+  client.options.onInputChanged?.(false);
+  client.options.onSnapshot({
+    ...snapshot(),
+    captions: [
+      {
+        id: "prior",
+        speaker: "user",
+        text: "An older utterance",
+        sealed: true,
+        complete: true,
+      },
+    ],
+  });
+  assert.equal(e.harness.flush().inputEnabled, false);
+  assert.equal(e.harness.value().connected, true);
+});
+
+for (const exit of [
+  "end",
+  "background",
+  "thread",
+  "account",
+  "unmount",
+] as const) {
+  test(`${exit} clears capture immediately and rejects a late input notification`, async (context) => {
+    const e = setup(context);
+    await e.connect();
+    const client = e.clients[0]!;
+    client.options.onInputChanged?.(true);
+    assert.equal(e.harness.flush().inputEnabled, true);
+    if (exit === "end") {
+      client.pendingEnd = session({ state: "closing", end_requested: true });
+      const ending = e.harness.value().end();
+      assert.equal(e.harness.flush().inputEnabled, false);
+      assert.equal(await ending, false);
+    } else if (exit === "background") e.appState("background");
+    else if (exit === "thread") e.replaceScope(secondThread);
+    else if (exit === "account") e.replaceScope(firstThread, 2);
+    else {
+      e.harness.unmount();
+      e.remount();
+    }
+    assert.equal(e.harness.flush().inputEnabled, false);
+    client.options.onInputChanged?.(true);
+    assert.equal(e.harness.flush().inputEnabled, false);
+  });
+}
 
 test("a readiness timeout ends Connecting and late readiness cannot restore the closed client", async (context) => {
   const e = setup(context);
@@ -711,7 +784,7 @@ test("unmount aborts pending permission, removes app listeners and fences late c
   assert.equal(e.clients.length, 0);
 });
 
-test("thread replacement closes the old client and clears the old thread's visible session", async (context) => {
+test("thread replacement clears captions while retaining the account's exact unresolved call", async (context) => {
   const e = setup(context);
   await e.connect();
   const old = e.clients[0]!;
@@ -723,14 +796,16 @@ test("thread replacement closes the old client and clears the old thread's visib
   assert.equal(next.connected, false);
   assert.equal(next.starting, false);
   assert.equal(next.snapshot, null);
-  assert.equal(next.conflict, null);
+  assert.equal(next.conflict?.id, firstId);
+  assert.equal(next.conflictThread, firstThread);
   assert.equal(next.error, undefined);
   old.options.onSnapshot(snapshot());
   old.options.onError("Late error");
   old.options.onConflict?.(session());
   const final = e.harness.flush();
   assert.equal(final.snapshot, null);
-  assert.equal(final.conflict, null);
+  assert.equal(final.conflict?.id, firstId);
+  assert.equal(final.conflictThread, firstThread);
   assert.equal(final.error, undefined);
 });
 
@@ -775,6 +850,364 @@ test("conflict metadata survives client closure and blocks new calls until expli
     { thread: firstThread, id: firstId, action: "end" },
   ]);
   assert.equal(e.harness.flush().conflict, null);
+});
+
+test("explicit recovery ends only the verified other chat and keeps closing blocked", async (context) => {
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(session(), secondThread);
+    client.closed();
+  };
+  await e.start();
+  e.responses.control = async () =>
+    session({ state: "closing", end_requested: true });
+  await e.harness.value().endConflict();
+  let state = e.harness.flush();
+  assert.equal(state.conflictThread, secondThread);
+  assert.equal(state.conflict?.state, "closing");
+  assert.deepEqual(e.controls, [
+    { thread: secondThread, id: firstId, action: "end" },
+  ]);
+  await e.start();
+  assert.equal(
+    e.clients.length,
+    1,
+    "accepted End does not yet establish a free slot",
+  );
+  Object.assign(e.api, {
+    accountActive: async () => ({ session: null, conversation_id: null }),
+  });
+  await e.harness.value().checkConflict();
+  state = e.harness.flush();
+  assert.equal(state.conflict, null);
+  assert.equal(state.error, undefined);
+});
+
+test("status discovery preserves a different new call without ending it", async (context) => {
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(
+      session({ state: "closing", end_requested: true }),
+    );
+    client.closed();
+  };
+  await e.start();
+  const staleEnd = e.harness.value().endConflict;
+  const staleStart = e.harness.value().start;
+  Object.assign(e.api, {
+    accountActive: async () => ({
+      session: session({ id: secondId }),
+      conversation_id: secondThread,
+    }),
+  });
+  await e.harness.value().checkConflict();
+  const state = e.harness.flush();
+  assert.equal(state.conflict?.id, secondId);
+  assert.equal(state.conflictThread, secondThread);
+  assert.deepEqual(e.controls, []);
+  await staleEnd();
+  await staleStart(preferences, "openai_live");
+  assert.deepEqual(
+    e.controls,
+    [],
+    "an old End handler cannot target the newly discovered call",
+  );
+  await e.start();
+  assert.equal(e.clients.length, 1);
+});
+
+test("unverified account status blocks blind Start and recovers through an explicit check", async (context) => {
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(null, undefined, true);
+    client.closed();
+  };
+  await e.start();
+  assert.equal(e.harness.value().conflictUnknown, true);
+  await e.start();
+  assert.equal(e.clients.length, 1);
+  Object.assign(e.api, {
+    accountActive: async () => ({ session: null, conversation_id: null }),
+  });
+  await e.harness.value().checkConflict();
+  assert.equal(e.harness.flush().conflictUnknown, false);
+});
+
+test("a bounded legacy scan can release only a verified prior terminal target for explicit restart", async (context) => {
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(
+      session({ state: "closing", end_requested: true }),
+      secondThread,
+    );
+    client.closed();
+  };
+  await e.start();
+  Object.assign(e.api, {
+    accountActive: async () => {
+      throw new VoiceCallDiscoveryIncompleteError();
+    },
+  });
+  e.responses.status = async () =>
+    session({ state: "closed", end_requested: true });
+  await e.harness.value().checkConflict();
+  const state = e.harness.flush();
+  assert.equal(state.conflict, null);
+  assert.equal(state.conflictUnknown, false);
+  assert.equal(e.statusReads.length, 1);
+  assert.equal(e.statusReads[0]!.thread, secondThread);
+  assert.equal(e.statusReads[0]!.id, firstId);
+  assert.equal(
+    e.clients.length,
+    1,
+    "cleanup never creates a new session automatically",
+  );
+  assert.deepEqual(e.controls, []);
+  e.responses.start = async () => {};
+  await e.start();
+  assert.equal(
+    e.clients.length,
+    2,
+    "a new explicit Start goes through admission again",
+  );
+});
+
+for (const result of [
+  session({ state: "closing", end_requested: true }),
+  session({ id: secondId, state: "closed" }),
+]) {
+  test(`legacy cleanup keeps a ${result.state} target ${result.id === firstId ? "until terminal" : "with mismatched identity"} blocked`, async (context) => {
+    const e = setup(context);
+    e.responses.start = async (client) => {
+      client.options.onConflict?.(
+        session({ state: "closing", end_requested: true }),
+      );
+      client.closed();
+    };
+    await e.start();
+    Object.assign(e.api, {
+      accountActive: async () => {
+        throw new VoiceCallDiscoveryIncompleteError();
+      },
+    });
+    e.responses.status = async () => result;
+    await e.harness.value().checkConflict();
+    assert.equal(e.harness.flush().conflict?.id, firstId);
+    assert.equal(e.harness.value().conflictUnknown, true);
+    await e.start();
+    assert.equal(e.clients.length, 1);
+    assert.deepEqual(e.controls, []);
+  });
+}
+
+test("legacy incomplete discovery without an owned target cannot use status to unlock Start", async (context) => {
+  const e = setup(context);
+  Object.assign(e.api, {
+    accountActive: async () => {
+      throw new VoiceCallDiscoveryIncompleteError();
+    },
+  });
+  await e.harness.value().checkConflict();
+  assert.equal(e.harness.flush().conflictUnknown, true);
+  assert.deepEqual(e.statusReads, []);
+  await e.start();
+  assert.equal(e.clients.length, 0);
+});
+
+test("a network failure cannot unlock a verified target even if its last status might be terminal", async (context) => {
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(
+      session({ state: "closing", end_requested: true }),
+    );
+    client.closed();
+  };
+  await e.start();
+  Object.assign(e.api, {
+    accountActive: async () => {
+      throw new Error("network");
+    },
+  });
+  e.responses.status = async () => session({ state: "closed" });
+  await e.harness.value().checkConflict();
+  assert.equal(e.harness.flush().conflict?.id, firstId);
+  assert.equal(e.harness.value().conflictUnknown, true);
+  assert.deepEqual(e.statusReads, []);
+});
+
+test("late terminal status after a scope change cannot clear another account's recovery", async (context) => {
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(
+      session({ state: "closing", end_requested: true }),
+    );
+    client.closed();
+  };
+  await e.start();
+  Object.assign(e.api, {
+    accountActive: async () => {
+      throw new VoiceCallDiscoveryIncompleteError();
+    },
+  });
+  const waiting = deferred<unknown>();
+  e.responses.status = async () => waiting.promise;
+  const checking = e.harness.value().checkConflict();
+  await e.harness.settle();
+  assert.equal(e.statusReads.length, 1);
+  e.replaceScope(secondThread, 2);
+  assert.equal(e.statusReads[0]!.signal?.aborted, true);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(session({ id: secondId }), secondThread);
+    client.closed();
+  };
+  await e.start();
+  waiting.resolve(session({ state: "closed" }));
+  await checking;
+  assert.equal(e.harness.flush().conflict?.id, secondId);
+});
+
+test("an owned End that failed remotely remains available for recovery", async (context) => {
+  const e = setup(context);
+  await e.connect();
+  e.clients[0]!.pendingEnd = session();
+  assert.equal(await e.harness.value().end(), false);
+  const state = e.harness.flush();
+  assert.equal(state.connected, false);
+  assert.equal(state.conflict?.id, firstId);
+  assert.equal(state.conflictThread, firstThread);
+  assert.equal(e.clients[0]!.ends, 1);
+});
+
+test("accepted End stays inspectable across unmount until terminal cleanup is confirmed", async (context) => {
+  const e = setup(context);
+  await e.connect();
+  const client = e.clients[0]!;
+  client.pendingEnd = session({ state: "closing", end_requested: true });
+  assert.equal(await e.harness.value().end(), false);
+  e.harness.unmount();
+  const restored = e.remount();
+  assert.equal(restored.conflict?.id, firstId);
+  assert.equal(restored.conflictThread, firstThread);
+  assert.equal(restored.connected, false);
+  await e.start();
+  assert.equal(e.clients.length, 1);
+  client.pendingEnd = undefined;
+  client.options.onCleanup?.(null, false);
+  assert.equal(e.harness.flush().conflict, null);
+  assert.equal(await e.harness.value().end(), true);
+});
+
+test("an unresolved create survives leaving voice and late ownership is recovered without another create", async (context) => {
+  const e = setup(context);
+  const waiting = deferred<void>();
+  e.responses.start = async (client) => {
+    client.pendingStart = true;
+    return waiting.promise;
+  };
+  const starting = e.harness.value().start(preferences, "openai_live");
+  await e.harness.settle();
+  const client = e.clients[0]!;
+  assert.equal(await e.harness.value().end(), false);
+  e.harness.unmount();
+  assert.equal(e.remount().conflictUnknown, true);
+  assert.equal(await e.harness.value().checkConflict(), false);
+  assert.deepEqual(
+    e.activeReads,
+    [],
+    "an empty status cannot release an in-flight create",
+  );
+  await e.start();
+  assert.equal(e.clients.length, 1);
+  client.pendingStart = false;
+  client.options.onCleanup?.(
+    session({ state: "closing", end_requested: true }),
+    false,
+    firstThread,
+  );
+  waiting.resolve();
+  await starting;
+  const restored = e.harness.flush();
+  assert.equal(restored.conflictUnknown, false);
+  assert.equal(restored.conflict?.id, firstId);
+  assert.equal(restored.conflictThread, firstThread);
+  assert.deepEqual(e.controls, []);
+});
+
+test("only a terminal conflict End or verified empty status permits closing the surface", async (context) => {
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(session());
+    client.closed();
+  };
+  await e.start();
+  e.responses.control = async () =>
+    session({ state: "closing", end_requested: true });
+  assert.equal(await e.harness.value().endConflict(), false);
+  e.harness.flush();
+  e.responses.active = async () => ({
+    session: session({ state: "closing", end_requested: true }),
+  });
+  assert.equal(await e.harness.value().checkConflict(), false);
+  e.responses.active = async () => ({ session: null });
+  assert.equal(await e.harness.value().checkConflict(), true);
+});
+
+test("automatic failure with End still pending blocks a retained Start handler immediately", async (context) => {
+  const e = setup(context);
+  const staleStart = e.harness.value().start;
+  await e.connect();
+  const client = e.clients[0]!;
+  client.pendingEnd = session();
+  client.options.onError("Voice connection lost.");
+  client.closed();
+  const state = e.harness.flush();
+  assert.equal(state.connected, false);
+  assert.equal(state.conflict?.id, firstId);
+  await staleStart(preferences, "openai_live");
+  assert.equal(e.clients.length, 1);
+  assert.deepEqual(e.controls, []);
+});
+
+test("closing status polling is bounded and never repeats End or creation", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context);
+  let reads = 0;
+  Object.assign(e.api, {
+    accountActive: async () => {
+      reads++;
+      return {
+        session: session({ state: "closing", end_requested: true }),
+        conversation_id: firstThread,
+      };
+    },
+  });
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(
+      session({ state: "closing", end_requested: true }),
+    );
+    client.closed();
+  };
+  await e.start();
+  for (let i = 0; i < 10; i++) {
+    context.mock.timers.tick(1000);
+    await e.harness.settle();
+  }
+  assert.equal(reads, 6);
+  assert.equal(e.harness.value().conflict?.state, "closing");
+  assert.equal(e.clients.length, 1);
+  assert.deepEqual(e.controls, []);
+});
+
+test("a late status check cannot replace recovery after an account change", async (context) => {
+  const e = setup(context);
+  const waiting = deferred<unknown>();
+  Object.assign(e.api, { accountActive: async () => waiting.promise });
+  const checking = e.harness.value().checkConflict();
+  e.replaceScope(secondThread, 2);
+  waiting.resolve({ session: session(), conversation_id: firstThread });
+  await checking;
+  assert.equal(e.harness.flush().conflict, null);
+  assert.equal(e.harness.value().checkingConflict, false);
 });
 
 test("billing recovery survives failed client closure and clears as soon as a new explicit attempt starts", async (context) => {
@@ -880,12 +1313,14 @@ test("late End conflict success cannot clear a different thread's newly observed
   e.responses.control = () => waiting.promise;
   const oldEnd = e.harness.value().endConflict();
   e.replaceScope(secondThread);
-  e.responses.start = async (client) => {
-    client.options.onConflict?.(session({ id: secondId }));
-    client.closed();
-  };
-  await e.start();
-  assert.equal(e.harness.value().conflict?.id, secondId);
+  Object.assign(e.api, {
+    accountActive: async () => ({
+      session: session({ id: secondId }),
+      conversation_id: secondThread,
+    }),
+  });
+  await e.harness.value().checkConflict();
+  assert.equal(e.harness.flush().conflict?.id, secondId);
   waiting.resolve(session({ state: "closed" }));
   await oldEnd;
   assert.equal(e.harness.flush().conflict?.id, secondId);

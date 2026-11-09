@@ -8,6 +8,11 @@ import type { nativeVoiceEnvironment } from "../../../lib/api/assistantVoiceApi"
 import { AssistantVoiceClient } from "./AssistantVoiceClient";
 import { NativeVoiceMedia } from "./VoiceMediaBridge";
 import type { VoiceStartRecovery } from "./voiceStartError";
+import {
+  discoverActiveVoiceCall,
+  VoiceCallDiscoveryIncompleteError,
+} from "./voiceActiveCall";
+import { voiceSessionSchema } from "./voiceContracts";
 import type {
   VoicePreferences,
   VoiceProtocol,
@@ -16,6 +21,19 @@ import type {
 } from "./voiceContracts";
 
 type Environment = ReturnType<typeof nativeVoiceEnvironment>;
+
+type RecoveryTarget = {
+  session: VoiceSession | null;
+  thread?: string;
+  unknown: boolean;
+  pendingStart?: boolean;
+};
+// Only safe session metadata survives the surface. A new account or explicit
+// recovery action fences late completions from an older client.
+let retainedRecovery:
+  | (RecoveryTarget & { epoch: number; owner: object })
+  | undefined;
+const recoveryListeners = new Set<() => void>();
 
 export function useNativeVoice(
   thread: string,
@@ -26,14 +44,20 @@ export function useNativeVoice(
   const [mediaAttempt, setMediaAttempt] = useState(0);
   const [starting, setStarting] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [inputEnabled, setInputEnabled] = useState(false);
   const [holding, setHolding] = useState(false);
   const [speakerMuted, setSpeakerMuted] = useState(false);
   const [snapshot, setSnapshot] = useState<VoiceSnapshot | null>(null);
   const [error, setError] = useState<string>();
   const [recovery, setRecovery] = useState<VoiceStartRecovery>();
   const [conflict, setConflict] = useState<VoiceSession | null>(null);
+  const [conflictThread, setConflictThread] = useState<string>();
+  const [conflictUnknown, setConflictUnknown] = useState(false);
   const [endingConflict, setEndingConflict] = useState(false);
+  const [checkingConflict, setCheckingConflict] = useState(false);
   const current = useRef<AssistantVoiceClient | null>(null);
+  const clientThread = useRef(thread);
+  const ownership = useRef<object | undefined>(undefined);
   const scope = useRef({ thread, environment });
   scope.current = { thread, environment };
   const latestSnapshot = useRef<VoiceSnapshot | null>(null);
@@ -42,6 +66,17 @@ export function useNativeVoice(
   const mounted = useRef(true);
   const busy = useRef(false);
   const conflictBusy = useRef(false);
+  const conflictChecks = useRef(0);
+  const latestConflict = useRef({
+    session: conflict,
+    thread: conflictThread,
+    unknown: conflictUnknown,
+  });
+  latestConflict.current = {
+    session: conflict,
+    thread: conflictThread,
+    unknown: conflictUnknown,
+  };
   const permissionAttempt = useRef<number | undefined>(undefined);
   const pending = useRef<AbortController | undefined>(undefined);
   const update = useRef(onUpdate);
@@ -72,6 +107,30 @@ export function useNativeVoice(
     setRecovery(nextRecovery);
   }
 
+  function claimRecovery() {
+    const owner = {};
+    ownership.current = owner;
+    retainedRecovery = {
+      epoch: environment.epoch,
+      owner,
+      session: null,
+      unknown: false,
+    };
+    return owner;
+  }
+
+  function remember(target: RecoveryTarget, owner = ownership.current) {
+    if (
+      environment.epoch !== getAuthEpoch() ||
+      !owner ||
+      retainedRecovery?.epoch !== environment.epoch ||
+      retainedRecovery.owner !== owner
+    )
+      return;
+    retainedRecovery = { ...target, epoch: environment.epoch, owner };
+    recoveryListeners.forEach((listener) => listener());
+  }
+
   function refresh() {
     if (!sameScope() || refreshTimer.current) return;
     refreshTimer.current = setTimeout(() => {
@@ -91,14 +150,25 @@ export function useNativeVoice(
     conflictBusy.current = false;
     const previous = current.current;
     current.current = null;
-    if (previous) void previous.end();
+    const cleanup = previous?.end();
+    if (previous?.pendingEnd)
+      remember({
+        session: previous.pendingEnd,
+        thread: clientThread.current,
+        unknown: false,
+      });
+    else if (previous?.pendingStart)
+      remember({ session: null, unknown: true, pendingStart: true });
     media?.close();
     if (mounted.current) {
       setStarting(false);
       setConnected(false);
+      setInputEnabled(false);
       setHolding(false);
       setEndingConflict(false);
+      setCheckingConflict(false);
     }
+    return cleanup;
   }
 
   const stopRef = useRef(stopLocal);
@@ -110,13 +180,35 @@ export function useNativeVoice(
     setMedia(null);
     latestSnapshot.current = null;
     setSnapshot(null);
-    setConflict(null);
+    if (retainedRecovery?.epoch !== environment.epoch)
+      retainedRecovery = undefined;
+    ownership.current = retainedRecovery?.owner;
+    const restoreRecovery = () => {
+      if (!sameScope()) return;
+      const target =
+        retainedRecovery?.epoch === environment.epoch
+          ? retainedRecovery
+          : undefined;
+      latestConflict.current = {
+        session: target?.session ?? null,
+        thread: target?.thread,
+        unknown: target?.unknown ?? false,
+      };
+      setConflict(target?.session ?? null);
+      setConflictThread(target?.thread);
+      setConflictUnknown(target?.unknown ?? false);
+    };
+    restoreRecovery();
+    recoveryListeners.add(restoreRecovery);
+    conflictChecks.current = 0;
     reportError();
     setConnected(false);
+    setInputEnabled(false);
     setStarting(false);
     setHolding(false);
     setSpeakerMuted(false);
     setEndingConflict(false);
+    setCheckingConflict(false);
     const subscription = AppState.addEventListener("change", (state) => {
       // System permission prompts may briefly inactivate the app before any
       // microphone is acquired. Actual background always cancels the attempt.
@@ -134,6 +226,7 @@ export function useNativeVoice(
     });
     return () => {
       mounted.current = false;
+      recoveryListeners.delete(restoreRecovery);
       subscription.remove();
       stopRef.current();
       clearTimeout(refreshTimer.current);
@@ -141,13 +234,35 @@ export function useNativeVoice(
     };
   }, [thread, environment]);
 
+  useEffect(() => {
+    if (
+      !conflict ||
+      (!conflict.end_requested && conflict.state !== "closing") ||
+      conflictChecks.current >= 6
+    )
+      return;
+    const timer = setTimeout(() => {
+      if (AppState.currentState === "active" && !conflictBusy.current) {
+        conflictChecks.current++;
+        void checkConflict(false);
+      }
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [conflict, conflictThread]);
+
   async function start(preferences: VoicePreferences, protocol: VoiceProtocol) {
     if (
       !sameScope() ||
       AppState.currentState !== "active" ||
       busy.current ||
       current.current ||
-      conflict
+      conflict ||
+      conflictUnknown ||
+      latestConflict.current.session ||
+      latestConflict.current.unknown ||
+      (retainedRecovery?.epoch === environment.epoch &&
+        (retainedRecovery.session || retainedRecovery.unknown)) ||
+      conflictBusy.current
     )
       return;
     busy.current = true;
@@ -159,6 +274,7 @@ export function useNativeVoice(
       ticket.current === generation &&
       !controller.signal.aborted;
     setStarting(true);
+    setInputEnabled(false);
     reportError();
     latestSnapshot.current = null;
     setSnapshot(null);
@@ -197,6 +313,7 @@ export function useNativeVoice(
       }
       if (!valid()) return;
       const nextMedia = new NativeVoiceMedia();
+      const owner = claimRecovery();
       const next = new AssistantVoiceClient({
         conversationId: thread,
         media: nextMedia,
@@ -224,22 +341,54 @@ export function useNativeVoice(
           setStarting(false);
           setConnected(true);
         },
+        onInputChanged: (enabled) => {
+          if (valid() && current.current === next) setInputEnabled(enabled);
+        },
         onError: (message, nextRecovery) => {
           if (valid()) reportError(message, nextRecovery);
         },
-        onConflict: (session) => {
-          if (valid()) setConflict(session);
+        onConflict: (session, conversationId, unknown = false) => {
+          if (!valid()) return;
+          remember(
+            {
+              session,
+              thread: session ? (conversationId ?? thread) : undefined,
+              unknown,
+            },
+            owner,
+          );
+          conflictChecks.current = 0;
+        },
+        onCleanup: (session, unknown, conversationId) => {
+          remember(
+            {
+              session,
+              thread: session ? (conversationId ?? thread) : undefined,
+              unknown,
+              pendingStart: !session && next.pendingStart,
+            },
+            owner,
+          );
         },
         onClosed: () => {
           if (!valid()) return;
           if (current.current === next) current.current = null;
+          if (next.pendingEnd) {
+            remember(
+              { session: next.pendingEnd, thread, unknown: false },
+              owner,
+            );
+            conflictChecks.current = 0;
+          }
           setStarting(false);
           setConnected(false);
+          setInputEnabled(false);
           setHolding(false);
           refresh();
         },
       });
       current.current = next;
+      clientThread.current = thread;
       setMedia(nextMedia);
       setMediaAttempt(generation);
       await next.start(preferences, protocol);
@@ -262,40 +411,204 @@ export function useNativeVoice(
     }
   }
 
-  async function end() {
-    if (!sameChat()) return;
-    stopLocal();
+  async function end(): Promise<boolean> {
+    if (!sameChat()) return false;
+    const previous = current.current;
+    const cleanup = stopLocal();
+    const generation = ticket.current;
+    if (sameScope() && previous?.pendingEnd) {
+      remember({ session: previous.pendingEnd, thread, unknown: false });
+      conflictChecks.current = 0;
+    }
+    await cleanup;
+    if (sameScope() && ticket.current === generation && previous) {
+      if (!previous.pendingStart)
+        remember({
+          session: previous.pendingEnd ?? null,
+          thread: previous.pendingEnd ? thread : undefined,
+          unknown: false,
+        });
+      conflictChecks.current = 0;
+    }
     refresh();
+    return (
+      sameScope() &&
+      ticket.current === generation &&
+      !previous?.pendingStart &&
+      !latestConflict.current.session &&
+      !latestConflict.current.unknown
+    );
   }
 
-  async function endConflict() {
-    if (!sameScope() || !conflict || conflictBusy.current) return;
+  async function checkConflict(manual = true): Promise<boolean> {
+    if (
+      !sameScope() ||
+      AppState.currentState !== "active" ||
+      conflictBusy.current ||
+      current.current ||
+      busy.current
+    )
+      return false;
+    if (
+      retainedRecovery?.epoch === environment.epoch &&
+      retainedRecovery.pendingStart
+    ) {
+      reportError(
+        "The previous voice start is still settling. Check again shortly.",
+      );
+      return false;
+    }
     conflictBusy.current = true;
-    const generation = ticket.current;
-    const valid = () => sameScope() && ticket.current === generation;
+    const generation = ++ticket.current;
+    const controller = new AbortController();
+    pending.current = controller;
+    const priorTarget = latestConflict.current;
+    const owner = claimRecovery();
+    remember(priorTarget, owner);
+    const valid = () =>
+      sameScope() &&
+      ticket.current === generation &&
+      !controller.signal.aborted;
+    setCheckingConflict(true);
+    if (manual) {
+      conflictChecks.current = 0;
+      reportError();
+    }
+    try {
+      const call = await discoverActiveVoiceCall(
+        environment.api,
+        priorTarget.thread ?? thread,
+        controller.signal,
+      );
+      if (!valid()) return false;
+      remember(
+        {
+          session: call?.session ?? null,
+          thread: call?.conversationId,
+          unknown: false,
+        },
+        owner,
+      );
+      if (!call) reportError();
+      return !call;
+    } catch (cause) {
+      if (valid()) {
+        if (
+          cause instanceof VoiceCallDiscoveryIncompleteError &&
+          priorTarget.session &&
+          priorTarget.thread
+        ) {
+          try {
+            const prior = voiceSessionSchema.parse(
+              await environment.api.status(
+                priorTarget.thread,
+                priorTarget.session.id,
+                controller.signal,
+              ),
+            );
+            if (!valid()) return false;
+            if (
+              prior.id === priorTarget.session.id &&
+              (prior.state === "closed" || prior.state === "failed")
+            ) {
+              // Only this verified target is released. A later explicit Start
+              // still goes through authoritative account-wide admission.
+              remember({ session: null, unknown: false }, owner);
+              reportError();
+              return true;
+            }
+          } catch {
+            if (!valid()) return false;
+          }
+        }
+        remember({ ...priorTarget, unknown: true }, owner);
+        reportError(
+          "Call status could not be verified. Check status again before starting voice.",
+        );
+      }
+      return false;
+    } finally {
+      if (valid()) {
+        conflictBusy.current = false;
+        setCheckingConflict(false);
+      }
+    }
+  }
+
+  async function endConflict(): Promise<boolean> {
+    if (
+      !sameScope() ||
+      !conflict ||
+      conflictBusy.current ||
+      conflict.id !== latestConflict.current.session?.id ||
+      conflictThread !== latestConflict.current.thread
+    )
+      return false;
+    conflictBusy.current = true;
+    const generation = ++ticket.current;
+    const owner = claimRecovery();
+    remember(
+      { session: conflict, thread: conflictThread ?? thread, unknown: false },
+      owner,
+    );
+    const controller = new AbortController();
+    pending.current = controller;
+    const valid = () =>
+      sameScope() &&
+      ticket.current === generation &&
+      !controller.signal.aborted;
     setEndingConflict(true);
     reportError();
     try {
-      await environment.api.control(thread, conflict.id, {
-        command_id: Crypto.randomUUID(),
-        expected_revision: conflict.control_revision,
-        action: "end",
-      });
+      const next = voiceSessionSchema.parse(
+        await environment.api.control(conflictThread ?? thread, conflict.id, {
+          command_id: Crypto.randomUUID(),
+          expected_revision: conflict.control_revision,
+          action: "end",
+        }),
+      );
+      if (next.id !== conflict.id) throw new Error("Voice session changed");
       if (valid()) {
-        setConflict(null);
+        const terminal = next.state === "closed" || next.state === "failed";
+        remember(
+          {
+            session: terminal ? null : next,
+            thread: terminal ? undefined : (conflictThread ?? thread),
+            unknown: false,
+          },
+          owner,
+        );
+        conflictChecks.current = 0;
         refresh();
+        return terminal;
       }
+      return false;
     } catch {
-      if (!valid()) return;
+      if (!valid()) return false;
       reportError(
         "The existing call could not be ended. Refresh its state and try again.",
       );
       try {
-        const active = await environment.api.active(thread);
-        if (valid()) setConflict(active.session);
+        const active = await discoverActiveVoiceCall(
+          environment.api,
+          conflictThread ?? thread,
+          controller.signal,
+        );
+        if (valid()) {
+          remember(
+            {
+              session: active?.session ?? null,
+              thread: active?.conversationId,
+              unknown: false,
+            },
+            owner,
+          );
+          return !active;
+        }
       } catch {
         /* Keep the last verified conflict; do not create another call. */
       }
+      return false;
     } finally {
       if (valid()) {
         conflictBusy.current = false;
@@ -338,16 +651,21 @@ export function useNativeVoice(
     mediaAttempt,
     starting,
     connected,
+    inputEnabled,
     snapshot,
     holding,
     speakerMuted,
     error,
     recovery,
     conflict,
+    conflictThread,
+    conflictUnknown,
     endingConflict,
+    checkingConflict,
     start,
     end,
     endConflict,
+    checkConflict,
     hold(pressed: boolean) {
       if (!quieting(pressed)) return;
       setHolding(current.current?.hold(pressed) ?? false);

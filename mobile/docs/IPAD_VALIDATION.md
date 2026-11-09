@@ -436,3 +436,80 @@ screen test has its required navigation mock. No blocking issue was found.
 There is no reliable affected typecheck; the full frontend suite/typecheck/build
 is delegated to GitHub CI. This focused fix does not complete the earlier
 full-iPad acceptance matrix or the paused voice recovery work.
+
+
+## 2026-11-09 — mobile-only compact voice and main-chat transcription
+
+The mobile voice entry now connects once after options and saved settings load.
+The normal bottom bar contains actual capture/playback status, elapsed time,
+microphone control and End; saved push-to-talk uses Hold to talk. Voice preferences
+and pricing are reached from the chat header. The internal welcome/Start panel
+and second transcript were removed. Partial speech updates the main chat by the
+server message ID, and sealed history takes over without a duplicate. Existing
+messages, attachments, tasks, approvals and complete call receipts are preserved.
+
+This increment changes only mobile files. The preexisting dirty backend and
+`docs/chat/11-voice.md` changes were preserved and excluded from its commit.
+Account-active discovery is optional: 404/405 falls back to existing conversation
+APIs; an incomplete bounded scan retains an unknown state. End stops local capture
+immediately and closes the surface only after confirmed terminal/no-active state.
+Late starts and cleanup retain their verified session/chat ownership across
+unmount; account and operation generations reject obsolete results.
+
+Focused verification, from `mobile/`:
+
+```sh
+pnpm exec tsx --test src/features/assistant/AssistantScreen.voice.test.ts src/features/assistant/voice/AssistantVoiceConversation.test.ts src/features/assistant/voice/AssistantVoiceClient.test.ts src/features/assistant/voice/useNativeVoice.test.ts src/features/assistant/voice/voiceActiveCall.test.ts src/features/assistant/voice/voiceStartError.test.ts src/features/assistant/voice/voiceTranscript.test.ts src/lib/api/assistantVoiceTransport.test.ts src/features/assistant/voice/voiceSelection.test.ts src/features/assistant/useTranscriptScrollFollow.test.ts src/features/assistant/assistantTranscriptScroll.test.ts
+# 309 passed, 0 failed, 0 skipped
+```
+
+After preserving unrelated whitespace in the Screen files, their affected
+Screen/helper/scroll command was repeated:
+
+```sh
+pnpm exec tsx --test src/features/assistant/AssistantScreen.voice.test.ts src/features/assistant/voice/voiceTranscript.test.ts src/features/assistant/useTranscriptScrollFollow.test.ts src/features/assistant/assistantTranscriptScroll.test.ts
+# 87 passed, 0 failed, 0 skipped (overlaps the 309 above)
+```
+
+From repository root:
+
+```sh
+frontend/node_modules/.bin/prettier --check mobile/src/features/assistant/assistantTypes.ts mobile/src/features/assistant/voice/AssistantVoiceClient.ts mobile/src/features/assistant/voice/AssistantVoiceClient.test.ts mobile/src/features/assistant/voice/AssistantVoiceConversation.tsx mobile/src/features/assistant/voice/AssistantVoiceConversation.test.ts mobile/src/features/assistant/voice/useNativeVoice.ts mobile/src/features/assistant/voice/useNativeVoice.test.ts mobile/src/features/assistant/voice/voiceActiveCall.ts mobile/src/features/assistant/voice/voiceActiveCall.test.ts mobile/src/features/assistant/voice/voiceContracts.ts mobile/src/features/assistant/voice/voiceStartError.ts mobile/src/features/assistant/voice/voiceStartError.test.ts mobile/src/features/assistant/voice/voiceTranscript.ts mobile/src/features/assistant/voice/voiceTranscript.test.ts mobile/src/lib/api/assistantVoiceTransport.ts mobile/src/lib/api/assistantVoiceTransport.test.ts
+# passed for all 16 files
+
+git diff --check -- mobile
+# passed
+```
+
+Changed Screen/test ranges were formatted. The whole-file formatter also checked
+those two files and warned; both warnings reproduce on unchanged HEAD. Unrelated
+formatting is preserved. No reliable repository-native affected typecheck exists;
+the full frontend suite/typecheck/build is delegated to GitHub CI.
+
+Independent transcript/scroll and lifecycle reviews found and resolved the real
+capture-gate integration omission, paused-history anchoring during voice, and a
+retained partial caption continuing to say Transcribing after close. Regression
+coverage also includes same-chat close/reopen callbacks, delayed native menu
+choices, exact history takeover, bounded socket-caption rollover, saved provider
+and PTT preservation, uncertain POST outcomes, pending End and account fencing.
+
+Actual iPad run this increment: final source was served to the complete signed
+Debug App (`dev.nyxid.ipadqa`) on iPad Pro 13-inch M5 / iOS 26.3 after clearing
+Metro. An IPv6-only localhost binding was corrected using
+`NODE_OPTIONS=--dns-result-order=ipv4first`; IPv4 Metro status and actual bundle
+delivery were verified. The app loaded, but session restoration returned backend
+HTTP 500 `database_error` (1007) and showed sign-in. The existing QA backend on
+3401 cannot reach its MongoDB on 33018. The original temporary data directory is
+missing WiredTiger version metadata and at least one collection file. Startup
+and repair attempts on a separate copy failed; original database files were not
+repaired or replaced, and no backend source was changed.
+
+**This run does not accept an authenticated iPad voice call or the new compact
+bar/transcription interaction against a live provider.** Restore a working QA
+database and sign-in, then exercise: existing/new chat one-tap entry, automatic
+speech and same-bubble partial updates, microphone mute/unmute, header preferences,
+PTT press/release, End confirmation, reopening and details/Back scroll retention.
+No synthetic captions were inserted into the running app to claim acceptance.
+The acoustic checks recorded above are historical and do not verify this head.
+Physical-device, human-listening, Android, Grok and broader iPad route/layout
+coverage gaps recorded earlier also remain open.

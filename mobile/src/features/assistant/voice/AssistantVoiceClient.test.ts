@@ -202,7 +202,15 @@ function setup() {
   const errors: string[] = [];
   const recoveries: (VoiceStartRecovery | undefined)[] = [];
   const conflicts: (VoiceSession | null)[] = [];
+  const conflictThreads: (string | undefined)[] = [];
+  const conflictUnknown: (boolean | undefined)[] = [];
+  const cleanup: {
+    session: VoiceSession | null;
+    unknown: boolean;
+    thread?: string;
+  }[] = [];
   const snapshots: VoiceSnapshot[] = [];
+  const inputChanges: boolean[] = [];
   const paths: string[] = [];
   let closed = 0;
   let ready = 0;
@@ -250,14 +258,21 @@ function setup() {
     onReady: () => {
       ready++;
     },
+    onInputChanged: (enabled) => inputChanges.push(enabled),
     onError: (value, recovery) => {
       errors.push(value);
       recoveries.push(recovery);
     },
-    onConflict: (value) => conflicts.push(value),
+    onConflict: (value, thread, unknown) => {
+      conflicts.push(value);
+      conflictThreads.push(thread);
+      conflictUnknown.push(unknown);
+    },
     onClosed: () => {
       closed++;
     },
+    onCleanup: (session, unknown, thread) =>
+      cleanup.push({ session, unknown, thread }),
     randomId: () =>
       `dddddddd-dddd-4ddd-8ddd-${String(++nextId).padStart(12, "0")}`,
   });
@@ -277,6 +292,7 @@ function setup() {
     snapshot();
   };
   return {
+    api,
     client,
     media,
     socket,
@@ -287,7 +303,11 @@ function setup() {
     errors,
     recoveries,
     conflicts,
+    conflictThreads,
+    conflictUnknown,
+    cleanup,
     snapshots,
+    inputChanges,
     paths,
     responses,
     snapshot,
@@ -330,6 +350,55 @@ test("automatic mode starts only when provider, authoritative session and input 
   assert.equal(e.media.input, false);
   e.snapshot({ muted: true });
   assert.equal(e.media.input, false);
+  await e.client.end();
+});
+
+test("capture notifications follow the applied input gate through readiness, remote mute and End", async () => {
+  const e = setup();
+  await e.client.start({ ...preferences, input_mode: "automatic" });
+  e.media.emit({ type: "provider-ready" });
+  assert.deepEqual(e.inputChanges, []);
+  e.snapshot();
+  assert.equal(e.media.input, true);
+  assert.deepEqual(e.inputChanges, [true]);
+  e.snapshot({ input_muted: true });
+  assert.equal(e.media.input, false);
+  assert.deepEqual(e.inputChanges, [true, false]);
+  e.snapshot();
+  assert.deepEqual(e.inputChanges, [true, false, true]);
+  e.client.muteSpeaker(true);
+  assert.deepEqual(e.inputChanges, [true, false, true]);
+  const ending = e.client.end();
+  assert.equal(e.media.input, false);
+  assert.deepEqual(e.inputChanges, [true, false, true, false]);
+  await ending;
+});
+
+test("PTT capture notifications change on accepted press and release rather than connected readiness", async () => {
+  const e = setup();
+  await e.open();
+  assert.equal(e.count().ready, 1);
+  assert.deepEqual(e.inputChanges, []);
+  assert.equal(e.client.hold(true), true);
+  assert.deepEqual(e.inputChanges, [true]);
+  assert.equal(e.client.hold(false), false);
+  assert.deepEqual(e.inputChanges, [true, false]);
+  await e.client.end();
+});
+
+test("a synchronous media failure while enabling input cannot publish a stale capture notification", async () => {
+  const e = setup();
+  await e.open();
+  const applyInput = e.media.setInput.bind(e.media);
+  e.media.setInput = (enabled) => {
+    applyInput(enabled);
+    if (enabled) e.media.emit({ type: "error", message: "capture failed" });
+  };
+  e.client.hold(true);
+  assert.equal(e.client.isClosed, true);
+  assert.equal(e.media.input, false);
+  assert.equal(e.inputChanges.includes(true), false);
+  assert.equal(e.inputChanges.at(-1), false);
   await e.client.end();
 });
 
@@ -721,6 +790,92 @@ test("a 409 observes the active call without deleting it or retrying session cre
   assert.match(e.errors[0]!, /Another voice call/);
 });
 
+test("a cross-chat 409 preserves the verified account call and its conversation without ending it", async () => {
+  const e = setup();
+  const otherThread = `nyxa-${"b".repeat(32)}`;
+  e.responses.start = async () => {
+    throw { statusCode: 409 };
+  };
+  e.api.accountActive = async () => ({
+    session: session(),
+    conversation_id: otherThread,
+  });
+  await e.client.start(preferences);
+  assert.deepEqual(e.conflictThreads, [otherThread]);
+  assert.equal(e.count().activeCalls, 0);
+  assert.equal(e.controls.length, 0);
+  assert.equal(e.starts.length, 1);
+  assert.match(e.errors[0]!, /Another voice call/);
+});
+
+test("a 409 without a verified account call does not claim another call exists", async () => {
+  const e = setup();
+  e.responses.start = async () => {
+    throw { statusCode: 409 };
+  };
+  e.api.accountActive = async () => ({ session: null, conversation_id: null });
+  await e.client.start(preferences);
+  assert.match(e.errors[0]!, /Voice state changed/);
+  assert.equal(e.errors[0]!.includes("Another voice call"), false);
+  assert.equal(e.controls.length, 0);
+});
+
+test("an unavailable account lookup preserves unknown ownership for a status check", async () => {
+  const e = setup();
+  e.responses.start = async () => {
+    throw { statusCode: 409 };
+  };
+  e.api.accountActive = async () => {
+    throw new Error("lookup unavailable");
+  };
+  await e.client.start(preferences);
+  assert.deepEqual(e.conflicts, [null]);
+  assert.deepEqual(e.conflictUnknown, [true]);
+  assert.equal(e.controls.length, 0);
+});
+
+test("failed End retains the owned call identity after immediate local audio cleanup", async () => {
+  const e = setup();
+  await e.open();
+  e.responses.control = async () => {
+    throw new Error("lost End response");
+  };
+  await e.client.end();
+  assert.equal(e.client.isClosed, true);
+  assert.equal(e.media.input, false);
+  assert.equal(e.client.pendingEnd?.id, sessionId);
+  assert.equal(e.conflicts.at(-1)?.id, sessionId);
+  assert.equal(e.conflictThreads.at(-1), conversationId);
+  assert.equal(e.controls.length, 1);
+});
+
+test("automatic transport failure exposes owned cleanup before the End response arrives", async () => {
+  const e = setup();
+  await e.open();
+  const waiting = deferred<unknown>();
+  e.responses.control = async () => waiting.promise;
+  e.socket.onclose!();
+  assert.equal(e.client.isClosed, true);
+  assert.equal(e.client.pendingEnd?.id, sessionId);
+  assert.equal(e.media.input, false);
+  assert.equal(e.controls.length, 1);
+  await e.client.start(preferences);
+  assert.equal(e.starts.length, 1);
+  waiting.resolve(session({ state: "closing", end_requested: true }));
+  await e.client.end();
+  assert.equal(e.conflicts.at(-1)?.state, "closing");
+});
+
+test("accepted closing End remains recoverable until the server releases the call", async () => {
+  const e = setup();
+  await e.open();
+  e.responses.control = async () =>
+    session({ state: "closing", end_requested: true });
+  await e.client.end();
+  assert.equal(e.client.pendingEnd?.state, "closing");
+  assert.equal(e.conflicts.at(-1)?.end_requested, true);
+});
+
 test("a lost POST response is reconciled once through active, never through another POST", async () => {
   const e = setup();
   e.responses.start = async () => {
@@ -771,10 +926,15 @@ test("ending during POST cleans up a late successful owned session exactly once"
   for (let step = 0; step < 8 && !e.starts.length; step++)
     await Promise.resolve();
   assert.equal(e.starts.length, 1);
+  assert.equal(e.client.pendingStart, true);
   await e.client.end();
+  assert.equal(e.cleanup.at(-1)?.unknown, true);
   assert.equal(e.starts[0]!.signal!.aborted, true);
   waiting.resolve({ session: session(), sdp_answer: "answer" });
   await starting;
+  assert.equal(e.client.pendingStart, false);
+  assert.equal(e.cleanup.at(-1)?.session?.id, sessionId);
+  assert.equal(e.cleanup.at(-1)?.thread, conversationId);
   assert.deepEqual(
     e.controls.map((value) => value.input.action),
     ["end"],
@@ -787,6 +947,30 @@ test("ending during POST cleans up a late successful owned session exactly once"
   assert.deepEqual(e.media.answers, []);
   assert.deepEqual(e.paths, []);
   assert.equal(e.count().closed, 1);
+});
+
+test("a rejected POST after local End retains verified cross-chat recovery without replay or auto-End", async () => {
+  const e = setup();
+  const waiting = deferred<unknown>();
+  const otherThread = `nyxa-${"b".repeat(32)}`;
+  e.responses.start = () => waiting.promise;
+  e.api.accountActive = async () => ({
+    session: session({ id: requestId }),
+    conversation_id: otherThread,
+  });
+  const starting = e.client.start(preferences);
+  for (let step = 0; step < 8 && !e.starts.length; step++)
+    await Promise.resolve();
+  await e.client.end();
+  waiting.reject(new Error("lost response"));
+  await starting;
+  assert.equal(e.client.pendingStart, false);
+  assert.equal(e.cleanup.at(-1)?.unknown, false);
+  assert.equal(e.cleanup.at(-1)?.session?.id, requestId);
+  assert.equal(e.cleanup.at(-1)?.thread, otherThread);
+  assert.equal(e.starts.length, 1);
+  assert.deepEqual(e.controls, []);
+  assert.deepEqual(e.errors, []);
 });
 
 test("ending while socket setup is pending closes the late socket and ignores its events", async () => {
