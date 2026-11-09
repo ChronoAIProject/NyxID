@@ -313,6 +313,47 @@ impl OpenAi {
     }
 }
 
+/// Floor a nonnegative provider JSON decimal without floating-point rounding.
+/// The original spelling is retained independently for reconciliation.
+pub(super) fn completed_seconds(raw: &str) -> AppResult<i64> {
+    let invalid = || AppError::VoiceProviderUnavailable;
+    if raw.is_empty() || raw.len() > 64 || raw.starts_with('-') {
+        return Err(invalid());
+    }
+    let (mantissa, exponent) = raw
+        .split_once(['e', 'E'])
+        .map_or(Ok((raw, 0)), |(m, e)| e.parse::<i32>().map(|e| (m, e)))
+        .map_err(|_| invalid())?;
+    if !(-64..=64).contains(&exponent) {
+        return Err(invalid());
+    }
+    let decimal = mantissa.find('.').unwrap_or(mantissa.len()) as i32;
+    let digits: Vec<u8> = mantissa.bytes().filter(|b| *b != b'.').collect();
+    if digits.is_empty() || digits.iter().any(|b| !b.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    let point = decimal + exponent;
+    let mut whole = 0_i64;
+    for index in 0..point.max(0) as usize {
+        whole = whole
+            .checked_mul(10)
+            .and_then(|n| {
+                n.checked_add(i64::from(digits.get(index).copied().unwrap_or(b'0') - b'0'))
+            })
+            .filter(|n| *n <= 86_400)
+            .ok_or_else(invalid)?;
+    }
+    if whole == 86_400
+        && digits
+            .iter()
+            .skip(point.max(0) as usize)
+            .any(|d| *d != b'0')
+    {
+        return Err(invalid());
+    }
+    Ok(whole)
+}
+
 #[cfg(test)]
 mod pooling_tests {
     use super::*;
@@ -367,45 +408,4 @@ mod pooling_tests {
         assert_eq!(seen[1].1, "Bearer fixture-second");
         server.abort();
     }
-}
-
-/// Floor a nonnegative provider JSON decimal without floating-point rounding.
-/// The original spelling is retained independently for reconciliation.
-pub(super) fn completed_seconds(raw: &str) -> AppResult<i64> {
-    let invalid = || AppError::VoiceProviderUnavailable;
-    if raw.is_empty() || raw.len() > 64 || raw.starts_with('-') {
-        return Err(invalid());
-    }
-    let (mantissa, exponent) = raw
-        .split_once(['e', 'E'])
-        .map_or(Ok((raw, 0)), |(m, e)| e.parse::<i32>().map(|e| (m, e)))
-        .map_err(|_| invalid())?;
-    if !(-64..=64).contains(&exponent) {
-        return Err(invalid());
-    }
-    let decimal = mantissa.find('.').unwrap_or(mantissa.len()) as i32;
-    let digits: Vec<u8> = mantissa.bytes().filter(|b| *b != b'.').collect();
-    if digits.is_empty() || digits.iter().any(|b| !b.is_ascii_digit()) {
-        return Err(invalid());
-    }
-    let point = decimal + exponent;
-    let mut whole = 0_i64;
-    for index in 0..point.max(0) as usize {
-        whole = whole
-            .checked_mul(10)
-            .and_then(|n| {
-                n.checked_add(i64::from(digits.get(index).copied().unwrap_or(b'0') - b'0'))
-            })
-            .filter(|n| *n <= 86_400)
-            .ok_or_else(invalid)?;
-    }
-    if whole == 86_400
-        && digits
-            .iter()
-            .skip(point.max(0) as usize)
-            .any(|d| *d != b'0')
-    {
-        return Err(invalid());
-    }
-    Ok(whole)
 }
