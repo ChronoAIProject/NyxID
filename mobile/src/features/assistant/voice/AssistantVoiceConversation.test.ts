@@ -326,6 +326,14 @@ function setup(
       Label: "Text",
       Notice: "Notice",
     },
+    "../../../components/settings/SettingsList": {
+      SettingsRow: "SettingsRow",
+    },
+    "../../../components/workspace/WorkspaceSelectionField": {
+      // The shared sheet owns its searchable draft and one-shot Apply action;
+      // these tests exercise the voice screen's persistence boundary.
+      WorkspaceSelectionSheet: "WorkspaceSelectionSheet",
+    },
     "../ChatComposer": { ChatComposerFrame: "ComposerFrame" },
     "./VoiceMediaBridge": { VoiceMediaBridge: "VoiceMediaBridge" },
     "./useNativeVoice": { useNativeVoice: () => voice },
@@ -345,7 +353,8 @@ function setup(
     all().find(
       (row) =>
         row.props.accessibilityLabel === label ||
-        (row.type === "ActionButton" && row.props.label === label),
+        ((row.type === "ActionButton" || row.type === "SettingsRow") &&
+          row.props.label === label),
     );
   const button = (label: string) => {
     const result = find(label);
@@ -356,6 +365,7 @@ function setup(
     harness,
     events,
     voice,
+    environment,
     levels,
     query,
     props,
@@ -365,6 +375,8 @@ function setup(
     all,
     find,
     button,
+    voicePicker: () =>
+      all().find((row) => row.type === "WorkspaceSelectionSheet"),
     text: () =>
       all()
         .flatMap((row) => row.props.children.flat(Infinity))
@@ -793,12 +805,203 @@ test("voice and mode changes are saved for next call without changing this call"
     false,
   );
   assert.equal(f.find("Hold to talk"), undefined);
-  await f.button("Marin voice").props.onPress();
+  f.button("Voice").props.onPress();
+  f.voicePicker()!.props.onChange(["marin"]);
   await f.harness.settle();
   assert.equal(f.savedPreferences.at(-1)?.voice, "marin");
   assert.equal(f.savedPreferences.at(-1)?.service_id, saved.service_id);
   assert.equal(f.savedPreferences.at(-1)?.input_mode, "push_to_talk");
+  assert.equal(f.button("Voice").props.value, "Marin");
+  assert.equal(f.starts().length, 0);
+  assert.equal(
+    f.events.some(([event]) => event === "end" || event === "mode"),
+    false,
+  );
   f.harness.unmount();
+});
+
+test("voice preferences show one saved-voice row while all server voices stay inside the picker", () => {
+  const voices = [
+    ...source.voice.voices,
+    ...Array.from({ length: 32 }, (_, index) => ({
+      id: `server-voice-${index}`,
+      label: `Server choice ${index + 1}`,
+    })),
+  ];
+  const f = setup({
+    active: true,
+    source: { ...source, voice: { ...source.voice, voices } },
+  });
+  assert.equal(f.find("Voice"), undefined);
+  assert.equal(f.voicePicker(), undefined);
+  f.openPreferences();
+  assert.equal(f.button("Voice").props.value, "Cedar");
+  assert.equal(f.voicePicker(), undefined);
+  assert.equal(f.all().filter((row) => row.type === "SettingsRow").length, 1);
+  for (const row of voices) {
+    assert.equal(f.find(`${row.label} voice`), undefined);
+    assert.equal(f.find(row.label), undefined);
+  }
+  f.button("Voice").props.onPress();
+  const picker = f.voicePicker();
+  assert.ok(picker);
+  assert.equal(picker.props.label, "Voice");
+  assert.equal(picker.props.title, "Choose voice");
+  assert.equal(picker.props.description, "Changes apply to your next call.");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(picker.props.options)),
+    voices.map((row) => ({ value: row.id, label: row.label })),
+  );
+  assert.equal(picker.props.options.length, 34);
+  assert.deepEqual(JSON.parse(JSON.stringify(picker.props.value)), ["cedar"]);
+  assert.deepEqual(JSON.parse(picker.props.scopeKey), [
+    7,
+    thread,
+    JSON.stringify([source.service_id, null, "platform", source.model]),
+  ]);
+  assert.equal(f.savedPreferences.length, 0);
+  assert.equal(f.voice.connected, true);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("browsing and cancelling the voice picker never saves or changes the current call", async () => {
+  const f = setup({ active: true });
+  f.openPreferences();
+  f.button("Voice").props.onPress();
+  const picker = f.voicePicker();
+  assert.ok(picker);
+  await f.harness.settle();
+  assert.equal(f.savedPreferences.length, 0);
+  assert.deepEqual(f.events, []);
+  picker.props.onClose();
+  f.harness.flush();
+  assert.equal(f.voicePicker(), undefined);
+  assert.equal(f.button("Voice").props.value, "Cedar");
+  assert.deepEqual(f.events, []);
+  assert.equal(f.voice.connected, true);
+  f.harness.unmount();
+});
+
+test("applying a voice persists once and preserves the selected source and live call", async () => {
+  const f = setup({ active: true });
+  f.openPreferences();
+  f.button("Voice").props.onPress();
+  const picker = f.voicePicker();
+  assert.ok(picker);
+  picker.props.onChange(["marin"]);
+  picker.props.onChange(["marin"]);
+  picker.props.onClose();
+  await f.harness.settle();
+  assert.equal(f.voicePicker(), undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.savedPreferences)), [
+    { ...saved, voice: "marin" },
+  ]);
+  assert.equal(f.button("Voice").props.value, "Marin");
+  assert.equal(f.events.filter(([event]) => event === "save").length, 1);
+  assert.equal(
+    f.events.some(([event]) =>
+      ["start", "end", "mode"].includes(String(event)),
+    ),
+    false,
+  );
+  assert.equal(f.voice.connected, true);
+  assert.equal(f.voice.snapshot?.session.id, sessionId);
+  f.harness.unmount();
+});
+
+test("failed voice saves retain the previous selection and show a retryable error", async () => {
+  const f = setup({ active: true });
+  f.failSave();
+  f.openPreferences();
+  f.button("Voice").props.onPress();
+  const picker = f.voicePicker();
+  assert.ok(picker);
+  picker.props.onChange(["marin"]);
+  picker.props.onClose();
+  await f.harness.settle();
+  assert.equal(f.savedPreferences.length, 0);
+  assert.equal(f.button("Voice").props.value, "Cedar");
+  assert.match(f.notices().join(" "), /could not be saved/);
+  f.button("Voice").props.onPress();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.voicePicker()!.props.value)), [
+    "cedar",
+  ]);
+  assert.equal(
+    f.events.some(([event]) =>
+      ["start", "end", "mode"].includes(String(event)),
+    ),
+    false,
+  );
+  assert.equal(f.voice.connected, true);
+  f.harness.unmount();
+});
+
+test("opening the voice picker releases held input without ending the call", () => {
+  const f = setup({
+    active: true,
+    saved: { ...saved, input_mode: "push_to_talk" },
+  });
+  f.openPreferences();
+  f.voice.holding = true;
+  f.voice.inputEnabled = true;
+  f.button("Voice").props.onPress();
+  assert.ok(f.voicePicker());
+  assert.deepEqual(f.events, [["hold", false]]);
+  assert.equal(f.voice.holding, false);
+  assert.equal(f.voice.inputEnabled, false);
+  assert.equal(f.voice.connected, true);
+  f.harness.unmount();
+});
+
+test("dismissed or unfocused voice pickers ignore delayed Apply callbacks", async () => {
+  for (const dismiss of ["picker", "preferences", "focus"] as const) {
+    const f = setup({ active: true });
+    f.openPreferences();
+    f.button("Voice").props.onPress();
+    const picker = f.voicePicker();
+    assert.ok(picker);
+    if (dismiss === "picker") picker.props.onClose();
+    if (dismiss === "preferences") {
+      f.button("Close voice preferences").props.onPress();
+      f.harness.render();
+    }
+    if (dismiss === "focus") f.setFocused(false);
+    f.harness.flush();
+    picker.props.onChange(["marin"]);
+    await f.harness.settle();
+    assert.equal(f.savedPreferences.length, 0, dismiss);
+    assert.equal(f.voicePicker(), undefined, dismiss);
+    assert.equal(f.voice.connected, true, dismiss);
+    f.harness.unmount();
+  }
+});
+
+test("voice picker Apply is fenced to its account epoch, chat, and voice source", async () => {
+  for (const change of ["epoch", "chat", "source"] as const) {
+    const f = setup({ active: true });
+    f.openPreferences();
+    f.button("Voice").props.onPress();
+    const picker = f.voicePicker();
+    assert.ok(picker);
+    if (change === "epoch") f.environment.epoch++;
+    if (change === "chat") f.props.thread = `nyxa-${"b".repeat(32)}`;
+    if (change === "source") {
+      const own = { ...source, connection_id: "another-connection" };
+      f.query.options.data = { options: [own] };
+      f.query.settings.data = {
+        voice: { ...saved, connection_id: own.connection_id },
+      };
+    }
+    f.harness.render();
+    picker.props.onChange(["marin"]);
+    await f.harness.settle();
+    assert.equal(f.savedPreferences.length, 0, change);
+    assert.equal(f.voicePicker(), undefined, change);
+    f.button("Voice").props.onPress();
+    assert.notEqual(f.voicePicker()!.props.scopeKey, picker.props.scopeKey);
+    f.harness.unmount();
+  }
 });
 
 test("preference-save failures stay actionable and never imply the live call changed", async () => {

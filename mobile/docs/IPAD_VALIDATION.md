@@ -635,3 +635,59 @@ to the historical 309 count. Independent read-only lifecycle, transcript and
 recovery reviews found no further actionable mobile blocker in this increment.
 The six preexisting backend/chat-document diffs retained the same binary SHA256
 and were excluded from delivery.
+
+
+## 2026-11-09 — compact voice selection
+
+The voice preference tray no longer lays out every provider voice as a chip.
+It shows one Voice row with the saved next-call label. The row opens the existing
+native searchable single-selection sheet, with Cancel/Apply and genuine server
+labels. Search and draft selection do not persist anything. Confirmed selection
+uses the existing preference API; failure retains the previous value and shows
+an actionable error. A changed next-call voice does not alter the live call,
+and the current voice is shown separately only while those choices differ.
+
+The picker is scoped to account epoch, chat and exact voice source. Dismissed,
+unfocused and obsolete picker callbacks cannot save. Opening it releases a held
+accessibility PTT capture without ending the call. No backend/web code or shared
+picker implementation was changed.
+
+Focused dependency-related verification, from `mobile/`:
+
+```sh
+pnpm exec tsx --test src/features/assistant/voice/AssistantVoiceConversation.test.ts src/components/workspace/WorkspaceSelectionField.test.ts src/components/settings/SettingsList.test.ts
+# 61 passed, 0 failed, 0 skipped
+```
+
+Changed-file static checks, from repository root:
+
+```sh
+frontend/node_modules/.bin/prettier --check mobile/src/features/assistant/voice/AssistantVoiceConversation.tsx mobile/src/features/assistant/voice/AssistantVoiceConversation.test.ts
+git diff --check -- mobile
+# passed
+```
+
+No reliable affected typecheck exists; full frontend suite/typecheck/build is
+delegated to GitHub CI. Independent read-only review found no blocking issue.
+The six preexisting backend/chat-document diffs remain unchanged and excluded.
+
+Actual signed-App iPad landscape checks after cleared Metro reload:
+
+- The default tray shows Voice / Marin, not the 34 voice chips.
+- Opened the separate Choose voice pageSheet; searched Cedar, selected it, then
+  cancelled. The tray still showed Marin. That first muted call subsequently
+  reached its normal three-minute idle timeout; it was not counted as continuous
+  call evidence after timeout.
+- On the final source, searched Cedar and applied it during a connected muted
+  call. The tray showed Voice / Cedar plus Current call: Marin at elapsed 2:19,
+  with End and Unmute still present. The sheet did not navigate or end the call.
+- Reopened the picker and applied Marin again. The row returned to Marin; the
+  next call still used Hands-free. Save failures and held-PTT release are covered
+  by focused regression tests, not a live fault-injection/touch claim.
+
+- A subsequent same-chat call reopened, opened/cancelled the picker, and closed
+  preferences. Unmute followed by a fresh acoustic Chinese fixture produced its
+  recognized text in the main chat (minor recognition substitution). This proves
+  capture still worked after the picker flow; no literal assistant reply is
+  asserted because an idle-warning message overlapped this window. The prior
+  slower check had reached idle timeout and is not counted as speech evidence.

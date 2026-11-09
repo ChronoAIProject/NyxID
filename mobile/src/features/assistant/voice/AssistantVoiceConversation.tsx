@@ -21,6 +21,8 @@ import {
   Label,
   Notice,
 } from "../../../components/workspace/WorkspaceUI";
+import { SettingsRow } from "../../../components/settings/SettingsList";
+import { WorkspaceSelectionSheet } from "../../../components/workspace/WorkspaceSelectionField";
 import { useReducedMotion } from "../../../lib/accessibility/useReducedMotion";
 import { nativeVoiceEnvironment } from "../../../lib/api/assistantVoiceApi";
 import { useNetworkStatus } from "../../../hooks/useNetworkStatus";
@@ -30,7 +32,12 @@ import { ChatComposerFrame } from "../ChatComposer";
 import { useNativeVoice } from "./useNativeVoice";
 import { useVoiceLevels } from "./useVoiceLevels";
 import { VoiceMediaBridge } from "./VoiceMediaBridge";
-import { chooseVoiceOption, voiceElapsed, voiceTariff } from "./voiceSelection";
+import {
+  chooseVoiceOption,
+  voiceElapsed,
+  voiceOptionKey,
+  voiceTariff,
+} from "./voiceSelection";
 import type {
   VoiceOption,
   VoicePreferences,
@@ -114,6 +121,7 @@ function VoiceConversation({
   const [now, setNow] = useState(Date.now());
   const [tasksOpen, setTasksOpen] = useState(false);
   const [localPreferencesOpen, setLocalPreferencesOpen] = useState(false);
+  const [voicePickerScope, setVoicePickerScope] = useState<string>();
   const [pricingOpen, setPricingOpen] = useState(false);
   const [showErrorDetails, setShowErrorDetails] = useState(false);
   const [billingOpenError, setBillingOpenError] = useState(false);
@@ -245,6 +253,23 @@ function VoiceConversation({
   const canChangePreferences =
     selectionReady && !!option?.available && isConnected && !savingPreferences;
   const preferencesVisible = preferencesOpen ?? localPreferencesOpen;
+  const selectionScope = JSON.stringify([
+    environment.epoch,
+    thread,
+    option ? voiceOptionKey(option) : null,
+  ]);
+  const pickerContext = useRef({ scope: selectionScope, allowed: false });
+  pickerContext.current = {
+    scope: selectionScope,
+    allowed:
+      preferencesVisible &&
+      focused &&
+      canChangePreferences &&
+      voicePickerScope === selectionScope,
+  };
+  useEffect(() => {
+    if (!preferencesVisible || !focused) setVoicePickerScope(undefined);
+  }, [preferencesVisible, focused]);
   const duration = voiceElapsed(session?.created_at, session?.closed_at, now);
   const status = checking
     ? "Checking call status…"
@@ -499,6 +524,8 @@ function VoiceConversation({
     onReview(acknowledgementId);
   }
   function closePreferences() {
+    pickerContext.current.allowed = false;
+    setVoicePickerScope(undefined);
     setLocalPreferencesOpen(false);
     onPreferencesClose?.();
   }
@@ -881,14 +908,38 @@ function VoiceConversation({
               style={styles.preferencesScroll}
               contentContainerStyle={styles.trayContent}
             >
-              <Label muted>
-                {currentOption
-                  ? `${voiceLabel ? `${voiceLabel} · ` : ""}${currentOption.voice.protocol === "xai_realtime" ? "Grok" : "OpenAI"}`
-                  : "Voice source unavailable"}
-              </Label>
+              {!currentOption ? (
+                <Label muted>Voice source unavailable</Label>
+              ) : voice.connected && currentVoice !== nextVoice ? (
+                <Label
+                  muted
+                >{`Current call: ${voiceLabel ?? "Default voice"}`}</Label>
+              ) : null}
               <Label muted style={styles.footnote}>
                 Changes apply to your next call.
               </Label>
+              {option ? (
+                <SettingsRow
+                  label="Voice"
+                  value={
+                    option.voice.voices.find((row) => row.id === nextVoice)
+                      ?.label ??
+                    (missingVoice ? "Unavailable" : "Choose a voice")
+                  }
+                  disabled={!canChangePreferences}
+                  accessibilityHint="Choose the voice for your next call"
+                  accessibilityState={{
+                    expanded: voicePickerScope === selectionScope,
+                  }}
+                  onPress={() => {
+                    if (!canChangePreferences || !focused) return;
+                    // A held accessibility PTT toggle must not keep capturing
+                    // behind a modal that hides its release control.
+                    if (voice.holding) voice.hold(false);
+                    setVoicePickerScope(selectionScope);
+                  }}
+                />
+              ) : null}
               {option && !isGrok ? (
                 <View
                   accessibilityRole="radiogroup"
@@ -960,27 +1011,42 @@ function VoiceConversation({
                   {voiceTariff(currentOption)}
                 </Label>
               ) : null}
-              {option ? (
-                <View
-                  accessibilityRole="radiogroup"
-                  accessibilityLabel="Voice for next call"
-                  style={styles.preferencesChoices}
-                >
-                  {option.voice.voices.map((row) => (
-                    <Choice
-                      key={row.id}
-                      label={`${row.label} voice`}
-                      selected={nextVoice === row.id}
-                      disabled={!canChangePreferences}
-                      onPress={() => void savePreferences(nextMode, row.id)}
-                    />
-                  ))}
-                </View>
-              ) : null}
             </ScrollView>
           </View>
         ) : null}
       </ChatComposerFrame>
+      {preferencesVisible &&
+      focused &&
+      option &&
+      voicePickerScope === selectionScope ? (
+        <WorkspaceSelectionSheet
+          key={selectionScope}
+          scopeKey={selectionScope}
+          label="Voice"
+          title="Choose voice"
+          description="Changes apply to your next call."
+          options={option.voice.voices.map((row) => ({
+            value: row.id,
+            label: row.label,
+          }))}
+          value={nextVoice ? [nextVoice] : []}
+          disabled={!canChangePreferences}
+          onChange={(values) => {
+            if (
+              !mounted.current ||
+              !pickerContext.current.allowed ||
+              pickerContext.current.scope !== selectionScope ||
+              values.length !== 1
+            )
+              return;
+            void savePreferences(nextMode, values[0]);
+          }}
+          onClose={() => {
+            pickerContext.current.allowed = false;
+            setVoicePickerScope(undefined);
+          }}
+        />
+      ) : null}
     </>
   );
 }
