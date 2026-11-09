@@ -1182,6 +1182,7 @@ mod tests {
         guest: bool,
     ) -> ChatAuthority {
         ChatAuthority {
+            platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
             execution_unsupported: false,

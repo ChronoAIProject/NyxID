@@ -124,6 +124,7 @@ import {
   ASSISTANT_MEMORY_NOTE_MAX,
   assistantMemoryNoteSchema,
   ASSISTANT_AGENT_PERSONA_MAX,
+  ASSISTANT_AGENT_VOICE_INSTRUCTIONS_MAX,
   assistantAgentGrantsSchema,
   assistantAgentProfileSchema,
   nyxAgentAccessModeSchema,
@@ -659,7 +660,7 @@ const INHERIT = "inherit";
 function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
   const advancedControls = useFeature(FEATURE_FLAG.ASSISTANT_MODEL_CONTROLS);
   const update = useUpdateNyxBotAgent();
-  const models = useNyxAgentModels(advancedControls);
+  const models = useNyxAgentModels(advancedControls, { agentId: agent.id });
   const workspaceMode = useNyxBotSettings().data?.access_mode;
   const nyxbot = agent.kind === "nyxbot";
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
@@ -671,6 +672,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
       display_name: agent.display_name ?? "",
       description: agent.description,
       persona: agent.persona ?? "",
+      voice_instructions: agent.voice_instructions ?? "",
       model: agent.model ?? "",
       access_mode_override: agent.access_mode_override ?? null,
       channel_checking_notice: agent.channel_checking_notice ?? false,
@@ -690,6 +692,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
         ...(dirty.display_name ? { display_name: values.display_name } : {}),
         ...(dirty.description ? { description: values.description } : {}),
         ...(dirty.persona ? { persona: values.persona } : {}),
+        ...(dirty.voice_instructions ? { voice_instructions: values.voice_instructions } : {}),
         ...(dirty.model ? { model: values.model } : {}),
         ...(dirty.access_mode_override
           ? { access_mode_override: values.access_mode_override }
@@ -790,7 +793,8 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                       <ModelSelect
                         grouped
                         label="Agent model"
-                        value={field.value || undefined}
+                        agentId={agent.id}
+                        value={field.value}
                         disabled={readOnly}
                         onChange={field.onChange}
                       />
@@ -944,10 +948,34 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                 </GroupedRow>
               )}
             />
+            <FormField
+              control={form.control}
+              name="voice_instructions"
+              render={({ field }) => (
+                <GroupedRow search={{ id: "profile-voice-instructions", title: "Voice instructions", breadcrumb: "Overview › Profile", keywords: String(field.value ?? "") }} asChild className="grouped-field">
+                  <FormItem>
+                    <FormLabel>Voice instructions</FormLabel>
+                    <FormControl>
+                      <GroupedTextarea
+                        className="min-h-20"
+                        maxLength={ASSISTANT_AGENT_VOICE_INSTRUCTIONS_MAX}
+                        disabled={readOnly}
+                        placeholder="How to handle calls and use connected services (optional)."
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormDescription className="basis-full type-secondary text-text-tertiary">
+                      Guidance for this Bot across all voice clients and connected services. Applies to new calls using its existing permissions.
+                    </FormDescription>
+                    <GroupedFooter><FormMessage /></GroupedFooter>
+                  </FormItem>
+                </GroupedRow>
+              )}
+            />
           </GroupedList>
           {readOnly ? null : (
             <GroupedFormActions
-          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "name", label: "Name" }, { key: "display_name", label: "Display name" }, { key: "description", label: "Role / description" }, { key: "persona", label: "Persona" }, { key: "channel_checking_notice", label: "Channel progress reply" }, { key: "model", label: "Model", format: (value) => models.data?.find((model) => model.id === value) ? modelDisplayName(models.data.find((model) => model.id === value)!) : String(value || "Default model") }, { key: "access_mode_override", label: "Access mode", format: labelValue(ACCESS_MODE_LABEL, "Workspace setting") }])}
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "name", label: "Name" }, { key: "display_name", label: "Display name" }, { key: "description", label: "Role / description" }, { key: "persona", label: "Persona" }, { key: "voice_instructions", label: "Voice instructions" }, { key: "channel_checking_notice", label: "Channel progress reply" }, { key: "model", label: "Model", format: (value) => models.data?.find((model) => model.id === value) ? modelDisplayName(models.data.find((model) => model.id === value)!) : String(value || "Default model") }, { key: "access_mode_override", label: "Access mode", format: labelValue(ACCESS_MODE_LABEL, "Workspace setting") }])}
               label="profile"
               dirty={form.formState.isDirty}
               pending={update.isPending}

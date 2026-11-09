@@ -389,6 +389,7 @@ async fn authorize_and_execute(
     request: nyxid_machine::Request,
     receiver: mpsc::Receiver<Result<Vec<u8>, std::io::Error>>,
 ) -> AppResult<Response> {
+    let admitted_at = chrono::Utc::now();
     if request.operation != nyxid_machine::Operation::ServiceCall || request.node_id != node_id {
         return Err(AppError::Forbidden("Invalid machine service call".into()));
     }
@@ -431,6 +432,48 @@ async fn authorize_and_execute(
         }
     }
     crate::services::machine_desktop_service::agent_allowed(&state.db, node_id).await?;
+    let session_info = state.node_ws_manager.session_info(node_id);
+    let controls = if auth.execution_permission.is_some()
+        && session_info.is_connected
+        && session_info.capabilities_resolved
+        && session_info.capabilities.machine_execution_approval_v1
+    {
+        p.get("execution_approval")
+            .map(|value| {
+                serde_json::from_value::<nyxid_machine::gateway::ExecutionApproval>(value.clone())
+                    .map_err(|_| {
+                        AppError::ValidationError("Invalid Machine approval protocol".into())
+                    })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    if controls.as_ref().is_some_and(|c| c.version != 1) {
+        return Err(AppError::ValidationError(
+            "Unsupported Machine approval protocol".into(),
+        ));
+    }
+    if let Some(path) = p["path"]
+        .as_str()
+        .filter(|path| path.starts_with("/_nyxid/"))
+    {
+        if controls.is_none() || p["method"] != "GET" {
+            return Err(AppError::NotFound("Permission request not found".into()));
+        }
+        let id = path
+            .strip_prefix("/_nyxid/approvals/")
+            .and_then(|s| s.strip_suffix("/status"))
+            .filter(|s| uuid::Uuid::parse_str(s).is_ok())
+            .ok_or_else(|| AppError::NotFound("Permission request not found".into()))?;
+        let execution =
+            crate::services::execution_permission_dispatch::proposals::v2::machine_readback(
+                state, &auth, &job, id,
+            )
+            .await?;
+        return Ok(axum::Json(json!({"execution":execution})).into_response());
+    }
+
     let raw_path = p["path"]
         .as_str()
         .ok_or_else(|| AppError::ValidationError("Invalid gateway path".into()))?;
@@ -574,6 +617,9 @@ async fn authorize_and_execute(
             }
         }
     }
+    let signed_for_approval =
+        (auth.execution_permission.is_some() && controls.is_some() && git.is_none())
+            .then(|| request.clone());
     let mut request = builder
         .body(Body::from_stream(stream))
         .map_err(|_| AppError::ValidationError("Invalid gateway HTTP request".into()))?;
@@ -584,7 +630,7 @@ async fn authorize_and_execute(
         .extensions_mut()
         .insert(crate::services::machine_gateway_service::Ingress {
             declared_id: selected.id.clone(),
-            git,
+            git: git.clone(),
             job: Some((&job).into()),
         });
     let (grant_id, principal_kind) = match &job.binding {
@@ -615,8 +661,43 @@ async fn authorize_and_execute(
             principal_kind,
         },
     );
+    if git.is_none()
+        && let Some(signed_for_approval) = signed_for_approval.as_ref()
+        && let Some(controls) = controls.as_ref()
+        && let Some(authority) = binding
+            .as_ref()
+            .and_then(|b| b.get_document("machine_authority").ok())
+    {
+        let deadline = chrono::DateTime::from_timestamp_millis(controls.waiter_until_ms)
+            .ok_or_else(|| AppError::ValidationError("Invalid Machine approval deadline".into()))?
+            .min(admitted_at + chrono::Duration::seconds(120));
+        let token = if let Ok(uuid) = uuid::Uuid::parse_str(&signed_for_approval.request_id) {
+            session
+                .calls
+                .lock()
+                .await
+                .get(&uuid)
+                .map(|c| c.cancel.clone())
+                .unwrap_or_else(|| session.closed.child_token())
+        } else {
+            session.closed.child_token()
+        };
+        crate::services::execution_permission_dispatch::machine::bind(
+            &state.db,
+            &auth,
+            &job,
+            authority,
+            &selected.id,
+            signed_for_approval,
+            controls,
+            request.headers(),
+            deadline,
+            token,
+        )
+        .await?;
+    }
     let path_only = path.split('?').next().unwrap_or_default();
-    super::proxy::proxy_request_by_slug_inner(
+    let response = super::proxy::proxy_request_by_slug_inner(
         state,
         &auth,
         slug,
@@ -624,7 +705,8 @@ async fn authorize_and_execute(
         request,
         &mut String::new(),
     )
-    .await
+    .await?;
+    crate::services::execution_permission_dispatch::machine::delivery(state, &auth, response).await
 }
 
 pub(crate) async fn job_auth(state: &AppState, job: &MachineJob) -> AppResult<AuthUser> {
@@ -696,3 +778,7 @@ async fn verify(
 #[cfg(test)]
 #[path = "machine_service_policy_tests.rs"]
 mod service_policy_tests;
+
+#[cfg(test)]
+#[path = "machine_execution_proposal_tests.rs"]
+mod execution_proposal_tests;

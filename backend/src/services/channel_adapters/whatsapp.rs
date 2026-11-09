@@ -391,7 +391,7 @@ async fn classified_graph_response(
     Ok(body)
 }
 
-async fn fetch_media_at(
+pub(crate) async fn fetch_media_at(
     http: &reqwest::Client,
     credentials: &BotCredentials<'_>,
     attachment: &InboundAttachment,

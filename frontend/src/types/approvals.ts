@@ -90,6 +90,7 @@ export interface ApprovalRequestListResponse {
 
 export interface ApprovalGrantItem {
   readonly execution?: {
+    readonly context_scope?: string | null;
     readonly supported: boolean;
     readonly validity: string | null;
     readonly valid_until: string | null;

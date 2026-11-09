@@ -42,12 +42,29 @@ fn channel_media_old_documents_roundtrip_and_new_fields_survive_rewrites_with_re
     assert!(upload.source.is_none());
     assert!(upload.content_sha256.is_none());
     upload.source = Some(UploadSource {
+        guest: None,
         turn_id: "turn".into(),
         event_key: "secret-key".into(),
         index: 0,
         embedded: true,
         declared: 11,
     });
+    assert!(
+        !bson::to_document(upload.source.as_ref().unwrap())
+            .unwrap()
+            .contains_key("guest")
+    );
+    let mut with_guest = upload.source.clone().unwrap();
+    with_guest.guest = Some(crate::models::assistant_channel_media::GuestSource {
+        version: 1,
+        channel_id: "channel".into(),
+        event_id: "source-event".into(),
+        sender_id: "private-sender".into(),
+    });
+    let rewritten: UploadSource =
+        bson::from_document(bson::to_document(&with_guest).unwrap()).unwrap();
+    assert_eq!(rewritten.guest.unwrap().sender_id, "private-sender");
+    assert!(!format!("{with_guest:?}").contains("private-sender"));
     upload.content_sha256 = Some("digest".into());
     let rewritten: AssistantUpload =
         bson::from_document(bson::to_document(&upload).unwrap()).unwrap();
@@ -163,6 +180,7 @@ async fn upload(state: &AppState, row: &AssistantConversation, event: &NyxbotEve
         "private-label.png",
         png(),
         UploadSource {
+            guest: None,
             turn_id: row.active_turn.as_ref().unwrap().turn_id.clone(),
             event_key: event.media.as_ref().unwrap().key.clone(),
             index: 0,
@@ -488,6 +506,7 @@ async fn channel_media_unique_source_refuses_double_ingestion_without_duplicate_
         "duplicate.png",
         png(),
         UploadSource {
+            guest: None,
             turn_id: row.active_turn.as_ref().unwrap().turn_id.clone(),
             event_key: event.media.as_ref().unwrap().key.clone(),
             index: 0,
@@ -570,6 +589,7 @@ async fn channel_media_unknown_upload_ack_is_failed_and_known_committed_root_is_
             "image.png",
             png(),
             UploadSource {
+                guest: None,
                 turn_id: row2.active_turn.unwrap().turn_id,
                 event_key: event2.media.unwrap().key,
                 index: 0,
@@ -2056,6 +2076,7 @@ async fn channel_media_erasure_fence_rejects_held_event_and_upload() {
             "receipt.png",
             png(),
             UploadSource {
+                guest: None,
                 turn_id: row.active_turn.as_ref().unwrap().turn_id.clone(),
                 event_key: event.media.as_ref().unwrap().key.clone(),
                 index: 0,

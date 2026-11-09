@@ -1283,6 +1283,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         credential_api_key_id: "key".into(),
         message_count: 0,
         active_turn: Some(ActiveTurn {
+            platform_model_context: None,
             automation_work: None,
             artifact_watch_id: None,
             execution_task: None,
@@ -3891,10 +3892,13 @@ async fn voice_queue_claims_one_message_and_preserves_initiating_identity() {
             .execution_pending
     );
     use crate::services::assistant_acknowledgement_service as acks;
-    let chat = acks::for_key(&db, &user, Some(&credential.api_key_id))
+    let mut chat = acks::for_key(&db, &user, Some(&credential.api_key_id))
         .await
         .unwrap()
         .unwrap();
+    // Seed a legacy card to exercise queue identity and continuation races.
+    // New Voice work cannot request approvals.
+    chat.execution_voice_task = false;
     let card = Box::pin(acks::request(
         &db,
         &chat,
@@ -6212,6 +6216,7 @@ async fn turn_snapshot_is_decided_at_admission_and_copied_to_the_settled_reply()
             description: "Helps with notes".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,
@@ -6441,6 +6446,7 @@ async fn ineligible_skill_events_are_drained_transactionally_without_a_turn() {
             description: "Helps".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,

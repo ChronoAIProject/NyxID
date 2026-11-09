@@ -57,6 +57,11 @@ macro_rules! llm_billing_routes {
                 )
             ),
             (
+                "/models", "/api/v1/llm/models", "handlers::platform_models::public_list",
+                get(handlers::platform_models::public_list),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt("Platform model metadata; no downstream request")
+            ),
+            (
                 "/pools", "/api/v1/llm/pools", "handlers::llm_gateway::pool_aliases",
                 get(handlers::llm_gateway::pool_aliases),
                 crate::services::billing::route_inventory::BillingRoutePolicy::Exempt("AI pool alias discovery; no downstream request")
@@ -1062,6 +1067,34 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let admin_routes = Router::new()
+        .route(
+            "/platform-models/{id}/tariffs/{tariff_id}/retire",
+            post(handlers::platform_models::retire_tariff),
+        )
+        .route(
+            "/platform-models/{id}/tariffs",
+            get(handlers::platform_models::tariffs).post(handlers::platform_models::create_tariff),
+        )
+        .route(
+            "/platform-models",
+            get(handlers::platform_models::admin_list).post(handlers::platform_models::create),
+        )
+        .route(
+            "/platform-models/{id}",
+            get(handlers::platform_models::admin_get).put(handlers::platform_models::update),
+        )
+        .route(
+            "/platform-models/{id}/entitlements",
+            put(handlers::platform_models::entitlements),
+        )
+        .route(
+            "/platform-models/{id}/routes",
+            put(handlers::platform_models::routes),
+        )
+        .route(
+            "/platform-models/{id}/access",
+            get(handlers::platform_models::explain),
+        )
         .merge(if router_state.is_some() {
             Router::new()
                 .route(
@@ -3002,6 +3035,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/direct/skills", get(handlers::assistant_direct::skills))
         .route("/direct/models", get(handlers::assistant_direct::models))
+        .route(
+            "/nyxagent/platform-models",
+            get(handlers::assistant_platform_models::list),
+        )
         .route("/direct/efforts", get(handlers::assistant_direct::efforts))
         .route(
             "/actions/key-create",
@@ -3387,6 +3424,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/channel-bots/telegram-new/requests/{id}/creation-link",
             post(handlers::telegram_new::creation_link),
+        )
+        .route(
+            "/channel-bots/telegram-new/requests/{id}/regenerate-username",
+            post(handlers::telegram_new::regenerate_username),
         )
         .route(
             "/channel-bots/telegram-new/requests/{id}/connect",

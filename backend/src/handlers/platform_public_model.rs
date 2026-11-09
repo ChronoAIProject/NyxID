@@ -65,6 +65,10 @@ pub async fn dispatch(
     let (_, key, child) = key_service::validate_api_key(&state.db, raw).await?;
     let authority = platform_public_tools::authenticate(&state.db, &key, child.as_deref()).await?;
     authority.validate_callback_headers(headers)?;
+    let trace = crate::turn_trace::TurnContext::for_request(
+        headers,
+        Some(&authority.context().turn.turn_id),
+    );
     if headers.get_all("x-nyx-public-call-id").iter().count() != 1 {
         return Err(denied());
     }
@@ -96,16 +100,20 @@ pub async fn dispatch(
             .map_err(|_| denied())?
             .to_vec(),
     );
-    platform_public_proxy_service::dispatch_model(
-        &state,
-        authority.context(),
-        ModelRequest {
-            key_id: authority.key_id(),
-            service_id: &service_id,
-            path: &path,
-            body: &body,
-            call_id: &call,
-        },
-    )
-    .await
+    trace
+        .response(
+            crate::turn_trace::Stage::Proxy,
+            platform_public_proxy_service::dispatch_model(
+                &state,
+                authority.context(),
+                ModelRequest {
+                    key_id: authority.key_id(),
+                    service_id: &service_id,
+                    path: &path,
+                    body: &body,
+                    call_id: &call,
+                },
+            ),
+        )
+        .await
 }

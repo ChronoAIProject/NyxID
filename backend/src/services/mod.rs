@@ -309,6 +309,7 @@ pub mod assistant_nyxagent_egress;
 pub(crate) mod assistant_nyxagent_model_cache;
 pub mod assistant_nyxagent_runtime;
 pub mod assistant_onboarding_service;
+pub mod assistant_platform_model;
 pub mod assistant_platform_reply_decision;
 pub mod assistant_profile_routing;
 pub mod assistant_service_execution;
@@ -476,6 +477,7 @@ pub mod platform_setup_notice_service;
 
 pub mod assistant_access_policy;
 pub(crate) mod nyxbot_channel_query_service;
+pub(crate) mod nyxbot_gateway_policy;
 pub(crate) mod nyxbot_gateway_service;
 pub mod nyxbot_watch_service;
 pub mod tools_manager_service;
@@ -561,3 +563,8 @@ pub mod org_channel_service;
 
 pub mod generated_artifacts;
 pub(crate) mod invocation_diagnostic_service;
+
+pub mod platform_model_execution;
+pub mod platform_model_service;
+
+pub(crate) mod execution_permission_channel;

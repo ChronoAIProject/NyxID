@@ -250,6 +250,12 @@ describe("NyxBot team, settings and channel schemas", () => {
     expect(list.agents[0]?.pending_requests[0]?.conversation_id).toBe(specialistThread);
     expect(list.agents[0]?.channels[0]?.platform).toBe("telegram");
     expect(list.limits.max_live_subagents_limit).toBe(32);
+    expect(list.destroyed_truncated).toBeUndefined(); // Older servers omit the field.
+  });
+
+  it("retains additive destroyed archive truncation metadata", () => {
+    const list = assistantAgentListSchema.parse({ agents: [agent], limits, destroyed_truncated: true });
+    expect(list.destroyed_truncated).toBe(true);
   });
 
   it("parses one agent with memory and threads", () => {
@@ -534,6 +540,8 @@ describe("agent display name and persona", () => {
       persona: "",
     };
     expect(assistantAgentCreateSchema.safeParse(create).success).toBe(true);
+    expect(assistantAgentCreateSchema.safeParse({ ...create, voice_instructions: "Read live device state." }).success).toBe(true);
+    expect(assistantAgentCreateSchema.safeParse({ ...create, voice_instructions: "x".repeat(2001) }).success).toBe(false);
     expect(
       assistantAgentCreateSchema.safeParse({ ...create, display_name: "x".repeat(41) }).success,
     ).toBe(false);

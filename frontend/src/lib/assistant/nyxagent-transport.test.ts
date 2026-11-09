@@ -50,7 +50,7 @@ it("keeps a persisted diagnostic detail visible after reload", () => {
   expect(parsed.error_detail?.upstream_request_id).toBe("req-1");
 });
 
-it.each([["turn_failed", CONTEXT_RESET_NOTICE], ["stopped", "The turn was stopped, so the assistant continues in a fresh context with a recap. Check what the stopped turn finished before rerunning it."], ["credential_replaced", "The assistant's key was replaced, so it continues in a fresh context with a recap of this chat."], ["user_reset", "You reset the working context."]])("explains reset reason %s", (reason, text) => {
+it.each([["guest_media_turn", "The assistant context was refreshed to keep guest attachments limited to their own turn."], ["turn_failed", CONTEXT_RESET_NOTICE], ["stopped", "The turn was stopped, so the assistant continues in a fresh context with a recap. Check what the stopped turn finished before rerunning it."], ["credential_replaced", "The assistant's key was replaced, so it continues in a fresh context with a recap of this chat."], ["user_reset", "You reset the working context."]])("explains reset reason %s", (reason, text) => {
   expect(contextResetCopy(reason)).toBe(text);
   expect(contextResetCopy(reason)).not.toContain("decided cards were preserved");
 });
@@ -2549,4 +2549,25 @@ it("2072 restores terminal proxy approvals without presenting them as a pending 
   await transport.history(id);
   expect(transport.session(id).messages.map((m) => m.id)).toContain("nyxagent-approval:proxy");
   expect(transport.isRunning(id)).toBe(false);
+});
+
+
+it("keeps safe memory reasons through active polling and settled history reload", async () => {
+  let active = true;
+  const activity = { id: "memory", label: "nyxid__remember", status: "error", started_at: start, ended_at: reset, failure: { kind: "tool_error", reason: "note_too_long" } };
+  globalThis.__nyxidAssistantHttpMock = () => {
+    const page = history();
+    return json({ ...page,
+      conversation: { ...page.conversation, active_turn: active ? { turn_id: "turn", started_at: start, activities: [activity], attachments: [] } : null },
+      messages: active ? page.messages.slice(0, 1) : [page.messages[0], { ...page.messages[1], activities: [activity] }],
+    });
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages.at(-1)?.toolCalls?.[0]?.failure?.reason).toBe("note_too_long");
+  active = false;
+  await transport.history(id);
+  const reloaded = new NyxAgentTransport();
+  await reloaded.history(id);
+  expect(reloaded.session(id).messages.at(-1)?.toolCalls?.[0]?.failure?.reason).toBe("note_too_long");
 });

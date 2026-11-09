@@ -38,6 +38,9 @@ fn projection(collection: &str) -> Document {
     }
     let mut projection = doc! {"last_used_at":0,"updated_at":0,"created_at":0,"execution_dispatch_fence":0,
     "execution_task_fence":0,"mutation_fence":0,"reference_fence":0};
+    // Source checks write this lock counter in the same transaction. It is
+    // not authority drift; the actual policy fields and row fences remain.
+    projection.insert("execution_source_fence", 0);
     if collection == "org_memberships" {
         // Live collaboration admission writes this lock counter in the same
         // transaction. It is not a membership/role revision; those authority
@@ -209,6 +212,45 @@ impl Snapshot {
             bindings,
         ));
         Ok(Self(rows))
+    }
+
+    /// Indexed lookups for the bounded Machine response fence. Reuse the same
+    /// projection and row-set comparison as admission; OAuth refresh stays inert.
+    pub(super) fn delivery_lookups(&self) -> Vec<Document> {
+        self.0.iter().enumerate().map(|(i,(collection,filter,_))| doc!{"$lookup":{"from":*collection,"pipeline":[{"$match":filter.clone()},{"$project":projection(collection)},{"$sort":{"_id":1}},{"$limit":2049}],"as":format!("authority_{i}")}}).collect()
+    }
+    pub(super) fn validate_delivery(&self, row: &Document) -> AppResult<()> {
+        for (i, (_, _, expected)) in self.0.iter().enumerate() {
+            let values = row
+                .get_array(format!("authority_{i}"))
+                .map_err(|_| refused())?;
+            let actual = values
+                .iter()
+                .map(|v| v.as_document().cloned().ok_or_else(refused))
+                .collect::<AppResult<Vec<_>>>()?;
+            if actual != *expected {
+                return Err(refused());
+            }
+        }
+        Ok(())
+    }
+    pub(super) fn memberships(
+        &self,
+    ) -> AppResult<Vec<(String, crate::models::org_membership::OrgRole)>> {
+        self.0
+            .iter()
+            .find(|(name, _, _)| *name == "org_memberships")
+            .map(|(_, _, rows)| {
+                rows.iter()
+                    .filter(|r| matches!(r.get("revoked_at"), None | Some(bson::Bson::Null)))
+                    .map(|r| {
+                        let member: crate::models::org_membership::OrgMembership =
+                            bson::from_document(r.clone()).map_err(encoding)?;
+                        Ok((member.org_user_id, member.role))
+                    })
+                    .collect()
+            })
+            .unwrap_or_else(|| Ok(Vec::new()))
     }
 
     pub(super) async fn fence(&self, db: &Database, session: &mut ClientSession) -> AppResult<()> {

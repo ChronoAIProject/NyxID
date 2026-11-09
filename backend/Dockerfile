@@ -99,6 +99,7 @@ COPY cli/src/commands/update_attestation cli/src/commands/update_attestation
 COPY cli/resources/sigstore-root.json cli/resources/sigstore-root.json
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
 COPY docs/assistant/CHANNEL_SETUP_GUIDE.md docs/assistant/CHANNEL_SETUP_GUIDE.md
+COPY docs/examples/nyxbot-voice-service.template.json docs/examples/nyxbot-voice-service.template.json
 # The oracle worker bundle is embedded via include_str! and served from
 # /api/v1/oracle/worker-bundle so installs stay in sync with the server.
 COPY integrations/oracle/cdp-worker/worker.mjs integrations/oracle/cdp-worker/worker.mjs

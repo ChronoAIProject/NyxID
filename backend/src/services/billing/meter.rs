@@ -185,6 +185,12 @@ async fn complete_meter(
             ));
         }
     }
+    for row in &rows {
+        let expected = ctx.model_tariff.as_ref().map(|t| t.tariff().id.as_str());
+        if row.model_tariff.as_ref().map(|t| t.tariff_id.as_str()) != expected {
+            return Err(AppError::Conflict("Billing model tariff changed".into()));
+        }
+    }
     if require_funding && rows.iter().any(|row| row.funding.is_none()) {
         return Err(AppError::Conflict(
             "Incomplete funding record; retry with a fresh billing request id".into(),
@@ -215,6 +221,15 @@ pub async fn open(
 ) -> AppResult<MeteredProxyContext> {
     if !ctx.is_metered() {
         return Ok(MeteredProxyContext::disabled());
+    }
+
+    if reservation.is_none()
+        && let Some(tariff) = &ctx.model_tariff
+    {
+        if tariff.paid() {
+            return Err(super::model_tariffs::unavailable("funding_required"));
+        }
+        return Box::pin(open_free_model(db, ctx)).await;
     }
 
     let mut inserted_row_ids = Vec::with_capacity(2);
@@ -295,6 +310,48 @@ pub async fn open(
     Ok(MeteredProxyContext::from_route(ctx))
 }
 
+// Free tariffs still need a live binding fence and atomic component rows.
+// They use the ordinary meter representation without wallet/benefit funding.
+async fn open_free_model(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+) -> AppResult<MeteredProxyContext> {
+    if complete_meter(db, ctx, false).await? {
+        return Ok(MeteredProxyContext::from_route(ctx));
+    }
+    let rows: Vec<_> = ctx
+        .platform_specs()
+        .map(|(metric, code)| {
+            reserved_row(ctx, BillingLayer::Platform, metric, code.into(), None, None)
+        })
+        .collect();
+    let context = (db.clone(), ctx.clone(), rows);
+    let result = crate::services::transaction_service::run_db_only(
+        db,
+        &context,
+        |session, (db, ctx, rows)| {
+            Box::pin(async move {
+                let tariff = ctx
+                    .model_tariff
+                    .as_ref()
+                    .ok_or_else(|| super::model_tariffs::unavailable("missing_tariff"))?;
+                super::model_tariffs::fence_admission(db, session, tariff).await?;
+                db.collection::<UsageMeterRow>(USAGE_METER)
+                    .insert_many(rows)
+                    .session(&mut *session)
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await;
+    if result.is_err() && complete_meter(db, ctx, false).await? {
+        return Ok(MeteredProxyContext::from_route(ctx));
+    }
+    result?;
+    Ok(MeteredProxyContext::from_route(ctx))
+}
+
 pub async fn mark_forwarded(
     db: &mongodb::Database,
     metered: &MeteredProxyContext,
@@ -343,16 +400,42 @@ pub(super) async fn persist_settlement_intent(
         return Ok(Vec::new());
     };
 
-    if ctx.platform_metered() && !ctx.platform_components.is_empty() {
-        let collection = db.collection::<UsageMeterRow>(USAGE_METER);
-        collection.update_one(doc! { "transaction_id": transaction_id(&ctx.billing_request_id, BillingLayer::Platform, None), "status": "forwarded", "pending_platform_usage": Bson::Null },
-            doc! { "$set": {
-                "pending_platform_usage": bson::to_bson(&platform).map_err(|e| AppError::Internal(e.to_string()))?,
-                "pending_resale_quantity": resale.filter(|_| ctx.resale.is_some()).map(|r| r.quantity.max(0)),
-                "model": &model,
-                "updated_at": bson::DateTime::from_chrono(Utc::now()),
-            } }).await?;
-        if let Some(coordinator) = collection.find_one(doc! { "transaction_id": transaction_id(&ctx.billing_request_id, BillingLayer::Platform, None) }).await? {
+    if let Some(selected) = &ctx.model_tariff {
+        let vector = platform
+            .model_charges
+            .as_ref()
+            .ok_or_else(|| super::model_tariffs::unavailable("missing_usage_evidence"))?;
+        if selected.usage(&vector.native_usage)?.model_charges.as_ref() != Some(vector) {
+            return Err(super::model_tariffs::unavailable(
+                "invalid_normalized_usage",
+            ));
+        }
+        if vector.tariff_id != selected.tariff().id
+            || vector.public_model != selected.tariff().public_model
+            || vector.quantities.len() != selected.tariff().components.len()
+            || selected.tariff().components.iter().any(|c| {
+                vector
+                    .quantities
+                    .get(&c.lago_metric_code)
+                    .is_none_or(|n| *n < 0 || *n > c.max_quantity)
+            })
+            || platform.reported_model.is_some()
+        {
+            return Err(super::model_tariffs::unavailable("invalid_usage_evidence"));
+        }
+    } else if platform.model_charges.is_some() {
+        return Err(super::model_tariffs::unavailable("unexpected_model_usage"));
+    }
+    let model = ctx
+        .model_tariff
+        .as_ref()
+        .map(|s| s.tariff().public_model.clone())
+        .or(model);
+    if ctx.platform_metered() && (!ctx.platform_components.is_empty() || ctx.model_tariff.is_some())
+    {
+        if let Some(coordinator) =
+            save_component_intent(db, ctx, &platform, resale, model.as_deref()).await?
+        {
             return materialize_component_intent(db, &coordinator).await;
         }
         return Ok(Vec::new());
@@ -440,6 +523,68 @@ pub(super) async fn persist_settlement_intent(
     Ok(finalized_rows)
 }
 
+/// Persist the validated evidence and complete recovery intent together, before
+/// touching component rows. A crash after this write needs no caller retry.
+pub(super) async fn save_component_intent(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+    platform: &PlatformUsage,
+    resale: Option<ResaleUsage>,
+    model: Option<&str>,
+) -> AppResult<Option<UsageMeterRow>> {
+    let collection = db.collection::<UsageMeterRow>(USAGE_METER);
+    let identity = transaction_id(&ctx.billing_request_id, BillingLayer::Platform, None);
+    let mut filter = doc! {
+        "transaction_id": &identity,
+        "status": "forwarded",
+        "pending_platform_usage": Bson::Null,
+    };
+    let mut fields = doc! {
+        "pending_platform_usage": bson::to_bson(platform)
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+        "pending_resale_quantity": resale.filter(|_| ctx.resale.is_some())
+            .map(|r| r.quantity.max(0)),
+        "model": model,
+        "updated_at": bson::DateTime::now(),
+    };
+    let digest = if let Some(vector) = &platform.model_charges {
+        use sha2::{Digest, Sha256};
+        let digest = hex::encode(Sha256::digest(
+            serde_json::to_vec(vector).map_err(|e| AppError::Internal(e.to_string()))?,
+        ));
+        filter.insert(
+            "model_tariff.evidence_digest",
+            doc! {"$in": [Bson::Null, Bson::String(digest.clone())]},
+        );
+        fields.insert("model_tariff.evidence_digest", &digest);
+        fields.insert(
+            "model_tariff.evidence",
+            bson::to_bson(vector).map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+        Some(digest)
+    } else {
+        None
+    };
+    collection.update_one(filter, doc! {"$set": fields}).await?;
+    let saved = collection
+        .find_one(doc! {"transaction_id": &identity})
+        .await?;
+    if let Some(digest) = digest {
+        let saved = saved
+            .as_ref()
+            .ok_or_else(|| super::model_tariffs::unavailable("missing_meter"))?;
+        if saved
+            .model_tariff
+            .as_ref()
+            .and_then(|t| t.evidence_digest.as_deref())
+            != Some(digest.as_str())
+        {
+            return Err(AppError::Conflict("Model usage evidence changed".into()));
+        }
+    }
+    Ok(saved)
+}
+
 pub(super) async fn materialize_component_intent(
     db: &mongodb::Database,
     coordinator: &UsageMeterRow,
@@ -464,11 +609,35 @@ async fn materialize_component_rows(
 ) -> AppResult<Vec<UsageMeterRow>> {
     let collection = db.collection::<UsageMeterRow>(USAGE_METER);
     let mut materialized = Vec::new();
+    if let Some(vector) = &usage.model_charges {
+        if rows.len() != vector.quantities.len()
+            || rows.iter().any(|row| {
+                row.model_tariff.as_ref().is_none_or(|t| {
+                    t.tariff_id != vector.tariff_id
+                        || t.public_model != vector.public_model
+                        || vector
+                            .quantities
+                            .get(&row.lago_metric_code)
+                            .is_none_or(|n| *n < 0 || *n > t.max_quantity)
+                })
+            })
+        {
+            return Err(super::model_tariffs::unavailable(
+                "durable_usage_identity_mismatch",
+            ));
+        }
+    } else if rows.iter().any(|row| row.model_tariff.is_some()) {
+        return Err(super::model_tariffs::unavailable("missing_durable_usage"));
+    }
     for row in rows {
         if let Some(finalized) = finalize_matching(
             db,
             doc! { "_id": &row.id, "status": "forwarded" },
-            platform_quantity(row.metric, usage),
+            usage
+                .model_charges
+                .as_ref()
+                .map(|v| v.quantities[&row.lago_metric_code])
+                .unwrap_or_else(|| platform_quantity(row.metric, usage)),
             coordinator.model.clone(),
             // Classes describe the request, not each independently priced row.
             (row.transaction_id
@@ -705,6 +874,22 @@ pub(super) fn reserved_row(
     let funding = layer_reservation.map(|item| {
         let layer = Some(item);
         UsageFunding {
+            wallet_only: ctx.model_tariff.is_some()
+                && super::amounts::rate_pico(
+                    item.credits_per_unit_pico,
+                    item.credits_per_unit_micros,
+                ) == 0,
+            settlement_rate: ctx
+                .model_tariff
+                .as_ref()
+                .map(|_| {
+                    crate::models::credits::Credits::from_pico(super::amounts::rate_pico(
+                        item.credits_per_unit_pico,
+                        item.credits_per_unit_micros,
+                    ))
+                })
+                .transpose()
+                .expect("validated tariff rate"),
             tax_accounting: true,
             applied_tax: item.applied_tax.clone(),
             credits_per_unit_pico: item.credits_per_unit_pico,
@@ -726,6 +911,21 @@ pub(super) fn reserved_row(
         .then(|| ctx.operation.clone())
         .flatten();
     UsageMeterRow {
+        model_tariff: ctx.model_tariff.as_ref().and_then(|s| {
+            s.tariff()
+                .components
+                .iter()
+                .find(|c| c.lago_metric_code == lago_metric_code)
+                .map(|c| {
+                    Box::new(crate::models::platform_model_tariff::ModelMeterBinding {
+                        evidence: None,
+                        evidence_digest: None,
+                        tariff_id: s.tariff().id.clone(),
+                        public_model: s.tariff().public_model.clone(),
+                        max_quantity: c.max_quantity,
+                    })
+                })
+        }),
         org_channel_guest: ctx.org_channel_guest.as_ref().map(|g| g.usage()),
         rollup_pending: true,
         id: Uuid::new_v4().to_string(),
@@ -748,7 +948,10 @@ pub(super) fn reserved_row(
         lago_metric_code,
         operation,
         credential_class: ctx.credential_class,
-        model: None,
+        model: ctx
+            .model_tariff
+            .as_ref()
+            .map(|s| s.tariff().public_model.clone()),
         reported_model: None,
         token_breakdown: None,
         audio_tokens: None,
@@ -1003,6 +1206,11 @@ pub(crate) fn platform_metric_code(metric: BillingMetric) -> &'static str {
         BillingMetric::OutputTokens => "platform_output_tokens",
         BillingMetric::CacheReadTokens => "platform_cache_read_tokens",
         BillingMetric::CacheWriteTokens => "platform_cache_write_tokens",
+        BillingMetric::ReasoningTokens => "platform_reasoning_tokens",
+        BillingMetric::ImageInputTokens => "platform_image_input_tokens",
+        BillingMetric::ImageOutputTokens => "platform_image_output_tokens",
+        BillingMetric::AudioInputTokens => "platform_audio_input_tokens",
+        BillingMetric::AudioOutputTokens => "platform_audio_output_tokens",
         BillingMetric::Images => "platform_images",
         BillingMetric::VoiceSeconds => "platform_voice_seconds",
         BillingMetric::MachineRunningSeconds => "remote_machine_running_seconds",
@@ -1024,7 +1232,12 @@ fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
         BillingMetric::Images => usage.images.max(0),
         BillingMetric::VoiceSeconds => usage.voice_seconds.max(0),
         // Machine runtime is measured by its evidence-bound interval path.
-        BillingMetric::MachineRunningSeconds
+        BillingMetric::ReasoningTokens
+        | BillingMetric::ImageInputTokens
+        | BillingMetric::ImageOutputTokens
+        | BillingMetric::AudioInputTokens
+        | BillingMetric::AudioOutputTokens
+        | BillingMetric::MachineRunningSeconds
         | BillingMetric::SandboxCpuMillisSeconds
         | BillingMetric::SandboxMemoryMibSeconds
         | BillingMetric::SandboxDiskGibSeconds => 0,

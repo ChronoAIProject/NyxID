@@ -1,3 +1,5 @@
+import { Button } from "@/components/ui/button";
+import { usePlatformModels } from "@/hooks/use-platform-models";
 import { Label } from "@/components/ui/label";
 import { useDrawerSearchEntries } from "@/lib/drawer-search";
 import { flushSync } from "react-dom";
@@ -87,6 +89,7 @@ export function ServiceGrantPicker({
   readonly footer?: React.ReactNode;
 }) {
   const keys = useKeys({ includeTools: true });
+  const models = usePlatformModels();
   const [search, setSearch] = useState("");
   const inventory = (keys.data ?? [])
     .filter(
@@ -104,6 +107,9 @@ export function ServiceGrantPicker({
         (key.credential_missing || (key.credential_binding === "platform" && key.platform_key_available === false)
           ? "credential unavailable" : undefined),
     }));
+  inventory.push(...(models.data?.pages.flatMap((page) => page.models.map((model) => ({
+    slug: model.id, label: model.display_name, unavailable: undefined,
+  }))) ?? []));
   const services = [
     ...new Map(inventory.map((service) => [service.slug, service])).values(),
   ];
@@ -148,6 +154,7 @@ export function ServiceGrantPicker({
       footer={
         <>
           {footer}
+          {models.hasNextPage && <Button type="button" variant="ghost" disabled={models.isFetchingNextPage} onClick={() => void models.fetchNextPage()}>More platform models</Button>}
           {keys.error ? (
             <span role="alert" className="text-destructive">
               Could not refresh services. Your selections are kept.

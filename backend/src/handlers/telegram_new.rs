@@ -80,6 +80,29 @@ pub struct RequestResponse {
     pub connection_error: Option<String>,
     pub prompt_delivery: Option<PromptDeliveryResponse>,
     pub can_open_creation_form: bool,
+    pub setup_notice: Option<SetupNoticeResponse>,
+    pub username_suggestions: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct SetupNoticeResponse {
+    pub reason: &'static str,
+    pub message: &'static str,
+    pub status_url: String,
+    pub new_setup_url: String,
+    pub agent_url: Option<String>,
+}
+
+impl From<crate::services::telegram_new_service::SetupNotice> for SetupNoticeResponse {
+    fn from(notice: crate::services::telegram_new_service::SetupNotice) -> Self {
+        Self {
+            reason: notice.reason,
+            message: notice.message,
+            status_url: notice.status_url,
+            new_setup_url: notice.new_setup_url,
+            agent_url: notice.agent_url,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -98,6 +121,8 @@ pub struct PromptDeliveryResponse {
 
 impl From<TelegramBotRequest> for RequestResponse {
     fn from(request: TelegramBotRequest) -> Self {
+        let username_suggestions =
+            crate::services::telegram_new_service::username_suggestions(&request);
         let approved = matches!(
             request.status,
             Status::Ready | Status::Provisioning | Status::Connected | Status::Suspended
@@ -132,6 +157,8 @@ impl From<TelegramBotRequest> for RequestResponse {
             }
         });
         Self {
+            username_suggestions,
+            setup_notice: None,
             prompt_delivery,
             can_open_creation_form,
             auto_connect: request.auto_connect,
@@ -161,8 +188,10 @@ pub(crate) async fn projected_request(
     request: TelegramBotRequest,
 ) -> AppResult<RequestResponse> {
     let eligible = service(state).can_open_creation_form(&request).await?;
+    let notice = service(state).setup_notice(&request).await?;
     let mut response = RequestResponse::from(request);
-    response.can_open_creation_form = eligible;
+    response.can_open_creation_form = eligible && notice.is_none();
+    response.setup_notice = notice.map(Into::into);
     Ok(response)
 }
 
@@ -350,6 +379,13 @@ pub async fn launch(
 pub struct CreationLinkResponse {
     pub request: RequestResponse,
     pub creation_url: String,
+    pub username_suggestions: Vec<UsernameSuggestionResponse>,
+}
+
+#[derive(Serialize)]
+pub struct UsernameSuggestionResponse {
+    pub username: String,
+    pub creation_url: String,
 }
 
 pub async fn creation_link(
@@ -366,12 +402,41 @@ pub async fn creation_link(
         ));
     }
     let (request, creation_url) = service(&state).creation_link(&actor, &id).await?;
+    let username_suggestions =
+        crate::services::telegram_new_service::creation_suggestions(&request, &creation_url)?
+            .into_iter()
+            .map(|(username, creation_url)| UsernameSuggestionResponse {
+                username,
+                creation_url,
+            })
+            .collect();
     Ok((
         private_headers(),
         Json(CreationLinkResponse {
             request: projected_request(&state, request).await?,
             creation_url,
+            username_suggestions,
         }),
+    ))
+}
+
+pub async fn regenerate_username(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> AppResult<(HeaderMap, Json<RequestResponse>)> {
+    let actor = human(&auth)?;
+    limit(&state, &actor).await?;
+    if !body.is_empty() {
+        return Err(AppError::BadRequest(
+            "This action accepts no parameters".into(),
+        ));
+    }
+    let request = service(&state).regenerate_username(&actor, &id).await?;
+    Ok((
+        private_headers(),
+        Json(projected_request(&state, request).await?),
     ))
 }
 

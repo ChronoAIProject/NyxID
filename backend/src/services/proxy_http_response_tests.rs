@@ -123,44 +123,51 @@ async fn direct_stream_retains_oversized_usage_with_and_without_model_observatio
         .with_platform_metering(false);
         let metered = state.billing.open(&route).await.unwrap();
         state.billing.mark_forwarded(&metered).await.unwrap();
-        let response = relay_response(
-            &state,
-            HttpResponseContext {
-                service_id: service_id.clone(),
-                path: "v1/responses".into(),
-                nyxagent_admission: false,
-                model_request: request,
-                response_builder: Response::builder()
-                    .status(status)
-                    .header("content-type", "text/event-stream"),
-                status,
-                is_sse: true,
-                should_stream: true,
-                usage_context: Some(llm_usage_service::UsageAuditContext {
-                    db: db.clone(),
-                    user_id: "owner".into(),
-                    provider_slug: None,
-                    service_id: Some(service_id.clone()),
-                    model: Some("test".into()),
+        let trace = row
+            .as_ref()
+            .and_then(|row| row.active_turn.as_ref())
+            .and_then(|turn| crate::turn_trace::TurnContext::for_turn(&turn.turn_id));
+        let response = crate::turn_trace::scope(
+            trace,
+            relay_response(
+                &state,
+                HttpResponseContext {
+                    service_id: service_id.clone(),
                     path: "v1/responses".into(),
-                    api_key_id: None,
-                    api_key_name: None,
-                }),
-                metered,
-                request_body_len: 0,
-                resale_metric: None,
-                downstream_cancellation: CancellationToken::new(),
-                exchange_diagnostics: ProxyExchangeDiagnostics::new(
-                    std::time::Instant::now(),
-                    0,
-                    None,
-                    &Method::POST,
+                    nyxagent_admission: false,
+                    model_request: request,
+                    response_builder: Response::builder()
+                        .status(status)
+                        .header("content-type", "text/event-stream"),
                     status,
-                    "stream",
-                    &http::HeaderMap::new(),
-                ),
-            },
-            downstream,
+                    is_sse: true,
+                    should_stream: true,
+                    usage_context: Some(llm_usage_service::UsageAuditContext {
+                        db: db.clone(),
+                        user_id: "owner".into(),
+                        provider_slug: None,
+                        service_id: Some(service_id.clone()),
+                        model: Some("test".into()),
+                        path: "v1/responses".into(),
+                        api_key_id: None,
+                        api_key_name: None,
+                    }),
+                    metered,
+                    request_body_len: 0,
+                    resale_metric: None,
+                    downstream_cancellation: CancellationToken::new(),
+                    exchange_diagnostics: ProxyExchangeDiagnostics::new(
+                        std::time::Instant::now(),
+                        0,
+                        None,
+                        &Method::POST,
+                        status,
+                        "stream",
+                        &http::HeaderMap::new(),
+                    ),
+                },
+                downstream,
+            ),
         )
         .await
         .unwrap();
@@ -178,6 +185,11 @@ async fn direct_stream_retains_oversized_usage_with_and_without_model_observatio
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         }).await.unwrap();
+        if let Some(trace) = trace {
+            assert_eq!(usage["turn_id"], trace.turn_id());
+        } else {
+            assert!(usage.get("turn_id").is_none());
+        }
         assert_eq!(usage["prompt_tokens"], 25);
         assert_eq!(usage["completion_tokens"], 15);
         assert_eq!(usage["total_tokens"], 40);

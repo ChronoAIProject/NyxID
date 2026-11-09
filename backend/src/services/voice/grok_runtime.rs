@@ -109,7 +109,7 @@ pub async fn serve(
             &resolved.key,
             &call.preferences.model,
             &resolved.voice,
-            &instructions,
+            &instructions.live,
         )
         .await?;
         let transport = Transport::Grok(Box::new(grok::Handle::spawn(

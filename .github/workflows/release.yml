@@ -65,10 +65,24 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Install dist
-        # we specify bash to get pipefail; it guards against the `curl` command
-        # failing. otherwise `sh` won't catch that `curl` returned non-0
+        # Hand-added (allow-dirty = ["ci"]); reapply if dist init regenerates.
+        # Use the release API: browser download URLs can return 504 while
+        # the API remains available. Verify the archive before installing.
         shell: bash
-        run: "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.30.0/cargo-dist-installer.sh | sh"
+        run: |
+          dist_dir="$RUNNER_TEMP/cargo-dist"
+          gh release download v0.30.0 --repo axodotdev/cargo-dist \
+            --pattern cargo-dist-x86_64-unknown-linux-gnu.tar.xz \
+            --pattern cargo-dist-x86_64-unknown-linux-gnu.tar.xz.sha256 \
+            --dir "$dist_dir"
+          (
+            cd "$dist_dir"
+            sha256sum --check cargo-dist-x86_64-unknown-linux-gnu.tar.xz.sha256
+            tar -xf cargo-dist-x86_64-unknown-linux-gnu.tar.xz --strip-components 1
+          )
+          install -Dm755 "$dist_dir/dist" "$HOME/.cargo/bin/dist"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/dist" --version
       - name: Cache dist
         uses: actions/upload-artifact@v4
         with:

@@ -252,6 +252,8 @@ export function contextResetCopy(reason: string | null | undefined): string {
       return "The conversation audience changed; the assistant context was refreshed.";
     case "guest_turn":
       return "This guest turn uses a separate assistant context.";
+    case "guest_media_turn":
+      return "The assistant context was refreshed to keep guest attachments limited to their own turn.";
     case "stopped":
       return "The turn was stopped, so the assistant continues in a fresh context with a recap. Check what the stopped turn finished before rerunning it.";
     case "credential_replaced":

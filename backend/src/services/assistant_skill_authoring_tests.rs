@@ -4611,7 +4611,7 @@ async fn allowed_unstarted_drafts_join_the_original_publication_without_another_
         proposal.publication.as_ref().unwrap(),
         proposal.agent_skills_revision,
     );
-    let finalized = claims::finalize(&f.state, &reservation, &binding)
+    let finalized = claims::finalize(&f.state, &reservation, &binding, f.chat.approval_options())
         .await
         .unwrap();
     assert_eq!(finalized.id, card.id);
@@ -4697,6 +4697,39 @@ async fn interrupted_prepared_draft_recovers_same_proposal_and_original_turn_ide
             .unwrap(),
         1
     );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn noninteractive_retry_cannot_request_an_interrupted_drafts_review() {
+    let f = fixture("authoring_noninteractive_recovery").await;
+    let (proposal, card) = make(&f, input(&f.chat.agent_id)).await;
+    let cards = f
+        .state
+        .db
+        .collection::<AssistantAcknowledgement>(ACKNOWLEDGEMENTS_COLLECTION_NAME);
+    cards.delete_one(doc! {"_id":&card.id}).await.unwrap();
+    let mut caller = another_authoring_chat(&f).await;
+    assert!(f.chat.approval_options().allow_request);
+    caller.execution_voice_task = true;
+    assert!(matches!(
+        draft_in_chat(&f, &caller).await,
+        Err(AppError::ApprovalUnsupported)
+    ));
+    assert_eq!(cards.count_documents(doc! {}).await.unwrap(), 0);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    caller.execution_voice_task = false;
+    let recovered = draft_in_chat(&f, &caller).await.unwrap();
+    assert_eq!(recovered["proposal_id"], proposal.id);
+    assert_eq!(cards.count_documents(doc! {}).await.unwrap(), 1);
     f.state.db.drop().await.unwrap();
 }
 
@@ -4812,7 +4845,7 @@ async fn stale_preparation_cannot_finalize_after_origin_replacement() {
     let current = draft_in_chat(&f, &other).await.unwrap();
     assert_ne!(current["proposal_id"], proposal.id);
     assert!(matches!(
-        claims::finalize(&f.state, &stale, &binding).await,
+        claims::finalize(&f.state, &stale, &binding, f.chat.approval_options()).await,
         Err(AppError::Conflict(_))
     ));
     assert_eq!(
@@ -4908,7 +4941,7 @@ async fn destroyed_or_deleted_target_fences_stale_reservation_and_finalization()
             Err(AppError::NotFound(_))
         ));
         assert!(matches!(
-            claims::finalize(&f.state, &stale, &binding).await,
+            claims::finalize(&f.state, &stale, &binding, f.chat.approval_options()).await,
             Err(AppError::NotFound(_))
         ));
         assert_eq!(claims.count_documents(doc! {}).await.unwrap(), 0);

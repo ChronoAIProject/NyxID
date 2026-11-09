@@ -210,6 +210,7 @@ async fn local_session_info_prefers_exact_socket_capabilities() {
             proxy_upload_v1: false,
             http_cancellation: false,
             remote_credential_crypto_v1: true,
+            machine_execution_approval_v1: false,
             ..Default::default()
         },
     );

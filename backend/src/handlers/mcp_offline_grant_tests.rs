@@ -335,6 +335,7 @@ async fn assistant_team_grants_preserve_live_platform_audience_and_deleted_bound
     let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
     catalog.credential_encrypted = vec![1]; // Only metadata is read; never decrypted.
     catalog.platform_key = Some(PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: PlatformKeyAudience::Restricted,
         allowed_owner_ids: vec![f.org.clone()],

@@ -1,3 +1,4 @@
+import { retailComponentSchema } from "@/schemas/platform-models";
 import { z } from "zod";
 
 /** Where an effective value comes from; mirrors `BillingConfigSource`. */
@@ -104,6 +105,7 @@ export const credentialClassSchema = z.enum([
 export type CredentialClass = z.infer<typeof credentialClassSchema>;
 
 export const effectiveReasonSchema = z.enum([
+  "model_tariff_required",
   "billing_disabled",
   "nyxid_credentials_only",
   "lane_synced",
@@ -135,6 +137,12 @@ export const billingServiceSchema = z.object({
   effective_metric: z.string(),
   allowance_metrics: z.array(z.string()),
   effective: z.object({
+    model_prices: z.array(z.object({
+      model_id: z.string(), variant: z.record(z.string(), z.string()), lane: z.string(),
+      active_tariff_id: z.string().nullable(), pending_tariff_id: z.string().nullable(),
+      available: z.boolean(), blocking_reason: z.string().nullable(),
+      components: z.array(retailComponentSchema),
+    })).optional(),
     fallback_metric: z.string(),
     classes: z.array(effectiveClassSchema),
     resale: z.object({

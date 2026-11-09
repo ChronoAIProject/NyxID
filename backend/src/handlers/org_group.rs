@@ -70,6 +70,7 @@ pub(crate) async fn post(
         .await?;
     let request = GroupRequest {
         execution_task: participating.then(|| crate::models::execution_permission::TaskAdmission {
+            channel_source: None,
             version: 1,
             task: crate::models::execution_permission::TaskRef {
                 root_kind: crate::models::execution_permission::TaskRootKind::GroupRequest,

@@ -7290,6 +7290,7 @@ async fn chat_master_and_platform_catalogs_without_platform_selection_keep_legac
         catalog.auth_method = "bearer".into();
         catalog.service_category = "internal".into();
         catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: platform_enabled,
             ..Default::default()
         });
@@ -7828,6 +7829,7 @@ async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_
     catalog.auth_method = "bearer".into();
     catalog.auth_key_name = "Authorization".into();
     catalog.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: crate::models::downstream_service::PlatformKeyAudience::Public,
         ..Default::default()
@@ -7954,5 +7956,256 @@ async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_
     let value: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["result"]["isError"], true);
     assert!(!value.to_string().contains("connect_url"));
+    f.state.db.drop().await.unwrap();
+}
+
+// #2271: drive both direct native and nyx__call_tool discovery through the
+// real authenticated handler. Only synthetic lengths/IDs enter these fixtures.
+async fn operation_discovery_fixture(name: &'static str) -> (Fixture, String, Vec<String>) {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::services::assistant_team_service as team;
+    let f = boxed_chat_fixture(name).await;
+    let service = connected(
+        &f.state.db,
+        &f.owner,
+        "discovery-page",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Add(AgentGrants {
+            service_ids: vec![service.clone()],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let mut ids = Vec::new();
+    let now = bson::DateTime::now();
+    let rows:Vec<_>=(0..120).map(|i| {
+        let id=uuid::Uuid::new_v4().to_string(); ids.push(id.clone());
+        doc!{"_id":id,"service_id":&service,"name":format!("operation_{i}"),
+            "description":"中文 JSON \"value\"\n# Markdown\\path".repeat(8),
+            "method":"GET","path":format!("/items/{i}"),"is_active":true,"created_at":now,"updated_at":now}
+    }).collect();
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    ids.sort();
+    (f, service, ids)
+}
+
+#[tokio::test]
+async fn assistant_team_operation_discovery_mcp_pages_are_complete_bounded_and_filtered() {
+    let (f, service, expected) = operation_discovery_fixture("discovery_pages").await;
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    let hidden = connected(
+        &f.state.db,
+        &f.owner,
+        "ungranted-discovery",
+        "http://127.0.0.1:9",
+    )
+    .await;
+    let mut args = json!({"subagent":"worker","service_id":service,"limit":50});
+    let mut actual = Vec::new();
+    let mut snapshot = None;
+    let mut pages = 0usize;
+    loop {
+        let response = if pages.is_multiple_of(2) {
+            call(&f, &auth, "nyxid__get_agent_operations", args.clone()).await
+        } else {
+            direct_call(&f, &auth, "nyxid__get_agent_operations", args.clone()).await
+        };
+        let body = axum::body::to_bytes(response.into_body(), 32_000)
+            .await
+            .unwrap();
+        let wire: Value = serde_json::from_slice(&body).unwrap();
+        assert!(wire["result"].to_string().len() <= 9200);
+        assert_eq!(wire["result"]["isError"], false, "{wire}");
+        let value: Value =
+            serde_json::from_str(wire["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        if let Some(ref snapshot) = snapshot {
+            assert_eq!(&value["snapshot"], snapshot);
+        } else {
+            snapshot = Some(value["snapshot"].clone());
+        }
+        assert_eq!(value["services"].as_array().unwrap().len(), 1);
+        assert_eq!(value["services"][0]["service_id"], service);
+        actual.extend(
+            value["services"][0]["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|op| op["endpoint_id"].as_str().unwrap().to_owned()),
+        );
+        pages += 1;
+        if value["complete"] == true {
+            assert!(value["next_cursor"].is_null());
+            break;
+        }
+        args["cursor"] = value["next_cursor"].clone();
+        assert!(pages < 120);
+    }
+    assert!(pages > 3);
+    assert_eq!(actual, expected);
+    for service_id in [hidden, uuid::Uuid::new_v4().to_string()] {
+        let value = result(
+            call(
+                &f,
+                &auth,
+                "nyxid__get_agent_operations",
+                json!({"subagent":"worker","service_id":service_id}),
+            )
+            .await,
+            false,
+        )
+        .await;
+        assert_eq!(value["services"], json!([]));
+        assert_eq!(value["complete"], true);
+        assert_eq!(value["total"], 0);
+    }
+    // Discovery remains non-mutating and never creates a confirmation card.
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_team_operation_discovery_live_revocation_and_cursor_binding() {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::services::assistant_team_service as team;
+    let (f, service, ids) = operation_discovery_fixture("discovery_fences").await;
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    let initial = json!({"subagent":"worker","limit":1});
+    let first = result(
+        call(&f, &auth, "nyxid__get_agent_operations", initial.clone()).await,
+        false,
+    )
+    .await;
+    let args = json!({"subagent":"worker","cursor":first["next_cursor"],"limit":1});
+    // A specialist cannot borrow NyxBot's cursor, even for its own scope.
+    let own = authenticate(&f).await;
+    let denied = result(
+        call(&f, &own, "nyxid__get_agent_operations", args.clone()).await,
+        true,
+    )
+    .await;
+    assert!(denied.get("services").is_none());
+    assert_eq!(denied["reason"], "discovery_snapshot_changed");
+    assert!(
+        denied["message"]
+            .as_str()
+            .unwrap()
+            .contains("without cursor")
+    );
+    let mut guests = args.clone();
+    guests["guests"] = json!(true);
+    result(
+        call(&f, &auth, "nyxid__get_agent_operations", guests).await,
+        true,
+    )
+    .await;
+    let mut filter = args.clone();
+    filter["service_id"] = json!(service);
+    result(
+        call(&f, &auth, "nyxid__get_agent_operations", filter).await,
+        true,
+    )
+    .await;
+    // A concurrent contract change invalidates pagination before returning rows.
+    f.state
+        .db
+        .collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME)
+        .update_one(doc! {"_id":&ids[0]}, doc! {"$set":{"path":"/changed"}})
+        .await
+        .unwrap();
+    result(
+        call(&f, &auth, "nyxid__get_agent_operations", args.clone()).await,
+        true,
+    )
+    .await;
+    let first = result(
+        call(&f, &auth, "nyxid__get_agent_operations", initial.clone()).await,
+        false,
+    )
+    .await;
+    team::set_grants(
+        &f.state.db,
+        &f.owner,
+        &f.chat.agent_id,
+        team::GrantChange::Remove(AgentGrants {
+            service_ids: vec![service],
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let stale = json!({"subagent":"worker","cursor":first["next_cursor"]});
+    result(
+        call(&f, &auth, "nyxid__get_agent_operations", stale).await,
+        true,
+    )
+    .await;
+    let empty = result(
+        call(&f, &auth, "nyxid__get_agent_operations", initial).await,
+        false,
+    )
+    .await;
+    assert_eq!(empty["services"], json!([]));
+    // Cross-owner lookups retain not-found shaping, regardless of cursor.
+    let stranger = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(
+            &stranger,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let thread = crate::services::assistant_authority_tests::new_orchestrator(
+        &f.state,
+        &stranger,
+        "Read my operations",
+    )
+    .await;
+    let key = credentials::load_for_conversation(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &stranger,
+        &thread.id,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("x-api-key", key.raw_key.parse().unwrap());
+    let stranger_auth = authenticate_mcp(&f.state, &headers, false).await.unwrap();
+    let denied = result(
+        call(
+            &f,
+            &stranger_auth,
+            "nyxid__get_agent_operations",
+            json!({"subagent":f.chat.agent_id,"cursor":first["next_cursor"]}),
+        )
+        .await,
+        true,
+    )
+    .await;
+    assert!(denied.get("services").is_none());
+    assert_eq!(denied["error"], "not_found");
     f.state.db.drop().await.unwrap();
 }

@@ -26,7 +26,7 @@ use crate::{
         assistant_agent::{
             AgentGrants, AgentKind, AssistantAgent, COLLECTION_NAME as AGENTS, GuestAccess,
             MAX_DISPLAY_NAME_CHARS, MAX_MEMORY_NOTE_CHARS, MAX_MEMORY_NOTES, MAX_PERSONA_CHARS,
-            MemoryNote,
+            MAX_VOICE_INSTRUCTIONS_CHARS, MemoryNote,
         },
         assistant_conversation::{
             AccessMode, AgentEvent, AgentRole, AssistantConversation,
@@ -48,6 +48,8 @@ pub const NYXBOT_NAME: &str = "NyxBot";
 pub const MAX_NAME_CHARS: usize = 32;
 pub const MAX_DESCRIPTION_CHARS: usize = 2048;
 pub const MAX_GRANT_TARGETS: usize = 32;
+/// Archive discovery is bounded separately from the complete live roster.
+pub const DESTROYED_AGENT_LIMIT: usize = 200;
 /// Loop guards for server-started event turns.
 pub const EVENT_TURNS_PER_HOUR: u64 = 20;
 /// Channel turns run at once for one owner, across all their bots and chats,
@@ -225,6 +227,7 @@ pub async fn ensure_nyxbot(db: &Database, owner: &str) -> AppResult<AssistantAge
         memory: Vec::new(),
         display_name: None,
         persona: None,
+        voice_instructions: None,
         destroyed_at: None,
         created_at: now,
         updated_at: now,
@@ -504,28 +507,56 @@ async fn qualified_name(db: &Database, agent: &AssistantAgent) -> AppResult<Stri
     Ok(format!("{prefix}/{}", agent.name))
 }
 
-/// The owner's agents: NyxBot first, then specialists oldest first.
+/// All visible live agents (NyxBot first, then oldest first), followed by the
+/// most recently destroyed agents. Archives never consume live roster slots.
 pub async fn agents(
     db: &Database,
     owner: &str,
     include_destroyed: bool,
 ) -> AppResult<Vec<AssistantAgent>> {
+    Ok(agent_roster(db, owner, include_destroyed).await?.0)
+}
+
+async fn agent_roster(
+    db: &Database,
+    owner: &str,
+    include_destroyed: bool,
+) -> AppResult<(Vec<AssistantAgent>, bool)> {
     let owners = super::org_agent_service::visible_owners(db, owner).await?;
-    let mut filter =
+    let scope =
         doc! {"user_id": {"$in": owners}, "$or": [{"user_id": owner}, {"kind": "specialist"}]};
-    if !include_destroyed {
-        filter.insert("destroyed_at", bson::Bson::Null);
-    }
-    let mut rows: Vec<AssistantAgent> = db
-        .collection::<AssistantAgent>(AGENTS)
-        .find(filter)
-        .sort(doc! {"created_at": 1})
-        .limit(200)
+    let collection = db.collection::<AssistantAgent>(AGENTS);
+    let mut live_filter = scope.clone();
+    live_filter.insert("destroyed_at", bson::Bson::Null);
+    let mut rows: Vec<AssistantAgent> = collection
+        .find(live_filter)
+        .sort(doc! {"created_at": 1, "_id": 1})
         .await?
         .try_collect()
         .await?;
     rows.sort_by_key(|agent| !agent.is_nyxbot());
-    Ok(rows)
+    if !include_destroyed {
+        return Ok((rows, false));
+    }
+    let mut archive_filter = scope;
+    archive_filter.insert("destroyed_at", doc! {"$ne": bson::Bson::Null});
+    let mut archive: Vec<AssistantAgent> = collection
+        .find(archive_filter)
+        .sort(doc! {"destroyed_at": -1, "_id": -1})
+        .limit((DESTROYED_AGENT_LIMIT + 1) as i64)
+        .await?
+        .try_collect()
+        .await?;
+    let truncated = archive.len() > DESTROYED_AGENT_LIMIT;
+    archive.truncate(DESTROYED_AGENT_LIMIT);
+    // A live row destroyed between the two reads must not appear twice.
+    let live_ids: HashSet<_> = rows.iter().map(|row| row.id.clone()).collect();
+    rows.extend(
+        archive
+            .into_iter()
+            .filter(|row| !live_ids.contains(&row.id)),
+    );
+    Ok((rows, truncated))
 }
 
 /// The agent a thread belongs to; legacy rows belong to the owner's NyxBot.
@@ -1057,6 +1088,23 @@ pub async fn resolve_each_target(
             ));
             continue;
         }
+        // Logical model grants use public IDs, never private provider routes.
+        // Selection does not create these grants implicitly.
+        if target.starts_with("nyxid/") {
+            super::assistant_platform_model::require_ready(db).await?;
+            let model = super::platform_model_service::authorized_model(db, actor, target).await?;
+            let id = model
+                .billing_service_id
+                .ok_or_else(super::assistant_platform_model::unavailable)?;
+            resolved
+                .ids_by_request
+                .insert(target.to_owned(), id.clone());
+            if !resolved.platform_service_ids.contains(&id) {
+                resolved.platform_service_ids.push(id);
+                resolved.slugs.push(target.to_owned());
+            }
+            continue;
+        }
         let Some(service) = catalog
             .services
             .iter()
@@ -1161,6 +1209,7 @@ pub struct CreateRequest {
     /// Optional friendly name and persona (tone, personality).
     pub display_name: Option<String>,
     pub persona: Option<String>,
+    pub voice_instructions: Option<String>,
     pub targets: GrantTargets,
     pub account_read: bool,
     pub specialty: Option<String>,
@@ -1400,6 +1449,12 @@ async fn create_specialist_inner(
             "A persona",
             true,
         )?,
+        voice_instructions: style_value(
+            request.voice_instructions.as_deref().unwrap_or_default(),
+            MAX_VOICE_INSTRUCTIONS_CHARS,
+            "Voice instructions",
+            true,
+        )?,
         destroyed_at: None,
         created_at: now,
         updated_at: now,
@@ -1510,6 +1565,7 @@ async fn create_specialist_inner(
 pub struct AgentStyle<'a> {
     pub display_name: Option<&'a str>,
     pub persona: Option<&'a str>,
+    pub voice_instructions: Option<&'a str>,
 }
 
 /// A bounded, credential-free display name or persona; empty clears it.
@@ -1611,6 +1667,13 @@ pub async fn update_agent(
             "A persona",
             true,
         ),
+        (
+            "voice_instructions",
+            style.voice_instructions,
+            MAX_VOICE_INSTRUCTIONS_CHARS,
+            "Voice instructions",
+            true,
+        ),
     ] {
         match value.map(|value| style_value(value, max, what, multiline)) {
             Some(Ok(Some(value))) => {
@@ -1708,6 +1771,16 @@ pub async fn set_agent_policy(
     if let Some(model) = policy.model {
         if !super::assistant_nyxagent::valid_model(model) {
             return Err(AppError::AssistantModelUnavailable);
+        }
+        if model.starts_with("nyxid/") {
+            super::assistant_platform_model::validate_selection(
+                db,
+                &actor.user_id,
+                &current,
+                model,
+                false,
+            )
+            .await?;
         }
         set.insert("model", model);
     }
@@ -2461,6 +2534,25 @@ pub(crate) fn looks_secret(text: &str) -> bool {
         .any(|marker| lower.contains(marker))
 }
 
+/// Shared by the native schema boundary and both memory stores; never echo input.
+pub(crate) fn validate_memory_text(text: &str) -> AppResult<&str> {
+    use crate::errors::memory_write::MemoryWriteReason as Reason;
+    let text = text.trim();
+    let reason = if text.is_empty() {
+        Some(Reason::NoteEmpty)
+    } else if text.chars().count() > MAX_MEMORY_NOTE_CHARS {
+        Some(Reason::NoteTooLong)
+    } else if looks_secret(text) {
+        Some(Reason::SecretDetected)
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(AppError::MemoryWrite(reason));
+    }
+    Ok(text)
+}
+
 /// Remember a note, or replace one by ID. Bounded; never secrets.
 pub async fn remember(
     db: &Database,
@@ -2472,37 +2564,38 @@ pub async fn remember(
     let current = maintained_agent(db, owner, agent_id).await?;
     let actor = owner;
     let owner = current.user_id.as_str();
-    let text = text.trim();
-    if text.is_empty() || text.chars().count() > MAX_MEMORY_NOTE_CHARS {
-        return Err(AppError::ValidationError(format!(
-            "A memory note must contain 1 to {MAX_MEMORY_NOTE_CHARS} characters"
-        )));
+    use crate::errors::memory_write::MemoryWriteReason as Reason;
+    if current.destroyed_at.is_some() {
+        return Err(AppError::MemoryWrite(Reason::MemoryConflict));
     }
-    if looks_secret(text) {
-        return Err(AppError::ValidationError(
-            "Memory never stores credentials or secrets".into(),
-        ));
-    }
+    let text = validate_memory_text(text)?;
     let now = Utc::now();
     let collection = db.collection::<AssistantAgent>(AGENTS);
     if let Some(replace_id) = replace_id {
+        // Return the exact post-write snapshot. A later delete/replace must not
+        // turn a committed save into an apparent failure or another write's receipt.
         let updated = collection
-            .update_one(
-                doc! {"_id": agent_id, "user_id": owner, "memory.id": replace_id},
+            .find_one_and_update(
+                doc! {"_id": agent_id, "user_id": owner, "destroyed_at": bson::Bson::Null, "memory.id": replace_id},
                 doc! {"$set": {"memory.$.text": text,
                 "memory.$.updated_at": bson::DateTime::from_chrono(now)}},
             )
+            .return_document(ReturnDocument::After)
             .await?;
-        if updated.matched_count != 1 {
-            return Err(AppError::NotFound("Memory note not found".into()));
-        }
+        let Some(updated) = updated else {
+            let current = maintained_agent(db, actor, agent_id).await?;
+            return Err(AppError::MemoryWrite(if current.destroyed_at.is_some() {
+                Reason::MemoryConflict
+            } else {
+                Reason::ReplaceTargetNotFound
+            }));
+        };
         super::org_agent_service::audit_change(db, actor, &current, "memory").await;
-        let agent = agent(db, actor, agent_id).await?;
-        return agent
+        return updated
             .memory
             .into_iter()
             .find(|note| note.id == replace_id)
-            .ok_or_else(|| AppError::NotFound("Memory note not found".into()));
+            .ok_or(AppError::MemoryWrite(Reason::MemoryInternalError));
     }
     let note = MemoryNote {
         id: Uuid::new_v4().to_string(),
@@ -2523,10 +2616,14 @@ pub async fn remember(
         )
         .await?;
     if pushed.matched_count != 1 {
-        agent(db, owner, agent_id).await?;
-        return Err(AppError::Conflict(format!(
-            "Memory holds at most {MAX_MEMORY_NOTES} notes; forget or replace one first"
-        )));
+        let current = maintained_agent(db, actor, agent_id).await?;
+        return Err(AppError::MemoryWrite(
+            if current.destroyed_at.is_none() && current.memory.len() >= MAX_MEMORY_NOTES {
+                Reason::MemoryFull
+            } else {
+                Reason::MemoryConflict
+            },
+        ));
     }
     super::org_agent_service::audit_change(db, actor, &current, "memory").await;
     Ok(note)
@@ -2653,11 +2750,13 @@ pub struct AgentSummary {
     pub name: String,
     pub display_name: Option<String>,
     pub persona: Option<String>,
+    pub voice_instructions: Option<String>,
     pub description: String,
     pub specialty: Option<String>,
     pub created_by: String,
     /// NyxAgent model for new threads.
     pub model: String,
+    pub model_unavailable: bool,
     /// The agent's own access mode; absent follows the owner's workspace mode.
     pub access_mode_override: Option<crate::models::assistant_settings::AccessMode>,
     pub channel_checking_notice: bool,
@@ -2804,6 +2903,7 @@ pub async fn request_summaries(
 async fn slug_names(
     db: &Database,
     agents: &[AssistantAgent],
+    viewer: &str,
 ) -> AppResult<HashMap<String, String>> {
     let user_services: Vec<String> = agents
         .iter()
@@ -2817,6 +2917,7 @@ async fn slug_names(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
+    let mut platform_ids = Vec::new();
     let mut names = HashMap::new();
     for (collection, ids) in [
         (crate::models::user_service::COLLECTION_NAME, user_services),
@@ -2828,11 +2929,38 @@ async fn slug_names(
         let mut cursor = db
             .collection::<bson::Document>(collection)
             .find(doc! {"_id": {"$in": &ids}})
-            .projection(doc! {"slug": 1})
+            .projection(doc! {"slug": 1, "platform_key.purpose":1})
             .await?;
         while let Some(row) = cursor.try_next().await? {
             if let (Ok(id), Ok(slug)) = (row.get_str("_id"), row.get_str("slug")) {
                 names.insert(id.to_owned(), slug.to_owned());
+                if row
+                    .get_document("platform_key")
+                    .ok()
+                    .and_then(|p| p.get_str("purpose").ok())
+                    == Some("model_offering")
+                {
+                    // An absent/deleted model must not fall back to its internal offering slug.
+                    names.insert(id.to_owned(), String::new());
+                    platform_ids.push(id.to_owned());
+                }
+            }
+        }
+    }
+    if !platform_ids.is_empty() {
+        let mut models = db
+            .collection::<crate::models::platform_model::PlatformModel>(
+                crate::models::platform_model::COLLECTION_NAME,
+            )
+            .find(doc! {"billing_service_id":{"$in":platform_ids}})
+            .await?;
+        while let Some(model) = models.try_next().await? {
+            if let Some(id) = model.billing_service_id {
+                names.insert(
+                    id,
+                    super::assistant_platform_model::public_selection(db, viewer, &model.public_id)
+                        .await?,
+                );
             }
         }
     }
@@ -2884,12 +3012,41 @@ pub async fn summaries(
     include_destroyed: bool,
     reply_chars: usize,
 ) -> AppResult<Vec<AgentSummary>> {
+    Ok(
+        summaries_with_archive(db, owner, include_nyxbot, include_destroyed, reply_chars)
+            .await?
+            .0,
+    )
+}
+
+/// Archive metadata comes from the same bounded query as the returned rows.
+pub async fn summaries_with_archive(
+    db: &Database,
+    owner: &str,
+    include_nyxbot: bool,
+    include_destroyed: bool,
+    reply_chars: usize,
+) -> AppResult<(Vec<AgentSummary>, bool)> {
     ensure_nyxbot(db, owner).await?;
-    let mut rows = agents(db, owner, include_destroyed).await?;
+    let (mut rows, truncated) = agent_roster(db, owner, include_destroyed).await?;
     if !include_nyxbot {
         rows.retain(|agent| !agent.is_nyxbot());
     }
-    let names = slug_names(db, &rows).await?;
+    Ok((
+        summaries_for_agents(db, owner, rows, reply_chars).await?,
+        truncated,
+    ))
+}
+
+/// Summarize already resolved own/org agents, including an exact archived
+/// agent requested through its details route rather than roster discovery.
+pub(crate) async fn summaries_for_agents(
+    db: &Database,
+    owner: &str,
+    rows: Vec<AssistantAgent>,
+    reply_chars: usize,
+) -> AppResult<Vec<AgentSummary>> {
+    let names = slug_names(db, &rows, owner).await?;
     let requests = pending_requests(db, owner).await?;
     let by_thread = request_agents(db, owner, &requests, &rows).await?;
     let running = running_agents(db, owner).await?;
@@ -2945,6 +3102,8 @@ pub async fn summaries(
             (0, _) | (_, None) => None,
             (chars, Some(home)) => last_reply(db, owner, home, chars).await?,
         };
+        let public_model =
+            super::assistant_platform_model::public_selection(db, owner, &agent.model).await?;
         out.push(AgentSummary {
             share_role: None,
             owner_id: agent.user_id.clone(),
@@ -2961,8 +3120,9 @@ pub async fn summaries(
                 .service_ids
                 .iter()
                 .chain(&agent.grants.platform_service_ids)
+                .filter(|id| names.get(*id).is_none_or(|name| !name.is_empty()))
                 .map(|id| {
-                    if org_owned {
+                    if org_owned && !names.get(id).is_some_and(|s| s.starts_with("nyxid/")) {
                         id.clone()
                     } else {
                         names.get(id).cloned().unwrap_or_else(|| id.clone())
@@ -2975,7 +3135,7 @@ pub async fn summaries(
                 .service_ids
                 .iter()
                 .chain(&agent.grants.platform_service_ids)
-                .filter(|_| !org_owned)
+                .filter(|id| !org_owned && names.get(*id).is_none_or(|name| !name.is_empty()))
                 .map(|id| {
                     let name = names.get(id).cloned().unwrap_or_else(|| id.clone());
                     let level = agent.guest_access.get(id).copied().unwrap_or_default();
@@ -2997,10 +3157,12 @@ pub async fn summaries(
             name: agent.name.clone(),
             display_name: agent.display_name.clone(),
             persona: agent.persona.clone(),
+            voice_instructions: agent.voice_instructions.clone(),
             description: agent.description.clone(),
             specialty: agent.specialty.clone(),
             created_by: agent.created_by.clone(),
-            model: agent.model.clone(),
+            model: public_model.clone(),
+            model_unavailable: agent.model.starts_with("nyxid/") && public_model.is_empty(),
             access_mode_override: agent.access_mode_override,
             channel_checking_notice: agent.channel_checking_notice,
             home_conversation_id: home_id,

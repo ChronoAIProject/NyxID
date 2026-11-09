@@ -8,7 +8,7 @@ pub(crate) fn eligible(context: &RequestContext, chat: Option<&acks::ChatAuthori
         || matches!(
             context.descendant.as_deref(),
             Some(descendants::Descendant::Job(_))
-        )
+        ) && context.machine.get().is_none()
         || chat.is_some_and(|c| {
             c.guest
                 || c.execution_unsupported
@@ -19,6 +19,10 @@ pub(crate) fn eligible(context: &RequestContext, chat: Option<&acks::ChatAuthori
         })
     {
         return false;
+    }
+    if context.machine.get().is_some() {
+        return matches!(context.ingress.get(), Some(PreparedAdapter::Machine { .. }))
+            && chat.is_some_and(|c| c.execution_task.is_some());
     }
     if matches!(
         context.descendant.as_deref(),
@@ -40,6 +44,11 @@ pub(super) async fn source(
     context: &RequestContext,
     chat: Option<&acks::ChatAuthority>,
 ) -> AppResult<Option<ProposalSource>> {
+    if let Some(machine) = context.machine.get() {
+        return Ok(Some(ProposalSource::Machine {
+            binding: Box::new(machine.binding.clone()),
+        }));
+    }
     if let Some(native) = &context.native {
         return Ok(Some(native.source()));
     }
@@ -75,6 +84,7 @@ pub(super) async fn source(
 
 pub(super) fn adapter_identity(adapter: &PreparedAdapter) -> serde_json::Value {
     match adapter {
+        PreparedAdapter::Machine { binding, .. } => json!({"adapter":"machine","binding":binding}),
         PreparedAdapter::Unsupported => json!({"adapter":"unsupported"}),
         PreparedAdapter::Http => json!({"adapter":"http"}),
         PreparedAdapter::Pool { binding } => json!({"adapter":"pool","binding":binding}),
@@ -105,6 +115,11 @@ pub(super) fn locator(
     context: &RequestContext,
     chat: Option<&acks::ChatAuthority>,
 ) -> AppResult<String> {
+    if let Some(machine) = context.machine.get() {
+        return fingerprint(
+            &json!({"version":2,"actor":context.actor,"principal":context.principal,"key":chat.map(|c|&c.api_key_id),"machine":machine.binding,"occurrence":context.idempotency.get().unwrap_or(&context.operation_id)}),
+        );
+    }
     fingerprint(
         &json!({"version":2,"actor":context.actor,"principal":context.principal,"key":chat.map(|c|&c.api_key_id),"child":context.source_credential.get(),"occurrence":context.idempotency.get().unwrap_or(&context.operation_id)}),
     )
@@ -205,6 +220,10 @@ pub(super) async fn fence_source(
         }
     }
     let binding = match &p.source {
+        ProposalSource::Machine { binding } => {
+            if binding.actor_id != row.user_id || binding.key_id != p.key_id {return Err(refused());}
+            binding.fence(db,session,p.task.as_ref().ok_or_else(refused)?).await?; None
+        },
         ProposalSource::External { pool } => pool.as_ref().map(|pool| (
             "service_pools", doc! {"_id":&pool.id,"user_id":&pool.owner_id,"config_revision":pool.revision,"is_active":true,"members":{"$elemMatch":{"user_service_id":&p.contract.binding.connection_id,"enabled":true}}},
         )),

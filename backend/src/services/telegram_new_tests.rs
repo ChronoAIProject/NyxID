@@ -388,7 +388,10 @@ async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
         })
         .unwrap();
     assert_eq!(creation["suggested_name"], "Support");
-    assert_eq!(creation["suggested_username"], "support_bot");
+    assert_eq!(
+        creation["suggested_username"],
+        crate::services::telegram_new_service::username_suggestions(&pending)[0]
+    );
     assert_eq!(pending.status, Status::WaitingConsent);
     let view = serde_json::to_value(crate::handlers::telegram_new::RequestResponse::from(
         pending.clone(),
@@ -515,19 +518,19 @@ async fn telegram_new_start_sends_readable_instructions_before_the_creation_keyb
     for replies in sent.as_chunks::<2>().0 {
         let instructions = replies[0].body_json::<Value>().unwrap();
         assert_eq!(instructions["chat_id"], 700);
-        assert!(instructions.get("reply_markup").is_none());
+        assert!(instructions["reply_markup"]["keyboard"].is_null());
         let text = instructions["text"].as_str().unwrap();
         assert!(text.contains("Create your Telegram bot"));
         assert!(text.contains("Personal account:"));
         assert!(text.contains("https://app.nyxid.test"));
-        assert!(text.contains("Open the same creation form"));
+        assert!(text.contains("Open creation form"));
         assert!(text.contains("update Telegram to the latest version"));
         assert!(!text.contains(&challenge));
         let keyboard = replies[1].body_json::<Value>().unwrap();
         assert_eq!(keyboard["chat_id"], 700);
         assert_eq!(
             keyboard["reply_markup"]["keyboard"][0][0]["request_managed_bot"],
-            json!({"request_id": 1, "suggested_name": "Customer Support", "suggested_username": "customer_support_bot"}),
+            json!({"request_id": 1, "suggested_name": "Customer Support", "suggested_username": crate::services::telegram_new_service::username_suggestions(&request)[0]}),
         );
     }
     let bound = service.get(&actor, &request.id).await.unwrap();
@@ -542,11 +545,7 @@ async fn telegram_new_keyboard_failure_is_acknowledged_after_instructions() {
     Mock::given(method("POST"))
         .and(path(format!("/bot{MANAGER}/sendMessage")))
         .and(|request: &wiremock::Request| {
-            request
-                .body_json::<Value>()
-                .unwrap()
-                .get("reply_markup")
-                .is_some()
+            request.body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_array()
         })
         .respond_with(ResponseTemplate::new(400))
         .with_priority(1)
@@ -564,7 +563,7 @@ async fn telegram_new_keyboard_failure_is_acknowledged_after_instructions() {
     let sent = server.received_requests().await.unwrap();
     assert_eq!(sent.len(), 2);
     let instructions = sent[0].body_json::<Value>().unwrap();
-    assert!(instructions.get("reply_markup").is_none());
+    assert!(instructions["reply_markup"]["keyboard"].is_null());
     assert!(
         instructions["text"]
             .as_str()
@@ -602,13 +601,7 @@ async fn telegram_new_instruction_failure_remains_retryable_without_sending_keyb
     ));
     let sent = server.received_requests().await.unwrap();
     assert_eq!(sent.len(), 1);
-    assert!(
-        sent[0]
-            .body_json::<Value>()
-            .unwrap()
-            .get("reply_markup")
-            .is_none()
-    );
+    assert!(sent[0].body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_null());
 }
 
 #[tokio::test]
@@ -1882,7 +1875,7 @@ mod claims {
         let sent = server.received_requests().await.unwrap();
         assert_eq!(sent.len(), 2);
         let instructions = sent[0].body_json::<Value>().unwrap();
-        assert!(instructions.get("reply_markup").is_none());
+        assert!(instructions["reply_markup"]["keyboard"].is_null());
         assert!(
             instructions["text"]
                 .as_str()

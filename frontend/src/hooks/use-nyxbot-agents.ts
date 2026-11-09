@@ -11,6 +11,10 @@ import type {
 } from "@/schemas/assistant-nyxagent";
 import { livePollInterval, useNyxAgentLiveConnected } from "@/hooks/use-nyxagent-live-status";
 import { useAuthStore } from "@/stores/auth-store";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
+import type { NyxAgentModel } from "@/schemas/assistant-nyxagent";
+import { componentLabel } from "@/schemas/platform-models";
 import { useAgentOwnerMutation } from "./use-agent-owner-mutation";
 
 export const nyxBotQueryKeys = {
@@ -310,15 +314,49 @@ export function useStopNyxBotChannelThread() {
 }
 
 /** The models NyxAgent offers this owner. */
-export function useNyxAgentModels(enabled = true) {
+export function useNyxAgentModels(enabled = true, context?: { agentId?: string; conversationId?: string }) {
   const userId = useAuthStore((state) => state.user?.id);
-  return useQuery({
+  const platformEnabled = useFeature(FEATURE_FLAG.INFERENCE_PLATFORM_MODELS);
+  const legacy = useQuery({
     queryKey: nyxBotQueryKeys.models(userId),
     queryFn: () => nyxBotApi.models(),
     enabled: enabled && Boolean(userId),
     retry: false,
     staleTime: 60_000,
   });
+  const platform = useQuery({
+    queryKey: [...nyxBotQueryKeys.models(userId), "platform", context?.conversationId ?? null, context?.agentId ?? null],
+    queryFn: async () => {
+      const rows: NyxAgentModel[] = [];
+      const seen = new Set<string>();
+      let after: string | undefined;
+      do {
+        const page = await nyxBotApi.platformModels(context, after);
+        for (const model of page.models) {
+          // The assistant manifest selects the default tariff; other variants
+          // cannot advertise prices or image support for this selection.
+          const prices = model.retail_prices.filter((price) => price.available && Object.keys(price.variant).length === 0);
+          rows.push({
+            id: model.id, label: model.display_name,
+            available: model.availability !== "unavailable" && prices.length > 0,
+            input_modalities: prices.some((price) => price.image_input) ? ["text", "image"] : ["text"],
+            description: ["Model usage billed to you", ...prices.flatMap((price) => price.components.map((part) =>
+              `${componentLabel(part)}: ${part.explicit_free ? "Free" : `${part.credits_per_unit} credits / unit`}`))].join(" · "),
+          });
+        }
+        after = page.next_after ?? undefined;
+        if (after && seen.has(after)) throw new Error("Model pagination did not advance");
+        if (after) seen.add(after);
+      } while (after);
+      return rows;
+    },
+    enabled: enabled && Boolean(userId) && platformEnabled,
+    retry: false,
+    staleTime: 0,
+  });
+  // A platform outage never hides or authorizes legacy profiles. Cached platform
+  // names cannot survive flag-off, actor changes or a failed live refresh.
+  return { ...legacy, data: legacy.data ? [...legacy.data, ...(platformEnabled && !platform.isError ? platform.data ?? [] : [])] : legacy.data };
 }
 
 /** Select a thread's model; refreshes the thread and its agent's thread list. */

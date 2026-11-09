@@ -616,12 +616,13 @@ async fn live_read_budget_is_constant_and_ordinary_snapshot_checks_issue_zero_co
     let db = mongodb::Client::with_options(options)
         .unwrap()
         .database(f.db.name());
-    let cache = snapshot::Cache::default();
+    let cache = snapshot::Cache::for_database(&db);
     cache.refresh(&db).await.unwrap();
     captured.lock().unwrap().clear();
     let person = test_user(&f.person, UserType::Person);
     for _ in 0..100 {
         assert!(cache.candidate(&person, &[]));
+        assert!(snapshot::channel_candidate(&db, &f.person));
     }
     assert!(captured.lock().unwrap().is_empty());
     assert!(live_enabled(&db, &f.person, None).await.unwrap());
@@ -1118,5 +1119,45 @@ async fn broad_auth_candidates_add_zero_reads_and_org_markers_remain_independent
             baseline = Some(actual);
         }
     }
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn channel_snapshot_hints_respect_deny_cold_overflow_and_do_not_infer_orgs() {
+    let f = Fixture::new("channel_enrollment_hint").await;
+    let cache = snapshot::Cache::for_database(&f.db);
+    assert!(!snapshot::channel_candidate(&f.db, &f.person));
+    f.change(FlagTargetKind::Global, None, Some(true))
+        .await
+        .unwrap();
+    cache.refresh(&f.db).await.unwrap();
+    assert!(snapshot::channel_candidate(&f.db, &f.person));
+    f.change(FlagTargetKind::User, Some(&f.person), Some(false))
+        .await
+        .unwrap();
+    cache.refresh(&f.db).await.unwrap();
+    assert!(!snapshot::channel_candidate(&f.db, &f.person));
+    cache.replace(None);
+    assert!(!snapshot::channel_candidate(&f.db, &f.person));
+    f.change(FlagTargetKind::Global, None, Some(false))
+        .await
+        .unwrap();
+    f.change(FlagTargetKind::User, Some(&f.person), None)
+        .await
+        .unwrap();
+    f.membership(OrgRole::Member).await;
+    f.change(FlagTargetKind::Org, Some(&f.org), Some(true))
+        .await
+        .unwrap();
+    cache.refresh(&f.db).await.unwrap();
+    assert!(!snapshot::channel_candidate(&f.db, &f.person));
+    let one =
+        f.db.collection::<FeatureFlagOverride>(OVERRIDES)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+    cache.replace(Some(vec![one; 10_001]));
+    assert!(!snapshot::channel_candidate(&f.db, &f.person));
     f.db.drop().await.unwrap();
 }

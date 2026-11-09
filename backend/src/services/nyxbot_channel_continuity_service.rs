@@ -91,7 +91,7 @@ async fn restore(
             owner_sender_ids.push(sender.clone());
         }
     }
-    channels.update_one(doc! {"_id":&row.id},doc! {"$set":{"owner_sender_ids":owner_sender_ids,"private_chats":&previous.private_chats,"private_chat_posts":previous.private_chat_posts,
+    channels.update_one(doc! {"_id":&row.id},doc! {"$inc":{"execution_policy_revision":1_i64},"$set":{"owner_sender_ids":owner_sender_ids,"private_chats":&previous.private_chats,"private_chat_posts":previous.private_chat_posts,
         "continuity_from_channel_id":&previous.id,"continuity_restored_at":bson::DateTime::now()}}).session(&mut *session).await?;
     releases::audit(
         db,
@@ -140,7 +140,7 @@ pub(crate) async fn activate(
             let now=Utc::now();
             let groups_due=if row.transport=="gateway" {bson::Bson::DateTime(bson::DateTime::from_chrono(now))} else {bson::Bson::Null};
             if db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&id,"status":"pending","gateway_setup_release_id":&row.gateway_setup_release_id},
-                doc! {"$set":{"status":"active","route_id":&route,"link_code_hash":&link_hash,
+                doc! {"$inc":{"execution_policy_revision":1_i64},"$set":{"status":"active","route_id":&route,"link_code_hash":&link_hash,
                     "link_code_expires_at":bson::DateTime::from_chrono(now+chrono::Duration::hours(LINK_CODE_TTL_HOURS)),
                     "gateway_groups_retry_at":groups_due,"gateway_native_phase":row.gateway_source.as_ref().map(|_|"ready"),"updated_at":bson::DateTime::from_chrono(now)},
                     "$unset":{"gateway_setup_release_id":""}}).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}

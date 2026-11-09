@@ -118,6 +118,7 @@ pub(crate) async fn enable_billing_with_entitlement(
     service.slug = "api-twitter".into();
     service.billing = Some(ServiceBilling {
         byok_pricing: Some(LanePricing {
+            model_prices: Vec::new(),
             metric: BillingMetric::Requests,
             credits_per_unit: "2".into(),
             lago_metric_code: "platform_svc_api-twitter_byok".into(),
@@ -128,6 +129,7 @@ pub(crate) async fn enable_billing_with_entitlement(
         }),
         // A very different master-key price proves shared OAuth picks its own lane.
         platform_key_pricing: Some(LanePricing {
+            model_prices: Vec::new(),
             metric: BillingMetric::Requests,
             credits_per_unit: "99".into(),
             lago_metric_code: "platform_svc_api-twitter_pk".into(),

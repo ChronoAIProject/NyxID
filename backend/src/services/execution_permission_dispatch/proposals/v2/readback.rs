@@ -5,6 +5,7 @@ pub(crate) fn view(row: &ApprovalRequest) -> ProposalView {
     ProposalView {
         source: p.map(|p| {
             match p.source {
+                ProposalSource::Machine { .. } => "Machine service request",
                 ProposalSource::External { .. } => "API key request",
                 ProposalSource::Native { .. } => "Native permission key",
                 ProposalSource::Watch { .. } => "Background operation",
@@ -32,6 +33,7 @@ pub(crate) fn view(row: &ApprovalRequest) -> ProposalView {
             p.choices
                 .iter()
                 .map(|c| ChoiceView {
+                    context_scope: None,
                     id: c.id.clone(),
                     digest: c.digest.clone(),
                     label: c.label.clone(),
@@ -100,6 +102,12 @@ pub(crate) async fn readback(
             .map_err(|e| if e.is_forbidden() { missing() } else { e })?;
     }
     let binding = match &p.source {
+        ProposalSource::Machine { binding } => {
+            let admission=context.machine.get().ok_or_else(missing)?;
+            if fingerprint(&admission.binding)? != fingerprint(binding)? {return Err(missing());}
+            crate::services::security_readiness_service::require(&state.db,machine::READINESS).await?;
+            binding.live(&state.db,p.task.as_ref().ok_or_else(missing)?).await.map_err(|e|if e.is_forbidden(){missing()}else{e})?; None
+        },
         ProposalSource::External { pool } => pool.as_ref().map(|pool| (
             "service_pools", doc! {"_id":&pool.id,"user_id":&pool.owner_id,"config_revision":pool.revision,"is_active":true,"members":{"$elemMatch":{"user_service_id":&p.contract.binding.connection_id,"enabled":true}}},
         )),
@@ -160,4 +168,33 @@ pub(crate) async fn decrypt_result(
         return Err(conflict());
     }
     serde_json::from_slice(&raw).map(Some).map_err(encoding)
+}
+
+/// Called only by the verified node gateway, after its signed job/runtime/lease checks.
+pub(crate) async fn machine_readback(
+    state: &crate::AppState,
+    auth: &crate::mw::auth::AuthUser,
+    job: &crate::models::machine_job::MachineJob,
+    id: &str,
+) -> AppResult<ExecutionView> {
+    let row=state.db.collection::<ApprovalRequest>(REQUESTS).find_one(doc!{"_id":id,"user_id":&job.user_id,"execution_proposal.version":2,"execution_proposal.v2.source.kind":"machine","execution_proposal.v2.source.binding.job_id":&job.id,"execution_proposal.v2.source.binding.node_id":&job.node_id,"execution_proposal.v2.source.binding.runtime_id":&job.runtime_id}).await?.ok_or_else(missing)?;
+    let p = proposal(&row)?;
+    let ProposalSource::Machine { binding } = &p.source else {
+        return Err(missing());
+    };
+    binding
+        .job(&state.db)
+        .await
+        .map_err(|e| if e.is_forbidden() { missing() } else { e })?;
+    let context = auth.execution_permission.as_ref().ok_or_else(missing)?;
+    context
+        .machine
+        .set(Arc::new(machine::Admission {
+            binding: (**binding).clone(),
+            deadline: row.expires_at,
+            job_deadline: job.expires_at,
+            cancellation: Default::default(),
+        }))
+        .map_err(|_| missing())?;
+    readback(state, auth, &row).await
 }

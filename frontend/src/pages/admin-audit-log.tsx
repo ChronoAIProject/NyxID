@@ -56,6 +56,7 @@ import {
   getAppliedAdminAuditLogFilters,
   isAdminAuditLogDateFilterValid,
   normalizeAdminAuditLogSearch,
+  normalizeAuditTurnId,
   parseAdminAuditLogSearchFilters,
   updateAdminAuditLogSearchFilters,
 } from "@/lib/admin-audit-log";
@@ -230,6 +231,7 @@ export function AdminAuditLogPage() {
     routeSearch.search_filters,
     routeSearch.user_id,
     routeSearch.api_key_id,
+    routeSearch.turn_id,
   ].join("\u0000");
   const [searchDraft, setSearchDraft] = useState("");
   const [selectedSearchField, setSelectedSearchField] =
@@ -247,6 +249,7 @@ export function AdminAuditLogPage() {
     per_page: routeSearch.per_page ?? ADMIN_AUDIT_LOG_DEFAULT_PER_PAGE,
     user_id: routeSearch.user_id,
     api_key_id: routeSearch.api_key_id,
+    turn_id: routeSearch.turn_id,
     search: routeSearch.search,
     search_filters: routeSearch.search_filters,
     custom_filters: routeSearch.custom_filters,
@@ -361,6 +364,7 @@ export function AdminAuditLogPage() {
       search: undefined,
       user_id: undefined,
       api_key_id: undefined,
+      turn_id: undefined,
       search_filters: undefined,
       custom_filters: undefined,
       event_type: undefined,
@@ -463,7 +467,12 @@ export function AdminAuditLogPage() {
         toast.error("Search values must be 256 characters or fewer");
         return;
       }
-      exactPatch = { ...exactPatch, [selectedExactParam]: term };
+      const exactTerm = selectedExactParam === "turn_id" ? normalizeAuditTurnId(term) : term;
+      if (!exactTerm) {
+        toast.error("Enter a complete turn ID");
+        return;
+      }
+      exactPatch = { ...exactPatch, [selectedExactParam]: exactTerm };
     } else {
       const current = parseAdminAuditLogSearchFilters(nextScopedSearch) ?? [];
       const values =

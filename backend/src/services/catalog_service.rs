@@ -360,6 +360,7 @@ async fn provider_platform_secret_nonempty(
 /// Public services and legacy documents without a visibility field are visible to all.
 pub(crate) fn visibility_filter(user_id: &str, owner_ids: &[&str]) -> mongodb::bson::Document {
     doc! {
+        "platform_key.purpose": {"$nin":["model_route","model_offering"]},
         "$or": [
             { "visibility": { "$ne": "private" } },
             { "visibility": { "$exists": false } },
@@ -623,6 +624,11 @@ pub(crate) async fn enforce_catalog_read_access(
     user_id: &str,
     svc: &DownstreamService,
 ) -> AppResult<()> {
+    if super::platform_key_service::model_only(svc) {
+        // The dedicated first-party admin surface owns private model records.
+        // Ordinary catalog readers carry no such authenticated purpose.
+        return Err(AppError::NotFound("Catalog entry not found".into()));
+    }
     if svc.visibility != "private"
         || catalog_owner(svc) == user_id
         || super::platform_key_service::available(db, svc, user_id).await?

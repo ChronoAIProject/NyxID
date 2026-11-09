@@ -23,6 +23,7 @@ import {
   type EventNotice,
 } from "./assistantEventNotices";
 import type { AssistantMessage } from "./assistantTypes";
+import { AssistantAttachmentView } from "./AssistantAttachmentView";
 
 function EventRow({
   notice,
@@ -140,9 +141,11 @@ function EventRow({
 }
 export function AssistantSystemMessage({
   message,
+  conversationId,
   onOpenAutomations,
 }: {
   message: AssistantMessage;
+  conversationId?: string;
   onOpenAutomations: () => void;
 }) {
   const { colors } = useTheme();
@@ -206,6 +209,17 @@ export function AssistantSystemMessage({
           onOpenAutomations={onOpenAutomations}
         />
       ))}
+      {conversationId && message.attachments.length ? (
+        <View style={{ padding: 12, gap: 8 }}>
+          {message.attachments.map((attachment) => (
+            <AssistantAttachmentView
+              key={attachment.id}
+              attachment={attachment}
+              conversationId={conversationId}
+            />
+          ))}
+        </View>
+      ) : null}
     </View>
   );
 }

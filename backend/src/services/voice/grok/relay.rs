@@ -164,7 +164,7 @@ impl Grok {
             Some("nyx.presentation_context") => {
                 let facts = &event["facts"];
                 if !facts.is_object()
-                    || facts.to_string().len() > super::super::runtime::COMMENTARY_MAX_BYTES
+                    || facts.to_string().len() > super::super::speech::CONTEXT_MAX_BYTES
                 {
                     return Err(AppError::VoiceProviderUnavailable);
                 }

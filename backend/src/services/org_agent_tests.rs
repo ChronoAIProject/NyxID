@@ -224,6 +224,7 @@ impl Fixture {
             description: "Organization specialist".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             machines: None,
@@ -2436,11 +2437,14 @@ async fn voice_confirmation_refuses_revoked_org_access_without_a_continuation() 
         assert_eq!(voice_turn.report_to, None);
         assert!(!voice_turn.with_nyxbot);
         assert_eq!(active.agent_owner_id.as_deref(), Some(f.org.as_str()));
-        let chat = acks::for_key(db, &f.member, Some(&active.credential_api_key_id))
+        let mut chat = acks::for_key(db, &f.member, Some(&active.credential_api_key_id))
             .await
             .unwrap()
             .unwrap();
         assert!(!chat.involved());
+        // Seed a legacy owner card: revocation must still fence its decision,
+        // although new Voice work no longer creates approval requests.
+        chat.execution_voice_task = false;
         let card = Box::pin(acks::request(
             db,
             &chat,

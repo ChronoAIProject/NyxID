@@ -353,9 +353,14 @@ export function AssistantAttachmentView({
             captionColor ? { color: captionColor } : undefined,
           ]}
         >
-          {attachment.origin === "user_upload"
-            ? IMAGE_INPUT_UNAVAILABLE_MESSAGE
-            : "The agent couldn't view this image."}
+          {attachment.image_input_reason === "model_text_only" ||
+          attachment.image_input_reason === "image_input_unsupported"
+            ? "This model can’t view images. Choose an image-capable model or describe the image in text."
+            : attachment.image_input_reason === "guest_media_unavailable"
+              ? "This guest image was saved in this chat but was unavailable to the model in that turn."
+              : attachment.origin === "user_upload"
+                ? IMAGE_INPUT_UNAVAILABLE_MESSAGE
+                : "The agent couldn't view this image."}
         </Label>
       )}
       <AssistantImagePreview

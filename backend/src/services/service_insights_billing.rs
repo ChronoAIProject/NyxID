@@ -1068,6 +1068,7 @@ mod tests {
 
     fn lane(metric: BillingMetric, price: &str, code: &str) -> LanePricing {
         LanePricing {
+            model_prices: Vec::new(),
             metric,
             credits_per_unit: price.into(),
             lago_metric_code: code.into(),

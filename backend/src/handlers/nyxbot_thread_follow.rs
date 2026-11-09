@@ -192,6 +192,7 @@ async fn inbound_impl_inner(
         return Ok(Some(Inbound::Silent("refused_empty_content")));
     }
     let sender = Sender {
+        original_kind: None,
         media: crate::services::telegram_input::stored_attachments(&source.attachments),
         original_message: canonical_platform(&row.platform) != "telegram"
             || source.original_message == Some(true),

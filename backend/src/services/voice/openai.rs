@@ -67,12 +67,43 @@ impl OpenAi {
         self
     }
 
+    /// Reconcile a known native inference after a sideband error omitted its
+    /// terminal event. Fixed provider origin, own credential, bounded read only.
+    pub(super) async fn response(&self, id: &str) -> AppResult<Value> {
+        if !valid_provider_id(id) {
+            return Err(AppError::VoiceProviderUnavailable);
+        }
+        let mut url = url::Url::parse(&format!("{}/v1/responses/", self.http_origin))
+            .map_err(|_| AppError::VoiceProviderUnavailable)?;
+        url.path_segments_mut()
+            .map_err(|_| AppError::VoiceProviderUnavailable)?
+            .pop_if_empty()
+            .push(id);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut response = self
+                .client
+                .get(url)
+                .bearer_auth(self.key.as_str())
+                .send()
+                .await
+                .map_err(|_| AppError::VoiceProviderUnavailable)?;
+            if !response.status().is_success() {
+                return Err(AppError::VoiceProviderUnavailable);
+            }
+            let bytes = bounded_body(&mut response, MAX_FRAME).await?;
+            serde_json::from_slice(&bytes).map_err(|_| AppError::VoiceProviderUnavailable)
+        })
+        .await
+        .map_err(|_| AppError::VoiceProviderUnavailable)?
+    }
+
     pub async fn create(
         &self,
         sdp: &str,
         instructions: &str,
         voice: &str,
         model: &str,
+        delegation_instructions: Option<&str>,
     ) -> Result<Created, CreateError> {
         let mut response = self
             .client
@@ -84,6 +115,7 @@ impl OpenAi {
                 voice,
                 model,
                 self.delegation_model.as_deref(),
+                delegation_instructions,
             ))
             .send()
             .await
@@ -203,9 +235,10 @@ pub fn start_payload(
     voice: &str,
     model: &str,
     delegation_model: Option<&str>,
+    delegation_instructions: Option<&str>,
 ) -> Value {
     json!({"session":{"model":model,"store":false,"instructions":instructions,
-        "delegation":delegation_model.map(super::responses::configuration).unwrap_or_else(|| json!({"type":"client"})),"audio":{"output":{"voice":voice}},
+        "delegation":delegation_model.map(|model| super::responses::configuration(model, delegation_instructions)).unwrap_or_else(|| json!({"type":"client"})),"audio":{"output":{"voice":voice}},
         "client":{"data_channel":{"allowed_client_events":[],"allowed_server_events":[
             {"type":"session.started"},{"type":"session.closed"},{"type":"error"}
         ]}}},"transport":{"type":"webrtc","sdp":sdp}})

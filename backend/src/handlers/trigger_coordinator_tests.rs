@@ -577,6 +577,7 @@ async fn named_specialist(
             description: "Bounded group worker".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,
@@ -594,6 +595,7 @@ fn authority(
 ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
     let turn = row.active_turn.as_ref().unwrap();
     crate::services::assistant_acknowledgement_service::ChatAuthority {
+        platform_model_context: None,
         automation_work: turn.automation_work.clone(),
         execution_group_id: None,
         execution_unsupported: true,
@@ -2368,6 +2370,7 @@ async fn v2_delegation_tracks_usable_org_and_shared_specialists_and_shared_group
             description: "Delegated research".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,

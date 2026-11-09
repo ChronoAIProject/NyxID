@@ -355,24 +355,38 @@ pub async fn llm_proxy_request(
     if let Some(context) = &auth_user.execution_permission {
         context.bind_cancellation(crate::downstream_disconnect::request_cancellation(&request));
     }
-    let diagnostic = super::invocation_diagnostics::HttpInvocation::start(&state, &mut request);
-    if diagnostic.is_none() {
-        return Box::pin(llm_proxy_request_inner(
-            State(state),
-            auth_user,
-            path,
-            request,
-        ))
-        .await;
-    }
-    let result = Box::pin(llm_proxy_request_inner(
-        State(state.clone()),
-        auth_user.clone(),
-        path,
-        request,
-    ))
-    .await;
-    super::invocation_diagnostics::HttpInvocation::finish(diagnostic, &state, &auth_user, result)
+    let trace = crate::turn_trace::TurnContext::for_request(
+        request.headers(),
+        auth_user
+            .assistant_chat
+            .as_ref()
+            .and_then(|chat| chat.turn_id.as_deref()),
+    );
+    trace
+        .response(crate::turn_trace::Stage::Proxy, async move {
+            let diagnostic =
+                super::invocation_diagnostics::HttpInvocation::start(&state, &mut request);
+            if diagnostic.is_none() {
+                return Box::pin(llm_proxy_request_inner(
+                    State(state),
+                    auth_user,
+                    path,
+                    request,
+                ))
+                .await;
+            }
+            let result = Box::pin(llm_proxy_request_inner(
+                State(state.clone()),
+                auth_user.clone(),
+                path,
+                request,
+            ))
+            .await;
+            super::invocation_diagnostics::HttpInvocation::finish(
+                diagnostic, &state, &auth_user, result,
+            )
+            .await
+        })
         .await
 }
 
@@ -1121,25 +1135,37 @@ pub fn gateway_request(
     path: Path<String>,
     mut request: Request<Body>,
 ) -> futures::future::BoxFuture<'static, AppResult<Response>> {
-    if let Some(context) = &auth_user.execution_permission {
-        context.bind_cancellation(crate::downstream_disconnect::request_cancellation(&request));
-    }
-    let diagnostic = super::invocation_diagnostics::HttpInvocation::start(&state.0, &mut request);
-    if diagnostic.is_none() {
-        return Box::pin(gateway_request_inner(state, auth_user, path, request));
-    }
     Box::pin(async move {
-        let result = Box::pin(gateway_request_inner(
-            state.clone(),
-            auth_user.clone(),
-            path,
-            request,
-        ))
-        .await;
-        super::invocation_diagnostics::HttpInvocation::finish(
-            diagnostic, &state.0, &auth_user, result,
-        )
-        .await
+        if let Some(context) = &auth_user.execution_permission {
+            context.bind_cancellation(crate::downstream_disconnect::request_cancellation(&request));
+        }
+        let trace = crate::turn_trace::TurnContext::for_request(
+            request.headers(),
+            auth_user
+                .assistant_chat
+                .as_ref()
+                .and_then(|chat| chat.turn_id.as_deref()),
+        );
+        trace
+            .response(crate::turn_trace::Stage::Proxy, async move {
+                let diagnostic =
+                    super::invocation_diagnostics::HttpInvocation::start(&state.0, &mut request);
+                if diagnostic.is_none() {
+                    return Box::pin(gateway_request_inner(state, auth_user, path, request)).await;
+                }
+                let result = Box::pin(gateway_request_inner(
+                    state.clone(),
+                    auth_user.clone(),
+                    path,
+                    request,
+                ))
+                .await;
+                super::invocation_diagnostics::HttpInvocation::finish(
+                    diagnostic, &state.0, &auth_user, result,
+                )
+                .await
+            })
+            .await
     })
 }
 
@@ -1152,6 +1178,7 @@ async fn gateway_request_inner(
     if !auth_user.assistant_operation_scopes.is_empty() {
         crate::services::proxy_authorization::CanonicalPath::from_mcp_built(request.uri().path())?;
     }
+    let model_cancellation = crate::downstream_disconnect::request_cancellation(&request);
     let gateway_started_at = std::time::Instant::now();
     let gateway_uri = request.uri().clone();
     let gateway_extensions = request.extensions().clone();
@@ -1160,6 +1187,9 @@ async fn gateway_request_inner(
     auth_user
         .ensure_live_assistant_turn(&state.db, "llm.gateway")
         .await?;
+    if path == "assistant-model-context" {
+        return super::assistant_platform_models::context(&state, &auth_user, request).await;
+    }
     let billing_egress_permit = enforce_llm_billing_classification(
         &request,
         crate::services::billing::BillingIngress::LlmGateway,
@@ -1209,6 +1239,22 @@ async fn gateway_request_inner(
         .ok_or_else(|| {
             AppError::ValidationError("'model' field is required in request body".to_string())
         })?;
+
+    // Reserved platform IDs must never fall through to provider-name heuristics.
+    if model.starts_with("nyxid/") {
+        return Box::pin(super::platform_model_gateway::execute(
+            state,
+            auth_user,
+            path,
+            method,
+            query,
+            headers,
+            body_bytes,
+            body_json,
+            model_cancellation,
+        ))
+        .await;
+    }
 
     if let Some(pool_slug) = model.strip_prefix("pool:") {
         if pool_slug.is_empty() || pool_slug.contains('/') {
@@ -2283,7 +2329,7 @@ async fn build_filtered_response(
                 .as_ref()
                 .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric));
 
-            tokio::spawn(async move {
+            crate::turn_trace::spawn(async move {
                 let mut buffer = String::new();
                 let mut stream = downstream_response.bytes_stream();
                 let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
@@ -2581,7 +2627,7 @@ async fn build_translated_sse_response(
         .as_ref()
         .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric));
 
-    tokio::spawn(async move {
+    crate::turn_trace::spawn(async move {
         let mut buffer = String::new();
         let mut state = llm_gateway_service::StreamTranslationState::default();
         let mut stream = downstream_response.bytes_stream();
@@ -2695,7 +2741,7 @@ fn parse_next_sse_event(buffer: &mut String) -> Option<sse_parser::SseEvent> {
 /// `UserService` (the actor for personal credentials, an org for
 /// org-shared credentials). When `None`, the caller couldn't determine
 /// the owner -- the function falls back to the actor's policy only.
-async fn preflight_llm_deny_before_resolution(
+pub(super) async fn preflight_llm_deny_before_resolution(
     state: &AppState,
     auth_user: &AuthUser,
     service_id: &str,
@@ -2741,7 +2787,7 @@ async fn preflight_llm_deny_before_resolution(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn check_llm_approval(
+pub(super) async fn check_llm_approval(
     state: &AppState,
     auth_user: &AuthUser,
     service_id: &str,
@@ -2754,8 +2800,6 @@ async fn check_llm_approval(
     operation_guest: bool,
     method_override: bool,
 ) -> AppResult<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>> {
-    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
-    let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
     let mut operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
     operation_descriptor::apply_inference_contract(
         &mut operation,
@@ -2767,6 +2811,35 @@ async fn check_llm_approval(
             .as_deref()
             .is_some_and(|chat| chat.guest && chat.turn_live),
     );
+    check_llm_approval_descriptor(
+        state,
+        auth_user,
+        service_id,
+        &service.name,
+        &service.slug,
+        operation,
+        service_owner_user_id,
+        is_auto_connected,
+        operation_guest,
+    )
+    .await
+}
+
+/// Shared policy/card path; the caller supplies its verified operation descriptor.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn check_llm_approval_descriptor(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    service_name: &str,
+    service_slug: &str,
+    operation: operation_descriptor::OperationDescriptor,
+    service_owner_user_id: Option<&str>,
+    is_auto_connected: bool,
+    operation_guest: bool,
+) -> AppResult<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>> {
+    let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
+    let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
     let (approval_outcome, automatic) = crate::services::execution_permission_dispatch::approval(
         auth_user.execution_permission.as_ref(),
         &state.db,
@@ -2834,8 +2907,8 @@ async fn check_llm_approval(
         state.apns_auth.as_deref(),
         &pending.primary_owner_user_id,
         service_id,
-        &service.name,
-        &service.slug,
+        service_name,
+        service_slug,
         &pending.requester_type,
         &pending.requester_id,
         None,
@@ -2874,7 +2947,7 @@ fn should_bypass_approval_flow(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn enforce_agent_llm_operations(
+pub(super) async fn enforce_agent_llm_operations(
     db: &mongodb::Database,
     auth: &AuthUser,
     user_service: Option<&str>,
@@ -2968,14 +3041,14 @@ async fn enforce_agent_llm_operations(
 /// limits check the bytes actually sent (after translation and stream-usage
 /// normalization), and a scoped call never follows a redirect.
 #[derive(Default)]
-struct LlmOperationScope {
+pub(super) struct LlmOperationScope {
     forwarding: Option<String>,
     guest: bool,
     identity: Option<(String, Option<String>)>,
 }
 
 impl LlmOperationScope {
-    fn check_outbound(
+    pub(super) fn check_outbound(
         &self,
         auth: &AuthUser,
         method: &str,
@@ -3240,6 +3313,7 @@ mod tests {
         catalog.is_active = true;
         catalog.provider_config_id = Some(providers[0].id.clone());
         catalog.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Restricted,
             allowed_owner_ids: vec![org.clone()],

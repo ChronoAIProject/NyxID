@@ -40,10 +40,7 @@ async fn telegram_new_bound_keyboard_outcomes_deduplicate_monotonically() {
         Mock::given(method("POST"))
             .and(path(format!("/bot{MANAGER}/sendMessage")))
             .and(|r: &wiremock::Request| {
-                r.body_json::<Value>()
-                    .unwrap()
-                    .get("reply_markup")
-                    .is_some()
+                r.body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_array()
             })
             .respond_with(if invalid {
                 ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{}}))
@@ -134,20 +131,8 @@ async fn telegram_new_bound_first_rejection_can_retry_same_update() {
     );
     assert_eq!(server.received_requests().await.unwrap().len(), 3);
     let requests = server.received_requests().await.unwrap();
-    assert!(
-        requests[0]
-            .body_json::<Value>()
-            .unwrap()
-            .get("reply_markup")
-            .is_none()
-    );
-    assert!(
-        requests[1]
-            .body_json::<Value>()
-            .unwrap()
-            .get("reply_markup")
-            .is_none()
-    );
+    assert!(requests[0].body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_null());
+    assert!(requests[1].body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_null());
     assert!(requests[2].body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_array());
 }
 
@@ -194,10 +179,7 @@ async fn telegram_new_nonstandard_http_status_keeps_request_dto_bounded_and_reco
         Mock::given(method("POST"))
             .and(path(format!("/bot{MANAGER}/sendMessage")))
             .and(|r: &wiremock::Request| {
-                r.body_json::<Value>()
-                    .unwrap()
-                    .get("reply_markup")
-                    .is_some()
+                r.body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_array()
             })
             .respond_with(ResponseTemplate::new(status).set_body_string("PRIVATE-SENTINEL"))
             .with_priority(1)
@@ -246,10 +228,7 @@ async fn telegram_new_phase_lease_renews_without_reviving_expired_instructions()
         Mock::given(method("POST"))
             .and(path(format!("/bot{MANAGER}/sendMessage")))
             .and(|r: &wiremock::Request| {
-                r.body_json::<Value>()
-                    .unwrap()
-                    .get("reply_markup")
-                    .is_none()
+                r.body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_null()
             })
             .respond_with(
                 ResponseTemplate::new(200)
@@ -262,10 +241,7 @@ async fn telegram_new_phase_lease_renews_without_reviving_expired_instructions()
         Mock::given(method("POST"))
             .and(path(format!("/bot{MANAGER}/sendMessage")))
             .and(|r: &wiremock::Request| {
-                r.body_json::<Value>()
-                    .unwrap()
-                    .get("reply_markup")
-                    .is_some()
+                r.body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_array()
             })
             .respond_with(
                 ResponseTemplate::new(200)
@@ -352,7 +328,13 @@ async fn telegram_new_recovery_is_same_request_encoded_and_authority_bound() {
     assert_eq!(saved.start_update_id, Some(10));
     let parsed = url::Url::parse(&url).unwrap();
     assert_eq!(parsed.host_str(), Some("t.me"));
-    assert_eq!(parsed.path(), "/newbot/NyxSetupBot/support_bot");
+    assert_eq!(
+        parsed.path(),
+        format!(
+            "/newbot/NyxSetupBot/{}",
+            crate::services::telegram_new_service::username_suggestions(&saved)[0]
+        )
+    );
     assert_eq!(
         parsed.query_pairs().next().unwrap().1,
         "Support & 你好 /? #"
@@ -848,10 +830,7 @@ async fn telegram_new_hosted_recovery_refuses_deleted_replaced_or_retargeted_aut
         assert_eq!(sent.len(), before + 1, "{change}");
         let refusal = sent[before].body_json::<Value>().unwrap();
         assert!(
-            refusal["text"]
-                .as_str()
-                .unwrap()
-                .contains("setup is no longer available"),
+            refusal["text"].as_str().unwrap().contains("Check status:"),
             "{change}"
         );
         assert!(
@@ -902,7 +881,7 @@ async fn telegram_new_watch_revocation_between_instructions_and_keyboard_stops_d
         sent[1].body_json::<Value>().unwrap()["text"]
             .as_str()
             .unwrap()
-            .contains("setup is no longer available")
+            .contains("Check status:")
     );
     assert!(
         sent.iter()
@@ -948,10 +927,7 @@ async fn telegram_new_closed_hosted_authority_is_acked_but_database_admission_er
     assert_eq!(sent.len(), before + 3);
     assert!(sent[before..].iter().all(|r| {
         let body = r.body_json::<Value>().unwrap();
-        body["text"]
-            .as_str()
-            .unwrap()
-            .contains("setup is no longer available")
+        body["text"].as_str().unwrap().contains("Check status:")
             && body["reply_markup"]["keyboard"].is_null()
     }));
     // A real collection validator rejects the pre-dispatch metadata write. It
@@ -1076,10 +1052,7 @@ async fn telegram_new_overlapping_commands_and_outcome_write_failure_never_repla
     Mock::given(method("POST"))
         .and(path(format!("/bot{MANAGER}/sendMessage")))
         .and(|r: &wiremock::Request| {
-            r.body_json::<Value>()
-                .unwrap()
-                .get("reply_markup")
-                .is_some()
+            r.body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_array()
         })
         .respond_with(
             ResponseTemplate::new(200)
@@ -1634,7 +1607,8 @@ async fn telegram_new_concurrent_owners_each_receive_one_creation_keyboard() {
             .filter(|body| body["chat_id"] == sender)
             .collect();
         assert_eq!(messages.len(), 2);
-        assert!(messages[0]["reply_markup"].is_null());
+        assert!(messages[0]["reply_markup"]["keyboard"].is_null());
+        assert!(messages[0]["reply_markup"]["inline_keyboard"].is_array());
         assert!(messages[1]["reply_markup"]["keyboard"][0][0]["request_managed_bot"].is_object());
         let saved = service.get(actor, &request.id).await.unwrap();
         assert_eq!(saved.start_update_id, Some(update));
@@ -1762,10 +1736,7 @@ async fn telegram_new_pre_keyboard_manager_write_conflict_retries_without_replay
     Mock::given(method("POST"))
         .and(path(format!("/bot{MANAGER}/sendMessage")))
         .and(|r: &wiremock::Request| {
-            r.body_json::<Value>()
-                .unwrap()
-                .get("reply_markup")
-                .is_none()
+            r.body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_null()
         })
         .respond_with(move |_: &wiremock::Request| {
             armed.store(true, Ordering::SeqCst);
@@ -1780,7 +1751,8 @@ async fn telegram_new_pre_keyboard_manager_write_conflict_retries_without_replay
     assert_eq!(failed.load(Ordering::SeqCst), 1);
     let sent = server.received_requests().await.unwrap();
     assert_eq!(sent.len(), 2);
-    assert!(sent[0].body_json::<Value>().unwrap()["reply_markup"].is_null());
+    assert!(sent[0].body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_null());
+    assert!(sent[0].body_json::<Value>().unwrap()["reply_markup"]["inline_keyboard"].is_array());
     assert!(sent[1].body_json::<Value>().unwrap()["reply_markup"]["keyboard"][0][0]["request_managed_bot"].is_object());
     let saved = service.get(&actor, &request.id).await.unwrap();
     assert_eq!(saved.start_update_id, Some(10));
@@ -1834,16 +1806,33 @@ async fn telegram_new_expired_history_does_not_intercept_newer_setup_or_platform
         let before = server.received_requests().await.unwrap().len();
         webhook(&service, &headers, command("/start", 11 + before as i64)).await;
         let sent = server.received_requests().await.unwrap();
-        assert_eq!(sent.len(), before + 2);
+        let waiting = status == Status::WaitingBot;
+        assert_eq!(sent.len(), before + if waiting { 2 } else { 1 });
         assert!(sent[before..].iter().all(|r| {
             !r.body_json::<Value>().unwrap()["text"]
                 .as_str()
                 .unwrap()
                 .contains("expired")
         }));
-        assert!(
-            sent[before + 1].body_json::<Value>().unwrap()["reply_markup"]["keyboard"].is_array()
-        );
+        if waiting {
+            assert!(
+                sent[before + 1].body_json::<Value>().unwrap()["reply_markup"]["keyboard"]
+                    .is_array()
+            );
+        } else {
+            let reply = sent[before].body_json::<Value>().unwrap();
+            assert_eq!(reply["reply_markup"]["remove_keyboard"], true);
+            assert!(
+                reply["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(if status == Status::Connected {
+                        "setup is complete"
+                    } else {
+                        "setup was cancelled"
+                    })
+            );
+        }
     }
     // An established opted-in manager retains its platform route even when the
     // latest bound historical setup itself is expired.
@@ -1908,3 +1897,9 @@ async fn telegram_new_expired_history_does_not_intercept_newer_setup_or_platform
     assert_eq!(server.received_requests().await.unwrap().len(), before);
     state.db.drop().await.unwrap();
 }
+
+#[path = "telegram_new_status_tests.rs"]
+mod status_tests;
+
+#[path = "telegram_new_username_tests.rs"]
+mod username_tests;

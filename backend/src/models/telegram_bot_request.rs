@@ -143,11 +143,17 @@ pub struct TelegramBotRequest {
     pub manager_bot_id: i64,
     pub observation_id: String,
     pub label: String,
+    /// Cosmetic username regeneration only; absent on older requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username_seed: Option<String>,
     pub destination: String,
     pub status: TelegramRequestStatus,
     pub active: bool,
     pub revision: i64,
     pub challenge_hash: String,
+    /// At most four superseded launch hashes, for explanations only; never admission.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub previous_challenge_hashes: Vec<String>,
     pub telegram_user_id: Option<i64>,
     pub telegram_bot_id: Option<i64>,
     pub bot_username: Option<String>,

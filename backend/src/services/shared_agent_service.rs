@@ -1553,6 +1553,11 @@ pub async fn private_notes(db: &Database, actor: &str, agent: &str) -> AppResult
         .map_or_else(Vec::new, |r| r.notes))
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(super) static PRIVATE_NOTE_COLLISION: super::api_key_mutation_service::TransactionCollisionHook;
+}
+
 /// Native remember/forget on a shared private thread never edits owner or team memory.
 pub async fn edit_private_note(
     db: &Database,
@@ -1561,53 +1566,84 @@ pub async fn edit_private_note(
     text: Option<&str>,
     note_id: Option<&str>,
 ) -> AppResult<String> {
-    let access = require(db, actor, agent).await?;
-    let mut session = db.client().start_session().await?;
-    session.start_transaction().await?;
-    fence(db, &access, &mut session).await?;
-    let collection = db.collection::<PrivateNotes>(model::NOTES_COLLECTION_NAME);
-    let filter = doc! {"agent_id": &agent.id, "actor_user_id": actor};
-    let mut row = collection
-        .find_one(filter.clone())
-        .session(&mut session)
-        .await?
-        .unwrap_or_else(|| PrivateNotes {
-            id: Uuid::new_v4().to_string(),
-            agent_id: agent.id.clone(),
-            actor_user_id: actor.into(),
-            revision: 0,
-            notes: Vec::new(),
-            updated_at: Utc::now(),
-        });
-    let id = note_id
-        .map(str::to_owned)
-        .unwrap_or_else(|| Uuid::new_v4().to_string());
-    if note_id.is_some() && !row.notes.iter().any(|n| n.id == id) {
-        return Err(missing());
-    }
-    if let Some(text) = text {
-        let mut note = notes(vec![text.into()])?.remove(0);
-        note.id.clone_from(&id);
-        if let Some(existing) = row.notes.iter_mut().find(|n| n.id == id) {
-            *existing = note;
-        } else if row.notes.len() < crate::models::assistant_agent::MAX_MEMORY_NOTES {
-            row.notes.push(note);
-        } else {
-            return Err(AppError::Conflict(
-                "Private notes are full; replace or forget a note".into(),
-            ));
-        }
-    } else {
-        row.notes.retain(|n| n.id != id);
-    }
-    row.revision = row.revision.checked_add(1).ok_or_else(missing)?;
-    row.updated_at = Utc::now();
-    collection
-        .replace_one(filter, &row)
-        .upsert(true)
-        .session(&mut session)
-        .await?;
-    session.commit_transaction().await?;
+    // Retry only definitely aborted transactions. Unknown commits retry COMMIT
+    // on the same transaction, never the note append; keep the live sharing fence.
+    let context = (
+        db.clone(),
+        actor.to_owned(),
+        agent.clone(),
+        text.map(str::to_owned),
+        note_id.map(str::to_owned),
+    );
+    let id = super::transaction_service::run_db_only(
+        db,
+        &context,
+        |session, (db, actor, agent, text, note_id)| {
+            Box::pin(async move {
+                use crate::errors::memory_write::MemoryWriteReason as Reason;
+                let access = require(db, actor, agent).await?;
+                #[cfg(test)]
+                let hook = PRIVATE_NOTE_COLLISION.try_with(Clone::clone).ok();
+                #[cfg(test)]
+                if let Some(hook) = &hook {
+                    hook.begin_attempt();
+                }
+                let collection = db.collection::<PrivateNotes>(model::NOTES_COLLECTION_NAME);
+                let filter = doc! {"agent_id": &agent.id, "actor_user_id": actor};
+                let mut row = collection
+                    .find_one(filter.clone())
+                    .session(&mut *session)
+                    .await?
+                    .unwrap_or_else(|| PrivateNotes {
+                        id: Uuid::new_v4().to_string(),
+                        agent_id: agent.id.clone(),
+                        actor_user_id: actor.clone(),
+                        revision: 0,
+                        notes: Vec::new(),
+                        updated_at: Utc::now(),
+                    });
+                #[cfg(test)]
+                if let Some(hook) = &hook {
+                    hook.after_reads().await;
+                }
+                fence(db, &access, session).await?;
+                let id = note_id
+                    .clone()
+                    .unwrap_or_else(|| Uuid::new_v4().to_string());
+                if note_id.is_some() && !row.notes.iter().any(|n| n.id == id) {
+                    return Err(if text.is_some() {
+                        AppError::MemoryWrite(Reason::ReplaceTargetNotFound)
+                    } else {
+                        missing()
+                    });
+                }
+                if let Some(text) = text {
+                    let text = super::assistant_team_service::validate_memory_text(text)?;
+                    let mut note = notes(vec![text.into()])?.remove(0);
+                    note.id.clone_from(&id);
+                    if let Some(existing) = row.notes.iter_mut().find(|n| n.id == id) {
+                        note.created_at = existing.created_at;
+                        *existing = note;
+                    } else if row.notes.len() < crate::models::assistant_agent::MAX_MEMORY_NOTES {
+                        row.notes.push(note);
+                    } else {
+                        return Err(AppError::MemoryWrite(Reason::MemoryFull));
+                    }
+                } else {
+                    row.notes.retain(|n| n.id != id);
+                }
+                row.revision = row.revision.checked_add(1).ok_or_else(missing)?;
+                row.updated_at = Utc::now();
+                collection
+                    .replace_one(filter, &row)
+                    .upsert(true)
+                    .session(&mut *session)
+                    .await?;
+                Ok(id)
+            })
+        },
+    )
+    .await?;
     audit(db, actor, agent, "private_note").await;
     Ok(id)
 }
@@ -1636,6 +1672,8 @@ pub async fn summaries(
         let home = threads
             .iter()
             .find(|r| r.agent_id.as_deref() == Some(&a.id));
+        let public_model =
+            super::assistant_platform_model::public_selection(db, actor, &a.model).await?;
         result.push(super::assistant_team_service::AgentSummary {
             share_role: Some(access.role()),
             owner_id: a.user_id.clone(),
@@ -1664,10 +1702,12 @@ pub async fn summaries(
             name: a.name.clone(),
             display_name: a.display_name.clone(),
             persona: a.persona.clone(),
+            voice_instructions: a.voice_instructions.clone(),
             description: a.description.clone(),
             specialty: a.specialty.clone(),
             created_by: a.created_by.clone(),
-            model: a.model.clone(),
+            model: public_model.clone(),
+            model_unavailable: a.model.starts_with("nyxid/") && public_model.is_empty(),
             access_mode_override: None,
             channel_checking_notice: false,
             home_conversation_id: home.map(|r| r.id.clone()),
@@ -1685,15 +1725,18 @@ pub async fn summaries(
         if result.iter().any(|a| a.id == id) {
             continue;
         }
+        let public_model =
+            super::assistant_platform_model::public_selection(db, actor, &thread.model).await?;
         result.push(super::assistant_team_service::AgentSummary {
             id: id.into(), share_role: Some(ShareRole::User), owner_id: thread.agent_owner_id.clone().unwrap_or_default(),
             owner_name: None, owner_slug: None, owner_kind: "person", org_role: None, can_use: false, can_maintain: false,
             machines: Vec::new(), logins: Vec::new(), services: Vec::new(), account_read: false,
             guest_access: BTreeMap::new(), pending_requests: Vec::new(), last_reply: None, status: "idle",
             kind: crate::models::assistant_agent::AgentKind::Specialist, name: "Shared agent".into(),
-            display_name: Some("Shared agent · access ended".into()), persona: None, specialty: None,
+            display_name: Some("Shared agent · access ended".into()), persona: None, voice_instructions: None, specialty: None,
             description: "Your retained chats remain private and readable. Ask the owner to share this agent again to continue.".into(),
-            created_by: "user".into(), model: thread.model.clone(), access_mode_override: None, channel_checking_notice: false,
+            created_by: "user".into(), model: public_model.clone(),
+            model_unavailable: thread.model.starts_with("nyxid/") && public_model.is_empty(), access_mode_override: None, channel_checking_notice: false,
             home_conversation_id: Some(thread.id.clone()), memory_count: 0, created_at: thread.created_at,
             last_active_at: thread.updated_at, destroyed_at: None,
         });

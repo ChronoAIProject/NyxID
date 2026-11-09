@@ -14,6 +14,7 @@ use axum::{
 };
 use mongodb::bson::doc;
 use serde_json::{Value, json};
+use tower::ServiceExt;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path},
@@ -32,6 +33,65 @@ fn request() -> Request<Body> {
         .header("authorization", "Bearer original-caller")
         .body(Body::empty())
         .unwrap()
+}
+
+#[tokio::test]
+async fn proxy_only_agent_key_reaches_redemption_and_returns_non_delegable() {
+    let (state, actor, id, server) = fixture().await;
+    let key = crate::services::key_service::create_api_key(
+        &state.db,
+        &actor,
+        "diagnostic agent",
+        "proxy",
+        None,
+        None,
+        None,
+        None,
+        Some(true),
+        Some(false),
+        Some(false),
+        None,
+        None,
+        Some("codex"),
+        None,
+    )
+    .await
+    .unwrap();
+    let issued = crate::services::invocation_diagnostic_service::issue(
+        &state.db,
+        &state.config,
+        &actor,
+        &AuthMethod::ApiKey,
+        Some(&key.id),
+        None,
+        &id,
+    )
+    .await
+    .unwrap()
+    .expect("diagnostic handle must be issued");
+    let (_, private) = crate::routes::build_router_with_state(state.clone());
+    let response = private
+        .with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/monitoring/invocation-diagnostics")
+                .header("content-type", "application/json")
+                .header("x-api-key", &key.full_key)
+                .body(Body::from(json!({"handle": issued.handle}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+    assert_eq!(body["outcome"], "non_delegable");
+    assert_eq!(body["observation"], "unknown");
+    assert_eq!(body["assessment"], "unknown");
+    assert!(server.received_requests().await.unwrap().is_empty());
+    state.db.drop().await.unwrap();
 }
 
 #[tokio::test]

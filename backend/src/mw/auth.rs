@@ -577,6 +577,12 @@ fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool 
     if *method == Method::DELETE && path == "/api/v1/auth/agent-key/self" {
         return false;
     }
+    // Diagnostic redemption is an operational follow-up to a failed proxy
+    // call. The handler still enforces proxy scope, caller identity, exact
+    // service authorization, and handle binding.
+    if *method == Method::POST && path == "/api/v1/monitoring/invocation-diagnostics" {
+        return false;
+    }
     if !matches!(
         *method,
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
@@ -665,6 +671,9 @@ fn is_delegated_native_path(path: &str) -> bool {
 /// never reach. Matching is segment-based so adjacent names such as
 /// `/nodesXYZ` and `/administer` remain ordinary default-allowed GET paths.
 fn delegated_read_denied_path(path: &str) -> bool {
+    if path == "/api/v1/llm/gateway/v1/assistant-model-context" {
+        return true;
+    }
     let Some(segments) = api_v1_path_segments(path) else {
         return true;
     };
@@ -4673,6 +4682,7 @@ mod tests {
             (Method::POST, "/api/v1/channel-relay/reply"),
             (Method::POST, "/api/v1/channel-events/conversation-1"),
             (Method::POST, "/api/v1/ssh/service-1/exec"),
+            (Method::POST, "/api/v1/monitoring/invocation-diagnostics"),
             (Method::POST, "/oauth/token"),
         ];
 

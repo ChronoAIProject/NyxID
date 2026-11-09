@@ -713,6 +713,7 @@ impl BillingService {
         };
         let now = Utc::now();
         let row = UsageMeterRow {
+            model_tariff: None,
             org_channel_guest: None,
             id: interval.usage_row_id.clone(),
             rollup_pending: true,

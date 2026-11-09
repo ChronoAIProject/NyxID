@@ -11,6 +11,7 @@ import {
   getAppliedAdminAuditLogFilters,
   isAdminAuditLogDateFilterValid,
   normalizeAdminAuditLogSearch,
+  normalizeAuditTurnId,
   parseAdminAuditLogSearchFilters,
   updateAdminAuditLogSearchFilters,
 } from "./admin-audit-log";
@@ -430,5 +431,24 @@ describe("getAppliedAdminAuditLogFilters", () => {
     expect(
       getAdminAuditLogFilterValues({ status: "4xx,5xx" }, "status"),
     ).toEqual(["4xx", "5xx"]);
+  });
+});
+
+
+describe("exact turn trace filter", () => {
+  const turn = "e8242800-436d-4a66-8cdf-b0265db90ca1";
+  it("normalizes W3C IDs and refuses invalid URLs without broadening", () => {
+    expect(normalizeAuditTurnId(turn.replaceAll("-", "").toUpperCase())).toBe(turn);
+    expect(normalizeAdminAuditLogSearch({ turn_id: "invalid" })).toEqual({ turn_id: "invalid-turn-id" });
+    expect(normalizeAdminAuditLogSearch({ turn_id: "" })).toEqual({ turn_id: "invalid-turn-id" });
+    expect(normalizeAdminAuditLogSearch({ turn_id: turn })).toEqual({ turn_id: turn });
+    expect(getAdminAuditLogSearchFilters({ turn_id: turn })).toEqual([
+      { field: "turn_id_exact", values: [turn], operator: "is" },
+    ]);
+  });
+  it("offers the turn filter only when the server supports it", () => {
+    expect(getAdminAuditLogSearchFields(SERVER_OPTIONS).some(f => f.key === "turn_id_exact")).toBe(false);
+    const options: AdminAuditLogFilterOptions = { ...SERVER_OPTIONS, search_fields: [...(SERVER_OPTIONS.search_fields ?? []), { key: "turn_id_exact", label: "Turn ID (exact)" }] };
+    expect(getAdminAuditLogSearchFields(options).filter(f => f.key === "turn_id_exact")).toHaveLength(1);
   });
 });

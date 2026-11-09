@@ -21,6 +21,11 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Discover entitled public platform models and retail prices
+    Models {
+        #[command(subcommand)]
+        command: crate::commands::models::ModelCommands,
+    },
     /// Control NyxBot with the owner's first-party session (API keys are rejected)
     Nyxbot {
         #[command(subcommand)]
@@ -347,6 +352,11 @@ pub struct RepoArgs {
 
 #[derive(Subcommand)]
 pub enum AdminCommands {
+    /// Manage public models, private routes, access and exact price revisions
+    Models {
+        #[command(subcommand)]
+        command: crate::commands::models::AdminModelCommands,
+    },
     /// Configure billing, exact rates and ledger integrity
     Billing {
         #[command(subcommand)]

@@ -1,0 +1,1 @@
+{"id":"private-response","model":"openai/gpt-oss-120b-maas","system_fingerprint":"private-project","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}
