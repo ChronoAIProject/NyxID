@@ -497,17 +497,30 @@ Actual iPad run this increment: final source was served to the complete signed
 Debug App (`dev.nyxid.ipadqa`) on iPad Pro 13-inch M5 / iOS 26.3 after clearing
 Metro. An IPv6-only localhost binding was corrected using
 `NODE_OPTIONS=--dns-result-order=ipv4first`; IPv4 Metro status and actual bundle
-delivery were verified. The app loaded, but session restoration returned backend
-HTTP 500 `database_error` (1007) and showed sign-in. The existing QA backend on
-3401 cannot reach its MongoDB on 33018. The original temporary data directory is
-missing WiredTiger version metadata and at least one collection file. Startup
-and repair attempts on a separate copy failed; original database files were not
-repaired or replaced, and no backend source was changed.
+delivery were verified.
+
+The first restart accidentally reused old local QA URLs from the ignored
+`mobile/.env.local` rather than the real service URLs used by the user's prior
+manual session. That incorrect target returned backend HTTP 500 `database_error`
+(1007) during session restoration and failed to load sign-in provider options.
+The QA backend on 3401 could not reach MongoDB on 33018; startup and repair of a
+separate data copy failed. Original database files were not repaired or replaced.
+This historical QA failure is not a prerequisite for the intended manual session.
+
+Corrected on 2026-11-09: restored the ignored local runtime configuration to
+`https://nyx-api.chrono-ai.fun/api/v1`, with frontend/legal URLs
+`https://nyx.chrono-ai.fun`, and restarted Metro 8096 with its cache cleared.
+The real service's public config returned all three providers: GitHub, Google
+and Apple. After reloading the complete App, the actual Simulator accessibility
+tree and screenshot both showed **Continue with Google**, **Continue with GitHub**
+and **Continue with Apple**, with the sign-in-options error absent. Auth screen
+source was unchanged. The App is left at this restored sign-in screen; account
+reauthentication and authenticated voice verification remain outstanding.
 
 **This run does not accept an authenticated iPad voice call or the new compact
-bar/transcription interaction against a live provider.** Restore a working QA
-database and sign-in, then exercise: existing/new chat one-tap entry, automatic
-speech and same-bubble partial updates, microphone mute/unmute, header preferences,
+bar/transcription interaction against a live provider.** After sign-in against
+the restored service, exercise: existing/new chat one-tap entry, automatic speech
+and same-bubble partial updates, microphone mute/unmute, header preferences,
 PTT press/release, End confirmation, reopening and details/Back scroll retention.
 No synthetic captions were inserted into the running app to claim acceptance.
 The acoustic checks recorded above are historical and do not verify this head.
