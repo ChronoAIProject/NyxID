@@ -20,6 +20,7 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         invocation_diagnostic::{COLLECTION_NAME, InvocationDiagnostic, InvocationDiagnosticState},
+        service_concurrency::ServiceConcurrencyPolicy,
         user_endpoint::UserEndpoint,
         user_service::UserService,
     },
@@ -29,7 +30,7 @@ use crate::{
         feature_flag_service,
         monitoring_service::{self, CheckResult, CheckStatus, Client, ProbeResult, Source},
         org_service::{self, OwnerAccess},
-        user_service_service,
+        service_concurrency_service, user_service_service,
     },
 };
 
@@ -289,7 +290,7 @@ pub(crate) async fn redeem(
     let delegable = matches!(auth_method, AuthMethod::AccessToken)
         && client_id != Some("chrono-probe")
         && caller_token.is_some();
-    if delegable && has_active_capacity(db, execution_owner_id, &service).await? {
+    if delegable && concurrency_capacity_exhausted(db, execution_owner_id, &service).await? {
         return Ok(RedeemResult::NotReady);
     }
 
@@ -438,7 +439,7 @@ async fn authorized_service(
     Ok((usable && access.allows_resource(exact_id)).then_some(service))
 }
 
-async fn has_active_capacity(
+async fn concurrency_capacity_exhausted(
     db: &Database,
     actor_id: &str,
     service: &UserService,
@@ -446,15 +447,47 @@ async fn has_active_capacity(
     let Some(catalog_service_id) = service.catalog_service_id.as_deref() else {
         return Ok(false);
     };
-    Ok(db
+    let Some(catalog) = db
+        .collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .find_one(doc! {"_id":catalog_service_id})
+        .projection(doc! {"concurrency_policy":1})
+        .await?
+    else {
+        return Ok(false);
+    };
+    let policy = match catalog.get("concurrency_policy") {
+        None | Some(bson::Bson::Null) => return Ok(false),
+        Some(policy) => bson::from_bson::<ServiceConcurrencyPolicy>(policy.clone())
+            .map_err(|error| AppError::Internal(error.to_string()))?,
+    };
+    let Some(limit) = service_concurrency_service::effective_limit(db, &policy, actor_id).await?
+    else {
+        return Ok(false);
+    };
+    let Some(row) = db
         .collection::<bson::Document>(crate::models::service_concurrency::COLLECTION_NAME)
         .find_one(doc! {
-            "service_id":catalog_service_id,
+            "service_id":&policy.service_id,
             "person_id":actor_id,
-            "leases":{"$elemMatch":{"expires_at":{"$gt":bson::DateTime::now()}}},
         })
+        .projection(doc! {"leases.expires_at":1})
         .await?
-        .is_some())
+    else {
+        return Ok(false);
+    };
+    let now = bson::DateTime::now();
+    let active = row.get_array("leases").map_or(0, |leases| {
+        leases
+            .iter()
+            .filter(|lease| {
+                lease
+                    .as_document()
+                    .and_then(|lease| lease.get_datetime("expires_at").ok())
+                    .is_some_and(|expires_at| expires_at > &now)
+            })
+            .count()
+    });
+    Ok(active >= limit as usize)
 }
 
 impl Diagnostic {

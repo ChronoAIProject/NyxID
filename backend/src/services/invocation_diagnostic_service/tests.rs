@@ -792,9 +792,27 @@ async fn concurrent_redemptions_start_only_one_probe() {
 }
 
 #[tokio::test]
-async fn active_execution_capacity_keeps_the_handle_pending() {
+async fn redemption_waits_only_while_concurrency_capacity_is_exhausted() {
     let (state, actor, id, server) = fixture().await;
     let catalog_id = Uuid::new_v4().to_string();
+    let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+    catalog.id.clone_from(&catalog_id);
+    catalog.concurrency_policy = Some(
+        crate::models::service_concurrency::ServiceConcurrencyPolicy {
+            service_id: catalog_id.clone(),
+            default_limit: Some(1),
+            users: vec![],
+            orgs: vec![],
+        },
+    );
+    state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(catalog)
+        .await
+        .unwrap();
     state
         .db
         .collection::<mongodb::bson::Document>(crate::models::user_service::COLLECTION_NAME)
@@ -854,6 +872,37 @@ async fn active_execution_capacity_keeps_the_handle_pending() {
         .unwrap();
     assert_eq!(row.state, InvocationDiagnosticState::Pending);
     assert!(server.received_requests().await.unwrap().is_empty());
+
+    mount_healthy(&server, &id).await;
+    state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&catalog_id},
+            doc! {"$set":{"concurrency_policy.default_limit":2_i32}},
+        )
+        .await
+        .unwrap();
+    let result = redeem(
+        &state.db,
+        &state.config,
+        &actor,
+        &actor,
+        &AuthMethod::AccessToken,
+        None,
+        None,
+        true,
+        &[],
+        &issued.handle,
+        Some("original-caller"),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        result,
+        RedeemResult::Completed { fresh: true, .. }
+    ));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
 #[tokio::test]
