@@ -46,7 +46,7 @@
     },
     "/voice/options": {
       "get": {
-        "summary": "List available voice providers for a conversation",
+        "summary": "Get available voice providers, saved preferences and greeting capability",
         "operationId": "nyxbot_voice_get_voice_options",
         "responses": {
           "200": {

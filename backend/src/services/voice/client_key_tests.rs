@@ -541,6 +541,33 @@ async fn voice_child_http_discovery_and_start_enforce_exact_bot_connection() {
         assert_eq!(body["agents"].as_array().unwrap().len(), 1);
         assert_eq!(body["agents"][0]["agent_id"], agent.id);
         assert_eq!(body["agents"][0]["service_id"], service_id);
+        // One fresh options response contains the same saved defaults as
+        // discovery. Clearing settings must not resurrect a cached choice.
+        for saved in [Some(platform(&voice)), None] {
+            crate::services::assistant_settings_service::update(
+                &f.state.db, &f.owner,
+                crate::services::assistant_settings_service::Update {
+                    voice: Some(saved.clone()), ..Default::default()
+                },
+            ).await.unwrap();
+            let response = app.clone().oneshot(Request::builder()
+                .uri(format!("/api/v1/proxy/nyxbot-voice/{service_id}/voice/options?conversation_id={}", f.row.id))
+                .header("authorization", format!("Bearer {secret}"))
+                .body(Body::empty()).unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 128*1024).await.unwrap();
+            assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["preferences"], serde_json::to_value(saved).unwrap());
+            assert_eq!(body["greetings"], true);
+            assert!(body["options"].is_array());
+            assert_eq!(body["recording"], false);
+        }
+        let response = app.clone().oneshot(Request::builder()
+            .uri(format!("/api/v1/proxy/nyxbot-voice/{service_id}/voice/options?conversation_id={}", f.nyxbot_thread))
+            .header("authorization", format!("Bearer {secret}"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), 403, "Combined options cannot select another Bot");
         let response = app.clone().oneshot(Request::builder().method("POST")
             .uri(format!("/api/v1/proxy/nyxbot-voice/{service_id}/voice/sessions/{}/control", Uuid::new_v4()))
             .header("authorization", format!("Bearer {secret}"))
