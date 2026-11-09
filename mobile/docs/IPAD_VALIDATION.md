@@ -736,7 +736,7 @@ only Details revealed the labelled request and original failure warning. Hiding
 it removed that text. The failed-only list had no pending-work footer. Native
 media, captions or task results were not mocked or injected.
 
-**Current runtime failures remain open.** The real arithmetic task and the
+**Runtime failures at this checkpoint (End is superseded by the next section).** The real arithmetic task and the
 user-provided error both report `nyxid / model_proxy / approval_unsupported /
 HTTP 403 / NyxID 12502`. Current upstream main deliberately refuses a new
 approval request from voice execution. That refused operation was not executed
@@ -758,3 +758,93 @@ Independent review found no blocking issue in the task presentation diff.
 The six existing backend/chat-document changes are preserved byte-for-byte and
 excluded. Full frontend suite/typecheck/build remains delegated to GitHub CI;
 no reliable affected typecheck exists, and CI is not monitored.
+
+
+## 2026-11-09 — bounded End, status recovery and return to text
+
+This mobile-only increment addresses the later End/conflict/loading failures
+recorded above. A receipt is not terminal proof: the backend can retain a closing
+session while final usage settles. Temporary sanitized response metadata from
+one actual run confirmed a schema-valid closing End response followed by a
+closed, final-usage-confirmed status. The temporary diagnostics were removed
+before final validation; no credentials, SDP or transcript was logged by them.
+
+The native End sequence now immediately disables capture, PTT and playback,
+while retaining quiet native WebRTC and the NyxID control socket until a verified
+terminal response/snapshot or a seven-second absolute deadline. End uses one
+independent abortable request and a race, so a non-cooperative transport cannot
+strand cleanup. Generation/revision/resource checks reject stale terminal data.
+The actual Bridge unmount also respects client ownership of this quiet drain;
+ordinary unmounts and WebView media still close immediately. Drain gates prevent
+any input/playback re-enable, and final close resets them for the next generation.
+
+After bounded cleanup, the voice surface returns to the text composer even when
+remote settlement is not confirmed. Exact recovery identity remains retained.
+Closing/unknown/checking surfaces always offer Back to chat; this only exits the
+surface and cannot end another chat's call. End again has been removed. Verified
+closing discovery replaces the stale Another voice call diagnostic. New voice
+creation stays blocked until the previous call is verified terminal or account
+discovery is verified empty. A receipt or leaving the surface does not release it.
+
+Exact status, account discovery, explicit conflict End and its fallback discovery
+share an eight-second total request budget. Initial 409/lost-start discovery has
+the same bound. Timeout stops loading even if the adapter ignores abort; late
+results cannot overwrite recovery. Automatic checks remain limited to six. A new
+explicit Start waiting on old cleanup rechecks scope and its original ticket;
+a later End/background event cancels that intent. Offline/blur recovery does not
+implicitly End another chat's active call.
+
+Focused final verification from mobile/:
+
+```sh
+pnpm exec tsx --test src/features/assistant/voice/AssistantVoiceClient.test.ts src/features/assistant/voice/AssistantVoiceConversation.test.ts src/features/assistant/voice/useNativeVoice.test.ts src/features/assistant/voice/VoiceMediaBridge.test.ts src/features/assistant/voice/voiceRequestDeadline.test.ts src/features/assistant/voice/NativeOpenAIMedia.test.ts src/features/assistant/AssistantScreen.voice.test.ts src/lib/api/assistantVoiceTransport.test.ts
+# 346 passed, 0 failed, 0 skipped
+```
+
+Changed-file checks from repository root:
+
+```sh
+frontend/node_modules/.bin/prettier --check mobile/src/features/assistant/voice/AssistantVoiceClient.ts mobile/src/features/assistant/voice/AssistantVoiceClient.test.ts mobile/src/features/assistant/voice/AssistantVoiceConversation.tsx mobile/src/features/assistant/voice/AssistantVoiceConversation.test.ts mobile/src/features/assistant/voice/useNativeVoice.ts mobile/src/features/assistant/voice/useNativeVoice.test.ts mobile/src/features/assistant/voice/VoiceMediaBridge.tsx mobile/src/features/assistant/voice/VoiceMediaBridge.test.ts mobile/src/features/assistant/voice/voiceRequestDeadline.ts mobile/src/features/assistant/voice/voiceRequestDeadline.test.ts mobile/src/lib/api/assistantVoiceTransport.test.ts
+git diff --check -- mobile
+# passed; 11 explicitly selected source/test files
+```
+
+Regression coverage includes the real Client + NativeVoiceMedia + mounted Bridge
+cleanup for terminal/deadline, hung requests and late outcomes, duplicate End,
+wrong-resource/old-version snapshots, same-chat and account fences, cancellation
+of waiting Start, and returning to text without ending unrelated calls. An
+independent final read-only review confirmed its three lifecycle findings were
+fixed. No reliable affected typecheck exists; full suite/typecheck/build remains
+owned by GitHub CI. CI was not monitored.
+
+Final actual signed-App checks used iPad Pro 13 M5 / iOS 26.3 landscape,
+real service and native OpenAI WebRTC, Marin/Hands-free. After source freeze,
+Metro was restarted with cache clearing and the complete App reloaded once;
+there was no reload between the following calls:
+
+| User path | Actual observation |
+| --- | --- |
+| Home → voice → acoustic arithmetic phrase | Entered Listening. The fixture was transcribed in main chat, with a minor recognition substitution; the assistant replied that two plus two equals four. |
+| First call → End | Temporary Ending state, then automatic text composer and a 0:52 receipt. No manual Check, repeated End or reload was needed. |
+| Immediately reopen in the same chat | Connected to Listening. No retained-call conflict blocked this new call. |
+| Second call → harmless background arithmetic task | A real task was accepted then failed. Task activity showed Task 1 · Failed. The acoustic channel picked up unrelated room speech, so word-perfect recognition is not accepted for this second fixture. |
+| Failed-task call → mute → End | Returned automatically to the text composer with a 2:49 receipt, including the accurate failed task result. The previous indefinite End confirmation was not reproduced. |
+| Reopen after failed-task call | A third call entered Listening; this establishes that backend admission accepted another call after the failure/End path. |
+| Final End | Automatic composer with a 0:37 receipt. Final screenshot shows text entry and normal voice entry; the native peer is closed and no local capture is left running. |
+
+An earlier pre-freeze development hot refresh interrupted a second call. That
+run is excluded from final acceptance. The final tests above did not mock media,
+transcripts or task outcomes. Network hangs and component unmount timing were
+verified by regression tests, not by a live production fault injection. A final
+attempt to exercise text typing did not visibly enter text, so only composer
+restoration/visibility, not an additional text-send round trip, is accepted here.
+
+The separate prior approval_unsupported / HTTP 403 / NyxID12502 refusal is not
+fixed by this mobile increment. The final background task also failed; its exact
+provider error was not re-opened in Details in that final run. Successful
+background/external task execution is therefore still unaccepted. Physical
+human listening, sustained touch, Bluetooth interruptions, other providers and
+the broader route/layout gaps recorded above remain outside these checks.
+
+All source changes in this increment are mobile-only. The six preexisting
+backend/chat-document diffs remain unchanged and are excluded from the commit.

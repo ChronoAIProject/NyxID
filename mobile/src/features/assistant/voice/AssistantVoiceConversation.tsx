@@ -297,7 +297,7 @@ function VoiceConversation({
     : ending
       ? "Ending…"
       : confirmingEnd
-        ? "Confirming call ended…"
+        ? "Finishing call…"
         : uncertain
           ? "Call status unconfirmed"
           : conflict
@@ -413,10 +413,10 @@ function VoiceConversation({
     voice.recovery,
   ]);
   useEffect(() => {
-    if (!isConnected && hasCall) void requestEnd();
+    if (!isConnected && active && !conflict && !uncertain) void requestEnd();
   }, [isConnected]);
   useEffect(() => {
-    if (!focused && hasCall) void requestEnd();
+    if (!focused && active && !conflict && !uncertain) void requestEnd();
   }, [focused]);
   useEffect(() => {
     if (
@@ -444,6 +444,12 @@ function VoiceConversation({
     if (!mounted.current || closed.current) return;
     closed.current = true;
     onClose();
+  }
+  function returnToText() {
+    // An explicit End keeps this media owner alive until its bounded drain
+    // finishes. Status reads may be left without ending a different call.
+    if (endBusy.current || voice.endingConflict) return;
+    closeOnce();
   }
   function preferences(
     mode: VoicePreferences["input_mode"],
@@ -486,13 +492,17 @@ function VoiceConversation({
     setEndRequested(true);
     setEndingLocal(true);
     try {
-      const confirmed = conflict
-        ? await voice.endConflict()
-        : await voice.end();
-      if (confirmed === true) closeOnce();
+      // Keep the media owner mounted while bounded cleanup drains the call.
+      // Returning to text does not prove that its remote slot has settled.
+      if (conflict) await voice.endConflict();
+      else await voice.end();
+    } catch {
+      // Recovery remains owned by the hook; a failed remote End must not trap
+      // the user in voice after local audio has stopped.
     } finally {
       endBusy.current = false;
       if (mounted.current) setEndingLocal(false);
+      closeOnce();
     }
   }
   async function checkStatus() {
@@ -621,7 +631,8 @@ function VoiceConversation({
     uncertain ||
     checking ||
     ending;
-  const endDisabled = ending || checking || (uncertain && !conflict);
+  const returnToChat = confirmingEnd || uncertain || checking;
+  const endDisabled = ending;
   return (
     <>
       {voice.media ? (
@@ -724,8 +735,8 @@ function VoiceConversation({
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={
-              confirmingEnd
-                ? "Request end again"
+              returnToChat
+                ? "Return to chat"
                 : conflict
                   ? "End existing call"
                   : hasCall
@@ -734,7 +745,7 @@ function VoiceConversation({
             }
             accessibilityState={{ disabled: endDisabled }}
             disabled={endDisabled}
-            onPress={() => void requestEnd()}
+            onPress={() => (returnToChat ? returnToText() : void requestEnd())}
             style={[
               styles.end,
               {
@@ -743,9 +754,13 @@ function VoiceConversation({
               },
             ]}
           >
-            <PhoneOff size={17} color={colors.bg} />
+            {returnToChat ? (
+              <X size={17} color={colors.bg} />
+            ) : (
+              <PhoneOff size={17} color={colors.bg} />
+            )}
             <Text style={[styles.controlText, { color: colors.bg }]}>
-              {confirmingEnd ? "End again" : hasCall ? "End" : "Close"}
+              {returnToChat ? "Back to chat" : hasCall ? "End" : "Close"}
             </Text>
           </Pressable>
         </View>
@@ -760,16 +775,16 @@ function VoiceConversation({
             <Ellipsis size={18} color={colors.textSecondary} />
           </Pressable>
         ) : null}
-        {confirmingEnd || conflict || uncertain ? (
+        {confirmingEnd || conflict || uncertain || checking ? (
           <View style={styles.recovery}>
             <Label muted>
               {confirmingEnd
-                ? "Your microphone is off. Wait for the call to finish before starting another."
+                ? "The previous call is finishing. You can continue with text."
                 : conflict
                   ? voice.conflictThread && voice.conflictThread !== thread
-                    ? "A voice call is open in another chat. End it explicitly or check its status."
-                    : "A voice call is already open. End it explicitly or check its status."
-                  : "The existing call could not be located. Check call status before trying again."}
+                    ? "A voice call is open in another chat. You can continue with text."
+                    : "A voice call is already open. You can continue with text."
+                  : "Check the previous call before starting voice again. You can continue with text."}
             </Label>
             <View style={styles.recoveryActions}>
               <ActionButton
@@ -780,6 +795,15 @@ function VoiceConversation({
                 disabled={ending}
                 onPress={() => void checkStatus()}
               />
+              {!returnToChat ? (
+                <ActionButton
+                  label="Return to chat"
+                  variant="secondary"
+                  compact
+                  disabled={ending}
+                  onPress={returnToText}
+                />
+              ) : null}
             </View>
           </View>
         ) : null}

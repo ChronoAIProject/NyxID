@@ -501,11 +501,20 @@ function integratedStart(response: unknown | (() => Promise<unknown>)) {
   const errors: string[] = [];
   const conflicts: unknown[] = [];
   const mediaEvents: string[] = [];
+  const controlStates: {
+    startAborted: boolean | undefined;
+    endAborted: boolean | undefined;
+  }[] = [];
   const api = createAssistantVoiceApi(async (path, options) => {
     calls.push({ path, options });
     if (path.endsWith("/active")) return { session, conversation_id: thread };
-    if (path.endsWith("/control"))
+    if (path.endsWith("/control")) {
+      controlStates.push({
+        startAborted: calls[0]?.options?.signal?.aborted,
+        endAborted: options?.signal?.aborted,
+      });
       return { ...session, state: "closing", end_requested: true };
+    }
     return typeof response === "function" ? response() : response;
   }, origin);
   const media: VoiceMediaAdapter = {
@@ -538,7 +547,7 @@ function integratedStart(response: unknown | (() => Promise<unknown>)) {
     onError: (message) => errors.push(message),
     onConflict: (conflict) => conflicts.push(conflict),
   });
-  return { client, calls, errors, conflicts, mediaEvents };
+  return { client, calls, errors, conflicts, mediaEvents, controlStates };
 }
 
 test("real transport preserves an owned session so malformed media answers receive durable End", async () => {
@@ -562,7 +571,23 @@ test("real transport preserves an owned session so malformed media answers recei
       expected_revision: session.control_revision,
       action: "end",
     });
-    assert.equal(f.calls[1]!.options?.signal, undefined);
+    const startSignal = f.calls[0]!.options?.signal;
+    const endSignal = f.calls[1]!.options?.signal;
+    assert.ok(startSignal);
+    assert.ok(
+      endSignal,
+      "durable End has an independent bounded cancellation signal",
+    );
+    assert.notEqual(endSignal, startSignal);
+    assert.deepEqual(f.controlStates, [
+      { startAborted: true, endAborted: false },
+    ]);
+    assert.equal(startSignal.aborted, true);
+    assert.equal(
+      endSignal.aborted,
+      true,
+      "End cleans up its own controller after settling",
+    );
   }
 });
 
@@ -584,7 +609,23 @@ test("closing during a real POST still ends a late owned session with a malforme
     f.calls.map((call) => call.path),
     [`${root}/voice-sessions`, `${root}/voice-sessions/${sessionId}/control`],
   );
-  assert.equal(f.calls[1]!.options?.signal, undefined);
+  const startSignal = f.calls[0]!.options?.signal;
+  const endSignal = f.calls[1]!.options?.signal;
+  assert.ok(startSignal);
+  assert.ok(
+    endSignal,
+    "a cancelled Start must not cancel its late durable End",
+  );
+  assert.notEqual(endSignal, startSignal);
+  assert.deepEqual(f.controlStates, [
+    { startAborted: true, endAborted: false },
+  ]);
+  assert.equal(startSignal.aborted, true);
+  assert.equal(
+    endSignal.aborted,
+    true,
+    "late End releases its own cancellation resources",
+  );
   assert.deepEqual(f.mediaEvents, ["close"]);
   assert.deepEqual(f.errors, []);
   assert.equal((f.conflicts[0] as typeof session).state, "closing");

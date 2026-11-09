@@ -69,6 +69,7 @@ function setup(context: TestContext) {
   let refreshCalls = 0;
   const signals: AbortSignal[] = [];
   const controls: { thread: string; id: string; action: string }[] = [];
+  const controlSignals: (AbortSignal | undefined)[] = [];
   const cancellations: { thread: string; id: string; signal: AbortSignal }[] =
     [];
   const activeReads: string[] = [];
@@ -95,6 +96,10 @@ function setup(context: TestContext) {
     save: async (): Promise<unknown> => ({}),
     permission: async () => ({ granted: true }),
     start: async (_client: Client): Promise<void> => {},
+    end: async (client: Client): Promise<void> => {
+      client.options.media.close();
+      client.options.onClosed?.();
+    },
     control: async (): Promise<unknown> => session({ state: "closed" }),
     active: async (): Promise<any> => ({ session: null }),
     status: async (): Promise<unknown> => session(),
@@ -116,8 +121,14 @@ function setup(context: TestContext) {
       selectedThread: string,
       id: string,
       input: { action: string },
+      signal?: AbortSignal,
     ) => {
-      controls.push({ thread: selectedThread, id, action: input.action });
+      controls.push({
+        thread: selectedThread,
+        id,
+        action: input.action,
+      });
+      controlSignals.push(signal);
       return responses.control();
     },
     active: async (selectedThread: string) => {
@@ -174,7 +185,7 @@ function setup(context: TestContext) {
     async end() {
       this.ends++;
       this.isClosed = true;
-      this.options.onClosed?.();
+      return responses.end(this);
     }
     hold(value: boolean) {
       this.holds.push(value);
@@ -245,6 +256,7 @@ function setup(context: TestContext) {
     clients,
     media,
     controls,
+    controlSignals,
     cancellations,
     activeReads,
     statusReads,
@@ -1922,3 +1934,153 @@ test("post-call task cancellation is aborted on scope exit and late errors canno
   await cancelling;
   assert.equal(e.harness.flush().error, undefined);
 });
+
+test("local End leaves media teardown to the client and blocks recovery reads during its drain", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context);
+  await e.connect();
+  const client = e.clients[0]!;
+  client.pendingEnd = session({ state: "closing", end_requested: true });
+  const drained = deferred<void>();
+  e.responses.end = async (closing) => {
+    await drained.promise;
+    closing.options.media.close();
+    closing.options.onCleanup?.(closing.pendingEnd ?? null, false, firstThread);
+  };
+  const ending = e.harness.value().end();
+  assert.equal(e.harness.flush().inputEnabled, false);
+  assert.equal(
+    e.media[0]!.closed,
+    0,
+    "hook must not cut the client drain short",
+  );
+  context.mock.timers.tick(1000);
+  await e.harness.settle();
+  assert.deepEqual(e.statusReads, [], "polling cannot steal cleanup ownership");
+  assert.equal(await e.harness.value().checkConflict(), false);
+  const restarting = e.start();
+  assert.equal(e.clients.length, 1);
+  drained.resolve();
+  assert.equal(await ending, false);
+  await restarting;
+  assert.equal(e.media[0]!.closed, 1);
+  assert.equal(e.harness.flush().conflict?.id, firstId);
+});
+
+for (const stage of [
+  "exact status",
+  "account discovery",
+  "End control",
+  "End fallback discovery",
+] as const) {
+  test(`${stage} has an eight-second bound even if its request ignores abort`, async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const e = setup(context);
+    const closing = session({ state: "closing", end_requested: true });
+    e.responses.start = async (client) => {
+      client.options.onConflict?.(closing);
+      client.closed();
+    };
+    await e.start();
+    const waiting = deferred<unknown>();
+    e.responses.active = async () => ({ session: closing });
+    if (stage === "exact status") e.responses.status = () => waiting.promise;
+    else if (stage === "account discovery")
+      e.responses.active = () => waiting.promise;
+    else if (stage === "End control")
+      e.responses.control = () => waiting.promise;
+    else {
+      e.responses.control = async () => {
+        throw new Error("network");
+      };
+      e.responses.active = () => waiting.promise;
+    }
+    const isEnd = stage.startsWith("End");
+    const operation = isEnd
+      ? e.harness.value().endConflict()
+      : e.harness.value().checkConflict();
+    await e.harness.settle();
+    assert.equal(
+      isEnd
+        ? e.harness.value().endingConflict
+        : e.harness.value().checkingConflict,
+      true,
+    );
+    context.mock.timers.tick(7999);
+    await e.harness.settle();
+    assert.equal(
+      isEnd
+        ? e.harness.value().endingConflict
+        : e.harness.value().checkingConflict,
+      true,
+    );
+    context.mock.timers.tick(1);
+    assert.equal(await operation, false);
+    const state = e.harness.flush();
+    assert.equal(state.endingConflict, false);
+    assert.equal(state.checkingConflict, false);
+    assert.equal(state.conflict?.id, firstId);
+    assert.match(state.error ?? "", /could not be (verified|confirmed)/);
+    const signal = isEnd ? e.controlSignals[0] : e.statusReads[0]!.signal;
+    assert.equal(signal?.aborted, true);
+    waiting.resolve(
+      stage.includes("discovery")
+        ? { session: null }
+        : session({ state: "closed" }),
+    );
+    await e.harness.settle();
+    assert.equal(
+      e.harness.value().conflict?.id,
+      firstId,
+      "late success cannot clear retained recovery",
+    );
+    await e.start();
+    assert.equal(
+      e.clients.length,
+      1,
+      "unverified state never starts another call",
+    );
+  });
+}
+
+test("verified closing discovery replaces the stale another-call diagnostic", async (context) => {
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(session());
+    client.options.onError("Another voice call is active");
+    client.closed();
+  };
+  await e.start();
+  e.responses.active = async () => ({
+    session: session({ state: "closing", end_requested: true }),
+  });
+  await e.harness.value().checkConflict(false);
+  assert.equal(e.harness.flush().conflict?.state, "closing");
+  assert.equal(e.harness.value().error, undefined);
+  assert.equal(e.controls.length, 0);
+});
+
+for (const cancel of ["end", "background"] as const) {
+  test(`a later ${cancel} cancels an explicit start waiting on an older drain`, async (context) => {
+    const e = setup(context);
+    await e.connect();
+    const drained = deferred<void>();
+    e.responses.end = () => drained.promise;
+    const ending = e.harness.value().end();
+    const starting = e.harness.value().start(preferences, "openai_live");
+    assert.equal(e.clients.length, 1);
+    const secondEnd = cancel === "end" ? e.harness.value().end() : undefined;
+    if (cancel === "background") {
+      e.appState("background");
+      e.appState("active");
+    }
+    drained.resolve();
+    await Promise.all([ending, starting, secondEnd]);
+    assert.equal(
+      e.clients.length,
+      1,
+      "a later stop cancels the waiting intent even after recovery clears",
+    );
+    assert.equal(e.harness.flush().connected, false);
+  });
+}

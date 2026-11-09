@@ -33,6 +33,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
   private send?: (message: Record<string, unknown>) => void;
   private ready = false;
   private closed = true;
+  private drainingNative = false;
   private generation = 0;
   private sequence = 0;
   private failedGeneration = -1;
@@ -71,7 +72,9 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
     this.send = send;
     return () => {
       if (this.send !== send) return;
-      this.close();
+      // The client owns the deadline once native audio has been silenced for
+      // End. Removing its WebView presentation must not cut that drain short.
+      if (!this.drainingNative || !this.native) this.close();
       this.ready = false;
       this.send = undefined;
     };
@@ -460,23 +463,27 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
     await this.request({ type: "answer", sdp });
   }
   setInput(enabled: boolean): void {
+    if (this.drainingNative && enabled) return;
     if (this.native) return this.native.setInput(enabled);
     this.command({ type: "input", enabled });
   }
   hold(pressed: boolean): void {
+    if (this.drainingNative && pressed) return;
     if (this.native) return this.native.hold(pressed);
     this.command({ type: "hold", pressed });
   }
   muteSpeaker(muted: boolean): void {
+    if (this.drainingNative && !muted) return;
     if (this.native) return this.native.muteSpeaker(muted);
     this.command({ type: "speaker", muted });
   }
   async resume(): Promise<void> {
+    if (this.drainingNative) return;
     if (this.native) return this.native.resume();
     if (!this.closed) await this.request({ type: "resume" });
   }
   enqueue(bytes: ArrayBuffer, endMs: number): void {
-    if (this.closed) return;
+    if (this.closed || this.drainingNative) return;
     if (this.native) return this.native.enqueue(bytes, endMs);
     if (!Number.isSafeInteger(endMs) || endMs < 0 || endMs > 1830000) {
       this.unavailable();
@@ -499,7 +506,16 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
   playback(): { playback_ms: number; playback_audible: boolean } {
     return this.native ? this.native.playback() : { ...this.telemetry };
   }
+  beginEndDrain(): void {
+    if (this.closed || !this.native) return;
+    this.drainingNative = true;
+    this.native.setInput(false);
+    this.native.hold(false);
+    this.native.muteSpeaker(true);
+    this.native.flush();
+  }
   close(): void {
+    this.drainingNative = false;
     const active = !this.native && !this.closed && this.ready;
     this.closed = true;
     this.unsubscribeNative?.();

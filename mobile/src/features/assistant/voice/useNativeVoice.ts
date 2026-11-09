@@ -10,6 +10,7 @@ import { NativeVoiceMedia } from "./VoiceMediaBridge";
 import type { VoiceStartRecovery } from "./voiceStartError";
 import { discoverActiveVoiceCall } from "./voiceActiveCall";
 import { voiceSessionSchema } from "./voiceContracts";
+import { withVoiceRequestDeadline } from "./voiceRequestDeadline";
 import type {
   VoicePreferences,
   VoiceProtocol,
@@ -55,6 +56,7 @@ export function useNativeVoice(
   const [confirmedEnded, setConfirmedEnded] = useState(false);
   const [conflictCheckAttempt, setConflictCheckAttempt] = useState(0);
   const current = useRef<AssistantVoiceClient | null>(null);
+  const draining = useRef<Promise<void> | undefined>(undefined);
   const clientThread = useRef(thread);
   const ownership = useRef<object | undefined>(undefined);
   const scope = useRef({ thread, environment });
@@ -149,7 +151,19 @@ export function useNativeVoice(
     conflictBusy.current = false;
     const previous = current.current;
     current.current = null;
-    const cleanup = previous?.end();
+    // The client silences capture/output synchronously and owns the bounded
+    // transport drain. Closing its media here would cut off session.closed.
+    const cleanup = previous?.end() ?? draining.current;
+    if (cleanup) {
+      draining.current = cleanup;
+      void cleanup
+        .finally(() => {
+          if (draining.current !== cleanup) return;
+          draining.current = undefined;
+          if (sameScope()) setConflictCheckAttempt((attempt) => attempt + 1);
+        })
+        .catch(() => {});
+    }
     if (previous?.pendingEnd)
       remember({
         session: previous.pendingEnd,
@@ -158,7 +172,7 @@ export function useNativeVoice(
       });
     else if (previous?.pendingStart)
       remember({ session: null, unknown: true, pendingStart: true });
-    media?.close();
+    if (!previous && !cleanup) media?.close();
     if (mounted.current) {
       setStarting(false);
       setConnected(false);
@@ -257,7 +271,11 @@ export function useNativeVoice(
     )
       return;
     const timer = setTimeout(() => {
-      if (AppState.currentState === "active" && !conflictBusy.current) {
+      if (
+        AppState.currentState === "active" &&
+        !conflictBusy.current &&
+        !draining.current
+      ) {
         conflictChecks.current++;
         void checkConflict(false);
       }
@@ -274,10 +292,19 @@ export function useNativeVoice(
   ]);
 
   async function start(preferences: VoicePreferences, protocol: VoiceProtocol) {
+    // A new explicit attempt can wait for the old client's bounded teardown.
+    // Recheck all chat/account guards after that asynchronous boundary.
+    if (!sameScope()) return;
+    const waitingTicket = ticket.current;
+    if (draining.current) {
+      await draining.current;
+      if (ticket.current !== waitingTicket) return;
+    }
     if (
       !sameScope() ||
       AppState.currentState !== "active" ||
       busy.current ||
+      draining.current ||
       current.current ||
       conflict ||
       conflictUnknown ||
@@ -478,7 +505,8 @@ export function useNativeVoice(
       AppState.currentState !== "active" ||
       conflictBusy.current ||
       current.current ||
-      busy.current
+      busy.current ||
+      draining.current
     )
       return false;
     if (
@@ -508,10 +536,8 @@ export function useNativeVoice(
         : target;
     const owner = claimRecovery();
     remember(priorTarget, owner);
-    const valid = () =>
-      sameScope() &&
-      ticket.current === generation &&
-      !controller.signal.aborted;
+    const ownsOperation = () => sameScope() && ticket.current === generation;
+    const valid = () => ownsOperation() && !controller.signal.aborted;
     setCheckingConflict(true);
     setConfirmedEnded(false);
     if (manual) {
@@ -519,81 +545,83 @@ export function useNativeVoice(
       reportError();
     }
     try {
-      if (priorTarget.session && priorTarget.thread) {
-        try {
-          const prior = voiceSessionSchema.parse(
-            await environment.api.status(
-              priorTarget.thread,
-              priorTarget.session.id,
-              controller.signal,
-            ),
-          );
-          if (!valid()) return false;
-          const previous = latestSnapshot.current;
-          const observed = [
-            priorTarget.session,
-            ...(priorTarget.thread === thread &&
-            previous?.session.id === prior.id
-              ? [previous.session]
-              : []),
-          ];
-          const currentStatus = observed.every(
-            (value) =>
-              prior.id === value.id &&
-              (prior.generation > value.generation ||
-                (prior.generation === value.generation &&
-                  prior.control_revision >= value.control_revision)),
-          );
-          if (
-            currentStatus &&
-            (prior.state === "closed" || prior.state === "failed")
-          ) {
-            // An owned call's terminal receipt does not depend on optional
-            // account discovery or a bounded scan of other conversations.
-            // A later explicit Start still passes backend account admission.
-            remember({ session: null, unknown: false }, owner);
-            setConfirmedEnded(true);
+      return await withVoiceRequestDeadline(controller, async () => {
+        if (priorTarget.session && priorTarget.thread) {
+          try {
+            const prior = voiceSessionSchema.parse(
+              await environment.api.status(
+                priorTarget.thread,
+                priorTarget.session.id,
+                controller.signal,
+              ),
+            );
+            if (!valid()) return false;
+            const previous = latestSnapshot.current;
+            const observed = [
+              priorTarget.session,
+              ...(priorTarget.thread === thread &&
+              previous?.session.id === prior.id
+                ? [previous.session]
+                : []),
+            ];
+            const currentStatus = observed.every(
+              (value) =>
+                prior.id === value.id &&
+                (prior.generation > value.generation ||
+                  (prior.generation === value.generation &&
+                    prior.control_revision >= value.control_revision)),
+            );
             if (
-              priorTarget.thread === thread &&
-              (!previous || previous.session.id === prior.id)
+              currentStatus &&
+              (prior.state === "closed" || prior.state === "failed")
             ) {
-              const terminal: VoiceSnapshot = {
-                type: "snapshot",
-                session: prior,
-                captions: previous?.captions ?? [],
-                tasks: previous?.tasks ?? [],
-              };
-              latestSnapshot.current = terminal;
-              setSnapshot(terminal);
+              // An owned call's terminal receipt does not depend on optional
+              // account discovery or a bounded scan of other conversations.
+              // A later explicit Start still passes backend account admission.
+              remember({ session: null, unknown: false }, owner);
+              setConfirmedEnded(true);
+              if (
+                priorTarget.thread === thread &&
+                (!previous || previous.session.id === prior.id)
+              ) {
+                const terminal: VoiceSnapshot = {
+                  type: "snapshot",
+                  session: prior,
+                  captions: previous?.captions ?? [],
+                  tasks: previous?.tasks ?? [],
+                };
+                latestSnapshot.current = terminal;
+                setSnapshot(terminal);
+              }
+              reportError();
+              refresh();
+              return true;
             }
-            reportError();
-            refresh();
-            return true;
+          } catch {
+            if (!valid()) return false;
+            // Discovery can still identify a newer call or prove an empty slot.
           }
-        } catch {
-          if (!valid()) return false;
-          // Discovery can still identify a newer call or prove an empty slot.
         }
-      }
-      const call = await discoverActiveVoiceCall(
-        environment.api,
-        priorTarget.thread ?? thread,
-        controller.signal,
-      );
-      if (!valid()) return false;
-      remember(
-        {
-          session: call?.session ?? null,
-          thread: call?.conversationId,
-          unknown: false,
-        },
-        owner,
-      );
-      setConfirmedEnded(!call);
-      if (!call) reportError();
-      return !call;
+        const call = await discoverActiveVoiceCall(
+          environment.api,
+          priorTarget.thread ?? thread,
+          controller.signal,
+        );
+        if (!valid()) return false;
+        remember(
+          {
+            session: call?.session ?? null,
+            thread: call?.conversationId,
+            unknown: false,
+          },
+          owner,
+        );
+        setConfirmedEnded(!call);
+        reportError();
+        return !call;
+      });
     } catch {
-      if (valid()) {
+      if (ownsOperation()) {
         remember({ ...priorTarget, unknown: true }, owner);
         reportError(
           "Call status could not be verified. Check status again before starting voice.",
@@ -601,7 +629,7 @@ export function useNativeVoice(
       }
       return false;
     } finally {
-      if (valid()) {
+      if (ownsOperation()) {
         conflictBusy.current = false;
         setCheckingConflict(false);
         // Even a repeated failure may preserve the same session object. Rearm
@@ -629,64 +657,77 @@ export function useNativeVoice(
     );
     const controller = new AbortController();
     pending.current = controller;
-    const valid = () =>
-      sameScope() &&
-      ticket.current === generation &&
-      !controller.signal.aborted;
+    const ownsOperation = () => sameScope() && ticket.current === generation;
+    const valid = () => ownsOperation() && !controller.signal.aborted;
     setEndingConflict(true);
     reportError();
     try {
-      const next = voiceSessionSchema.parse(
-        await environment.api.control(conflictThread ?? thread, conflict.id, {
-          command_id: Crypto.randomUUID(),
-          expected_revision: conflict.control_revision,
-          action: "end",
-        }),
-      );
-      if (next.id !== conflict.id) throw new Error("Voice session changed");
-      if (valid()) {
-        const terminal = next.state === "closed" || next.state === "failed";
-        remember(
-          {
-            session: terminal ? null : next,
-            thread: terminal ? undefined : (conflictThread ?? thread),
-            unknown: false,
-          },
-          owner,
-        );
-        conflictChecks.current = 0;
-        refresh();
-        return terminal;
-      }
-      return false;
-    } catch {
-      if (!valid()) return false;
-      reportError(
-        "The existing call could not be ended. Refresh its state and try again.",
-      );
-      try {
-        const active = await discoverActiveVoiceCall(
-          environment.api,
-          conflictThread ?? thread,
-          controller.signal,
-        );
-        if (valid()) {
-          remember(
-            {
-              session: active?.session ?? null,
-              thread: active?.conversationId,
-              unknown: false,
-            },
-            owner,
+      return await withVoiceRequestDeadline(controller, async () => {
+        try {
+          const next = voiceSessionSchema.parse(
+            await environment.api.control(
+              conflictThread ?? thread,
+              conflict.id,
+              {
+                command_id: Crypto.randomUUID(),
+                expected_revision: conflict.control_revision,
+                action: "end",
+              },
+              controller.signal,
+            ),
           );
-          return !active;
+          if (next.id !== conflict.id) throw new Error("Voice session changed");
+          if (valid()) {
+            const terminal = next.state === "closed" || next.state === "failed";
+            remember(
+              {
+                session: terminal ? null : next,
+                thread: terminal ? undefined : (conflictThread ?? thread),
+                unknown: false,
+              },
+              owner,
+            );
+            conflictChecks.current = 0;
+            refresh();
+            return terminal;
+          }
+          return false;
+        } catch {
+          if (!valid()) return false;
+          reportError(
+            "The existing call could not be ended. Refresh its state and try again.",
+          );
+          try {
+            const active = await discoverActiveVoiceCall(
+              environment.api,
+              conflictThread ?? thread,
+              controller.signal,
+            );
+            if (valid()) {
+              remember(
+                {
+                  session: active?.session ?? null,
+                  thread: active?.conversationId,
+                  unknown: false,
+                },
+                owner,
+              );
+              return !active;
+            }
+          } catch {
+            /* Keep the last verified conflict; do not create another call. */
+          }
+          return false;
         }
-      } catch {
-        /* Keep the last verified conflict; do not create another call. */
-      }
+      });
+    } catch {
+      if (ownsOperation())
+        reportError(
+          "Ending the call could not be confirmed. Return to chat or check status again.",
+        );
       return false;
     } finally {
-      if (valid()) {
+      if (ownsOperation()) {
         conflictBusy.current = false;
         setEndingConflict(false);
       }

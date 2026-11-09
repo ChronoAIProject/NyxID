@@ -121,6 +121,7 @@ function setup(
     conflict?: VoiceSession;
     conflictThread?: string;
     conflictUnknown?: boolean;
+    checkingConflict?: boolean;
     inputEnabled?: boolean;
   } = {},
 ) {
@@ -175,7 +176,7 @@ function setup(
     conflictThread: input.conflictThread,
     conflictUnknown: input.conflictUnknown ?? false,
     endingConflict: false,
-    checkingConflict: false,
+    checkingConflict: input.checkingConflict ?? false,
     confirmedEnded: false,
     start: async (preferences: VoicePreferences, protocol: string) => {
       events.push(["start", preferences, protocol]);
@@ -1034,9 +1035,11 @@ test("pricing is fetched from the selected option and stays folded by default", 
   f.harness.unmount();
 });
 
-test("End closes local input immediately but keeps pending confirmation visible and blocks restart", async () => {
+test("End silences input and retains its media owner until bounded cleanup finishes, then returns to text without terminal proof", async () => {
   const pending = deferred<boolean>();
   const f = setup({ active: true });
+  const originalSnapshot = structuredClone(f.voice.snapshot);
+  const mediaOwner = f.all().find((row) => row.type === "VoiceMediaBridge")!;
   f.setEnd(pending.promise);
   f.voice.holding = true;
   f.button("End voice").props.onPress();
@@ -1046,23 +1049,27 @@ test("End closes local input immediately but keeps pending confirmation visible 
   assert.match(f.text(), /Ending/);
   assert.equal(f.find("Mute microphone"), undefined);
   assert.equal(f.find("Try again"), undefined);
+  assert.equal(f.button("Return to chat").props.disabled, true);
+  f.button("Return to chat").props.onPress();
+  assert.equal(
+    f.all().find((row) => row.type === "VoiceMediaBridge")?.props.media,
+    mediaOwner.props.media,
+  );
   assert.equal(
     f.events.some(([event]) => event === "close"),
     false,
   );
   pending.resolve(false);
   await f.harness.settle();
-  assert.match(f.text(), /Confirming call ended/);
-  assert.ok(f.button("Check call status"));
-  assert.ok(f.button("Request end again"));
-  assert.equal(
-    f.events.some(([event]) => event === "close"),
-    false,
-  );
+  assert.deepEqual(f.events, [["hold", false], ["end"], ["close"]]);
+  assert.deepEqual(f.voice.snapshot, originalSnapshot);
+  assert.equal(f.voice.confirmedEnded, false);
+  assert.equal(f.find("Request end again"), undefined);
+  assert.equal(f.starts().length, 0);
   f.harness.unmount();
 });
 
-test("only a verified terminal End returns to the text composer", async () => {
+test("a verified terminal End also returns to the text composer once", async () => {
   const f = setup({ active: true });
   f.setEnd(Promise.resolve(true));
   f.button("End voice").props.onPress();
@@ -1071,12 +1078,29 @@ test("only a verified terminal End returns to the text composer", async () => {
   f.harness.unmount();
 });
 
-test("a requested End closes after a terminal snapshot even when end_requested stays true", async () => {
+test("a failed remote End returns to text after bounded cleanup without claiming success", async () => {
+  const pending = deferred<boolean>();
+  const f = setup({ active: true });
+  f.setEnd(pending.promise);
+  f.button("End voice").props.onPress();
+  f.harness.flush();
+  assert.deepEqual(f.events, [["end"]]);
+  pending.reject(new Error("private transport details"));
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["end"], ["close"]]);
+  assert.equal(f.voice.snapshot?.session.state, "active");
+  assert.equal(f.voice.confirmedEnded, false);
+  assert.doesNotMatch(f.text(), /private transport/);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("a late terminal snapshot after returning to text cannot close the surface twice", async () => {
   const f = setup({ active: true });
   f.setEnd(Promise.resolve(false));
   f.button("End voice").props.onPress();
   await f.harness.settle();
-  assert.match(f.text(), /Confirming call ended/);
+  assert.deepEqual(f.events, [["end"], ["close"]]);
   f.voice.connected = false;
   f.voice.snapshot = {
     ...snapshot,
@@ -1089,12 +1113,12 @@ test("a requested End closes after a terminal snapshot even when end_requested s
   f.harness.unmount();
 });
 
-test("a requested End closes after verified empty discovery without a fabricated terminal snapshot", async () => {
+test("returning after End does not fabricate a terminal snapshot before later empty discovery", async () => {
   const f = setup({ active: true });
   f.setEnd(Promise.resolve(false));
   f.button("End voice").props.onPress();
   await f.harness.settle();
-  assert.match(f.text(), /Confirming call ended/);
+  assert.deepEqual(f.events, [["end"], ["close"]]);
   f.voice.connected = false;
   f.voice.confirmedEnded = true;
   f.harness.render();
@@ -1142,7 +1166,7 @@ test("a confirmed terminal call in another conversation closes recovery without 
     conflict: { ...snapshot.session, state: "closing", end_requested: true },
     conflictThread: `nyxa-${"b".repeat(32)}`,
   });
-  assert.match(f.text(), /Confirming call ended/);
+  assert.match(f.text(), /Finishing call/);
   assert.equal(f.voice.snapshot, null);
   f.voice.conflict = null;
   f.voice.confirmedEnded = true;
@@ -1204,7 +1228,8 @@ test("checking unknown status is read-only and never masquerades as Ending", asy
   const pending = deferred<boolean>();
   const f = setup({ conflictUnknown: true });
   f.setCheck(pending.promise);
-  assert.equal(f.button("End voice").props.disabled, true);
+  assert.equal(f.find("End voice"), undefined);
+  assert.equal(f.button("Return to chat").props.disabled, false);
   f.button("Check call status").props.onPress();
   f.harness.flush();
   assert.match(f.text(), /Checking call status/);
@@ -1220,25 +1245,61 @@ test("checking unknown status is read-only and never masquerades as Ending", asy
   f.harness.unmount();
 });
 
-test("pending End can be checked or explicitly retried and never automatically starts another call", async () => {
+test("unknown or checking recovery can return to text without an End or a replacement call", async () => {
+  for (const state of ["unknown", "checking"] as const) {
+    const f = setup({
+      conflictUnknown: state === "unknown",
+      checkingConflict: state === "checking",
+    });
+    assert.equal(f.button("Return to chat").props.disabled, false, state);
+    f.button("Return to chat").props.onPress();
+    await f.harness.settle();
+    assert.deepEqual(f.events, [["close"]], state);
+    assert.equal(f.voice.conflictUnknown, state === "unknown", state);
+    assert.equal(f.voice.checkingConflict, state === "checking", state);
+    assert.equal(f.voice.snapshot, null, state);
+    f.harness.unmount();
+  }
+});
+
+test("returning during a status read leaves the other chat's call untouched and ignores late completion", async () => {
+  const pending = deferred<boolean>();
+  const f = setup({
+    conflict: snapshot.session,
+    conflictThread: `nyxa-${"b".repeat(32)}`,
+  });
+  const originalConflict = f.voice.conflict;
+  f.setCheck(pending.promise);
+  f.button("Check call status").props.onPress();
+  f.harness.flush();
+  assert.match(f.text(), /Checking call status/);
+  assert.equal(f.button("Return to chat").props.disabled, false);
+  f.button("Return to chat").props.onPress();
+  assert.deepEqual(f.events, [["checkConflict"], ["close"]]);
+  assert.equal(f.voice.conflict, originalConflict);
+  f.harness.unmount();
+  pending.resolve(true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(f.events, [["checkConflict"], ["close"]]);
+});
+
+test("a pending previous End can be checked or left without repeating End or starting another call", async () => {
   const f = setup({
     conflict: { ...snapshot.session, state: "closing", end_requested: true },
   });
-  assert.match(f.text(), /Confirming call ended/);
+  const originalConflict = f.voice.conflict;
+  assert.match(f.text(), /Finishing call/);
   assert.equal(f.starts().length, 0);
   assert.equal(f.find("End existing call"), undefined);
+  assert.equal(f.find("Request end again"), undefined);
   await f.button("Check call status").props.onPress();
   await f.harness.settle();
   assert.deepEqual(f.events, [["checkConflict"]]);
-  f.setEndConflict(Promise.resolve(false));
-  await f.button("Request end again").props.onPress();
+  f.button("Return to chat").props.onPress();
   await f.harness.settle();
-  assert.deepEqual(f.events, [["checkConflict"], ["endConflict"]]);
+  assert.deepEqual(f.events, [["checkConflict"], ["close"]]);
+  assert.equal(f.voice.conflict, originalConflict);
   assert.equal(f.starts().length, 0);
-  f.setCheck(Promise.resolve(true));
-  await f.button("Check call status").props.onPress();
-  await f.harness.settle();
-  assert.deepEqual(f.events.at(-1), ["close"]);
   f.harness.unmount();
 });
 
@@ -1252,9 +1313,39 @@ test("another chat's existing call is never taken over or replaced implicitly", 
   assert.equal(f.starts().length, 0);
   await f.button("End existing call").props.onPress();
   await f.harness.settle();
-  assert.deepEqual(f.events, [["endConflict"]]);
+  assert.deepEqual(f.events, [["endConflict"], ["close"]]);
   assert.equal(f.starts().length, 0);
   f.harness.unmount();
+});
+
+test("returning from another chat's active-call conflict does not End that call", async () => {
+  const f = setup({
+    conflict: snapshot.session,
+    conflictThread: `nyxa-${"b".repeat(32)}`,
+  });
+  const originalConflict = f.voice.conflict;
+  assert.ok(f.button("End existing call"));
+  f.button("Return to chat").props.onPress();
+  await f.harness.settle();
+  assert.deepEqual(f.events, [["close"]]);
+  assert.equal(f.voice.conflict, originalConflict);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("leaving or losing network during recovery never ends an unrelated call", async () => {
+  for (const change of ["offline", "blur"] as const) {
+    const f = setup({
+      conflict: snapshot.session,
+      conflictThread: `nyxa-${"b".repeat(32)}`,
+    });
+    if (change === "offline") f.setOnline(false);
+    else f.setFocused(false);
+    await f.harness.settle();
+    assert.deepEqual(f.events, [], change);
+    assert.equal(f.starts().length, 0, change);
+    f.harness.unmount();
+  }
 });
 
 test("clearing a detected conflict does not consume the same entry as a new call", () => {
@@ -1689,19 +1780,16 @@ test("ordinary snapshots keep the media owner and a new attempt remounts only it
   f.harness.unmount();
 });
 
-test("offline and focus loss silence an existing call without automatically returning to a restartable composer", async () => {
+test("offline and focus loss finish local cleanup and return to text without claiming remote termination", async () => {
   for (const change of ["offline", "blur"] as const) {
     const f = setup({ active: true });
     f.setEnd(Promise.resolve(false));
     if (change === "offline") f.setOnline(false);
     else f.setFocused(false);
     await f.harness.settle();
-    assert.deepEqual(f.events, [["end"]]);
-    assert.match(f.text(), /Confirming call ended/);
-    assert.equal(
-      f.events.some(([event]) => event === "close"),
-      false,
-    );
+    assert.deepEqual(f.events, [["end"], ["close"]]);
+    assert.equal(f.voice.snapshot?.session.state, "active");
+    assert.equal(f.voice.confirmedEnded, false);
     f.harness.unmount();
   }
 });

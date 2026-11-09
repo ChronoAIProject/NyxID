@@ -158,6 +158,7 @@ class Socket implements VoiceControlSocket {
 class Clock implements VoiceClientClock {
   intervals = new Map<number, () => void>();
   timeouts = new Map<number, () => void>();
+  timeoutDelays = new Map<number, number>();
   sequence = 0;
   setInterval(callback: () => void) {
     const id = ++this.sequence;
@@ -167,13 +168,15 @@ class Clock implements VoiceClientClock {
   clearInterval(handle: unknown) {
     this.intervals.delete(handle as number);
   }
-  setTimeout(callback: () => void) {
+  setTimeout(callback: () => void, ms: number) {
     const id = ++this.sequence;
     this.timeouts.set(id, callback);
+    this.timeoutDelays.set(id, ms);
     return id;
   }
   clearTimeout(handle: unknown) {
     this.timeouts.delete(handle as number);
+    this.timeoutDelays.delete(handle as number);
   }
   tick() {
     [...this.intervals.values()].forEach((callback) => callback());
@@ -223,7 +226,14 @@ function setup() {
     }),
     active: async (): Promise<unknown> => ({ session: null }),
     control: async (input: VoiceControlRequest): Promise<unknown> =>
-      session({ muted: input.action === "mute", control_revision: 1 }),
+      session({
+        ...(snapshots.at(-1)?.session ?? {}),
+        muted: input.action === "mute",
+        control_revision: (snapshots.at(-1)?.session.control_revision ?? 0) + 1,
+        ...(input.action === "end"
+          ? { state: "closed" as const, end_requested: true }
+          : {}),
+      }),
     socket: async (): Promise<VoiceControlSocket> => socket,
     cancel: async (): Promise<void> => {},
   };
@@ -492,6 +502,7 @@ for (const reason of ["timeout", "close"] as const) {
     assert.equal(e.client.isClosed, true);
     assert.equal(e.count().ready, 0);
     assert.equal(e.media.inputs.includes(true), false);
+    await e.client.end();
     assert.equal(e.clock.timeouts.size, 0);
     assert.equal(e.socket.onopen, null);
   });
@@ -840,7 +851,9 @@ test("failed End retains the owned call identity after immediate local audio cle
   e.responses.control = async () => {
     throw new Error("lost End response");
   };
-  await e.client.end();
+  const ending = e.client.end();
+  e.clock.expire();
+  await ending;
   assert.equal(e.client.isClosed, true);
   assert.equal(e.media.input, false);
   assert.equal(e.client.pendingEnd?.id, sessionId);
@@ -871,7 +884,10 @@ test("accepted closing End remains recoverable until the server releases the cal
   await e.open();
   e.responses.control = async () =>
     session({ state: "closing", end_requested: true });
-  await e.client.end();
+  const ending = e.client.end();
+  for (let step = 0; step < 8; step++) await Promise.resolve();
+  e.clock.expire();
+  await ending;
   assert.equal(e.client.pendingEnd?.state, "closing");
   assert.equal(e.conflicts.at(-1)?.end_requested, true);
 });
@@ -933,16 +949,20 @@ test("ending during POST cleans up a late successful owned session exactly once"
   waiting.resolve({ session: session(), sdp_answer: "answer" });
   await starting;
   assert.equal(e.client.pendingStart, false);
-  assert.equal(e.cleanup.at(-1)?.session?.id, sessionId);
-  assert.equal(e.cleanup.at(-1)?.thread, conversationId);
+  assert.ok(
+    e.cleanup.some(
+      (row) => row.session?.id === sessionId && row.thread === conversationId,
+    ),
+  );
+  assert.equal(e.cleanup.at(-1)?.session, null);
   assert.deepEqual(
     e.controls.map((value) => value.input.action),
     ["end"],
   );
   assert.equal(
-    e.controls[0]!.signal,
-    undefined,
-    "durable End survives local abort",
+    e.controls[0]!.signal?.aborted,
+    true,
+    "durable End uses its own bounded controller after local abort",
   );
   assert.deepEqual(e.media.answers, []);
   assert.deepEqual(e.paths, []);
@@ -1027,6 +1047,7 @@ test("socket loss immediately disables input, ends once and never reconnects", a
     e.controls.map((value) => value.input.action),
     ["end"],
   );
+  await e.client.end();
   assert.equal(e.clock.intervals.size, 0);
   assert.equal(e.clock.timeouts.size, 0);
 });
@@ -1211,7 +1232,9 @@ test("mute suspends input immediately and late control responses cannot override
   waiting.resolve(session({ control_revision: 1, muted: false }));
   await muting;
   assert.equal(e.media.input, false);
-  await e.client.end();
+  const ending = e.client.end();
+  e.clock.expire();
+  await ending;
 });
 
 test("failed or mismatched mute controls end the call rather than reopening input", async () => {
@@ -1453,4 +1476,288 @@ test("diagnostic failures release a held microphone and output ducking before cl
     e.errors.some((message) => message.includes("private")),
     false,
   );
+});
+
+test("explicit OpenAI End quiets immediately and preserves transport until a verified final snapshot", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  e.client.setInputMode("push_to_talk");
+  e.client.hold(true);
+  assert.equal(e.media.input, true);
+  const waiting = deferred<unknown>();
+  e.responses.control = async () => {
+    assert.equal(
+      e.media.closed,
+      0,
+      "provider transport remains available for the End request",
+    );
+    assert.equal(e.socket.closed, 0);
+    return waiting.promise;
+  };
+  const ending = e.client.end();
+  assert.equal(e.client.end(), ending, "duplicate End shares one operation");
+  assert.equal(e.client.isClosed, true);
+  assert.equal(e.media.input, false);
+  assert.equal(e.media.holds.at(-1), false);
+  assert.equal(e.media.speaker.at(-1), true);
+  assert.equal(e.media.closed, 0);
+  assert.equal(e.socket.closed, 0);
+  assert.deepEqual([...e.clock.timeoutDelays.values()], [7_000]);
+  assert.equal(e.controls.length, 1);
+  assert.equal(e.controls[0]!.signal?.aborted, false);
+
+  // Controls, media readiness and ordinary snapshots cannot reopen audio.
+  e.client.hold(true);
+  e.client.setInputMode("automatic");
+  e.client.muteSpeaker(false);
+  await e.client.resumeAudio();
+  await e.client.mute(false);
+  e.media.emit({ type: "provider-ready" });
+  e.media.emit({ type: "error", message: "late private media error" });
+  e.snapshot({ state: "closing", end_requested: true, control_revision: 1 });
+  assert.equal(e.media.input, false);
+  assert.equal(e.media.speaker.at(-1), true);
+  assert.equal(e.media.resumed, 0);
+  assert.deepEqual(e.errors, []);
+  assert.equal(e.controls.length, 1);
+  assert.equal(
+    e.snapshots.length,
+    1,
+    "nonterminal cleanup is not a live callback",
+  );
+
+  const terminal = session({
+    state: "closed",
+    end_requested: true,
+    control_revision: 1,
+  });
+  e.snapshot(terminal);
+  // A delayed HTTP result cannot undo the terminal snapshot, even in the same turn.
+  waiting.resolve(
+    session({ state: "closing", end_requested: true, control_revision: 1 }),
+  );
+  e.snapshot({ state: "active", control_revision: 1 });
+  await ending;
+  assert.equal(e.client.pendingEnd, undefined);
+  assert.deepEqual(e.snapshots.at(-1)?.session, terminal);
+  assert.equal(e.cleanup.at(-1)?.session, null);
+  assert.equal(e.controls[0]!.signal?.aborted, true);
+  assert.equal(e.media.closed, 1);
+  assert.equal(e.socket.closed, 1);
+  assert.equal(e.clock.timeouts.size, 0);
+  assert.equal(e.count().closed, 1);
+});
+
+test("End's absolute deadline releases transport even when HTTP ignores abort, fencing its late success", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  const waiting = deferred<unknown>();
+  e.responses.control = async () => waiting.promise;
+  const ending = e.client.end();
+  e.snapshot({ state: "closing", end_requested: true, control_revision: 2 });
+  const snapshots = e.snapshots.length;
+  assert.equal(e.media.closed, 0);
+  e.clock.expire();
+  // A response arriving in the deadline's own turn is already too late.
+  waiting.resolve(session({ state: "closed", control_revision: 3 }));
+  await ending;
+  assert.equal(e.controls[0]!.signal?.aborted, true);
+  assert.equal(e.media.closed, 1);
+  assert.equal(e.socket.closed, 1);
+  assert.equal(e.client.pendingEnd?.state, "closing");
+  assert.equal(e.client.pendingEnd?.control_revision, 2);
+  const cleanupCount = e.cleanup.length;
+  for (let step = 0; step < 8; step++) await Promise.resolve();
+  assert.equal(e.snapshots.length, snapshots);
+  assert.equal(e.cleanup.length, cleanupCount);
+  assert.equal(e.client.pendingEnd?.state, "closing");
+  assert.equal(e.controls.length, 1);
+  assert.equal(e.clock.timeouts.size, 0);
+});
+
+test("a lost End response can settle from a final socket snapshot without retrying the POST", async () => {
+  const e = setup();
+  await e.open();
+  e.responses.control = async () => {
+    throw new Error("lost response");
+  };
+  const ending = e.client.end();
+  for (let step = 0; step < 8; step++) await Promise.resolve();
+  assert.equal(e.media.closed, 0);
+  e.snapshot({
+    state: "failed",
+    control_revision: 1,
+    end_reason: "provider_closed",
+  });
+  await ending;
+  assert.equal(e.client.pendingEnd, undefined);
+  assert.equal(e.cleanup.at(-1)?.session, null);
+  assert.equal(e.snapshots.at(-1)?.session.state, "failed");
+  assert.equal(e.media.closed, 1);
+  assert.equal(e.controls.length, 1);
+});
+
+test("draining End ignores wrong-resource and regressing terminal snapshots", async () => {
+  const e = setup();
+  await e.open();
+  e.snapshot({ generation: 2, control_revision: 4 });
+  const waiting = deferred<unknown>();
+  e.responses.control = async () => waiting.promise;
+  const ending = e.client.end();
+  e.snapshot({ id: requestId, state: "closed", generation: 3 });
+  e.snapshot({ state: "closed", generation: 1, control_revision: 5 });
+  e.snapshot({ state: "closed", generation: 2, control_revision: 3 });
+  e.socket.receive({ type: "snapshot", session: { state: "closed" } });
+  e.socket.receive({ type: "audio", generation: 2, end_ms: 1 });
+  e.socket.receive(new ArrayBuffer(960));
+  assert.equal(e.media.closed, 0);
+  assert.equal(e.media.input, false);
+  assert.equal(e.media.enqueued.length, 0);
+  assert.equal(e.snapshots.length, 2);
+  e.clock.expire();
+  await ending;
+  assert.equal(e.client.pendingEnd?.generation, 2);
+  assert.equal(e.client.pendingEnd?.control_revision, 4);
+  assert.equal(e.snapshots.length, 2);
+  assert.equal(e.media.closed, 1);
+});
+
+test("a transport fault closes media immediately while a noncooperative End request remains bounded", async () => {
+  const e = setup();
+  await e.open();
+  const waiting = deferred<unknown>();
+  e.responses.control = async () => waiting.promise;
+  e.socket.onclose!();
+  assert.equal(e.media.closed, 1);
+  assert.equal(e.socket.closed, 1);
+  assert.equal(e.media.input, false);
+  const ending = e.client.end();
+  e.clock.expire();
+  await ending;
+  assert.equal(e.controls[0]!.signal?.aborted, true);
+  assert.equal(e.client.pendingEnd?.id, sessionId);
+  assert.equal(e.controls.length, 1);
+  assert.equal(e.clock.timeouts.size, 0);
+});
+
+for (const prior of [
+  { state: "closing" as const },
+  { state: "active" as const, end_requested: true },
+]) {
+  test(`a 409 with ${prior.state} cleanup describes finalization without claiming a second live call`, async () => {
+    const e = setup();
+    e.responses.start = async () => {
+      throw { status: 409 };
+    };
+    e.responses.active = async () => ({ session: session(prior) });
+    await e.client.start(preferences);
+    assert.deepEqual(e.errors, [
+      "The previous voice call is finishing. You can continue with text.",
+    ]);
+    assert.equal(e.conflicts[0]?.id, sessionId);
+    assert.deepEqual(e.controls, []);
+    assert.equal(e.starts.length, 1);
+  });
+}
+
+for (const rejection of ["conflict", "lost response"] as const) {
+  test(`initial ${rejection} discovery times out after eight seconds and ignores a late call`, async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const e = setup();
+    const waiting = deferred<unknown>();
+    let signal: AbortSignal | undefined;
+    e.responses.start = async () => {
+      throw rejection === "conflict" ? { status: 409 } : new Error("network");
+    };
+    e.api.accountActive = async (_thread, requestSignal) => {
+      signal = requestSignal;
+      return waiting.promise;
+    };
+    const starting = e.client.start(preferences);
+    for (let step = 0; step < 20 && !signal; step++) await Promise.resolve();
+    assert.ok(signal);
+    assert.equal(e.client.isClosed, false);
+    context.mock.timers.tick(7_999);
+    for (let step = 0; step < 8; step++) await Promise.resolve();
+    assert.equal(e.client.isClosed, false);
+    context.mock.timers.tick(1);
+    await starting;
+    assert.equal(signal.aborted, true);
+    assert.equal(e.client.isClosed, true);
+    assert.equal(e.client.pendingStart, false);
+    assert.deepEqual(e.conflictUnknown, [true]);
+    assert.deepEqual(e.controls, []);
+    assert.equal(e.starts.length, 1);
+    const conflicts = e.conflicts.length;
+    const cleanup = e.cleanup.length;
+    waiting.resolve({ session: session(), conversation_id: conversationId });
+    for (let step = 0; step < 12; step++) await Promise.resolve();
+    assert.equal(e.conflicts.length, conflicts);
+    assert.equal(e.cleanup.length, cleanup);
+    assert.equal(e.starts.length, 1);
+  });
+}
+
+test("End cancels a hung initial discovery without allowing its late result to install a conflict", async () => {
+  const e = setup();
+  const waiting = deferred<unknown>();
+  let signal: AbortSignal | undefined;
+  e.responses.start = async () => {
+    throw { status: 409 };
+  };
+  e.api.accountActive = async (_thread, requestSignal) => {
+    signal = requestSignal;
+    return waiting.promise;
+  };
+  const starting = e.client.start(preferences);
+  for (let step = 0; step < 20 && !signal; step++) await Promise.resolve();
+  assert.ok(signal);
+  await e.client.end();
+  await starting;
+  assert.equal(signal.aborted, true);
+  assert.equal(e.client.pendingStart, false);
+  assert.deepEqual(e.conflicts, []);
+  assert.equal(e.cleanup.at(-1)?.unknown, true);
+  assert.equal(e.media.closed, 1);
+  const cleanup = e.cleanup.length;
+  waiting.resolve({ session: session(), conversation_id: conversationId });
+  for (let step = 0; step < 12; step++) await Promise.resolve();
+  assert.deepEqual(e.conflicts, []);
+  assert.equal(e.cleanup.length, cleanup);
+  assert.deepEqual(e.controls, []);
+});
+
+test("late rejected POST recovery is bounded and settles pendingStart as unknown without live callbacks", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup();
+  const post = deferred<unknown>();
+  const discovery = deferred<unknown>();
+  let signal: AbortSignal | undefined;
+  e.responses.start = () => post.promise;
+  e.api.accountActive = async (_thread, requestSignal) => {
+    signal = requestSignal;
+    return discovery.promise;
+  };
+  const starting = e.client.start(preferences);
+  for (let step = 0; step < 20 && !e.starts.length; step++)
+    await Promise.resolve();
+  assert.equal(e.client.pendingStart, true);
+  await e.client.end();
+  post.reject(new Error("lost response"));
+  for (let step = 0; step < 20 && !signal; step++) await Promise.resolve();
+  assert.ok(signal);
+  assert.equal(
+    signal.aborted,
+    false,
+    "late metadata cleanup has its own bounded lifetime",
+  );
+  context.mock.timers.tick(8_000);
+  await starting;
+  assert.equal(signal.aborted, true);
+  assert.equal(e.client.pendingStart, false);
+  assert.equal(e.cleanup.at(-1)?.unknown, true);
+  assert.deepEqual(e.conflicts, []);
+  assert.deepEqual(e.errors, []);
+  assert.deepEqual(e.controls, []);
+  assert.equal(e.starts.length, 1);
 });

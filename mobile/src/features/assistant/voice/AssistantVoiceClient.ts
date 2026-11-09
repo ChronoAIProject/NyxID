@@ -13,6 +13,7 @@ import {
 } from "./voiceContracts";
 import { ApiError } from "../../../lib/api/ApiError";
 import { discoverActiveVoiceCall } from "./voiceActiveCall";
+import { withVoiceRequestDeadline } from "./voiceRequestDeadline";
 import {
   voiceStartError,
   voiceStartRecovery,
@@ -39,6 +40,8 @@ export interface VoiceMediaAdapter {
   enqueue(bytes: ArrayBuffer, endMs: number): void;
   flush(): void;
   playback(): { playback_ms: number; playback_audible: boolean };
+  /** Transfer quiet native transport to this call's bounded End cleanup owner. */
+  beginEndDrain?(): void;
   close(): void;
   subscribe(listener: (event: VoiceMediaEvent) => void): () => void;
 }
@@ -132,6 +135,8 @@ export class AssistantVoiceClient {
   private readonly randomId: () => string;
   private readonly unsubscribe: () => void;
   private closed = false;
+  private disposed = false;
+  private onDrainSnapshot?: (snapshot: VoiceSnapshot) => void;
   private attempted = false;
   private started = false;
   private ready = false;
@@ -262,7 +267,10 @@ export class AssistantVoiceClient {
         this.fail(
           conflict
             ? active
-              ? "Another voice call is active. End it before starting a new call."
+              ? active.session.end_requested ||
+                active.session.state === "closing"
+                ? "The previous voice call is finishing. You can continue with text."
+                : "Another voice call is active. End it before starting a new call."
               : "Voice state changed before the call could start. Check call status and try again."
             : step === "microphone" &&
                 error instanceof Error &&
@@ -278,10 +286,19 @@ export class AssistantVoiceClient {
   }
 
   private async observeUncertainStart() {
+    const controller = new AbortController();
+    const interrupted = () => controller.abort();
+    // A late POST may settle after local End. Its bounded metadata recovery
+    // still belongs to onCleanup, while an in-view lookup follows local cancel.
+    if (!this.closed)
+      this.abort.signal.addEventListener("abort", interrupted, { once: true });
     try {
-      const active = await discoverActiveVoiceCall(
-        this.options.api,
-        this.options.conversationId,
+      const active = await withVoiceRequestDeadline(controller, () =>
+        discoverActiveVoiceCall(
+          this.options.api,
+          this.options.conversationId,
+          controller.signal,
+        ),
       );
       if (!this.closed)
         this.options.onConflict?.(
@@ -299,6 +316,9 @@ export class AssistantVoiceClient {
       if (!this.closed) this.options.onConflict?.(null, undefined, true);
       else this.options.onCleanup?.(null, true);
       return null;
+    } finally {
+      this.abort.signal.removeEventListener("abort", interrupted);
+      controller.abort();
     }
   }
 
@@ -320,7 +340,19 @@ export class AssistantVoiceClient {
       this.notifyReady();
     };
     socket.onmessage = ({ data }) => {
-      if (this.closed || this.socket !== socket) return;
+      if (this.socket !== socket) return;
+      if (this.closed) {
+        // Only authoritative snapshots can settle an explicit End. Audio and
+        // provider readiness never regain authority during this quiet drain.
+        if (this.onDrainSnapshot && typeof data === "string") {
+          try {
+            this.onDrainSnapshot(voiceSnapshotSchema.parse(JSON.parse(data)));
+          } catch {
+            /* Keep the last verified cleanup target until the deadline. */
+          }
+        }
+        return;
+      }
       this.onMessage(data);
     };
     const disconnected = () => {
@@ -683,47 +715,71 @@ export class AssistantVoiceClient {
   }
 
   end(): Promise<void> {
+    return this.endCall(true);
+  }
+
+  private endCall(graceful: boolean): Promise<void> {
     if (this.endPromise) return this.endPromise;
     if (this.closed) return Promise.resolve();
     const session = this.session;
     this.outstandingEnd = session;
     if (!session && this.startInFlight) this.options.onCleanup?.(null, true);
-    this.dispose();
-    this.endPromise = session ? this.endRemote(session) : Promise.resolve();
+    const drain =
+      graceful &&
+      !!session &&
+      this.protocol === "openai_live" &&
+      this.socket?.readyState === 1;
+    if (drain) {
+      // Lock every input/output path synchronously, keeping only transport
+      // alive so NyxID can obtain the provider's final close acknowledgement.
+      this.closed = true;
+      this.ready = false;
+      this.clearReadinessTimeout();
+      if (this.heartbeat !== undefined)
+        this.clock.clearInterval(this.heartbeat);
+      this.heartbeat = undefined;
+      this.releaseHeldInput();
+      this.applyInput(false);
+      this.speakerMuted = true;
+      this.options.media.muteSpeaker(true);
+      this.options.media.flush();
+      this.pendingAudio = undefined;
+      this.options.media.beginEndDrain?.();
+    } else this.dispose();
+    this.endPromise = session
+      ? this.endRemote(session, drain)
+      : Promise.resolve();
     return this.endPromise;
   }
 
-  private async endRemote(session: VoiceSession) {
+  private async endRemote(session: VoiceSession, drain = false) {
     if (this.endingSessions.has(session.id)) return;
     this.endingSessions.add(session.id);
     this.outstandingEnd = session;
     this.options.onCleanup?.(session, false, this.options.conversationId);
-    try {
-      const next = voiceSessionSchema.parse(
-        await this.options.api.control(
-          this.options.conversationId,
-          session.id,
-          {
-            command_id: this.randomId(),
-            expected_revision: session.control_revision,
-            action: "end",
-          },
-        ),
-      );
+    const controller = new AbortController();
+    let accepting = true;
+    let terminalAccepted = false;
+    let complete!: () => void;
+    const finished = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    const accept = (next: VoiceSession, snapshot?: VoiceSnapshot) => {
+      if (!accepting || terminalAccepted) return false;
+      const observed = this.outstandingEnd ?? this.session ?? session;
       if (
         next.id !== session.id ||
-        next.generation < session.generation ||
-        (next.generation === session.generation &&
-          next.control_revision < session.control_revision)
+        next.generation < observed.generation ||
+        (next.generation === observed.generation &&
+          next.control_revision < observed.control_revision)
       )
-        throw new Error("Voice session changed");
-      this.outstandingEnd =
-        next.state === "closed" || next.state === "failed" ? undefined : next;
-      if (!this.outstandingEnd) {
-        // Provider media may stop before the final control-socket snapshot.
-        // Teardown removes that listener, so publish the verified control result
-        // while preserving the last captions and accepted tasks for this call.
-        this.session = next;
+        return false;
+      const terminal = next.state === "closed" || next.state === "failed";
+      this.session = next;
+      if (snapshot) this.snapshot = snapshot;
+      this.outstandingEnd = terminal ? undefined : next;
+      if (terminal) {
+        terminalAccepted = true;
         this.options.onSnapshot({
           type: "snapshot",
           ...this.snapshot,
@@ -731,10 +787,49 @@ export class AssistantVoiceClient {
           captions: this.snapshot?.captions ?? [],
           tasks: this.snapshot?.tasks ?? [],
         });
+        complete();
       }
-    } catch {
-      // Retain the verified owned identity so explicit recovery can retry End.
-    }
+      return true;
+    };
+    if (drain)
+      this.onDrainSnapshot = (snapshot) => {
+        accept(snapshot.session, snapshot);
+      };
+    // Absolute budget includes the POST itself. Abort is paired with a race so
+    // even an adapter that ignores cancellation cannot strand local resources.
+    const deadline = this.clock.setTimeout(() => {
+      accepting = false;
+      controller.abort();
+      complete();
+    }, 7_000);
+    void (async () => {
+      try {
+        const next = voiceSessionSchema.parse(
+          await this.options.api.control(
+            this.options.conversationId,
+            session.id,
+            {
+              command_id: this.randomId(),
+              expected_revision: session.control_revision,
+              action: "end",
+            },
+            controller.signal,
+          ),
+        );
+        accept(next);
+      } catch {
+        // Retain the verified identity. A draining control socket can still
+        // prove termination after a lost or invalid HTTP response.
+      } finally {
+        if (!drain) complete();
+      }
+    })();
+    await finished;
+    accepting = false;
+    this.onDrainSnapshot = undefined;
+    this.clock.clearTimeout(deadline);
+    controller.abort();
+    if (drain) this.dispose();
     this.options.onConflict?.(
       this.outstandingEnd ?? null,
       this.outstandingEnd ? this.options.conversationId : undefined,
@@ -749,7 +844,9 @@ export class AssistantVoiceClient {
   private fail(message: string, recovery?: VoiceStartRecovery) {
     if (this.closed) return;
     this.options.onError(message, recovery);
-    void this.end();
+    // Device/transport faults require immediate local teardown. A human End
+    // preserves quiet transport briefly; a failed transport cannot drain it.
+    void this.endCall(false);
   }
 
   private clearReadinessTimeout() {
@@ -759,7 +856,8 @@ export class AssistantVoiceClient {
   }
 
   private dispose() {
-    if (this.closed) return;
+    if (this.disposed) return;
+    this.disposed = true;
     this.closed = true;
     this.ready = false;
     this.releaseHeldInput();
