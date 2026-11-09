@@ -67,8 +67,15 @@ const TASK_STATE: Record<Task["state"], string> = {
   claimed: "Running",
   awaiting_confirmation: "Needs your OK",
   completed: "Done",
-  cancelled: "Cancelled",
+  cancelled: "Ended",
 };
+
+function taskState(task: Task) {
+  if (task.state !== "cancelled") return TASK_STATE[task.state];
+  if (task.outcome === "failed") return "Failed";
+  if (task.outcome === "cancelled") return "Stopped";
+  return TASK_STATE.cancelled;
+}
 
 /** Voice replaces the text composer; the main chat keeps all words and cards. */
 export function AssistantVoiceConversation(props: Props) {
@@ -120,6 +127,7 @@ function VoiceConversation({
   const levels = useVoiceLevels(voice.media);
   const [now, setNow] = useState(Date.now());
   const [tasksOpen, setTasksOpen] = useState(false);
+  const [taskDetailsId, setTaskDetailsId] = useState<string>();
   const [localPreferencesOpen, setLocalPreferencesOpen] = useState(false);
   const [voicePickerScope, setVoicePickerScope] = useState<string>();
   const [pricingOpen, setPricingOpen] = useState(false);
@@ -231,6 +239,19 @@ function VoiceConversation({
   const running = tasks.some(
     (task) => task.state === "queued" || task.state === "claimed",
   );
+  const pendingTasks = tasks.filter(
+    (task) => task.state === "queued" || task.state === "claimed",
+  ).length;
+  const failedTasks = tasks.filter(
+    (task) => task.state === "cancelled" && task.outcome === "failed",
+  ).length;
+  const taskActivity = needsOk
+    ? "Needs your OK"
+    : pendingTasks
+      ? `${pendingTasks} ${pendingTasks === 1 ? "task" : "tasks"} in progress`
+      : failedTasks
+        ? `${failedTasks} ${failedTasks === 1 ? "task" : "tasks"} failed`
+        : "Task activity";
   const hasCall =
     active ||
     (!!session && !terminal) ||
@@ -529,31 +550,64 @@ function VoiceConversation({
     setLocalPreferencesOpen(false);
     onPreferencesClose?.();
   }
-  function taskRow(task: Task) {
+  function taskRow(task: Task, index: number) {
+    const detailsOpen = taskDetailsId === task.id;
+    const hasDetails = !!(task.title?.trim() || task.progress?.detail.trim());
     return (
       <View key={task.id} style={styles.taskRow}>
-        <View style={styles.fill}>
-          <Label numberOfLines={1}>{task.title || "Agent task"}</Label>
-          <Label muted style={styles.taskState}>
-            {TASK_STATE[task.state]}
-            {task.progress?.detail ? ` · ${task.progress.detail}` : ""}
+        <View style={styles.taskHeader}>
+          <Label style={styles.fill}>
+            {`Task ${index + 1} · ${taskState(task)}`}
           </Label>
+          <View style={styles.taskActions}>
+            {hasDetails ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`${detailsOpen ? "Hide" : "Show"} details for task ${index + 1}`}
+                accessibilityState={{ expanded: detailsOpen }}
+                onPress={() => {
+                  if (voice.holding) voice.hold(false);
+                  setTaskDetailsId(detailsOpen ? undefined : task.id);
+                }}
+                style={styles.taskDetailsButton}
+              >
+                <Label muted>{detailsOpen ? "Hide details" : "Details"}</Label>
+              </Pressable>
+            ) : null}
+            {task.state === "awaiting_confirmation" ? (
+              <ActionButton
+                label="Review in chat"
+                variant="secondary"
+                compact
+                onPress={() => review(task.pending_acknowledgement_ids[0])}
+              />
+            ) : null}
+            {task.state === "queued" || task.state === "claimed" ? (
+              <ActionButton
+                label="Stop task"
+                variant="secondary"
+                compact
+                onPress={() => void voice.stopTask(task.id)}
+              />
+            ) : null}
+          </View>
         </View>
-        {task.state === "awaiting_confirmation" ? (
-          <ActionButton
-            label="Review in chat"
-            variant="secondary"
-            compact
-            onPress={() => review(task.pending_acknowledgement_ids[0])}
-          />
-        ) : null}
-        {task.state === "queued" || task.state === "claimed" ? (
-          <ActionButton
-            label="Stop task"
-            variant="secondary"
-            compact
-            onPress={() => void voice.stopTask(task.id)}
-          />
+        {detailsOpen ? (
+          <View style={styles.taskDetails}>
+            {task.title?.trim() ? (
+              <>
+                <Label muted style={styles.taskState}>
+                  Request from voice assistant
+                </Label>
+                <Label selectable>{task.title}</Label>
+              </>
+            ) : null}
+            {task.progress?.detail.trim() ? (
+              <Label muted selectable style={styles.taskState}>
+                {task.progress.detail}
+              </Label>
+            ) : null}
+          </View>
         ) : null}
       </View>
     );
@@ -849,13 +903,19 @@ function VoiceConversation({
               tasksOpen ? "Hide agent tasks" : "Show agent tasks"
             }
             accessibilityState={{ expanded: tasksOpen }}
-            onPress={() => setTasksOpen((value) => !value)}
+            onPress={() => {
+              if (voice.holding) voice.hold(false);
+              setTaskDetailsId(undefined);
+              setTasksOpen((value) => !value);
+            }}
             style={[
               styles.taskChip,
               {
                 backgroundColor: needsOk
                   ? colors.warningTone.bg
-                  : colors.segmentTrack,
+                  : !running && failedTasks
+                    ? colors.dangerTone.bg
+                    : colors.segmentTrack,
               },
             ]}
           >
@@ -866,28 +926,33 @@ function VoiceConversation({
               style={[
                 styles.controlText,
                 {
-                  color: needsOk ? colors.warningTone.text : colors.textPrimary,
+                  color: needsOk
+                    ? colors.warningTone.text
+                    : !running && failedTasks
+                      ? colors.dangerTone.text
+                      : colors.textPrimary,
                 },
               ]}
             >
-              {needsOk
-                ? "Needs your OK"
-                : `${tasks.length} ${tasks.length === 1 ? "task" : "tasks"}`}
+              {taskActivity}
             </Text>
           </Pressable>
         ) : null}
-        {tasksOpen ? (
+        {tasksOpen && tasks.length ? (
           <ScrollView
             accessibilityLabel="Agent tasks"
             style={[styles.tray, { backgroundColor: colors.segmentTrack }]}
             contentContainerStyle={styles.trayContent}
           >
-            <Label>{`Agent tasks · ${tasks.length}`}</Label>
+            <Label>Task activity</Label>
             {tasks.map(taskRow)}
-            <Label muted style={styles.footnote}>
-              Ending voice leaves accepted tasks running. Stop a task here to
-              cancel it.
-            </Label>
+            {running || needsOk ? (
+              <Label muted style={styles.footnote}>
+                {running
+                  ? "Tasks can continue after the call ends. Stop a task to cancel it."
+                  : "Review the pending request in chat to continue."}
+              </Label>
+            ) : null}
           </ScrollView>
         ) : null}
         {preferencesVisible ? (
@@ -1234,7 +1299,7 @@ const styles = StyleSheet.create({
   recoveryActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   taskChip: {
     alignSelf: "flex-start",
-    minHeight: 32,
+    minHeight: 44,
     borderRadius: 16,
     paddingHorizontal: 10,
     flexDirection: "row",
@@ -1243,7 +1308,20 @@ const styles = StyleSheet.create({
   },
   tray: { maxHeight: 200, borderRadius: 14 },
   trayContent: { gap: 10, padding: 8 },
-  taskRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  taskRow: { gap: 6 },
+  taskHeader: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 8,
+  },
+  taskActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  taskDetailsButton: {
+    minHeight: 44,
+    paddingHorizontal: 8,
+    justifyContent: "center",
+  },
+  taskDetails: { gap: 4 },
   taskState: { fontSize: 12 },
   preferences: {
     borderTopWidth: StyleSheet.hairlineWidth,

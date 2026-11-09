@@ -190,6 +190,8 @@ export const voiceTaskSchema = z.object({
     "completed",
     "cancelled",
   ]),
+  /** Additive terminal detail; unknown values must not break the live call. */
+  outcome: z.enum(["failed", "cancelled"]).nullish().catch(undefined),
   pending_acknowledgement_ids: z.array(z.string()),
   title: z.string().max(120).nullable().optional(),
   result_message_id: z.string().nullable().optional(),

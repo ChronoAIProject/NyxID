@@ -691,3 +691,70 @@ Actual signed-App iPad landscape checks after cleared Metro reload:
   capture still worked after the picker flow; no literal assistant reply is
   asserted because an idle-warning message overlapped this window. The prior
   slower check had reached idle timeout and is not counted as speech evidence.
+
+
+## 2026-11-09 — voice task activity and failed outcomes
+
+Voice task snapshots already include an additive `outcome` that distinguishes
+failed execution from an explicit Stop. Mobile now retains known outcomes,
+accepts old servers with no outcome, and ignores future unknown values without
+breaking the live snapshot or implying success. Failed work renders Failed,
+explicit Stop renders Stopped, and a legacy unknown terminal result renders
+Ended. The task chip counts only queued/claimed work as in progress; a failed
+terminal task shows a failure summary instead of an ambiguous task count.
+
+Expanded activity shows numbered states and the existing Stop/approval-review
+controls. Generated task request text and server progress explanations are
+behind an explicit per-task Details action, labelled Request from voice
+assistant. Details remain keyed by task ID through snapshot updates. The
+possible-earlier-effects warning is preserved there. Only pending work shows
+continuation guidance; an approval-only list asks for review rather than
+suggesting an unavailable Stop control. Opening activity/details releases held
+PTT without ending the media session. This increment changes mobile files only.
+
+Focused checks from `mobile/`:
+
+```sh
+pnpm exec tsx --test src/features/assistant/voice/AssistantVoiceConversation.test.ts src/features/assistant/voice/voiceContracts.test.ts src/features/assistant/voice/AssistantVoiceClient.test.ts src/lib/api/assistantVoiceTransport.test.ts
+# 165 passed, 0 failed, 0 skipped
+```
+
+Changed-file checks from repository root:
+
+```sh
+frontend/node_modules/.bin/prettier --check mobile/src/features/assistant/voice/AssistantVoiceConversation.tsx mobile/src/features/assistant/voice/AssistantVoiceConversation.test.ts mobile/src/features/assistant/voice/voiceContracts.ts mobile/src/features/assistant/voice/voiceContracts.test.ts
+git diff --check -- mobile
+# passed
+```
+
+Actual authenticated signed-App iPad landscape check after a cleared Metro
+restart and explicit App reload used a real acoustic request to delegate harmless
+arithmetic, expressly without external tools or modifications. The request was
+transcribed, accepted and settled as a real failed task while the muted voice
+call remained open. Expanded activity showed Task 1 · Failed and Details;
+only Details revealed the labelled request and original failure warning. Hiding
+it removed that text. The failed-only list had no pending-work footer. Native
+media, captions or task results were not mocked or injected.
+
+**Current runtime failures remain open.** The real arithmetic task and the
+user-provided error both report `nyxid / model_proxy / approval_unsupported /
+HTTP 403 / NyxID 12502`. Current upstream main deliberately refuses a new
+approval request from voice execution. That refused operation was not executed
+and created no approval card; the error alone does not identify the exact
+service/rule or prove all earlier task actions had no effects. No approval or
+backend policy was changed by this mobile increment. Successful delegated or
+external task execution is not accepted by this test.
+
+The same actual run also exposed an unresolved End confirmation: End was
+requested at 2:50, native WebRTC closed and a 2:55 call receipt appeared, but
+the UI remained Confirming call ended even after Check call status and another
+explicit End request. This End-to-composer path is **not passed**. A standard
+development reload returned to the logged-in App; it is not counted as a fix
+or successful automatic settlement. Exact server status/root cause has not been
+established; a receipt alone must not authorize a new call. This later observation
+qualifies the earlier passing End/recovery runs above.
+
+Independent review found no blocking issue in the task presentation diff.
+The six existing backend/chat-document changes are preserved byte-for-byte and
+excluded. Full frontend suite/typecheck/build remains delegated to GitHub CI;
+no reliable affected typecheck exists, and CI is not monitored.
