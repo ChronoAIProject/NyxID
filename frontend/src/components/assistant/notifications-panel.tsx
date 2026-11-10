@@ -24,6 +24,7 @@ import {
   trailingEmptyPages,
   useMarkNotificationsRead,
   useNotificationList,
+  useNotificationSummary,
   useNotificationsEnabled,
 } from "@/hooks/use-assistant-notifications";
 import { notificationTarget, openNotificationLink } from "@/lib/assistant/notification-navigation";
@@ -132,13 +133,13 @@ export function NotificationsPanel({
   // it does, no further feed requests leave and nothing renders.
   const enabled = useNotificationsEnabled();
   const filter = notificationFilter(current.panelTab) ?? "all";
+  const summary = useNotificationSummary(enabled);
   const list = useNotificationList(filter, enabled);
   const markRead = useMarkNotificationsRead();
   const navigate = useNavigate();
   const [announcement, setAnnouncement] = useState<string>();
   const items = useMemo(() => list.data?.pages.flatMap((page) => page.items) ?? [], [list.data]);
   const asOf = list.data?.pages[0]?.as_of;
-  const loadedUnread = items.some((item) => !item.read);
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = list;
   // A page with no visible rows but a cursor (hidden or revoked sources only)
   // keeps paging reachable; automatic loading stops after a few such pages so
@@ -229,9 +230,9 @@ export function NotificationsPanel({
             variant="ghost"
             size="sm"
             onClick={markAll}
-            disabled={!asOf || !loadedUnread || markRead.isPending}
+            disabled={!asOf || (summary.data?.unread_count ?? 0) === 0 || markRead.isPending}
           >
-            Mark all as read
+            Mark all notifications as read
           </Button>
         </div>
         <p role="status" aria-live="polite" className="sr-only">

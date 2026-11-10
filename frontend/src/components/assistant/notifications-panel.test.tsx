@@ -36,6 +36,7 @@ function row(id: string, extra: Record<string, unknown> = {}) {
 const requests: { endpoint: string; method: string; body?: unknown }[] = [];
 let pages: Record<string, { items: Record<string, unknown>[]; next_cursor: string | null; as_of: string }>;
 let listStatus = 200;
+let summary: { unread_count: number; needs_decision_count: number; by_source: Record<string, unknown>[] };
 /** The fake server remembers what was marked read, as the real one does. */
 const readIds = new Set<string>();
 
@@ -43,6 +44,7 @@ beforeEach(() => {
   requests.length = 0;
   readIds.clear();
   listStatus = 200;
+  summary = { unread_count: 0, needs_decision_count: 0, by_source: [] };
   mocks.navigate.mockReset();
   mocks.update.mockReset();
   mocks.toastError.mockReset();
@@ -81,7 +83,7 @@ beforeEach(() => {
       if (body && typeof body === "object" && "ids" in body) for (const id of (body as { ids: string[] }).ids) readIds.add(id);
       return new Response(null, { status: 204 });
     }
-    if (endpoint === "/assistant/nyxagent/notifications/summary") return json({ unread_count: 0, needs_decision_count: 0, by_source: [] });
+    if (endpoint === "/assistant/nyxagent/notifications/summary") return json(summary);
     if (endpoint.startsWith("/assistant/nyxagent/notifications?")) {
       if (listStatus !== 200) return json({ error: "boom", message: "Server exploded", error_code: 5000 }, listStatus);
       const query = new URLSearchParams(endpoint.slice(endpoint.indexOf("?") + 1));
@@ -155,12 +157,43 @@ describe("NotificationsPanel", () => {
 
   it("marks everything read behind the first page's fence and announces it", async () => {
     const user = userEvent.setup();
+    summary = { unread_count: 1, needs_decision_count: 0, by_source: [] };
     renderPanel();
     await screen.findByRole("list", { name: "Notifications" });
-    await user.click(screen.getByRole("button", { name: "Mark all as read" }));
+    await user.click(screen.getByRole("button", { name: "Mark all notifications as read" }));
     await waitFor(() => expect(readRequests()).toHaveLength(1));
     expect(readRequests()[0]?.body).toEqual({ all: true, before: "2026-11-10T08:10:00Z" });
     expect(await screen.findByRole("status")).toHaveTextContent("All notifications marked as read.");
+  });
+
+  it("offers a clearly global mark-all action in an empty filtered view when the summary has other unread notifications", async () => {
+    const user = userEvent.setup();
+    mocks.current = { panelTab: "automations" };
+    pages = {
+      first: { items: [], next_cursor: null, as_of: "2026-11-10T08:10:00Z" },
+    };
+    summary = {
+      unread_count: 2,
+      needs_decision_count: 0,
+      by_source: [{ source_type: "conversation", id: "nyxa-other", unread: 2 }],
+    };
+
+    renderPanel();
+    expect(await screen.findByText("No automation results yet")).toBeInTheDocument();
+    const markAll = screen.getByRole("button", { name: /mark all/i });
+    expect(markAll).toBeEnabled();
+    expect(markAll).toHaveAccessibleName("Mark all notifications as read");
+
+    await user.click(markAll);
+    await waitFor(() => expect(readRequests()).toHaveLength(1));
+    expect(readRequests()[0]?.body).toEqual({ all: true, before: "2026-11-10T08:10:00Z" });
+  });
+
+  it("disables global mark-all when the summary is zero even if a loaded row is stale-unread", async () => {
+    summary = { unread_count: 0, needs_decision_count: 0, by_source: [] };
+    renderPanel();
+    await screen.findByRole("list", { name: "Notifications" });
+    expect(screen.getByRole("button", { name: /mark all/i })).toBeDisabled();
   });
 
   it("opens a row's thread in the app and reports only unread rows read", async () => {
@@ -211,7 +244,7 @@ describe("NotificationsPanel", () => {
     await screen.findByRole("button", { name: "Load more" });
     expect(screen.queryByText("Nothing new")).not.toBeInTheDocument();
     expect(screen.getByText("Nothing to show on this page yet.")).toHaveAttribute("role", "status");
-    expect(screen.getByRole("button", { name: "Mark all as read" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Mark all notifications as read" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "Load more" }));
     const list = await screen.findByRole("list", { name: "Notifications" });
     expect(within(list).getAllByRole("button")).toHaveLength(3);
@@ -249,7 +282,7 @@ describe("NotificationsPanel", () => {
     pages = { first: { items: [], next_cursor: null, as_of: "2026-11-10T08:10:00Z" } };
     await user.click(within(alert).getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("Nothing new")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Mark all as read" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Mark all notifications as read" })).toBeDisabled();
   });
 
   it("stops fetching and disappears when the Notifications feature turns off while open", async () => {
@@ -274,13 +307,14 @@ describe("NotificationsPanel", () => {
 
   it("closes through the sheet and reports mark-read failures", async () => {
     const user = userEvent.setup();
+    summary = { unread_count: 1, needs_decision_count: 0, by_source: [] };
     const { onClose } = renderPanel();
     await screen.findByRole("list", { name: "Notifications" });
     globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
       if (endpoint.endsWith("/notifications/read")) return json({ error: "boom", message: "No", error_code: 5000 }, 500);
       return json({ items: [], next_cursor: null, as_of: "x" });
     };
-    await user.click(screen.getByRole("button", { name: "Mark all as read" }));
+    await user.click(screen.getByRole("button", { name: "Mark all notifications as read" }));
     await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith("Could not mark notifications as read"));
     await act(async () => { await user.keyboard("{Escape}"); });
     expect(onClose).toHaveBeenCalled();

@@ -18,9 +18,9 @@ import type {
   NotificationSourceType,
   NotificationSummary,
 } from "@/schemas/assistant-notifications";
+import { useAuthStore } from "@/stores/auth-store";
 
 type NotificationReadSource = { readonly type: NotificationSourceType; readonly id: string };
-import { useAuthStore } from "@/stores/auth-store";
 
 /** Nested under the NyxAgent root so a live `resync` re-reads the feed with everything else. */
 export const notificationQueryKeys = {
