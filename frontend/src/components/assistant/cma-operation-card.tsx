@@ -157,28 +157,31 @@ export function CmaOperationCard({
       detailsId={detailsId}
       scrollBody={scrollBody}
       controls={
-        cmaUrl ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                asChild
-                variant="ghost"
-                size="icon"
-                className="text-foreground hover:bg-overlay-strong focus-visible:ring-2 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-card"
-              >
-                <a
-                  href={cmaUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  aria-label="View in CMA"
+        <>
+          <CmaExecutionControl operations={[operation]} />
+          {cmaUrl ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  asChild
+                  variant="ghost"
+                  size="icon"
+                  className="text-foreground hover:bg-overlay-strong focus-visible:ring-2 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-card"
                 >
-                  <ExternalLink aria-hidden="true" />
-                </a>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>View in CMA</TooltipContent>
-          </Tooltip>
-        ) : null
+                  <a
+                    href={cmaUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label="View in CMA"
+                  >
+                    <ExternalLink aria-hidden="true" />
+                  </a>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>View in CMA</TooltipContent>
+            </Tooltip>
+          ) : null}
+        </>
       }
     >
       <CmaOperationProgress operation={operation} />
@@ -195,13 +198,11 @@ export function CmaOperationCard({
 
 const LONG_REQUEST_MS = 10 * 60_000;
 
-/** Keep request notices and execution access when a live card replaces its receipt. */
+/** Keep request status and notices when a live card replaces its receipt. */
 export function CmaOperationProgress({
   operation,
-  showExecution = true,
 }: {
   readonly operation: CmaOperation;
-  readonly showExecution?: boolean;
 }) {
   const observed = presentation(operation);
   const pending = isCmaOperationPending(operation);
@@ -287,7 +288,6 @@ export function CmaOperationProgress({
           Tracking ended. CMA may still be running.
         </p>
       ) : null}
-      {showExecution ? <CmaOperationExecution operation={operation} /> : null}
     </>
   );
 }
@@ -361,13 +361,22 @@ function hasExecutionReference(operation: CmaOperation) {
   );
 }
 
-function CmaOperationExecution({
-  operation,
+function orderedRequests(operations: readonly CmaOperation[]) {
+  return [...operations].sort(
+    (a, b) =>
+      Number(isCmaOperationPending(b)) - Number(isCmaOperationPending(a)) ||
+      Date.parse(b.created_at) - Date.parse(a.created_at),
+  );
+}
+
+export function CmaExecutionControl({
+  operations,
 }: {
-  readonly operation: CmaOperation;
+  readonly operations: readonly CmaOperation[];
 }) {
   const enabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
-  if (!enabled || !hasExecutionReference(operation)) return null;
+  const operation = orderedRequests(operations).find(hasExecutionReference);
+  if (!enabled || !operation) return null;
   return (
     <CmaAgentPanel
       key={`${operation.agent_ref_id}:${operation.response_id ?? ""}`}
@@ -387,17 +396,11 @@ export function CmaSessionRequests({
   readonly visible: boolean;
 }) {
   const [limit, setLimit] = useState(3);
-  const ordered = [...operations].sort(
-    (a, b) =>
-      Number(isCmaOperationPending(b)) - Number(isCmaOperationPending(a)) ||
-      Date.parse(b.created_at) - Date.parse(a.created_at),
-  );
-  const execution = ordered.find(hasExecutionReference);
+  const ordered = orderedRequests(operations);
   if (!ordered.length) return null;
   return (
     <section aria-label="CMA requests" className="space-y-2">
-      <h4 className="type-group-label text-text-tertiary">Requests</h4>
-      {execution ? <CmaOperationExecution operation={execution} /> : null}
+      <h4 className="type-group-label text-text-tertiary">Request status</h4>
       {ordered.slice(0, limit).map((operation) => (
         <section
           key={operation.id}
@@ -413,7 +416,7 @@ export function CmaSessionRequests({
                 : "Time unavailable"}
             </time>
           </p>
-          <CmaOperationProgress operation={operation} showExecution={false} />
+          <CmaOperationProgress operation={operation} />
           <CmaOperationDetails
             operation={operation}
             scrollBody={scrollBody}

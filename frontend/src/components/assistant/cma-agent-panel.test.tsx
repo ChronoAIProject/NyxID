@@ -184,6 +184,9 @@ async function openPanel() {
 
 it("does not observe CMA until the card is opened", () => {
   renderChat();
+  const controls = screen.getByRole("group", { name: "CMA submission controls" });
+  const execution = within(controls).getByRole("button", { name: "View execution" });
+  expect(execution.textContent).toBe("");
   expect(mocks.agent).not.toHaveBeenCalled();
   expect(mocks.desktop).not.toHaveBeenCalled();
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();

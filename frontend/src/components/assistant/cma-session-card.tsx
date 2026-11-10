@@ -26,7 +26,11 @@ import {
   TooltipContent,
 } from "@/components/ui/tooltip";
 import { CmaGlyph } from "@/components/service-icons/cma";
-import { CmaOperationCard, CmaSessionRequests } from "./cma-operation-card";
+import {
+  CmaExecutionControl,
+  CmaOperationCard,
+  CmaSessionRequests,
+} from "./cma-operation-card";
 import type { CmaOperation } from "@/schemas/cma-operation";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { safeCmaUrl } from "@/lib/assistant/cma-url";
@@ -230,6 +234,7 @@ function CmaSessionCard({
           role="group"
           aria-label="CMA session controls"
         >
+          <CmaExecutionControl operations={operations} />
           {session.origin ? (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -458,8 +463,10 @@ function SessionStatus({ state }: { readonly state: CmaSessionState }) {
   const live = state.connection === "live";
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <span className="text-13 text-muted-foreground">Agent:</span>
       <span
         role="status"
+        aria-label="CMA agent status"
         className="flex items-center gap-1.5 text-13 text-foreground"
       >
         {state.status === "working" || state.status === "starting" ? (

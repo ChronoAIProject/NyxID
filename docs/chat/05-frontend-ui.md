@@ -254,8 +254,8 @@ When the existing two-hour watch deadline expires, the card explicitly explains
 that automatic tracking ended and CMA may still be running.
 
 When CMA execution is enabled and the operation has a verified local Agent
-reference, **View execution** opens a right-side Sheet within the current
-NyxBot chat. The shared Agent view presents the continuous Conversation and
+reference, the **View execution** header icon opens a right-side Sheet within
+the current NyxBot chat. The shared Agent view presents the continuous Conversation and
 Desktop tabs, locating the operation's response only after its Agent binding
 is verified. Closing the Sheet preserves the source chat, draft, and reading
 position and disposes its live observers and desktop connection. **Back to
@@ -271,9 +271,12 @@ without an agent ID or its original reply. A live session card replaces its
 normal operation receipt only when both service and agent IDs match; failed
 or uncertain receipts remain visible. A consolidated live card retains the
 receipt's status, request notices and Submission details. One feature-gated
-**View execution** panel targets the newest pending request with a verified
+**View execution** header icon targets the newest pending request with a verified
 local `agent_ref_id`, or the newest verified request when none is pending,
-using its exact `response_id`. Requests show pending work first and initially
+using its exact `response_id`, including while the card is minimised. The
+**Agent:** line describes the overall agent and observer connection; **Request
+status** describes each submitted request independently. Requests show pending
+work first and initially
 show three rows, with older rows revealed three at a time. Live cards precede
 submission history, which also initially shows three cards with an older-history
 control. Cards do not render inside replies.

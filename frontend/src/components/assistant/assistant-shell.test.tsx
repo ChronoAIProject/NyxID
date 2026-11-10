@@ -266,7 +266,8 @@ it("offers one execution panel for the newest active request and bounds older re
   }));
   renderCmaOperations(operations);
   const requests = screen.getByRole("region", { name: "CMA requests" });
-  const execution = within(requests).getAllByRole("button", { name: "View execution" });
+  const controls = screen.getByRole("group", { name: "CMA session controls" });
+  const execution = within(controls).getAllByRole("button", { name: "View execution" });
   expect(execution).toHaveLength(1);
   expect(execution[0]).toHaveAttribute("data-agent-id", linkedRequest.agent_ref_id);
   expect(execution[0]).toHaveAttribute("data-response-id", "rsp-4");
@@ -274,7 +275,8 @@ it("offers one execution panel for the newest active request and bounds older re
   expect(requests.querySelector("[data-cma-request]")).toHaveAttribute("data-cma-request", "request-4");
   fireEvent.click(within(requests).getByRole("button", { name: "Show older requests (4)" }));
   expect(requests.querySelectorAll("[data-cma-request]")).toHaveLength(6);
-  expect(within(requests).getAllByRole("button", { name: "View execution" })).toHaveLength(1);
+  expect(within(controls).getAllByRole("button", { name: "View execution" })).toHaveLength(1);
+  expect(within(requests).queryByRole("button", { name: "View execution" })).not.toBeInTheDocument();
 });
 
 it.each([true, false])("keeps live work ahead of a bounded submission history (desktop: %s)", (desktop) => {

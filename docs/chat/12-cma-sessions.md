@@ -6,9 +6,13 @@ conversation's header identify current CMA work. Unrelated chats and account
 inventory never establish attribution.
 
 Each compact card leads with the CMA glyph and actual task title, followed by
-one line for task and stream status. A tight shared list shows the three newest
+one line labelled **Agent:** for the overall agent status and its stream connection.
+The **Request status** section tracks each submitted request separately, so a
+newer queued request can appear alongside an older request still running. A
+tight shared list shows the three newest
 public actions; **Show all N actions** expands the bounded 30-action history.
-Source chat, supplied CMA link, pin, and minimise controls share the header.
+The **View execution** icon, source chat, supplied CMA link, pin, and minimise
+controls share the header. Execution access remains available while minimised.
 Each icon has a state-aware tooltip available on hover and keyboard focus.
 The compact action list and Session details use spacing without internal
 horizontal dividers.
@@ -102,7 +106,8 @@ assets preview area and follow the dedicated card layout, minimise control and
 metadata disclosure independently of automatic session discovery. Unconfirmed
 submissions show recorded status without a live stream, actions or pin.
 Matching live cards retain per-request status, notices and Submission details.
-Their single execution panel focuses the newest pending verified request, or
+Their single header execution icon opens a panel focused on the newest pending
+verified request, or
 the newest verified request if none is pending. It uses the verified local Agent
 reference, never the remote session ID. Request rows and unmatched submission
 history initially show three items; older items are revealed three at a time.

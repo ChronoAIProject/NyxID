@@ -11,6 +11,11 @@ import {
   SheetTrigger,
 } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 const CmaAgentView = lazy(() =>
   import("./cma-agent-view").then((module) => ({
@@ -32,11 +37,22 @@ export function CmaAgentPanel({
 
   return (
     <Sheet open={open} onOpenChange={setOpen}>
-      <SheetTrigger asChild>
-        <Button ref={trigger} variant="primary" className="mt-4 w-full">
-          View execution <PanelRight aria-hidden className="size-3" />
-        </Button>
-      </SheetTrigger>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <SheetTrigger asChild>
+            <Button
+              ref={trigger}
+              variant="ghost"
+              size="icon"
+              aria-label="View execution"
+              className="shrink-0 text-foreground hover:bg-overlay-strong focus-visible:ring-2 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-card"
+            >
+              <PanelRight aria-hidden="true" />
+            </Button>
+          </SheetTrigger>
+        </TooltipTrigger>
+        <TooltipContent>View execution</TooltipContent>
+      </Tooltip>
       <SheetContent
         showCloseButton={false}
         className={cn(
