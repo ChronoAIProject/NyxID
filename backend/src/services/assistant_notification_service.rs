@@ -19,11 +19,11 @@ use std::{
 };
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use mongodb::{
     ClientSession, Database, IndexModel,
     bson::{self, Document, doc},
-    options::IndexOptions,
+    options::{IndexOptions, ReturnDocument},
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -89,6 +89,8 @@ pub const SUMMARY_SOURCES: usize = 200;
 /// Per-process flag cache: admin flips apply within this window.
 const FLAG_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 const FLAG_CACHE_CAPACITY: usize = 4096;
+const PUSH_PREFERENCE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+const PUSH_PREFERENCE_CACHE_CAPACITY: usize = 4096;
 /// Push: at most one push per visible source in this window and this many
 /// per rolling hour.
 pub const PUSH_SOURCE_INTERVAL_MINUTES: i64 = 10;
@@ -108,6 +110,11 @@ pub const PUSH_REQUEUE_GRACE_MINUTES: i64 = 2;
 pub const PUSH_RETRY_WINDOW_MINUTES: i64 = 30;
 const PUSH_BATCH: i64 = 64;
 const PUSH_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const PUSH_CONCURRENCY: usize = 4;
+const PUSH_SWEEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const PUSH_WORKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const PUSH_WORKER_LEASE_SECONDS: i64 = 45;
+const PUSH_WORKER_STATE: &str = "assistant_notification_worker";
 /// Skipped run reasons the owner can act on (D3), taken from the scheduler's
 /// real terminal reasons: `grace_expired` is what a run deferred by budget,
 /// capacity or a busy thread settles as when its window closes. Other skips
@@ -209,6 +216,67 @@ pub fn reset_flag_cache(db: &Database) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .retain(|key, _| !key.starts_with(&prefix));
+}
+
+// The producer cache contains preferences only, never ACLs or content. Settings
+// writes seed the local entry immediately; other replicas converge within 30s.
+type PushPreferenceCache = HashMap<String, (Instant, NotificationPushPreferences)>;
+fn push_preference_cache() -> &'static Mutex<PushPreferenceCache> {
+    static CACHE: OnceLock<Mutex<PushPreferenceCache>> = OnceLock::new();
+    CACHE.get_or_init(Mutex::default)
+}
+
+pub fn cache_push_preferences(db: &Database, user_id: &str, value: NotificationPushPreferences) {
+    let key = flag_cache_key(db, user_id);
+    let mut cache = push_preference_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if cache.len() >= PUSH_PREFERENCE_CACHE_CAPACITY && !cache.contains_key(&key) {
+        cache.clear();
+    }
+    cache.insert(key, (Instant::now(), value));
+}
+
+async fn creation_push_plan(
+    db: &Database,
+    user_id: &str,
+    kind: NotificationKind,
+) -> AppResult<PushPlan> {
+    let key = flag_cache_key(db, user_id);
+    let started = Instant::now();
+    let cached = push_preference_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&key)
+        .filter(|(at, _)| at.elapsed() < PUSH_PREFERENCE_CACHE_TTL)
+        .map(|(_, value)| *value);
+    let value = match cached {
+        Some(value) => value,
+        None => {
+            let loaded = crate::services::assistant_settings_service::get(db, user_id)
+                .await?
+                .notifications
+                .push;
+            let mut cache = push_preference_cache()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            // Do not overwrite a settings PUT that completed while this read was in flight.
+            if let Some((_, value)) = cache.get(&key).filter(|(at, _)| *at >= started) {
+                *value
+            } else {
+                if cache.len() >= PUSH_PREFERENCE_CACHE_CAPACITY && !cache.contains_key(&key) {
+                    cache.clear();
+                }
+                cache.insert(key, (Instant::now(), loaded));
+                loaded
+            }
+        }
+    };
+    Ok(if push_preferred(&value, kind) {
+        PushPlan::Pending
+    } else {
+        PushPlan::Skipped("preference_off")
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +386,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     db.collection::<Document>(PUSH_SOURCES)
         .create_index(IndexModel::builder().keys(doc! {"user_id": 1}).build())
         .await?;
+    ensure_worker_state(db).await?;
     Ok(())
 }
 
@@ -337,11 +406,18 @@ fn deterministic_id(scope: &str, id: &str) -> String {
     .to_string()
 }
 
-/// One visible source coalesces across chat kinds (D5): a reply and a
-/// mention in the same group share the unread row; the latest event's kind
-/// is kept on the row.
+/// Coalescing follows the visible destination (D5): channel and background
+/// activity on one saved conversation share a key; public organization chats
+/// and groups retain their own destination identity. The row keeps the latest kind.
 pub fn source_key(source: &NotificationSource) -> String {
-    format!("{}:{}", source.source_type.as_str(), source.id)
+    let destination_type = if source.source_type == SourceType::ChannelChat
+        && source.conversation_id.as_deref() == Some(source.id.as_str())
+    {
+        SourceType::Conversation
+    } else {
+        source.source_type
+    };
+    format!("{}:{}", destination_type.as_str(), source.id)
 }
 
 enum PushPlan {
@@ -398,6 +474,10 @@ async fn record_in_session(
         // A pending decision never expires before its card does.
         expires_at = expires_at.max(card_expires_at);
     }
+    let push = match new.push {
+        PushPlan::Pending => creation_push_plan(db, new.user_id, new.kind).await?,
+        skipped => skipped,
+    };
     let key = source_key(&new.source);
     let coalesced = new.kind.coalesced();
     let row = AssistantNotification {
@@ -415,7 +495,7 @@ async fn record_in_session(
         count: 1,
         outcome: new.outcome,
         reason: new.reason,
-        push: Some(push_state(&new.push, new.kind)),
+        push: Some(push_state(&push, new.kind)),
         created_at: now,
         updated_at: now,
         expires_at,
@@ -439,26 +519,9 @@ async fn record_in_session(
         .remove("source")
         .and_then(|value| value.as_document().cloned())
         .unwrap_or_default();
-    for (field, value) in source {
-        let path = format!("source.{field}");
-        // Latest references: an owner's home thread hears from whichever bot
-        // they wrote from last, so labels and purge follow the current bot.
-        if matches!(
-            field.as_str(),
-            "message_id"
-                | "turn_id"
-                | "seq"
-                | "agent_id"
-                | "channel_id"
-                | "thread_id"
-                | "platform_binding_id"
-                | "platform_binding_generation"
-        ) {
-            set.insert(path, value);
-        } else {
-            on_insert.insert(path, value);
-        }
-    }
+    // Every source field follows the latest activity, including clearing stale
+    // channel references after a background event on the same visible thread.
+    set.insert("source", source);
     for (field, value) in document {
         match field.as_str() {
             "user_id" | "source_key" | "coalesced" | "unread" | "count" => {}
@@ -481,24 +544,34 @@ async fn record_in_session(
     Ok(())
 }
 
-/// Parent write fence: the trigger row is written so a concurrent trigger
-/// delete serializes against this producer. Returns false when it is gone.
-async fn fence_trigger(
+/// The run is the write fence. Trigger deletion writes every non-terminal run in
+/// its transaction before purging feed rows, so a late terminal cannot survive
+/// deletion; unrelated runs never write the trigger merely for notifications.
+async fn fence_run(
     db: &Database,
     session: &mut ClientSession,
-    user_id: &str,
-    trigger_id: &str,
+    run: &TriggerRun,
 ) -> AppResult<bool> {
-    Ok(db
-        .collection::<Document>(TRIGGERS)
+    let exists = db
+        .collection::<Document>(RUNS)
         .update_one(
-            doc! {"_id": trigger_id, "user_id": user_id},
+            doc! {"_id": &run.id, "user_id": &run.user_id, "trigger_id": &run.trigger_id},
             doc! {"$inc": {"notification_fence": 1_i64}},
         )
         .session(&mut *session)
         .await?
         .matched_count
-        == 1)
+        == 1;
+    if !exists {
+        return Ok(false);
+    }
+    Ok(db
+        .collection::<Document>(TRIGGERS)
+        .find_one(doc! {"_id": &run.trigger_id, "user_id": &run.user_id})
+        .projection(doc! {"_id": 1})
+        .session(&mut *session)
+        .await?
+        .is_some())
 }
 
 /// Whether the thread's personal platform binding is still active for this
@@ -538,43 +611,31 @@ async fn live_channel_owner(
         .and_then(|channel| channel.get_str("user_id").ok().map(str::to_owned)))
 }
 
-/// Parent write fence for channel chats: the channel row is written so the
-/// transactional unlink (`retire_connection`, which sets `status`) and the
-/// transactional chat removal (`remove_thread`, which increments the channel's
-/// `notification_generation`) serialize against this producer. Returns the
-/// live channel's `user_id`, or `None` while it is non-live or gone.
-async fn fence_channel(
-    db: &Database,
-    session: &mut ClientSession,
-    channel_id: &str,
-) -> AppResult<Option<String>> {
-    Ok(db
-        .collection::<Document>(CHANNELS)
-        .find_one_and_update(
-            doc! {"_id": channel_id, "status": {"$in": LIVE_CHANNEL_STATUSES.to_vec()}},
-            doc! {"$inc": {"notification_fence": 1_i64}},
-        )
-        .projection(doc! {"_id": 1, "user_id": 1})
-        .session(&mut *session)
-        .await?
-        .and_then(|channel| channel.get_str("user_id").ok().map(str::to_owned)))
-}
-
-/// The chat's `nyxbot_threads` row. Skew-safe after [`fence_channel`]: chat
-/// removal writes the same channel row before deleting the thread.
-async fn live_thread_id(
+/// Each provider chat has its own fence. Unlink writes all affected thread
+/// rows before purging; chat removal deletes this same row. The channel status
+/// read after the fence is therefore skew-safe without a shared channel write.
+async fn fence_channel_thread(
     db: &Database,
     session: &mut ClientSession,
     channel_id: &str,
     partition: &str,
-) -> AppResult<Option<String>> {
-    Ok(db
+) -> AppResult<Option<(String, String)>> {
+    let Some(thread) = db
         .collection::<Document>(CHANNEL_THREADS)
-        .find_one(doc! {"channel_id": channel_id, "partition": partition})
+        .find_one_and_update(
+            doc! {"channel_id": channel_id, "partition": partition},
+            doc! {"$inc": {"notification_fence": 1_i64}},
+        )
         .projection(doc! {"_id": 1})
         .session(&mut *session)
         .await?
-        .and_then(|thread| thread.get_str("_id").ok().map(str::to_owned)))
+    else {
+        return Ok(None);
+    };
+    let Some(owner) = live_channel_owner(db, session, channel_id).await? else {
+        return Ok(None);
+    };
+    Ok(thread.get_str("_id").ok().map(|id| (owner, id.to_owned())))
 }
 
 /// A destroyed agent produces no further updates. This read is skew-safe:
@@ -655,12 +716,9 @@ pub async fn record_turn_settled_in_session(
                 return Ok(());
             }
         }
-        let Some(channel_owner) = fence_channel(db, session, &channel.nyxbot_channel_id).await?
-        else {
-            return Ok(());
-        };
-        let Some(thread_id) =
-            live_thread_id(db, session, &channel.nyxbot_channel_id, &channel.partition).await?
+        let Some((channel_owner, thread_id)) =
+            fence_channel_thread(db, session, &channel.nyxbot_channel_id, &channel.partition)
+                .await?
         else {
             return Ok(());
         };
@@ -816,7 +874,7 @@ pub async fn record_run_terminal_in_session(
     if !enabled(db, &run.user_id).await? {
         return Ok(());
     }
-    if !fence_trigger(db, session, &run.user_id, &run.trigger_id).await? {
+    if !fence_run(db, session, run).await? {
         return Ok(());
     }
     let push = if matches!(run.deliver_to, DeliverTo::Notification) {
@@ -1423,7 +1481,7 @@ pub async fn list(state: &AppState, user_id: &str, query: &ListQuery) -> AppResu
         filter.insert("unread", true);
     }
     let mut clauses: Vec<Document> = Vec::new();
-    if query.pending_only {
+    if query.pending_only || query.unread_only {
         filter.insert("resolved_at", bson::Bson::Null);
         clauses.push(doc! {"$or": [
             {fields::KIND: {"$ne": NotificationKind::NeedsDecision.as_str()}},
@@ -1465,7 +1523,7 @@ pub async fn list(state: &AppState, user_id: &str, query: &ListQuery) -> AppResu
         None
     };
     let mut items = resolve_items(state, user_id, rows).await?;
-    if query.pending_only {
+    if query.pending_only || query.unread_only {
         // A card decided elsewhere a moment ago is no longer pending.
         items.retain(|item| !item.resolved);
     }
@@ -1492,6 +1550,7 @@ struct Lookups {
     /// Channel chats by `nyxbot_threads._id`.
     threads: HashMap<String, Document>,
     channels: HashMap<String, Document>,
+    platform_bindings: HashMap<String, Document>,
     /// The person's active membership role per organization owner id.
     memberships: HashMap<String, String>,
     /// Organization owners that are active organization users.
@@ -1569,8 +1628,12 @@ async fn load_lookups(
     let mut agent_ids = HashSet::new();
     let mut channel_ids = HashSet::new();
     let mut thread_ids = HashSet::new();
+    let mut platform_binding_ids = HashSet::new();
     for row in rows {
         let source = &row.source;
+        if let Some(id) = &source.platform_binding_id {
+            platform_binding_ids.insert(id.clone());
+        }
         if let Some(id) = &source.conversation_id {
             conversation_ids.insert(id.clone());
         }
@@ -1812,6 +1875,19 @@ async fn load_lookups(
             .await?,
         )
     };
+    let platform_bindings = if platform_binding_ids.is_empty() {
+        HashMap::new()
+    } else {
+        by_id(
+            load_documents(
+                db,
+                PLATFORM_BINDINGS,
+                doc! {"_id": {"$in": ids(&platform_binding_ids)}},
+                doc! {"user_id": 1, "generation": 1, "conversation_id": 1, "state": 1},
+            )
+            .await?,
+        )
+    };
     // Organization access is evaluated in memory from one membership read and
     // one active-organization read, never per source.
     let mut org_ids: HashSet<String> = HashSet::new();
@@ -1866,6 +1942,7 @@ async fn load_lookups(
         agents,
         threads,
         channels,
+        platform_bindings,
         memberships,
         active_orgs,
     })
@@ -1942,6 +2019,7 @@ fn channel_label(channel: &Document) -> String {
 /// A row of a linked platform chat must still describe the thread's own
 /// binding (id, generation, owner); a relinked or foreign thread hides it.
 fn platform_thread_matches(
+    lookups: &Lookups,
     conversation: &Document,
     source: &NotificationSource,
     user_id: &str,
@@ -1949,6 +2027,16 @@ fn platform_thread_matches(
     let Some(binding) = source.platform_binding_id.as_deref() else {
         return true;
     };
+    let Some(live) = lookups.platform_bindings.get(binding) else {
+        return false;
+    };
+    if live.get_str("state").ok() != Some("active")
+        || live.get_str("user_id").ok() != Some(user_id)
+        || live.get_str("conversation_id").ok() != source.conversation_id.as_deref()
+        || live.get_i64("generation").ok() != source.platform_binding_generation
+    {
+        return false;
+    }
     conversation
         .get_document("platform_thread")
         .ok()
@@ -2164,7 +2252,7 @@ fn build(
                 return Built::Purge;
             };
             if !lookups.conversation_visible(user_id, conversation)
-                || !platform_thread_matches(conversation, source, user_id)
+                || !platform_thread_matches(lookups, conversation, source, user_id)
             {
                 return Built::Hidden;
             }
@@ -2297,7 +2385,7 @@ fn build(
                 return Built::Purge;
             };
             if !lookups.conversation_visible(user_id, conversation)
-                || !platform_thread_matches(conversation, source, user_id)
+                || !platform_thread_matches(lookups, conversation, source, user_id)
             {
                 return Built::Hidden;
             }
@@ -2552,6 +2640,11 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
     // Linked platform chats: the thread still carries this exact binding.
     let platform_ok = doc! {"$and": [
         conv_ok.clone(),
+        present("$platform_binding"),
+        {"$eq": ["$platform_binding0.state", "active"]},
+        {"$eq": ["$platform_binding0.user_id", user_id]},
+        {"$eq": ["$platform_binding0.generation", "$source.platform_binding_generation"]},
+        {"$eq": ["$platform_binding0.conversation_id", "$source.conversation_id"]},
         {"$not": [missing_or_null("$source.platform_binding_id")]},
         {"$eq": ["$conv0.platform_thread.binding_id", "$source.platform_binding_id"]},
         {"$eq": ["$conv0.platform_thread.binding_generation", "$source.platform_binding_generation"]},
@@ -2665,7 +2758,14 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
             "card",
             doc! {"status": 1, "expires_at": 1, "conversation_id": 1},
         ),
+        lookup_by_id(
+            PLATFORM_BINDINGS,
+            fields::SOURCE_PLATFORM_BINDING_ID,
+            "platform_binding",
+            doc! {"user_id": 1, "generation": 1, "conversation_id": 1, "state": 1},
+        ),
         doc! {"$addFields": {
+            "platform_binding0": {"$arrayElemAt": ["$platform_binding", 0]},
             "conv0": {"$arrayElemAt": ["$conv", 0]},
             "grp0": {"$arrayElemAt": ["$grp", 0]},
             "chan0": {"$arrayElemAt": ["$chan", 0]},
@@ -2843,8 +2943,8 @@ pub fn push_preferred(preferences: &NotificationPushPreferences, kind: Notificat
     }
 }
 
-fn push_source_slot(user_id: &str, source_type: SourceType, source_id: &str) -> String {
-    format!("{user_id}\u{1f}{}\u{1f}{source_id}", source_type.as_str())
+fn push_source_slot(row: &AssistantNotification) -> String {
+    format!("{}\u{1f}{}", row.user_id, row.source_key)
 }
 
 /// Compare-and-set the push barrier on a queued or claimed row.
@@ -2968,11 +3068,7 @@ pub(crate) async fn claim_push(db: &Database, row: &AssistantNotification) -> Ap
                 }
                 let previous_attempt = push.attempt.as_deref();
                 // Per visible source (person, source type, source id), whatever the kinds.
-                let slot = push_source_slot(
-                    &current.user_id,
-                    current.source.source_type,
-                    &current.source.id,
-                );
+                let slot = push_source_slot(&current);
                 let cutoff = now - Duration::minutes(PUSH_SOURCE_INTERVAL_MINUTES);
                 let taken = db
                     .collection::<Document>(PUSH_SOURCES)
@@ -3079,7 +3175,7 @@ async fn release_reservations(db: &Database, claimed: &ClaimedPush) -> AppResult
     let row = &claimed.row;
     db.collection::<Document>(PUSH_SOURCES)
         .delete_one(doc! {
-            "_id": push_source_slot(&row.user_id, row.source.source_type, &row.source.id),
+            "_id": push_source_slot(row),
             "attempt": &claimed.attempt,
         })
         .await?;
@@ -3123,7 +3219,7 @@ pub(crate) async fn requeue_claimed(db: &Database, claimed: &ClaimedPush) -> App
                     .await?;
                 db.collection::<Document>(PUSH_SOURCES)
                     .delete_one(doc! {
-                        "_id": push_source_slot(&row.user_id, row.source.source_type, &row.source.id),
+                        "_id": push_source_slot(row),
                         "attempt": &claimed.attempt,
                     })
                     .session(&mut *session)
@@ -3207,6 +3303,61 @@ pub(crate) async fn settle_push(
     Ok(())
 }
 
+/// Delivery and decision expiry have their own interval. Slow push transport
+/// cannot delay watches, execution recovery, or the shared assistant sweep.
+pub fn spawn_worker(state: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if sweep(&state).await.is_err() {
+                tracing::warn!(target: "nyxid::assistant_notifications", "Notification worker deferred");
+            }
+        }
+    });
+}
+
+/// Initialize or restore the lease singleton without changing a live lease.
+async fn ensure_worker_state(db: &Database) -> mongodb::error::Result<()> {
+    let seeded = db
+        .collection::<Document>(PUSH_WORKER_STATE)
+        .update_one(
+            doc! {"_id": "push"},
+            doc! {"$setOnInsert": {"lease_until": bson::DateTime::from_millis(0)}},
+        )
+        .upsert(true)
+        .await;
+    match seeded {
+        Ok(_) => Ok(()),
+        // Another replica may win the initial singleton insert. No other
+        // duplicate is possible: this collection has only its _id index.
+        Err(error) if super::service_pool_service::is_duplicate_key(&error) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// One replica prepares a batch at a time. The database clock owns the lease;
+/// its 45s lifetime exceeds the worker's hard 30s deadline. Row attempt tokens
+/// remain authoritative even after a crash or a lease handover.
+async fn acquire_worker(db: &Database) -> AppResult<Option<String>> {
+    // Restores and partially completed startup must not silently disable pushes.
+    ensure_worker_state(db).await?;
+    let token = Uuid::new_v4().to_string();
+    Ok(db
+        .collection::<Document>(PUSH_WORKER_STATE)
+        .find_one_and_update(
+            doc! {"_id": "push", "$expr": {"$lte": ["$lease_until", "$$NOW"]}},
+            vec![
+                doc! {"$set": {"token": &token, "lease_until": {"$dateAdd": {
+                "startDate": "$$NOW", "unit": "second", "amount": PUSH_WORKER_LEASE_SECONDS}}}},
+            ],
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .map(|_| token))
+}
+
 /// Resolve timed-out decision rows and send queued pushes with the real transport.
 pub async fn sweep(state: &AppState) -> AppResult<()> {
     sweep_with(state, |user, title, body, data| async move {
@@ -3270,8 +3421,9 @@ fn note(first_error: &mut Option<AppError>, result: AppResult<()>) {
 ///
 /// Order per sweep: cheap snapshot checks settle rows that need no claim
 /// (seen, feed off, preference off: the frozen push kind never changes);
-/// then, per person, one batched lookup prepares every due row; then each
-/// row takes its `sending` barrier immediately before its provider call, so
+/// then one batched lookup per person prepares every due row. A leased worker
+/// runs at most four row futures, each taking its `sending` barrier immediately
+/// before its own provider call within the sweep deadline, so
 /// a claim never waits behind other sends and an unsent row can never age
 /// into the ambiguity window. A failure before a claim leaves the row due
 /// for the next sweep; one person's failure never blocks another's rows.
@@ -3280,6 +3432,54 @@ where
     F: Fn(String, String, String, HashMap<String, String>) -> Fut,
     Fut: std::future::Future<Output = Result<automation::Outcome, &'static str>>,
 {
+    sweep_with_concurrency(state, PUSH_CONCURRENCY, send).await
+}
+
+async fn sweep_with_concurrency<F, Fut>(
+    state: &AppState,
+    concurrency: usize,
+    send: F,
+) -> AppResult<()>
+where
+    F: Fn(String, String, String, HashMap<String, String>) -> Fut,
+    Fut: std::future::Future<Output = Result<automation::Outcome, &'static str>>,
+{
+    // Include acquisition and release database I/O in the hard bound too.
+    match tokio::time::timeout(PUSH_WORKER_TIMEOUT, async {
+        let Some(token) = acquire_worker(&state.db).await? else {
+            return Ok(());
+        };
+        let result = sweep_batch(state, concurrency, send).await;
+        let released = state
+            .db
+            .collection::<Document>(PUSH_WORKER_STATE)
+            .update_one(
+                doc! {"_id": "push", "token": &token},
+                doc! {"$set": {"lease_until": bson::DateTime::from_millis(0)}, "$unset": {"token": ""}},
+            )
+            .await;
+        result?;
+        released?;
+        Ok(())
+    })
+    .await
+    {
+        Ok(result) => result,
+        // Cancellation is conservative: an attempt whose commit/provider
+        // response was interrupted is ambiguous and is never auto-replayed.
+        // An acquisition/release interrupted after commit expires by its lease.
+        Err(_) => Err(AppError::Internal(
+            "Notification worker deadline reached".into(),
+        )),
+    }
+}
+
+async fn sweep_batch<F, Fut>(state: &AppState, concurrency: usize, send: F) -> AppResult<()>
+where
+    F: Fn(String, String, String, HashMap<String, String>) -> Fut,
+    Fut: std::future::Future<Output = Result<automation::Outcome, &'static str>>,
+{
+    let deadline = tokio::time::Instant::now() + PUSH_SWEEP_TIMEOUT;
     let db = &state.db;
     let now = Utc::now();
     db.collection::<Document>(COLLECTION_NAME)
@@ -3372,14 +3572,28 @@ where
             None => due.push((user, vec![row])),
         }
     }
+    let mut prepared = Vec::new();
     for (user, rows) in due {
-        if let Err(error) = deliver_for_person(state, &send, &user, rows).await {
-            tracing::warn!(
-                target: "nyxid::assistant_notifications",
-                user_id = %user, "Notification push delivery interrupted"
-            );
-            first_error.get_or_insert(error);
+        if tokio::time::Instant::now() >= deadline {
+            break;
         }
+        match prepare_for_person(state, &user, rows).await {
+            Ok(rows) => prepared.extend(rows),
+            Err(error) => {
+                tracing::warn!(target: "nyxid::assistant_notifications", user_id = %user,
+                    "Notification push preparation interrupted");
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    let mut deliveries = futures::stream::iter(
+        prepared
+            .into_iter()
+            .map(|(row, built)| deliver_one(state, &send, row, built, deadline)),
+    )
+    .buffer_unordered(concurrency);
+    while let Some(result) = deliveries.next().await {
+        note(&mut first_error, result);
     }
     match first_error {
         Some(error) => Err(error),
@@ -3387,21 +3601,12 @@ where
     }
 }
 
-/// Prepare every due row of one person with one batched lookup, then claim
-/// and send each row in turn. The prepared payload is sent only if the
-/// claimed snapshot is the prepared one: a row whose latest references moved
-/// on since preparation gives its claim back (no attempt consumed, no extra
-/// lookup) and the next sweep prepares the newer references in its batch.
-async fn deliver_for_person<F, Fut>(
+/// One batched lookup per person; preparation never takes a sending claim.
+async fn prepare_for_person(
     state: &AppState,
-    send: &F,
     user: &str,
     rows: Vec<AssistantNotification>,
-) -> AppResult<()>
-where
-    F: Fn(String, String, String, HashMap<String, String>) -> Fut,
-    Fut: std::future::Future<Output = Result<automation::Outcome, &'static str>>,
-{
+) -> AppResult<Vec<(AssistantNotification, NotificationItem)>> {
     let db = &state.db;
     let view_of = |row: &AssistantNotification| {
         // Title and preview follow the pushed kind with the latest refs.
@@ -3415,67 +3620,92 @@ where
             .into_iter()
             .map(|item| (item.id.clone(), item))
             .collect();
+    let mut ready = Vec::new();
     for row in rows {
         let Some(built) = prepared.remove(&row.id) else {
-            // Purged or hidden; nothing was claimed.
             push_skip(db, &row.id, "source_unavailable").await?;
             continue;
         };
-        // The barrier is taken immediately before the provider call.
-        let claimed = match claim_push(db, &row).await? {
-            Claim::Claimed(claimed) => *claimed,
-            Claim::Skipped | Claim::NotClaimed => continue,
-        };
-        if claimed.row.source_key != row.source_key || claimed.row.user_id != row.user_id {
-            // Impossible under coalescing (identity is fixed at insert), so
-            // the prepared payload is not this row's: give the claim back.
-            requeue_claimed(db, &claimed).await?;
-            continue;
-        }
-        if (claimed.row.updated_at != row.updated_at || claimed.row.count != row.count)
-            && Utc::now() - row.created_at < Duration::minutes(PUSH_REQUEUE_GRACE_MINUTES)
-        {
-            // Coalesced since preparation while young: give the claim back so
-            // the next sweep pushes the newer preview. Past the grace the
-            // prepared preview is sent: a push is a snapshot of the activity
-            // at preparation (ACL-checked then), not a promise of the very
-            // latest body, and a busy source must not starve its own push.
-            requeue_claimed(db, &claimed).await?;
-            continue;
-        }
-        let kind = push_kind(&claimed.row);
-        // `type` is the closed kind: mobile refreshes the matching view on receipt.
-        let mut data = HashMap::from([
-            ("type".to_owned(), kind.as_str().to_owned()),
-            ("kind".to_owned(), kind.as_str().to_owned()),
-            ("notification_id".to_owned(), claimed.row.id.clone()),
-            ("deeplink".to_owned(), built.url.clone()),
-        ]);
-        if let Some(conversation) = claimed.row.source.conversation_id.as_ref() {
-            data.insert("conversation_id".to_owned(), conversation.clone());
-        }
-        let body = if built.preview.is_empty() {
-            built.title.clone()
-        } else {
-            built.preview.clone()
-        };
-        let outcome = match tokio::time::timeout(
-            PUSH_SEND_TIMEOUT,
-            send(user.to_owned(), built.title.clone(), body, data),
-        )
-        .await
-        {
-            Ok(Ok(automation::Outcome::Accepted)) => PushOutcome::Accepted,
-            Ok(Ok(automation::Outcome::Refused(failure))) => PushOutcome::Refused(failure),
-            Ok(Err(code)) => PushOutcome::Unavailable(code),
-            Ok(Ok(automation::Outcome::Unknown)) | Err(_) => PushOutcome::Unknown,
-        };
-        settle_push(db, &claimed, outcome).await?;
-        tracing::debug!(
-            target: "nyxid::assistant_notifications",
-            notification_id = %claimed.row.id, kind = kind.as_str(), "Notification push settled"
-        );
+        ready.push((row, built));
     }
+    Ok(ready)
+}
+
+/// Only this future's provider call follows its claim. At most four such
+/// futures are polled concurrently; later rows keep their pending barriers.
+async fn deliver_one<F, Fut>(
+    state: &AppState,
+    send: &F,
+    row: AssistantNotification,
+    built: NotificationItem,
+    deadline: tokio::time::Instant,
+) -> AppResult<()>
+where
+    F: Fn(String, String, String, HashMap<String, String>) -> Fut,
+    Fut: std::future::Future<Output = Result<automation::Outcome, &'static str>>,
+{
+    if tokio::time::Instant::now() >= deadline {
+        return Ok(());
+    }
+    let db = &state.db;
+    // The barrier is taken immediately before the provider call.
+    let claimed = match claim_push(db, &row).await? {
+        Claim::Claimed(claimed) => *claimed,
+        Claim::Skipped | Claim::NotClaimed => return Ok(()),
+    };
+    if claimed.row.source_key != row.source_key || claimed.row.user_id != row.user_id {
+        // Impossible under coalescing (identity is fixed at insert), so
+        // the prepared payload is not this row's: give the claim back.
+        requeue_claimed(db, &claimed).await?;
+        return Ok(());
+    }
+    if (claimed.row.updated_at != row.updated_at || claimed.row.count != row.count)
+        && Utc::now() - row.created_at < Duration::minutes(PUSH_REQUEUE_GRACE_MINUTES)
+    {
+        // Coalesced since preparation while young: give the claim back so
+        // the next sweep pushes the newer preview. Past the grace the
+        // prepared preview is sent: a push is a snapshot of the activity
+        // at preparation (ACL-checked then), not a promise of the very
+        // latest body, and a busy source must not starve its own push.
+        requeue_claimed(db, &claimed).await?;
+        return Ok(());
+    }
+    if tokio::time::Instant::now() >= deadline {
+        requeue_claimed(db, &claimed).await?;
+        return Ok(());
+    }
+    let kind = push_kind(&claimed.row);
+    // `type` is the closed kind: mobile refreshes the matching view on receipt.
+    let mut data = HashMap::from([
+        ("type".to_owned(), kind.as_str().to_owned()),
+        ("kind".to_owned(), kind.as_str().to_owned()),
+        ("notification_id".to_owned(), claimed.row.id.clone()),
+        ("deeplink".to_owned(), built.url.clone()),
+    ]);
+    if let Some(conversation) = claimed.row.source.conversation_id.as_ref() {
+        data.insert("conversation_id".to_owned(), conversation.clone());
+    }
+    let body = if built.preview.is_empty() {
+        built.title.clone()
+    } else {
+        built.preview.clone()
+    };
+    let outcome = match tokio::time::timeout_at(
+        deadline.min(tokio::time::Instant::now() + PUSH_SEND_TIMEOUT),
+        send(row.user_id.clone(), built.title.clone(), body, data),
+    )
+    .await
+    {
+        Ok(Ok(automation::Outcome::Accepted)) => PushOutcome::Accepted,
+        Ok(Ok(automation::Outcome::Refused(failure))) => PushOutcome::Refused(failure),
+        Ok(Err(code)) => PushOutcome::Unavailable(code),
+        Ok(Ok(automation::Outcome::Unknown)) | Err(_) => PushOutcome::Unknown,
+    };
+    settle_push(db, &claimed, outcome).await?;
+    tracing::debug!(
+        target: "nyxid::assistant_notifications",
+        notification_id = %claimed.row.id, kind = kind.as_str(), "Notification push settled"
+    );
     Ok(())
 }
 

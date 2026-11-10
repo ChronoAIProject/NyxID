@@ -537,3 +537,201 @@ async fn stale_provider_binding_cannot_purge_current_notifications() {
         Some("bnd_successor")
     );
 }
+
+async fn create_notification_chat(
+    state: &AppState,
+    row: &NyxbotChannel,
+    key: &str,
+    partition: &str,
+    destination: &NyxbotThread,
+    path: usize,
+) -> NyxbotThread {
+    match path {
+        0 => thread_conversation(state, row, partition).await.unwrap().0,
+        1 => {
+            assert_eq!(
+                put_conversation(
+                    State(state.clone()),
+                    Path(("bnd_chats".into(), partition.into())),
+                    bearer(key),
+                )
+                .await
+                .status(),
+                StatusCode::OK,
+            );
+            state
+                .db
+                .collection::<NyxbotThread>(THREADS)
+                .find_one(doc! {"channel_id": &row.id, "partition": partition})
+                .await
+                .unwrap()
+                .unwrap()
+        }
+        2 => chats::record_chat(
+            state,
+            row,
+            partition,
+            &chats::ChatFacts {
+                kind: "private",
+                chat_id: partition.into(),
+                thread_id: None,
+                owner: false,
+                title: Some("New chat".into()),
+            },
+            None,
+        )
+        .await
+        .unwrap(),
+        3 => custom_event_thread(state, row, partition, destination)
+            .await
+            .unwrap(),
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
+async fn notification_new_chats_invalidate_old_retirement_snapshots_on_every_creation_path() {
+    let (state, _, server) = Box::pin(setup("notification_new_chat_fence")).await;
+    let _server = tokio_util::task::AbortOnDropHandle::new(server);
+    let (connection, key) = Box::pin(channel(&state, "gateway")).await;
+    assert_eq!(
+        put_binding(
+            State(state.clone()),
+            Path("bnd_chats".into()),
+            bearer(&key),
+            Json(binding_body(&key, OWNER)),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let connection = load_channel(&state, OWNER, &connection.id).await.unwrap();
+    let destination = thread_conversation(&state, &connection, PARTITION)
+        .await
+        .unwrap()
+        .0;
+    let channels = state.db.collection::<bson::Document>(CHANNELS);
+    let mut probes = Vec::new();
+    for path in 0..4 {
+        let mut retirement = state.db.client().start_session().await.unwrap();
+        retirement.start_transaction().await.unwrap();
+        channels
+            .find_one(doc! {"_id": &connection.id})
+            .session(&mut retirement)
+            .await
+            .unwrap()
+            .unwrap();
+        let partition = format!("conv_{}", Uuid::new_v4().simple());
+        let thread =
+            create_notification_chat(&state, &connection, &key, &partition, &destination, path)
+                .await;
+        let after_create = channels
+            .find_one(doc! {"_id": &connection.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let generation = after_create.get_i64("chat_admission_generation").unwrap();
+        let repeated =
+            create_notification_chat(&state, &connection, &key, &partition, &destination, path)
+                .await;
+        assert_eq!(repeated.id, thread.id);
+        let after_repeat = channels
+            .find_one(doc! {"_id": &connection.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after_repeat.get_i64("chat_admission_generation").unwrap(),
+            generation,
+            "existing chat path {path} must not write its shared channel"
+        );
+        probes.push(
+            seed_notification_purge_probe(
+                &state.db,
+                OWNER,
+                doc! {"channel_id": &connection.id, "thread_id": &thread.id},
+            )
+            .await,
+        );
+        let error = channels
+            .update_one(
+                doc! {"_id": &connection.id},
+                doc! {"$set": {"status": "disconnected"}},
+            )
+            .session(&mut retirement)
+            .await
+            .expect_err("new chat creation must invalidate the retirement's older snapshot");
+        assert!(
+            error.contains_label("TransientTransactionError"),
+            "path {path}: {error}"
+        );
+        retirement.abort_transaction().await.unwrap();
+    }
+    releases::retire_connection(
+        &state,
+        &connection,
+        ReleaseReason::Disconnect,
+        "disconnected",
+        None,
+    )
+    .await
+    .unwrap();
+    for probe in probes {
+        assert_notification_probe(&state.db, &probe, false).await;
+    }
+    let before = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .count_documents(doc! {"channel_id": &connection.id})
+        .await
+        .unwrap();
+    assert!(
+        thread_conversation(&state, &connection, "after-retirement")
+            .await
+            .is_err()
+    );
+    assert!(
+        custom_event_thread(&state, &connection, "custom-after-retirement", &destination)
+            .await
+            .is_err()
+    );
+    assert!(
+        chats::record_chat(
+            &state,
+            &connection,
+            "inbound-after-retirement",
+            &chats::ChatFacts {
+                kind: "private",
+                chat_id: "inbound-after-retirement".into(),
+                thread_id: None,
+                owner: false,
+                title: None,
+            },
+            None,
+        )
+        .await
+        .is_err()
+    );
+    assert_ne!(
+        put_conversation(
+            State(state.clone()),
+            Path((
+                "bnd_chats".into(),
+                format!("conv_{}", Uuid::new_v4().simple())
+            )),
+            bearer(&key),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .count_documents(doc! {"channel_id": &connection.id})
+            .await
+            .unwrap(),
+        before
+    );
+}

@@ -184,7 +184,7 @@ pub struct AssistantNotification {
     pub user_id: String,
     pub kind: NotificationKind,
     pub source: NotificationSource,
-    /// `{source.type}:{source.id}`; shared across coalesced kinds on one source.
+    /// Canonical visible destination; saved chat/conversation ids share one key.
     pub source_key: String,
     pub coalesced: bool,
     /// Needs the person's attention: neither read nor resolved. Indexed with

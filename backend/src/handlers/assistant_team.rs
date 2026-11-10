@@ -3935,6 +3935,7 @@ const SWEEP_SECS: u64 = 15;
 /// restarted) when their events arrived. Agents are persistent, so nothing
 /// is destroyed automatically.
 pub fn spawn_sweeps(state: AppState) {
+    crate::services::assistant_notification_service::spawn_worker(state.clone());
     crate::services::nyxbot_gateway_release_service::spawn_worker(state.clone());
     super::mcp_transport::async_operations::spawn_sweep(state.clone());
     super::nyxbot::late_delivery::spawn_sweep(state.clone());
@@ -4010,12 +4011,6 @@ pub fn spawn_sweeps(state: AppState) {
                     }
                 }
                 Err(error) => tracing::debug!(%error, "Assistant orphan sweep deferred"),
-            }
-            if crate::services::assistant_notification_service::sweep(&state)
-                .await
-                .is_err()
-            {
-                tracing::debug!("Notification sweep deferred");
             }
             if crate::services::execution_permission_dispatch::proposals::sweep(&state)
                 .await

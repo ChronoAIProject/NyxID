@@ -36,7 +36,12 @@ For `agent_update`, `chat_update` and `group_mention`, a new event increments
 on the existing unread row. Reading that row closes its coalescing window. The
 next event creates a new row. When different coalesced kinds share a source,
 they increment the same row and its kind follows the latest activity. The
-source key contains the visible source type and id, without the kind. A unique
+source key contains the canonical visible destination, without the kind. A saved
+conversation uses `conversation:<id>` for both channel and background activity,
+so owner DMs and later events on the home thread share one unread row. Its
+latest kind and full source references replace the previous activity. Unlink
+removes a merged row only when its latest activity references that channel;
+a later non-channel event clears those references and survives unlink. A unique
 partial index on `(user_id, source_key)`
 for `coalesced: true, unread: true` enforces the window across replicas; updates
 and increments happen in the source transaction. Run and card rows use UUID v5
@@ -89,8 +94,30 @@ invalidation paths. Reading a decision marks it seen without resolving it.
 Source deletion also removes rows in the existing cleanup paths: conversations,
 personal/organization/collaboration groups, hidden member threads, agent
 destruction and purge, channel retirement and thread deletion, trigger deletion,
-and personal erasure. Parent write fences serialize late producers against
-retirement and deletion. Notification cleanup uses the source reference rather
+and personal erasure. A channel producer writes only its provider chat's
+`nyxbot_threads` row and then reads the live channel. `retire_connection` writes
+every affected thread in its transaction before purging, and exact-chat removal
+deletes that same thread row; either ordering forces a concurrent settlement to
+retry. All new provider-chat paths (inbound recording, fallback conversation reservations,
+gateway PUT and custom-event threads) insert under a live channel write in a
+short transaction. A chat created concurrently with retirement therefore enters
+the retirement's retry snapshot or is refused after retirement; it cannot evade
+the per-thread fence by appearing after the old snapshot. Updating an existing
+chat adds no channel write. Other channel status changes may retain hidden rows
+for later repair. Unrelated chats never write the channel merely to fence
+notification settlement. Run
+producers similarly fence their own run. Trigger deletion fences only pending,
+started and waiting runs before purging: terminal runs cannot re-enter
+`finish_update`, and the pause producer already writes its trigger in the same
+transaction. Retained terminal history adds no fence writes.
+
+Channel retirement still writes one document per retained provider chat; trigger
+deletion writes one per non-terminal run. Neither set has a fixed count cap.
+These indexed operations share the existing source cleanup transaction and its
+MongoDB transaction lifetime (normally 60 seconds); a large set can abort the
+whole retirement and require a retry, with no partially committed purge. There
+is no notification write shared by independent live chats or runs. Notification
+cleanup uses the source reference rather
 than assuming the source owner and recipient are the same person.
 Detaching a provider binding retains the logical channel and its readable
 histories, so it retains their notification rows. Disconnecting the channel or
@@ -113,6 +140,8 @@ gated assistant routes. Requests always act for the authenticated person.
 
 List query parameters are `cursor`, `limit` (1–50), `unread_only` (default false),
 `pending_only` (default false) and `kind` (comma-separated subset of the six kinds).
+`unread_only` includes only unseen activity and still-pending decisions; resolved
+or timed-out cards are excluded, matching the summary's unread count.
 The **Needs you** filter sends `kind=needs_decision&pending_only=true`, which
 includes seen pending cards and excludes resolved cards. **All** retains resolved
 decisions as history. Ordering is descending
@@ -204,7 +233,9 @@ shows pending decisions distinctly. Filters are **All**, **Needs you**,
 **Automations** and **Chats**. Rows show their kind, current source title, bounded
 preview, age, unread state and a count chip when activity coalesced. The panel
 supports cursor pagination, empty/error states and mark-all with the viewed
-`as_of` fence. Opening a row navigates to its canonical source and marks it seen.
+`as_of` fence. Both clients label the action **Mark all notifications as read**,
+enable it from the global summary unread count on every filter, and clear all
+kinds through the same server fence. Opening a row navigates to its canonical source and marks it seen.
 An empty page can still have a cursor when all its sources are hidden. Both clients
 keep pagination available until that cursor is exhausted, bound automatic traversal
 to five empty pages and prevent repeated cursors from causing automatic loops.
@@ -242,8 +273,15 @@ is on. Existing users receive no new push until they opt in. Preferences are
 additive to `GET`/`PUT /api/v1/assistant/nyxagent/settings` and old stored settings
 deserialize with the defaults.
 
-Push is queued only when a notification row is first created, never when a
-coalesced count increases. `push.kind` snapshots that first event's kind, so a
+At row creation, a kind without push consent is stored as
+`skipped: preference_off` and never enters the delivery queue. Producers resolve
+preferences through a bounded cache of at most 4,096 people per process. A settings
+PUT immediately refreshes this process's entry; other replicas converge within
+30 seconds. The worker still reads current settings before sending. Enabling push
+does not replay an existing skipped row.
+
+Push is queued only when an opted-in notification row is first created, never
+when a coalesced count increases. `push.kind` snapshots that first event's kind, so a
 later mention or agent reply cannot change which preference authorizes its push.
 The push uses that original kind and current source references for its preview.
 The worker rechecks preferences, visibility and the
@@ -256,8 +294,27 @@ The row's durable send barrier is:
 pending → sending → sent | failed | unknown | skipped
 ```
 
+A dedicated notification task runs every 15 seconds, including decision-expiry
+resolution. It does not run inline with the shared assistant sweep, so provider
+latency cannot delay watches, connect-link resumes, or execution recovery. A
+45-second database lease admits one worker across replicas before it reads the
+oldest 64 due rows. Acquisition recreates the singleton if it is missing, even
+when startup initialization was skipped or a restore omitted it. Row claims
+retain their separate attempt-token fences. At the fixed 15-second cadence, the
+64-row batch caps selection at about four opted-in pushes per second across the
+platform; four concurrent calls and the 20-second budget can lower throughput
+when providers are slow. Preference-off traffic never consumes that capacity.
+
 A sweep checks flags and preferences, then prepares previews in one batch per
-person before claiming any sends. Each row takes its sending claim immediately
+person before claiming any sends. It polls at most four delivery futures at once,
+including multiple sources for one person. The transport budget is 20 seconds
+for the whole sweep, with each provider call bounded to ten seconds and the
+remaining sweep time. Rows not started by the deadline stay pending; claims
+returned before a call release their reservations. A 30-second hard worker
+deadline bounds database/preparation stalls as well. An interrupted in-flight
+claim or provider call remains ambiguous and follows the existing `unknown`
+recovery rule; it is never replayed automatically. A crashed worker's lease
+expires without removing the row-level barrier. Each row takes its sending claim immediately
 before its own provider call, which has a ten-second timeout; unsent rows do not
 wait in `sending` behind other deliveries. During its first two minutes, a row
 that changes after preparation returns atomically to its prior pending or retry

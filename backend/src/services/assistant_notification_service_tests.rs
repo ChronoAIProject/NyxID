@@ -280,6 +280,7 @@ async fn background_turns_coalesce_until_read_while_user_turns_and_flag_off_prod
     .await;
     settle(&f, &row, "Answer", None).await;
     set_flag(&f, true).await;
+    push_prefs(&f, &f.owner, all_push()).await;
     let nyxbot = team::ensure_nyxbot(db, &f.owner).await.unwrap();
     let home = team::home_thread(db, &f.state.encryption_keys, &nyxbot)
         .await
@@ -721,12 +722,12 @@ async fn org_guest_lane_notifies_the_route_admin_from_the_public_transcript_only
         .await
         .unwrap();
     // With the admin's feed off, a guest settlement reads the channel owner
-    // and stops: no channel write (no fence), no row.
+    // and stops: no per-chat fence write, no row.
     set_flag(&f, false).await;
     settle(&f, &row, "while the feed is off", None).await;
     let untouched = db
-        .collection::<Document>(CHANNELS)
-        .find_one(doc! {"_id": &channel})
+        .collection::<Document>(CHANNEL_THREADS)
+        .find_one(doc! {"_id": &thread})
         .await
         .unwrap()
         .unwrap();
@@ -748,8 +749,8 @@ async fn org_guest_lane_notifies_the_route_admin_from_the_public_transcript_only
         .unwrap();
     let reply = settle(&f, &row, "private lane text", None).await;
     assert!(
-        db.collection::<Document>(CHANNELS)
-            .find_one(doc! {"_id": &channel})
+        db.collection::<Document>(CHANNEL_THREADS)
+            .find_one(doc! {"_id": &thread})
             .await
             .unwrap()
             .unwrap()
@@ -1087,6 +1088,7 @@ async fn trigger_terminals_record_results_and_actionable_problems_once_and_fence
         .unwrap();
     assert!(rows_of(&f, &f.owner).await.is_empty());
     set_flag(&f, true).await;
+    push_prefs(&f, &f.owner, all_push()).await;
     let run = run_for(&f, &trigger).await;
     schedules::finish(db, &run.id, RunOutcome::Completed, None, &frontend)
         .await
@@ -3243,14 +3245,14 @@ async fn claims_are_taken_immediately_before_each_send_and_stale_claims_are_neve
             assert_eq!(push.state, "sending");
             assert!(push.attempt.is_some());
             assert!(Utc::now() - push.claimed_at.expect("claimed_at") < Duration::seconds(5));
-            // Rows still waiting their turn are not claimed yet.
+            // Claims are bounded by the number of active delivery futures.
             let waiting = db
                 .collection::<Document>(COLLECTION_NAME)
                 .count_documents(doc! {"user_id": &row.user_id, "push.state": "sending",
                 "push.claimed_at": {"$gt": bson_date(Utc::now() - Duration::minutes(1))}})
                 .await
                 .unwrap();
-            assert_eq!(waiting, 1);
+            assert!((1..=PUSH_CONCURRENCY as u64).contains(&waiting));
             seen.lock().unwrap().push(id);
             Ok(automation::Outcome::Accepted)
         }
@@ -3501,7 +3503,7 @@ async fn a_row_that_coalesces_after_preparation_gives_its_claim_back_and_sends_t
         row_b.id.clone(),
         newer.clone(),
     );
-    sweep_with(&f.state, move |user, title, body, data| {
+    sweep_with_concurrency(&f.state, 1, move |user, title, body, data| {
         let db = sender_db.clone();
         let sent = sent_in.clone();
         let mutated = mutated_in.clone();
@@ -3635,7 +3637,7 @@ async fn a_continually_coalescing_row_is_pushed_with_its_prepared_preview_once_p
             message_ids[message_key].clone(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
         );
-        sweep_with(&f.state, move |user, title, body, data| {
+        sweep_with_concurrency(&f.state, 1, move |user, title, body, data| {
             let db = sender_db.clone();
             let sent = sent_in.clone();
             let (busy_id, message_id, fired) = (busy_id.clone(), message_id.clone(), fired.clone());

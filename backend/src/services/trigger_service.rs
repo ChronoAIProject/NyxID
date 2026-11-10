@@ -570,6 +570,9 @@ pub async fn delete(db: &Database, current: &Trigger) -> AppResult<()> {
                         .delete_many(doc! {"trigger_id": &current.id, "kind": "schedule"})
                         .session(&mut *session)
                         .await?;
+                    db.collection::<bson::Document>(crate::models::trigger_run::COLLECTION_NAME)
+                        .update_many(doc! {"trigger_id": &current.id, "outcome": {"$in": ["pending", "started", "waiting"]}}, doc! {"$inc": {"notification_fence": 1_i64}})
+                        .session(&mut *session).await?;
                     db.collection::<bson::Document>(
                         crate::models::assistant_notification::COLLECTION_NAME,
                     )

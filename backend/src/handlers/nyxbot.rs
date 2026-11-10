@@ -3425,13 +3425,11 @@ async fn thread_conversation(
 ) -> AppResult<(NyxbotThread, String)> {
     let now = bson::DateTime::now();
     let threads = state.db.collection::<NyxbotThread>(THREADS);
-    threads
-        .update_one(
-            doc! {"channel_id": &row.id, "partition": partition},
-            doc! {"$setOnInsert": crate::services::nyxbot_chat_settings_service::placeholder(row, now), "$set": {"updated_at": now}},
-        )
-        .upsert(true)
-        .await?;
+    crate::services::nyxbot_chat_settings_service::upsert_thread::<bson::Document>(
+        &state.db, row,
+        doc! {"channel_id": &row.id, "partition": partition},
+        doc! {"$setOnInsert": crate::services::nyxbot_chat_settings_service::placeholder(row, now), "$set": {"updated_at": now}}.into(),
+    ).await?;
     let reserved = format!("nyxa-{}", Uuid::new_v4().simple());
     let thread = threads
         .find_one_and_update(
@@ -4586,17 +4584,13 @@ pub async fn put_conversation(
         return problem(StatusCode::NOT_FOUND, "binding_not_found");
     }
     let now = bson::DateTime::now();
-    match state
-        .db
-        .collection::<NyxbotThread>(THREADS)
-        .update_one(
-            doc! {"channel_id": &row.id, "partition": &conversation_id},
-            doc! {"$setOnInsert": crate::services::nyxbot_chat_settings_service::placeholder(&row, now), "$set": {"updated_at": now}},
-        )
-        .upsert(true)
-        .await
-    {
+    match crate::services::nyxbot_chat_settings_service::upsert_thread::<bson::Document>(
+        &state.db, &row,
+        doc! {"channel_id": &row.id, "partition": &conversation_id},
+        doc! {"$setOnInsert": crate::services::nyxbot_chat_settings_service::placeholder(&row, now), "$set": {"updated_at": now}}.into(),
+    ).await {
         Ok(_) => Json(json!({})).into_response(),
+        Err(AppError::Conflict(_)) => problem(StatusCode::NOT_FOUND, "binding_not_found"),
         Err(_) => problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
 }
@@ -4877,10 +4871,8 @@ async fn custom_event_thread(
     destination: &NyxbotThread,
 ) -> AppResult<NyxbotThread> {
     let now = bson::DateTime::now();
-    let upsert = state
-        .db
-        .collection::<NyxbotThread>(THREADS)
-        .update_one(
+    let upsert = crate::services::nyxbot_chat_settings_service::upsert_thread::<bson::Document>(
+            &state.db, channel,
             doc! {"channel_id": &channel.id, "user_id": &channel.user_id, "partition": partition},
             doc! {
                 "$setOnInsert": {"_id": Uuid::new_v4().to_string(), "created_at": now,
@@ -4894,9 +4886,8 @@ async fn custom_event_thread(
                     "last_message_id": &destination.last_message_id,
                     "last_relay_message_id": &destination.last_relay_message_id},
                 "$set": {"updated_at": now}
-            },
+            }.into(),
         )
-        .upsert(true)
         .await;
     upsert?;
     let result = state

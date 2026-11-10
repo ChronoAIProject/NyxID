@@ -166,21 +166,20 @@ async fn pm_f3_different_chats_settle_without_a_shared_channel_write_or_notifica
             if event.command.get_str("findAndModify").ok() == Some(CHANNELS) {
                 writes.fetch_add(1, Ordering::SeqCst);
             }
-            if event.command.get_str("insert").ok() == Some(MESSAGES)
-                && let Ok(documents) = event.command.get_array("documents")
+            // The very first read in finish_turn_inner's transaction body:
+            // count body entries, including attempts aborted before insertion.
+            if event.command.get_str("find").ok() == Some(MESSAGES)
+                && let Ok(filter) = event.command.get_document("filter")
+                && filter.len() == 4
+                && filter.contains_key("_id")
+                && filter.contains_key("turn_id")
+                && let Ok(conversation) = filter.get_str("conversation_id")
             {
-                for value in documents {
-                    if let Some(message) = value.as_document()
-                        && message.get_str("role").ok() == Some("assistant")
-                        && let Ok(conversation) = message.get_str("conversation_id")
-                    {
-                        *attempts
-                            .lock()
-                            .unwrap()
-                            .entry(conversation.into())
-                            .or_default() += 1;
-                    }
-                }
+                *attempts
+                    .lock()
+                    .unwrap()
+                    .entry(conversation.into())
+                    .or_default() += 1;
             }
         }
     });
@@ -224,7 +223,7 @@ async fn pm_f3_different_chats_settle_without_a_shared_channel_write_or_notifica
         assert_eq!(
             attempts.get(&row.id),
             Some(&1),
-            "assistant-message insert retried for {}",
+            "settlement transaction body retried for {}",
             row.id
         );
     }
@@ -484,5 +483,251 @@ async fn pm_f6_list_and_summary_share_the_same_live_visibility_matrix() {
         differences.is_empty(),
         "list/summary ACL matrix disagreed:\n{}",
         differences.join("\n")
+    );
+}
+
+#[tokio::test]
+async fn pm_f1_creation_preferences_refresh_on_put_and_expire_on_other_replicas() {
+    let f = fixture("pm_f1_preference_cache").await;
+    // A default-off cache entry is replaced by the settings PUT in this process.
+    assert!(matches!(
+        creation_push_plan(&f.state.db, &f.owner, NotificationKind::AgentUpdate)
+            .await
+            .unwrap(),
+        PushPlan::Skipped("preference_off")
+    ));
+    push_prefs(&f, &f.owner, all_push()).await;
+    assert!(matches!(
+        creation_push_plan(&f.state.db, &f.owner, NotificationKind::AgentUpdate)
+            .await
+            .unwrap(),
+        PushPlan::Pending
+    ));
+    // Simulate a settings PUT on a different process: the old local decision
+    // remains valid for at most the documented 30-second cache lifetime.
+    f.state
+        .db
+        .collection::<Document>(crate::models::assistant_settings::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.owner},
+            doc! {"$set": {"notifications.push.agent_update": false}},
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        creation_push_plan(&f.state.db, &f.owner, NotificationKind::AgentUpdate)
+            .await
+            .unwrap(),
+        PushPlan::Pending
+    ));
+    {
+        let key = flag_cache_key(&f.state.db, &f.owner);
+        let mut cache = push_preference_cache().lock().unwrap();
+        cache.get_mut(&key).unwrap().0 = Instant::now() - PUSH_PREFERENCE_CACHE_TTL;
+    }
+    assert!(matches!(
+        creation_push_plan(&f.state.db, &f.owner, NotificationKind::AgentUpdate)
+            .await
+            .unwrap(),
+        PushPlan::Skipped("preference_off")
+    ));
+    assert!(push_preference_cache().lock().unwrap().len() <= PUSH_PREFERENCE_CACHE_CAPACITY);
+}
+
+#[tokio::test]
+async fn pm_f2_delivery_concurrency_is_bounded_even_for_one_person() {
+    let f = fixture("pm_f2_concurrency").await;
+    set_flag(&f, true).await;
+    push_prefs(&f, &f.owner, all_push()).await;
+    for _ in 0..8 {
+        let conversation = seed_conversation(&f, &f.owner, "Concurrent delivery").await;
+        insert_row(
+            &f,
+            &seeded(
+                &f.owner,
+                NotificationKind::AgentUpdate,
+                conversation_source(&conversation),
+            ),
+        )
+        .await;
+    }
+    let barrier = Arc::new(tokio::sync::Barrier::new(4));
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let (sender_active, sender_peak) = (active.clone(), peak.clone());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(22),
+        sweep_with(&f.state, move |_, _, _, _| {
+            let (barrier, active, peak) =
+                (barrier.clone(), sender_active.clone(), sender_peak.clone());
+            async move {
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(current, Ordering::SeqCst);
+                barrier.wait().await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                Ok(automation::Outcome::Accepted)
+            }
+        }),
+    )
+    .await
+    .expect("four independent sources must make progress together")
+    .unwrap();
+    assert_eq!(peak.load(Ordering::SeqCst), 4);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
+    for row in rows_of(&f, &f.owner).await {
+        assert_eq!(row.push.unwrap().state, "sent");
+    }
+}
+
+#[tokio::test]
+async fn pm_f3_unlink_invalidates_a_stale_settlement_snapshot() {
+    use crate::models::{nyxbot_channel::NyxbotChannel, nyxbot_gateway_release::ReleaseReason};
+    let f = fixture("pm_f3_unlink_snapshot").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    let (channel, _) = seed_channel(&f, &f.owner, None).await;
+    let mut input = start(None, "First external question", TurnOrigin::Channel);
+    input.channel = Some(channel_origin(&channel));
+    input.guest = true;
+    let first = begin(&f, &f.owner, &input).await;
+    let reply = settle(&f, &first, "First answer", None).await;
+    let mut message = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {"_id": &reply})
+        .await
+        .unwrap()
+        .unwrap();
+    db.collection::<Document>(COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    input.conversation_id = Some(first.id.clone());
+    let late = begin(&f, &f.owner, &input).await;
+    let turn = late.active_turn.as_ref().unwrap();
+    message.id = Uuid::new_v4().to_string();
+    message.turn_id = turn.turn_id.clone();
+    let mut tx = db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    // Establish the old source snapshot before real unlink commits.
+    db.collection::<Document>(CHANNELS)
+        .find_one(doc! {"_id": &channel})
+        .session(&mut tx)
+        .await
+        .unwrap()
+        .unwrap();
+    let connection = db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .find_one(doc! {"_id": &channel})
+        .await
+        .unwrap()
+        .unwrap();
+    crate::services::nyxbot_gateway_release_service::retire_connection(
+        &f.state,
+        &connection,
+        ReleaseReason::Disconnect,
+        "disconnected",
+        None,
+    )
+    .await
+    .unwrap();
+    let error = record_turn_settled_in_session(db, &mut tx, &late, turn, &message)
+        .await
+        .expect_err("a stale snapshot must conflict on the per-chat fence");
+    assert!(
+        matches!(error, AppError::DatabaseError(error) if error.contains_label("TransientTransactionError"))
+    );
+    tx.abort_transaction().await.unwrap();
+    // The actual settlement retries against the retired channel and still
+    // saves its durable reply without recreating a feed row.
+    settle(&f, &late, "Late answer is saved", None).await;
+    assert!(rows_of(&f, &f.owner).await.is_empty());
+}
+
+#[tokio::test]
+async fn pm_f3_trigger_deletion_invalidates_a_stale_run_snapshot_without_a_trigger_write() {
+    let f = fixture("pm_f3_trigger_snapshot").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    let bot = team::ensure_nyxbot(db, &f.owner).await.unwrap();
+    let trigger = automation(&f, &bot.id, DeliverTo::Thread).await;
+    let mut run = run_for(&f, &trigger).await;
+    run.outcome = RunOutcome::Completed;
+    // Already terminal history cannot produce again and must not add writes
+    // to deletion's fence set.
+    let mut historical = run.clone();
+    historical.id = Uuid::new_v4().to_string();
+    historical.scheduled_at -= Duration::days(1);
+    db.collection::<TriggerRun>(RUNS)
+        .insert_one(&historical)
+        .await
+        .unwrap();
+    let mut tx = db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    db.collection::<Document>(TRIGGERS)
+        .find_one(doc! {"_id": &trigger.id})
+        .session(&mut tx)
+        .await
+        .unwrap()
+        .unwrap();
+    trigger_service::delete(db, &trigger).await.unwrap();
+    let retained = db
+        .collection::<Document>(RUNS)
+        .find_one(doc! {"_id": &historical.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!retained.contains_key("notification_fence"));
+    let error = record_run_terminal_in_session(db, &mut tx, &run)
+        .await
+        .expect_err("trigger deletion must invalidate a producer's old run snapshot");
+    assert!(
+        matches!(error, AppError::DatabaseError(error) if error.contains_label("TransientTransactionError"))
+    );
+    tx.abort_transaction().await.unwrap();
+    schedules::finish(
+        db,
+        &run.id,
+        RunOutcome::Completed,
+        None,
+        &f.state.config.frontend_url,
+    )
+    .await
+    .unwrap();
+    assert!(rows_of(&f, &f.owner).await.is_empty());
+}
+
+#[tokio::test]
+async fn pm_f2_a_missing_worker_singleton_is_recreated_and_delivery_continues() {
+    let f = fixture("pm_f2_missing_worker").await;
+    set_flag(&f, true).await;
+    push_prefs(&f, &f.owner, all_push()).await;
+    let conversation = seed_conversation(&f, &f.owner, "Restored source").await;
+    produce(&f, &f.owner, &conversation).await;
+    f.state
+        .db
+        .collection::<Document>(PUSH_WORKER_STATE)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+    let sent: Sent = Default::default();
+    let (a, b) = tokio::join!(
+        try_sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)),
+        try_sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)),
+    );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(sent.lock().unwrap().len(), 1);
+    assert_eq!(
+        rows_of(&f, &f.owner).await[0].push.as_ref().unwrap().state,
+        "sent"
+    );
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(PUSH_WORKER_STATE)
+            .count_documents(doc! {"_id": "push"})
+            .await
+            .unwrap(),
+        1
     );
 }

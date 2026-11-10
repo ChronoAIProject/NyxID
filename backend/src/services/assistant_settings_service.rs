@@ -242,6 +242,11 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
         .return_document(ReturnDocument::After)
         .await?
         .ok_or_else(|| AppError::Internal("Assistant settings unavailable".into()))?;
+    super::assistant_notification_service::cache_push_preferences(
+        db,
+        user_id,
+        updated.notifications.push,
+    );
     if updated.access_mode == AccessMode::Autopilot && current.access_mode != updated.access_mode {
         super::assistant_acknowledgement_service::retire_full_access_confirmations(
             db,
