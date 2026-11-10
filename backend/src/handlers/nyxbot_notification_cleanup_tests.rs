@@ -2,6 +2,110 @@ use super::*;
 use crate::test_utils::{assert_notification_probe, seed_notification_purge_probe};
 
 #[tokio::test]
+async fn owner_private_channel_replies_are_chat_updates_on_the_shared_home_thread() {
+    use crate::{
+        models::assistant_notification::{AssistantNotification, NotificationKind, SourceType},
+        services::{assistant_notification_service as feed, feature_flag_service as flags},
+    };
+    let (state, _, server) = Box::pin(setup("notification_owner_private_chat")).await;
+    let _server = tokio_util::task::AbortOnDropHandle::new(server);
+    feed::ensure_indexes(&state.db).await.unwrap();
+    flags::set_platform_override(
+        &state.db,
+        feed::FLAG_KEY,
+        &flags::FlagTarget::User(OWNER.into()),
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    feed::reset_flag_cache();
+    let (connection, key) = Box::pin(channel(&state, "gateway")).await;
+    assert_eq!(
+        put_binding(
+            State(state.clone()),
+            Path("bnd_owner_feed".into()),
+            bearer(&key),
+            Json(binding_body(&key, OWNER)),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    ensure_partition(&state, &key, PARTITION).await;
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id":&connection.id},
+            doc! {"$set":{"owner_sender_ids":["7"]}},
+        )
+        .await
+        .unwrap();
+    let notifications = state.db.collection::<AssistantNotification>(
+        crate::models::assistant_notification::COLLECTION_NAME,
+    );
+    for (event_id, count) in [("private-feed-first", 1), ("private-feed-second", 2)] {
+        let incoming = event("What changed?", "7", event_id);
+        let answer = body_text(Box::pin(respond(&state, &key, &incoming, event_id)).await).await;
+        assert!(answer.contains("Here is your answer"), "{answer}");
+        let rows: Vec<_> = notifications
+            .find(doc! {"user_id":OWNER})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, NotificationKind::ChatUpdate);
+        assert_eq!(rows[0].source.source_type, SourceType::ChannelChat);
+        assert_eq!(
+            rows[0].source.channel_id.as_deref(),
+            Some(connection.id.as_str())
+        );
+        assert_eq!(rows[0].count, count);
+        let conversation = engine::get(&state.db, OWNER, &rows[0].source.id)
+            .await
+            .unwrap();
+        assert!(conversation.channel.is_none());
+        assert_eq!(
+            conversation
+                .reply_channel
+                .as_ref()
+                .unwrap()
+                .nyxbot_channel_id,
+            connection.id
+        );
+        assert_eq!(
+            rows[0].source.conversation_id.as_deref(),
+            Some(conversation.id.as_str())
+        );
+        let replay = body_text(Box::pin(respond(&state, &key, &incoming, event_id)).await).await;
+        assert!(replay.contains("response.completed"));
+        assert_eq!(
+            notifications
+                .find_one(doc! {"_id":&rows[0].id})
+                .await
+                .unwrap()
+                .unwrap()
+                .count,
+            count
+        );
+        let listed = feed::list(&state, OWNER, &feed::ListQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(listed.items.len(), 1);
+        assert_eq!(listed.items[0].preview, "Here is your answer");
+        assert!(
+            listed.items[0]
+                .url
+                .ends_with(&format!("/assistant?c={}", conversation.id))
+        );
+    }
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn provider_binding_detach_preserves_pending_decision_until_owner_decides() {
     use crate::services::{
         assistant_acknowledgement_service as acks, feature_flag_service as flags,
