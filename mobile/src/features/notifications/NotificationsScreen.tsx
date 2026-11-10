@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -74,6 +74,21 @@ export const NOTIFICATION_EMPTY_COPY: Record<NotificationFilter, string> = {
   automations: "No automation results yet.",
   chats: "No chat updates yet.",
 };
+
+/**
+ * The server may filter a whole page (hidden or revoked sources) and still
+ * hand back a cursor. An empty list then keeps walking on its own, one hop
+ * per distinct cursor and at most this many hops, so a later visible row
+ * stays reachable; beyond that the list offers Load more instead of looping.
+ */
+export const AUTO_EMPTY_PAGE_HOPS = 5;
+export function nextEmptyPageHop(
+  cursor: string | null | undefined,
+  followed: readonly string[],
+  limit = AUTO_EMPTY_PAGE_HOPS,
+): boolean {
+  return !!cursor && !followed.includes(cursor) && followed.length < limit;
+}
 
 export function notificationError(error: unknown): string {
   const message = (error as { message?: unknown } | null)?.message;
@@ -238,6 +253,30 @@ export function NotificationsScreen({
   );
   const asOf = feed.data?.pages[0]?.as_of;
   const unread = summary.data?.unread_count ?? 0;
+  // Nothing visible yet while the server still has pages: keep paging.
+  const lastCursor = feed.data?.pages.at(-1)?.next_cursor ?? null;
+  const searching =
+    enabled &&
+    rows.length === 0 &&
+    !feed.isPending &&
+    !feed.isError &&
+    feed.hasNextPage;
+  const followed = useRef<{ filter: NotificationFilter; cursors: string[] }>({
+    filter,
+    cursors: [],
+  });
+  if (followed.current.filter !== filter)
+    followed.current = { filter, cursors: [] };
+  const autoHop =
+    searching &&
+    !feed.isFetchingNextPage &&
+    nextEmptyPageHop(lastCursor, followed.current.cursors);
+  const fetchNextPage = feed.fetchNextPage;
+  useEffect(() => {
+    if (!autoHop || !runtime.active || !lastCursor) return;
+    followed.current.cursors.push(lastCursor);
+    void fetchNextPage();
+  }, [autoHop, runtime.active, lastCursor, fetchNextPage]);
   const { refreshing, onRefresh } = usePullRefresh(() =>
     Promise.all([feed.refetch(), summary.refetch()]),
   );
@@ -317,6 +356,21 @@ export function NotificationsScreen({
         </SettingsGroup>
       </>
     );
+  } else if (searching) {
+    // Not exhausted: an automatic hop is running or offered, never "all caught up".
+    empty =
+      autoHop || feed.isFetchingNextPage ? (
+        <SkeletonRows rows={2} accessibilityLabel="Looking for updates" />
+      ) : (
+        <SettingsGroup inset={false}>
+          <SettingsRow
+            tone="action"
+            label="Load more"
+            centered
+            onPress={() => void feed.fetchNextPage()}
+          />
+        </SettingsGroup>
+      );
   } else {
     empty = (
       <View style={styles.empty}>

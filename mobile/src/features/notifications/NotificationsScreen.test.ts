@@ -222,12 +222,16 @@ test("mark all read uses the server fence, filters re-query by kind and the end 
   x.h.flush();
   assert.equal(x.filters.at(-1), "needs_you");
   assert.equal(x.all().find((n) => n.type === "SegmentControl")!.props.activeIndex, 1);
-  x.list().props.onEndReached();
+  // The agent_update row leaves Needs you empty while a cursor remains, so the
+  // list walks on by itself once; the end of the list then asks for more.
   assert.deepEqual(x.fetched, ["needs_you"]);
+  x.list().props.onEndReached();
+  assert.deepEqual(x.fetched, ["needs_you", "needs_you"]);
   x.h.unmount();
   const none = setup({ pages: [{ as_of: AS_OF, next_cursor: null, items: [] }], summary: { unread_count: 0, needs_decision_count: 0, by_source: [], by_source_truncated: false } });
   assert.equal(none.header().enabled, false, "nothing to mark");
   assert.ok(nodes(none.list().props.ListEmptyComponent).some((n) => n.type === "Text" && n.props.children === "You're all caught up."));
+  assert.deepEqual(none.fetched, [], "an exhausted feed asks for nothing more");
   none.h.unmount();
 });
 
@@ -257,4 +261,51 @@ test("the flag, loading and failures each have their own state, and resolved car
   const keep = all.module.notificationRows(pages, "needs_you");
   assert.deepEqual(Array.from(keep, (item: any) => item.id), ["n2"]);
   all.h.unmount();
+});
+
+test("an empty page with a cursor keeps paging on its own, stops on a repeated cursor and offers Load more, and ends only when exhausted", () => {
+  const options: {
+    pages: { as_of: string; next_cursor: string | null; items: unknown[] }[];
+    hasNextPage: boolean;
+    summary: unknown;
+  } = {
+    pages: [{ as_of: AS_OF, next_cursor: "p2", items: [] }],
+    hasNextPage: true,
+    summary: { unread_count: 1, needs_decision_count: 0, by_source: [], by_source_truncated: false },
+  };
+  const x = setup(options);
+  x.h.flush();
+  assert.deepEqual(x.fetched, ["all"], "the empty first page is followed automatically");
+  const emptyNodes = () => nodes(x.list().props.ListEmptyComponent);
+  assert.ok(emptyNodes().some((n) => n.type === "SkeletonRows" && n.props.accessibilityLabel === "Looking for updates"));
+  assert.equal(emptyNodes().some((n) => n.type === "Text" && n.props.children === "You're all caught up."), false, "not exhausted yet");
+  x.h.render();
+  x.h.flush();
+  assert.deepEqual(x.fetched, ["all"], "the same cursor is never followed twice");
+  options.pages.push({ as_of: AS_OF, next_cursor: "p2", items: [] });
+  x.h.render();
+  x.h.flush();
+  assert.deepEqual(x.fetched, ["all"], "an unchanged cursor stops the automatic walk");
+  const loadMore = emptyNodes().find((n) => n.type === "SettingsRow" && n.props.label === "Load more");
+  assert.ok(loadMore, "pagination stays reachable by hand");
+  loadMore!.props.onPress();
+  assert.deepEqual(x.fetched, ["all", "all"]);
+  options.pages.push({ as_of: AS_OF, next_cursor: "p3", items: [] });
+  x.h.render();
+  x.h.flush();
+  assert.deepEqual(x.fetched, ["all", "all", "all"], "a new cursor is followed again");
+  options.pages.push({ as_of: AS_OF, next_cursor: null, items: [row("n9", { kind: "chat_update", title: "Found" })] });
+  options.hasNextPage = false;
+  x.h.render();
+  x.h.flush();
+  assert.equal(x.renderedRows().length, 1, "the visible row from a later page is reachable");
+  assert.deepEqual(x.fetched, ["all", "all", "all"]);
+  x.h.unmount();
+  const hops = setup({ pages: [{ as_of: AS_OF, next_cursor: "c1", items: [] }], hasNextPage: true,
+    summary: { unread_count: 0, needs_decision_count: 0, by_source: [], by_source_truncated: false } });
+  assert.equal(hops.module.AUTO_EMPTY_PAGE_HOPS, 5);
+  assert.equal(hops.module.nextEmptyPageHop("c6", ["c1", "c2", "c3", "c4", "c5"]), false, "the automatic walk is bounded");
+  assert.equal(hops.module.nextEmptyPageHop("c2", ["c1"]), true);
+  assert.equal(hops.module.nextEmptyPageHop(null, []), false);
+  hops.h.unmount();
 });
