@@ -993,7 +993,7 @@ export function ChatMessageEntry({
       <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-hairline bg-overlay text-text-tertiary">
         <MessageSquare className="h-3 w-3" />
       </div>
-      <div className="min-w-0 max-w-[84%] flex-1">
+      <div className="min-w-0 max-w-[84%] flex-1 wrap-anywhere">
         <div className="type-secondary-emphasis text-foreground">{displayName}</div>
         {message.thinking ? (
           <p className="mt-1 text-13 italic text-text-tertiary">
