@@ -1201,7 +1201,7 @@ fn chat_authority(row: &AssistantConversation, agent_id: &str) -> acks::ChatAuth
         user_id: row.user_id.clone(),
         conversation_id: row.id.clone(),
         api_key_id: row.credential_api_key_id.clone(),
-        role: row.role.clone(),
+        role: row.role,
         agent_id: agent_id.into(),
         agent_name: "NyxBot".into(),
         guest: false,
@@ -1549,9 +1549,15 @@ async fn group_cards_mark_the_visible_group_and_opening_it_reads_them_without_re
     let db = &f.state.db;
     set_flag(&f, true).await;
     let researcher = specialist(&f, "researcher").await;
-    let group = groups::create(db, &f.owner, "Ops", &[researcher.id.clone()], "user")
-        .await
-        .unwrap();
+    let group = groups::create(
+        db,
+        &f.owner,
+        "Ops",
+        std::slice::from_ref(&researcher.id),
+        "user",
+    )
+    .await
+    .unwrap();
     // The member speaks through a hidden thread of the group.
     let mut member = start(None, "Delete service g", TurnOrigin::Group);
     member.agent_id = Some(researcher.id.clone());
@@ -1651,9 +1657,15 @@ async fn group_notices_coalesce_and_outside_posts_do_not_notify_and_group_reads_
     let db = &f.state.db;
     set_flag(&f, true).await;
     let researcher = specialist(&f, "researcher").await;
-    let group = groups::create(db, &f.owner, "Ops", &[researcher.id.clone()], "user")
-        .await
-        .unwrap();
+    let group = groups::create(
+        db,
+        &f.owner,
+        "Ops",
+        std::slice::from_ref(&researcher.id),
+        "user",
+    )
+    .await
+    .unwrap();
     // NyxBot or the owner posting into the group from outside is a request,
     // not an update.
     groups::append(
@@ -2933,9 +2945,15 @@ async fn the_creating_kind_drives_push_preference_and_payload_after_coalescing()
     let db = &f.state.db;
     set_flag(&f, true).await;
     let researcher = specialist(&f, "researcher").await;
-    let research = groups::create(db, &f.owner, "Research", &[researcher.id.clone()], "user")
-        .await
-        .unwrap();
+    let research = groups::create(
+        db,
+        &f.owner,
+        "Research",
+        std::slice::from_ref(&researcher.id),
+        "user",
+    )
+    .await
+    .unwrap();
     // Only mentions push.
     push_prefs(
         &f,
@@ -3016,9 +3034,15 @@ async fn the_creating_kind_drives_push_preference_and_payload_after_coalescing()
         },
     )
     .await;
-    let design = groups::create(db, &f.owner, "Design", &[researcher.id.clone()], "user")
-        .await
-        .unwrap();
+    let design = groups::create(
+        db,
+        &f.owner,
+        "Design",
+        std::slice::from_ref(&researcher.id),
+        "user",
+    )
+    .await
+    .unwrap();
     let second = seeded(
         &f.owner,
         NotificationKind::GroupMention,
@@ -3208,9 +3232,15 @@ async fn pre_claim_failures_strand_nothing_and_the_next_sweep_delivers() {
     // Now a source lookup fails during the owner's batched preparation: both
     // of their due rows stay queued, unclaimed.
     let researcher = specialist(&f, "researcher").await;
-    let group = groups::create(db, &f.owner, "Ops", &[researcher.id.clone()], "user")
-        .await
-        .unwrap();
+    let group = groups::create(
+        db,
+        &f.owner,
+        "Ops",
+        std::slice::from_ref(&researcher.id),
+        "user",
+    )
+    .await
+    .unwrap();
     let mention = Uuid::new_v4().to_string();
     db.collection::<Document>(GROUP_MESSAGES)
         .insert_one(

@@ -3244,6 +3244,63 @@ pub async fn pause_committed_admission(db: &mongodb::Database) {
     }
 }
 
+/// A typed content-free row for lifecycle tests. Each test chooses the exact
+/// source references, which must round-trip through the production model.
+pub(crate) async fn seed_notification_purge_probe(
+    db: &mongodb::Database,
+    user_id: &str,
+    references: Document,
+) -> String {
+    use crate::models::assistant_notification::{
+        AssistantNotification, COLLECTION_NAME, NotificationKind, NotificationSource,
+    };
+    let id = Uuid::new_v4().to_string();
+    let mut source = doc! {"type":"conversation", "id":Uuid::new_v4().to_string()};
+    source.extend(references.clone());
+    let source: NotificationSource = bson::from_document(source).unwrap();
+    let stored_source = bson::to_document(&source).unwrap();
+    for (key, value) in references {
+        assert_eq!(stored_source.get(&key), Some(&value), "source field {key}");
+    }
+    let now = chrono::Utc::now();
+    db.collection::<AssistantNotification>(COLLECTION_NAME)
+        .insert_one(AssistantNotification {
+            id: id.clone(),
+            user_id: user_id.into(),
+            kind: NotificationKind::AgentUpdate,
+            source,
+            source_key: id.clone(),
+            coalesced: false,
+            unread: true,
+            count: 1,
+            read_at: None,
+            resolved_at: None,
+            resolution: None,
+            card_expires_at: None,
+            outcome: None,
+            reason: None,
+            push: None,
+            created_at: now,
+            updated_at: now,
+            expires_at: now + chrono::Duration::days(30),
+        })
+        .await
+        .unwrap();
+    id
+}
+
+pub(crate) async fn assert_notification_probe(db: &mongodb::Database, id: &str, present: bool) {
+    assert_eq!(
+        db.collection::<Document>("assistant_notifications")
+            .find_one(doc! {"_id":id})
+            .await
+            .unwrap()
+            .is_some(),
+        present,
+        "notification {id} presence after source transition"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4155,61 +4212,4 @@ mod tests {
             assert_eq!(options.direct_connection, expected);
         }
     }
-}
-
-/// A typed content-free row for lifecycle tests. Each test chooses the exact
-/// source references, which must round-trip through the production model.
-pub(crate) async fn seed_notification_purge_probe(
-    db: &mongodb::Database,
-    user_id: &str,
-    references: Document,
-) -> String {
-    use crate::models::assistant_notification::{
-        AssistantNotification, COLLECTION_NAME, NotificationKind, NotificationSource,
-    };
-    let id = Uuid::new_v4().to_string();
-    let mut source = doc! {"type":"conversation", "id":Uuid::new_v4().to_string()};
-    source.extend(references.clone());
-    let source: NotificationSource = bson::from_document(source).unwrap();
-    let stored_source = bson::to_document(&source).unwrap();
-    for (key, value) in references {
-        assert_eq!(stored_source.get(&key), Some(&value), "source field {key}");
-    }
-    let now = chrono::Utc::now();
-    db.collection::<AssistantNotification>(COLLECTION_NAME)
-        .insert_one(AssistantNotification {
-            id: id.clone(),
-            user_id: user_id.into(),
-            kind: NotificationKind::AgentUpdate,
-            source,
-            source_key: id.clone(),
-            coalesced: false,
-            unread: true,
-            count: 1,
-            read_at: None,
-            resolved_at: None,
-            resolution: None,
-            card_expires_at: None,
-            outcome: None,
-            reason: None,
-            push: None,
-            created_at: now,
-            updated_at: now,
-            expires_at: now + chrono::Duration::days(30),
-        })
-        .await
-        .unwrap();
-    id
-}
-
-pub(crate) async fn assert_notification_probe(db: &mongodb::Database, id: &str, present: bool) {
-    assert_eq!(
-        db.collection::<Document>("assistant_notifications")
-            .find_one(doc! {"_id":id})
-            .await
-            .unwrap()
-            .is_some(),
-        present,
-        "notification {id} presence after source transition"
-    );
 }
