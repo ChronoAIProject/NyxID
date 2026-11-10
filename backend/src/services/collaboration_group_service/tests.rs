@@ -4090,7 +4090,7 @@ async fn notifications_follow_collaboration_departure_and_group_deletion() {
     .await;
     probe(&f.state.db, &departing, false).await;
     probe(&f.state.db, &remaining, true).await;
-    crate::handlers::collaboration_group::delete_group(
+    crate::handlers::assistant_group::delete_group(
         axum::extract::State(f.state.clone()),
         crate::test_utils::test_auth_user(&f.admin),
         axum::extract::Path(group.id.clone()),
