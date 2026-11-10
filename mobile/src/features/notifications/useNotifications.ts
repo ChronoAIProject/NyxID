@@ -277,10 +277,11 @@ function visibleReadDecision(
  * `VISIBLE_THREAD_MAX_EXACT_READS` times for a count the server leaves
  * unchanged. A truncated summary with unexact counts reads once per open.
  * An open is one thread under one account while the screen stays focused:
- * a background pause keeps what was already read, while a navigation blur
- * and return, another thread, another account or a fresh mount start over
- * (the web's tab-visibility behavior). Decisions become seen, never
- * resolved, server-side.
+ * a background pause and resume keeps, rather than refills, the exact-read
+ * budget and the used fallback, while a navigation blur and return, another
+ * thread, another account or a fresh mount start over (the web's
+ * tab-visibility behavior). Decisions become seen, never resolved,
+ * server-side.
  */
 export function useVisibleThreadRead(
   source: VisibleNotificationSource | undefined,
@@ -302,24 +303,22 @@ export function useVisibleThreadRead(
   };
   const latest = useRef({ view, source });
   latest.current = { view, source };
+  // The open record: what this open has read and whether its deadline passed.
   const open = useRef<{
     identity?: string;
     focused: boolean;
     state: VisibleReadState;
     due: boolean;
-    /** Counts opens so the deadline re-arms for each one. */
-    generation: number;
-  }>({ identity, focused, state: freshVisibleReadState(), due: false, generation: 0 });
-  if (open.current.identity !== identity || (focused && !open.current.focused))
-    open.current = {
-      identity,
-      focused,
-      state: freshVisibleReadState(),
-      due: false,
-      generation: open.current.generation + 1,
-    };
-  else open.current.focused = focused;
-  const generation = open.current.generation;
+  }>({ identity, focused, state: freshVisibleReadState(), due: false });
+  // A new open starts fresh: another thread or account, or focus returning
+  // after a navigation blur. Committed before the deadline and judging
+  // effects below, never from a render React may discard.
+  useEffect(() => {
+    const current = open.current;
+    if (current.identity !== identity || (focused && !current.focused))
+      open.current = { identity, focused, state: freshVisibleReadState(), due: false };
+    else current.focused = focused;
+  }, [identity, focused]);
   const judge = useRef(() => {});
   judge.current = () => {
     const current = open.current;
@@ -329,7 +328,8 @@ export function useVisibleThreadRead(
     current.state = next.state;
     if (next.read) mutate.current({ source: { type: target.type, id: target.id } });
   };
-  // The deadline: armed for each open when the thread is in front, dropped on pause.
+  // The deadline: armed for each open when the thread is in front (identity
+  // or a focus return names the open), dropped on pause and re-armed on resume.
   useEffect(() => {
     if (!enabled || !active || !identity) return;
     const timer = setTimeout(() => {
@@ -340,10 +340,10 @@ export function useVisibleThreadRead(
       clearTimeout(timer);
       open.current.due = false;
     };
-  }, [enabled, active, identity, generation]);
+  }, [enabled, active, identity, focused]);
   // After the deadline every summary refresh is judged immediately.
   const { exact, anyUnread, truncated, dataUpdatedAt } = view;
   useEffect(() => {
     if (enabled && active) judge.current();
-  }, [enabled, active, identity, generation, exact, anyUnread, truncated, dataUpdatedAt]);
+  }, [enabled, active, identity, focused, exact, anyUnread, truncated, dataUpdatedAt]);
 }
