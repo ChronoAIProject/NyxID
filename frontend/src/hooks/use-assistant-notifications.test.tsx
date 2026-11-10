@@ -103,6 +103,21 @@ describe("useNotificationList", () => {
     await waitFor(() => expect(result.current.data?.pages).toHaveLength(1));
     const first = requests.find((request) => request.endpoint.startsWith("/assistant/nyxagent/notifications?"));
     expect(first!.endpoint).not.toContain("kind=");
+    expect(first!.endpoint).not.toContain("pending_only");
+  });
+
+  it("asks for pending decisions only under Needs you, and nowhere else", async () => {
+    const { result } = renderHook(() => useNotificationList("needs_you"), { wrapper });
+    await waitFor(() => expect(result.current.data?.pages).toHaveLength(1));
+    const first = requests.find((request) => request.endpoint.startsWith("/assistant/nyxagent/notifications?"));
+    const query = new URLSearchParams(first!.endpoint.split("?")[1]);
+    expect(query.get("kind")).toBe("needs_decision");
+    expect(query.get("pending_only")).toBe("true");
+    requests.length = 0;
+    const chats = renderHook(() => useNotificationList("chats"), { wrapper });
+    await waitFor(() => expect(chats.result.current.data?.pages).toHaveLength(1));
+    const second = requests.find((request) => request.endpoint.startsWith("/assistant/nyxagent/notifications?"));
+    expect(second!.endpoint).not.toContain("pending_only");
   });
 });
 

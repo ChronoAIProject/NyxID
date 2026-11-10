@@ -26,6 +26,9 @@ export function notificationListQuery(params: NotificationListParams): string {
   if (params.unreadOnly) query.set("unread_only", "true");
   const kinds = params.filter ? NOTIFICATION_FILTER_KINDS[params.filter] : [];
   if (kinds.length) query.set("kind", kinds.join(","));
+  // Needs you lists only decisions still waiting, seen or not; All keeps
+  // resolved ones as history, so the chip says so explicitly.
+  if (params.filter === "needs_you") query.set("pending_only", "true");
   return query.toString();
 }
 
