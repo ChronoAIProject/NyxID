@@ -158,6 +158,25 @@ never grants permissions, approves actions or changes the access mode. Nothing
 is stored on the agent; the outline is read from the hash-verified package each
 time, and no audit or log entry contains outline text.
 
+## Capability skills and skillsets
+
+Write reusable skills at three levels, none of them tied to a business:
+
+- **Capability skills** do one thing with one provider through NyxID, such as
+  `sms-send-twilio` or `records-notion`. Each states its success signal.
+- **Behaviour and workflow skills** describe how to act or a procedure, such as
+  `caller-details-readback` or `booking-with-availability`, without naming a
+  provider.
+- **Skillsets** (Ornn) bundle the members for one use case. Their master prompt
+  follows this template: the Overview says which use case the skillset is for,
+  and each Approach step's `Uses` names a member.
+
+Business facts live in a separate facts pack. NyxBot pins skills only today;
+presenting a skillset as one skill (its master prompt as `SKILL.md`, its members
+as the dependencies) is proposed for a later part of #2331. See
+[the examples](skill-templates/README.md), which also explain how to check
+templates and preview their cards locally.
+
 ## Rollout
 
 `assistant:skill-runs` is off by default for everyone. Upgrade every backend
