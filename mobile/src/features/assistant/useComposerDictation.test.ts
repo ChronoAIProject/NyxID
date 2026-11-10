@@ -13,7 +13,10 @@ function recognizer(events: string[]) {
   let permission = deferred<Permission>();
   const module = {
     onDevice: true,
-    setAudioSessionActiveIOS: (active: boolean, options: { notifyOthersOnDeactivation: boolean }) => {
+    setAudioSessionActiveIOS: (
+      active: boolean,
+      options: { notifyOthersOnDeactivation: boolean },
+    ) => {
       assert.equal(active, false);
       assert.equal(options.notifyOthersOnDeactivation, true);
       events.push("audio-release");
@@ -589,7 +592,9 @@ test("an utterance retains its capture-time insertion callback", async () => {
   const f = setup({ continuous: false });
   await f.begin();
   const replacements: string[] = [];
-  f.props.onInsert = (text) => { replacements.push(text); };
+  f.props.onInsert = (text) => {
+    replacements.push(text);
+  };
   f.h.render();
   f.result("capture-time route", true);
   f.emit("end");
@@ -658,7 +663,9 @@ test("ordinary editable dictation appends through the latest draft callback", as
   const f = setup();
   await f.begin();
   const replacements: string[] = [];
-  f.props.onInsert = (text) => { replacements.push(text); };
+  f.props.onInsert = (text) => {
+    replacements.push(text);
+  };
   f.h.render();
   f.result("append to the edited draft", true);
   f.emit("end");
@@ -685,14 +692,21 @@ function privateAudio(f: ReturnType<typeof setup>) {
       commands.push(message);
       if (message.type === "close") f.events.push("private-close");
       if (respond && message.type === "prepare")
-        queueMicrotask(() => media.receive(JSON.stringify({
-          type: "response", generation: message.generation,
-          requestId: message.requestId, result: "offer",
-        })));
+        queueMicrotask(() =>
+          media.receive(
+            JSON.stringify({
+              type: "response",
+              generation: message.generation,
+              requestId: message.requestId,
+              result: "offer",
+            }),
+          ),
+        );
     });
     if (ready) media.receive(JSON.stringify({ type: "ready" }));
     const controller = new AbortController();
-    const preparation = media.prepare("openai_live", controller.signal)
+    const preparation = media
+      .prepare("openai_live", controller.signal)
       .catch((error: Error) => error.message);
     return { media, commands, controller, preparation };
   };
@@ -708,7 +722,11 @@ for (const closeFirst of [false, true]) {
     f.native.emit("end");
     p.controller.abort();
     assert.equal(await p.preparation, "Voice audio was closed.");
-    assert.equal(p.commands.length, 0, "the bridge never acquired native media");
+    assert.equal(
+      p.commands.length,
+      0,
+      "the bridge never acquired native media",
+    );
     assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
     p.media.close();
     f.native.emit("end");
@@ -739,11 +757,16 @@ for (const closeFirst of [false, true]) {
     assert.equal(await p.preparation, "offer");
     if (closeFirst) p.media.close();
     f.native.emit("end");
-    assert.equal(f.events.includes("audio-release"), closeFirst,
-      "an active newer owner must not be deactivated");
+    assert.equal(
+      f.events.includes("audio-release"),
+      closeFirst,
+      "an active newer owner must not be deactivated",
+    );
     p.media.close();
     assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
-    assert.ok(f.events.indexOf("private-close") < f.events.indexOf("audio-release"));
+    assert.ok(
+      f.events.indexOf("private-close") < f.events.indexOf("audio-release"),
+    );
     p.media.close();
     f.native.emit("end");
     assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
@@ -759,7 +782,10 @@ test("private bridge readiness timeout cannot take away a recognizer's deactivat
   const p = privateAudio(f)(false);
   f.native.emit("end");
   context.mock.timers.tick(15000);
-  assert.equal(await p.preparation, "Voice audio is not ready. Please try again.");
+  assert.equal(
+    await p.preparation,
+    "Voice audio is not ready. Please try again.",
+  );
   assert.equal(p.commands.length, 0);
   assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
   p.media.close();
@@ -788,8 +814,14 @@ test("native media preparation failure runs the inherited deactivation", async (
   f.native.emit("end");
   assert.equal(f.events.includes("audio-release"), false);
   const command = p.commands[0]!;
-  p.media.receive(JSON.stringify({ type: "response", generation: command.generation,
-    requestId: command.requestId, error: "Media preparation failed." }));
+  p.media.receive(
+    JSON.stringify({
+      type: "response",
+      generation: command.generation,
+      requestId: command.requestId,
+      error: "Media preparation failed.",
+    }),
+  );
   assert.equal(await p.preparation, "Media preparation failed.");
   assert.equal(f.events.filter((e) => e === "audio-release").length, 1);
   p.media.close();

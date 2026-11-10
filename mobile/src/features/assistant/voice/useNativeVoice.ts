@@ -29,8 +29,7 @@ type RecoveryTarget = {
 // Only safe session metadata survives the surface. A new account or explicit
 // recovery action fences late completions from an older client.
 let retainedRecovery:
-  | (RecoveryTarget & { epoch: number; owner: object })
-  | undefined;
+  (RecoveryTarget & { epoch: number; owner: object }) | undefined;
 const recoveryListeners = new Set<() => void>();
 
 export function useNativeVoice(
@@ -238,9 +237,9 @@ export function useNativeVoice(
       }
       // System permission prompts may briefly inactivate the app before any
       // microphone is acquired. Actual background always cancels the attempt.
-      if (
-        !(state === "inactive" && permissionAttempt.current === ticket.current)
-      ) {
+      if (!(
+        state === "inactive" && permissionAttempt.current === ticket.current
+      )) {
         const hadVoiceWork = busy.current || current.current !== null;
         stopRef.current();
         if (hadVoiceWork)

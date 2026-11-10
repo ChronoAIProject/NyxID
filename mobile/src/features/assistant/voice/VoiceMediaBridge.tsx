@@ -54,8 +54,7 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
 
   constructor(
     private readonly createOpenAI:
-      | (() => VoiceMediaAdapter | undefined)
-      | null = createNativeOpenAIMedia,
+      (() => VoiceMediaAdapter | undefined) | null = createNativeOpenAIMedia,
   ) {}
 
   get usesNativeMedia(): boolean {
