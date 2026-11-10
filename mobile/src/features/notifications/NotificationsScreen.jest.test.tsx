@@ -9,6 +9,8 @@ const mockReads: unknown[] = [];
 const mockOpened: unknown[] = [];
 const mockFilters: string[] = [];
 const mockFetched: string[] = [];
+let mockUnreadCount = 1;
+let mockHasNextPage = true;
 let mockHeader: { label: string; enabled: boolean; onPress: () => void } | undefined;
 const mockRows = [
   notificationSchema.parse({
@@ -76,7 +78,7 @@ jest.mock("./useNotifications", () => ({
   useNotificationsEnabled: () => true,
   useNotificationsLive: () => false,
   useNotificationSummary: () => ({
-    data: { unread_count: 1, needs_decision_count: 1, by_source: [], by_source_truncated: false },
+    data: { unread_count: mockUnreadCount, needs_decision_count: 1, by_source: [], by_source_truncated: false },
     refetch: () => Promise.resolve(),
   }),
   useMarkNotificationsRead: () => ({ mutate: (scope: unknown) => mockReads.push(scope), isPending: false }),
@@ -87,7 +89,7 @@ jest.mock("./useNotifications", () => ({
       isPending: false,
       isError: false,
       error: undefined,
-      hasNextPage: true,
+      hasNextPage: mockHasNextPage,
       isFetchingNextPage: false,
       fetchNextPage: () => {
         mockFetched.push(filter);
@@ -106,6 +108,9 @@ describe("NotificationsScreen", () => {
     mockOpened.length = 0;
     mockFilters.length = 0;
     mockFetched.length = 0;
+    mockUnreadCount = 1;
+    mockHasNextPage = true;
+    mockHeader = undefined;
     (navigation as { push: jest.Mock }).push.mockClear();
   });
 
@@ -137,11 +142,33 @@ describe("NotificationsScreen", () => {
 
   it("marks everything read behind the server fence and switches mockFilters", async () => {
     await render(<NotificationsScreen navigation={navigation} route={{ key: "r", name: "Notifications", params: undefined }} />);
-    expect(mockHeader?.label).toBe("Mark all read");
+    expect(mockHeader?.label).toBe("Mark all notifications as read");
     expect(mockHeader?.enabled).toBe(true);
     mockHeader!.onPress();
     expect(mockReads).toEqual([{ all: true, before: MOCK_AS_OF }]);
     await fireEvent.press(screen.getByRole("tab", { name: /Needs you/ }));
     expect(mockFilters.at(-1)).toBe("needs_you");
+  });
+
+  it("keeps the global read action available on an empty filter when other kinds are unread", async () => {
+    mockHasNextPage = false;
+    await render(<NotificationsScreen navigation={navigation} route={{ key: "r", name: "Notifications", params: undefined }} />);
+    await fireEvent.press(screen.getByRole("tab", { name: "Automations" }));
+    expect(screen.getByText("No automation results yet.")).toBeTruthy();
+    expect(mockHeader).toMatchObject({
+      label: "Mark all notifications as read",
+      enabled: true,
+    });
+    mockHeader!.onPress();
+    expect(mockReads).toEqual([{ all: true, before: MOCK_AS_OF }]);
+  });
+
+  it("disables the global read action when the summary has no unread notifications", async () => {
+    mockUnreadCount = 0;
+    await render(<NotificationsScreen navigation={navigation} route={{ key: "r", name: "Notifications", params: undefined }} />);
+    expect(mockHeader).toMatchObject({
+      label: "Mark all notifications as read",
+      enabled: false,
+    });
   });
 });

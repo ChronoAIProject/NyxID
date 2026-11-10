@@ -210,7 +210,7 @@ test("mark all read uses the server fence, filters re-query by kind and the end 
     summary: { unread_count: 1, needs_decision_count: 2, by_source: [], by_source_truncated: false },
   });
   const header = x.header();
-  assert.equal(header.label, "Mark all read");
+  assert.equal(header.label, "Mark all notifications as read");
   assert.equal(header.enabled, true);
   header.onPress();
   assert.deepEqual(JSON.parse(JSON.stringify(x.reads)), [{ all: true, before: AS_OF }]);

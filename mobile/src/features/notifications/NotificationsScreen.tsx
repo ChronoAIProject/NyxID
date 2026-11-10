@@ -284,7 +284,7 @@ export function NotificationsScreen({
     if (asOf) markRead.mutate({ all: true, before: asOf });
   }, [asOf, markRead.mutate]);
   useSettingsHeaderAction(navigation, {
-    label: "Mark all read",
+    label: "Mark all notifications as read",
     enabled: enabled && unread > 0 && !!asOf && !markRead.isPending,
     busy: markRead.isPending,
     onPress: markAll,
