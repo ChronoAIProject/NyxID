@@ -542,8 +542,7 @@ async fn live_channel_owner(
 /// transactional unlink (`retire_connection`, which sets `status`) and the
 /// transactional chat removal (`remove_thread`, which increments the channel's
 /// `notification_generation`) serialize against this producer. Returns the
-/// live channel's `user_id`, or `None` once it is retired (`failed` or
-/// `disconnected` also purge the feed) or gone.
+/// live channel's `user_id`, or `None` while it is non-live or gone.
 async fn fence_channel(
     db: &Database,
     session: &mut ClientSession,

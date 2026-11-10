@@ -3060,10 +3060,15 @@ pub(crate) async fn begin_owner_turn_in_session(
     if start.invocation_id.is_some() || events.iter().any(|event| event.invocation_id.is_some()) {
         row.invocation_controlled = true;
     }
-    // Cached flag snapshot for settlement; a lookup failure reads as off.
-    let notifications_enabled = super::assistant_notification_service::enabled(db, user_id)
-        .await
-        .unwrap_or(false);
+    // Group transcript and trigger terminal producers resolve their own flags;
+    // their hidden turn settlements never create a notification.
+    let notifications_enabled = if matches!(start.origin, TurnOrigin::Group | TurnOrigin::Trigger) {
+        false
+    } else {
+        super::assistant_notification_service::enabled(db, user_id)
+            .await
+            .unwrap_or(false)
+    };
     row.active_turn = Some(ActiveTurn {
         platform_model_context: None,
         automation_work: automation_work.clone(),
