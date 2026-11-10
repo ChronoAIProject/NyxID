@@ -1,4 +1,5 @@
 use super::*;
+use crate::errors::AppError;
 
 const FIRECRAWL: &str = "4f1c2a8e-0d6b-4b8e-9b51-2f0a3c9e7d11";
 const GITHUB: &str = "9a7e5c31-6f2d-4e0a-8c4b-1d3e5f7a9b20";
@@ -371,4 +372,207 @@ fn repository_example_skills_follow_the_template() {
         )
         .is_empty()
     );
+}
+
+#[test]
+fn fence_examples_never_become_the_outline() {
+    let closure = closure();
+    let fake = "## Overview\nFAKE example.\n\n## Approach\n1. **Fake.** Inside an example.\n";
+    // A longer outer fence is not closed by a shorter inner one.
+    let longer = format!("````markdown\n```\n{fake}```\n````\n");
+    assert!(parse(&longer, &[]).is_none());
+    // A fence line with trailing text never closes a fence.
+    let false_close = format!("```\nexample\n```markdown\n{fake}```\n");
+    assert!(parse(&false_close, &[]).is_none());
+    // Backticks never close a tilde fence.
+    let tilde = format!("~~~\n```\n{fake}~~~\n");
+    assert!(parse(&tilde, &[]).is_none());
+    // An unterminated fence runs to the end.
+    assert!(parse(&skill(&format!("```\n{BODY}")), &closure).is_none());
+    // The real outline after a long example fence wins, never the example.
+    let real = parse(&skill(&format!("{longer}{BODY}")), &closure).expect("outline");
+    assert!(!render(&real).contains("FAKE"));
+    assert!(real.overview.starts_with("Give me a topic"));
+}
+
+#[test]
+fn only_the_metadata_depends_on_key_declares_dependencies() {
+    let mut closure = closure();
+    closure.push(pin("2c4e6a80-1b3d-4f57-9e0a-6c8e0b2d4f61", "helper", "1.0"));
+    let with = |front: &str, uses: &str| {
+        let body = BODY.replace("Uses: firecrawl-via-nyxid", &format!("Uses: {uses}"));
+        parse(&format!("---\n{front}---\n{body}"), &closure)
+    };
+    let direct =
+        "metadata:\n  depends-on:\n    - firecrawl-via-nyxid@1.3\n    - github-via-nyxid@1.2\n";
+    assert!(with(direct, "firecrawl-via-nyxid").is_some());
+    // Text in another key's block scalar declares nothing.
+    let scalar = format!("description: |\n  depends-on: [helper@1.0]\n{direct}");
+    assert!(with(&scalar, "helper").is_none());
+    assert!(with(&scalar, "firecrawl-via-nyxid").is_some());
+    // Neither does a nested mapping or a top-level key.
+    let nested = format!("{direct}  other:\n    depends-on: [helper@1.0]\n");
+    assert!(with(&nested, "helper").is_none());
+    let top = format!("depends-on: [helper@1.0]\n{direct}");
+    assert!(with(&top, "helper").is_none());
+    // Forms the scan can't read with certainty fail closed.
+    for unreadable in [
+        "metadata:\n  \"depends-on\": [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]\n",
+        "metadata:\n  depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2,\n    other@1.0]\n",
+        "metadata:\n  depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]\n  depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]\n",
+        "metadata:\n  depends-on:\n    - firecrawl-via-nyxid@1.3\n    - github-via-nyxid@1.2\n    - name: other\n",
+        "metadata: {depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]}\n",
+    ] {
+        assert!(
+            with(unreadable, "firecrawl-via-nyxid").is_none(),
+            "{unreadable}"
+        );
+    }
+    // A skill without Uses tags keeps its outline even when declarations are unreadable.
+    let plain = BODY
+        .replace("   Uses: firecrawl-via-nyxid\n", "")
+        .replace("   Uses: github-via-nyxid\n", "");
+    assert!(
+        parse(
+            &format!("---\nmetadata:\n  \"depends-on\": [x@1.0]\n---\n{plain}"),
+            &closure
+        )
+        .is_some()
+    );
+}
+
+#[test]
+fn tag_lines_cannot_hide_unresolved_uses() {
+    let closure = closure();
+    for broken in [
+        "   Uses: firecrawl-via-nyxid · Uses: missing",
+        "   Uses: firecrawl-via-nyxid · and some prose",
+        "   Asks you · maybe",
+        "   Uses:",
+    ] {
+        let body = BODY.replace("   Uses: firecrawl-via-nyxid", broken);
+        assert!(parse(&skill(&body), &closure).is_none(), "{broken}");
+    }
+    // Prose that merely mentions asking stays step text.
+    let prose = BODY.replace(
+        "   Uses: firecrawl-via-nyxid",
+        "   It asks you nothing.\n   Uses: firecrawl-via-nyxid",
+    );
+    let outline = parse(&skill(&prose), &closure).expect("outline");
+    assert!(outline.steps[1].text.ends_with("It asks you nothing."));
+    assert!(!outline.steps[1].asks_you);
+}
+
+#[test]
+fn flag_off_adds_no_instructions() {
+    assert_eq!(instructions(false, false), "");
+    assert_eq!(instructions(false, true), "");
+    assert_eq!(instructions(true, false), GUIDANCE);
+    assert_eq!(
+        instructions(true, true),
+        format!("{GUIDANCE}{AUTHORING_GUIDANCE}")
+    );
+    // Advisory warnings never ask for another draft or publication.
+    assert!(AUTHORING_GUIDANCE.contains("do not draft or publish again"));
+}
+
+#[tokio::test]
+async fn flag_gates_tool_discovery_and_skill_read() {
+    use crate::services::{
+        assistant_account_tools::virtual_service_for,
+        feature_flag_service::{FlagTarget, set_platform_override},
+    };
+    let f = crate::services::assistant_authority_tests::orchestrator_fixture("skill_outline_flag")
+        .await;
+    let tool = |service: &crate::services::mcp_service::McpToolService, name: &str| {
+        service
+            .endpoints
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| json!([e.description, e.request_body_schema]))
+    };
+    let statics = |name: &str| {
+        crate::services::assistant_team_tools::endpoints()
+            .into_iter()
+            .chain(crate::services::assistant_team_tools::agent_endpoints())
+            .find(|e| e.name == name)
+            .map(|e| json!([e.description, e.request_body_schema]))
+    };
+    let mut guest = f.chat.clone();
+    guest.guest = true;
+    let outline_read = json!({"skill": "not-attached", "section": "outline"});
+
+    // Flag off: the skill tools are exactly the static definitions, and an
+    // outline read is refused as not enabled.
+    let off = virtual_service_for(&f.state.db, &f.chat).await;
+    for name in ["skill_read", "preview_agent_skill"] {
+        assert_eq!(tool(&off, name), statics(name), "{name}");
+    }
+    let refused =
+        crate::handlers::agent_skills::dispatch(&f.state, &f.chat, "skill_read", &outline_read)
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(&refused, AppError::Forbidden(m) if m.contains("not enabled")),
+        "{refused:?}"
+    );
+
+    set_platform_override(
+        &f.state.db,
+        FLAG_KEY,
+        &FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    assert!(enabled(&f.state.db, &f.owner).await.unwrap());
+    let on = virtual_service_for(&f.state.db, &f.chat).await;
+    assert!(
+        tool(&on, "skill_read")
+            .unwrap()
+            .to_string()
+            .contains("\"section\"")
+    );
+    assert!(
+        tool(&on, "preview_agent_skill")
+            .unwrap()
+            .to_string()
+            .contains("outline_offset")
+    );
+    // With the flag on, an outline read gets past the gate to the normal
+    // attached-pin checks.
+    let missing =
+        crate::handlers::agent_skills::dispatch(&f.state, &f.chat, "skill_read", &outline_read)
+            .await
+            .unwrap_err();
+    assert!(
+        !matches!(&missing, AppError::Forbidden(m) if m.contains("not enabled")),
+        "{missing:?}"
+    );
+    let bad_section = json!({"skill": "not-attached", "section": "files"});
+    assert!(matches!(
+        crate::handlers::agent_skills::dispatch(&f.state, &f.chat, "skill_read", &bad_section)
+            .await,
+        Err(AppError::ValidationError(_))
+    ));
+
+    // Guests never see outline options and are refused before any read.
+    let guest_tools = virtual_service_for(&f.state.db, &guest).await;
+    assert!(
+        !json!(
+            guest_tools
+                .endpoints
+                .iter()
+                .map(|e| &e.request_body_schema)
+                .collect::<Vec<_>>()
+        )
+        .to_string()
+        .contains("outline")
+    );
+    assert!(matches!(
+        crate::handlers::agent_skills::dispatch(&f.state, &guest, "skill_read", &outline_read).await,
+        Err(AppError::Forbidden(m)) if m.contains("owner turns")
+    ));
+    f.state.db.drop().await.unwrap();
 }

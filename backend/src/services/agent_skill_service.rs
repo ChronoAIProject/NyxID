@@ -768,56 +768,55 @@ pub async fn read_outline(
     let skill_md = files
         .get("SKILL.md")
         .and_then(|content| std::str::from_utf8(content).ok());
-    outline_page(
-        skill_md,
-        &root.dependencies,
-        id,
-        version,
-        offset,
-        PAGE_BUDGET,
-        CONTINUE_READ,
-    )
-}
-
-/// The outline of a verified preview, bounded so the preview and its first
-/// outline page fit one tool result together.
-pub fn preview_outline(preview: &Preview, offset: usize, preview_wire: usize) -> AppResult<Value> {
-    outline_page(
-        preview.skill_md.as_deref(),
-        &preview.reference.dependencies,
-        &preview.reference.skill_id,
-        &preview.reference.version,
-        offset,
-        PAGE_BUDGET
-            .saturating_sub(preview_wire)
-            .max(MIN_OUTLINE_BUDGET),
-        "Call preview_agent_skill again with outline_offset=next_offset to continue.",
-    )
-}
-
-fn outline_page(
-    skill_md: Option<&str>,
-    closure: &[SkillPin],
-    id: &str,
-    version: &str,
-    offset: usize,
-    budget: usize,
-    hint: &str,
-) -> AppResult<Value> {
-    match skill_md.and_then(|md| super::skill_outline::parse(md, closure)) {
-        Some(outline) => page_with(
-            &super::skill_outline::render(&outline),
-            id,
-            version,
-            "outline",
-            offset,
-            budget,
-            hint,
-        ),
-        None => Ok(
-            json!({"skill_id":id,"version":version,"path":"outline","untrusted_guidance":true,"outline_available":false,"complete":true,"hint":super::skill_outline::NO_OUTLINE_HINT}),
-        ),
+    match rendered_outline(skill_md, &root.dependencies) {
+        Some(outline) => page(&outline, id, version, "outline", offset),
+        None => Ok(no_outline(id, version)),
     }
+}
+
+/// `preview_agent_skill` with the verified root's outline
+/// (`assistant:skill-runs`). Without `outline_offset`, the preview carries the
+/// first outline page when both fit one tool result; otherwise its `outline`
+/// says how to fetch it. With `outline_offset`, the result is an outline-only
+/// page. Every result stays within the tool-response budget.
+pub fn preview_with_outline(preview: &Preview, outline_offset: Option<usize>) -> AppResult<Value> {
+    const HINT: &str =
+        "Call preview_agent_skill again with outline_offset=next_offset for an outline-only page.";
+    let id = &preview.reference.skill_id;
+    let version = &preview.reference.version;
+    let outline = rendered_outline(preview.skill_md.as_deref(), &preview.reference.dependencies);
+    if let Some(offset) = outline_offset {
+        return match outline {
+            Some(outline) => page_with(&outline, id, version, "outline", offset, PAGE_BUDGET, HINT),
+            None => Ok(no_outline(id, version)),
+        };
+    }
+    let mut value = json!(preview);
+    let Some(outline) = outline else {
+        value["outline"] = no_outline(id, version);
+        return Ok(value);
+    };
+    // The page is nested in the preview, which costs about one extra escape
+    // layer; the assembled result is checked below either way.
+    let budget = PAGE_BUDGET.saturating_sub(wire_len(&value));
+    if budget >= MIN_OUTLINE_BUDGET {
+        value["outline"] = page_with(&outline, id, version, "outline", 0, budget, HINT)?;
+        if wire_len(&value) <= PAGE_BUDGET {
+            return Ok(value);
+        }
+    }
+    value["outline"] = json!({"skill_id":id,"version":version,"path":"outline","untrusted_guidance":true,"outline_available":true,"complete":false,"next_offset":0,"continuation_hint":"The outline did not fit in this preview. Call preview_agent_skill again with outline_offset=0 for an outline-only page."});
+    Ok(value)
+}
+
+fn rendered_outline(skill_md: Option<&str>, closure: &[SkillPin]) -> Option<String> {
+    skill_md
+        .and_then(|md| super::skill_outline::parse(md, closure))
+        .map(|outline| super::skill_outline::render(&outline))
+}
+
+fn no_outline(id: &str, version: &str) -> Value {
+    json!({"skill_id":id,"version":version,"path":"outline","untrusted_guidance":true,"outline_available":false,"complete":true,"hint":super::skill_outline::NO_OUTLINE_HINT})
 }
 
 /// Every file of an attached pin's exact package (hash-checked), by

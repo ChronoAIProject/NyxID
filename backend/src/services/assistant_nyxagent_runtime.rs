@@ -1670,17 +1670,17 @@ async fn execute_turn_inner(
     };
     let mut guidance = guidance.to_owned();
     // NYX template outlines (`assistant:skill-runs`, default off): owner turns only.
-    if !row.guest_model_setup
+    let outlines = !row.guest_model_setup
         && !row.guest_turn
-        && crate::services::skill_outline::enabled(&state.db, &row.user_id)
-            .await
-            .unwrap_or(false)
-    {
-        guidance.push_str(crate::services::skill_outline::GUIDANCE);
-        if authoring {
-            guidance.push_str(crate::services::skill_outline::AUTHORING_GUIDANCE);
-        }
-    }
+        && Box::pin(crate::services::skill_outline::enabled(
+            &state.db,
+            &row.user_id,
+        ))
+        .await
+        .unwrap_or(false);
+    guidance.push_str(&crate::services::skill_outline::instructions(
+        outlines, authoring,
+    ));
     if !row.guest_model_setup
         && !row.guest_turn
         && row.group_id.is_none()

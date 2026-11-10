@@ -842,9 +842,12 @@ pub(crate) async fn dispatch(
         };
         let input = authoring::parse_input(args)?;
         // Template advice only; it never refuses or changes the draft.
-        let warnings = if crate::services::skill_outline::enabled(&state.db, &chat.user_id)
-            .await
-            .unwrap_or(false)
+        let warnings = if Box::pin(crate::services::skill_outline::enabled(
+            &state.db,
+            &chat.user_id,
+        ))
+        .await
+        .unwrap_or(false)
         {
             crate::services::skill_outline::template_warnings(input.skill_md())
         } else {
@@ -922,19 +925,19 @@ pub(crate) async fn dispatch(
         "preview_agent_skill" => {
             let preview =
                 skills::preview(&reader, arg(args, "skill"), arg(args, "version")).await?;
-            let mut value = json!(preview);
-            if crate::services::skill_outline::enabled(db, &chat.user_id)
+            if Box::pin(crate::services::skill_outline::enabled(db, &chat.user_id))
                 .await
                 .unwrap_or(false)
             {
-                let wire = skills::wire_len(&value);
-                value["outline"] = skills::preview_outline(
+                skills::preview_with_outline(
                     &preview,
-                    args["outline_offset"].as_u64().unwrap_or(0) as usize,
-                    wire,
-                )?;
+                    args["outline_offset"]
+                        .as_u64()
+                        .map(|offset| offset as usize),
+                )?
+            } else {
+                json!(preview)
             }
-            value
         }
         "skill_read" => {
             let agent = team::agent(db, &chat.user_id, &chat.agent_id).await?;
@@ -961,7 +964,8 @@ pub(crate) async fn dispatch(
             let outline = match args["section"].as_str() {
                 None => false,
                 Some("outline") => {
-                    if !crate::services::skill_outline::enabled(db, &chat.user_id).await? {
+                    if !Box::pin(crate::services::skill_outline::enabled(db, &chat.user_id)).await?
+                    {
                         return Err(AppError::Forbidden("Skill outlines are not enabled".into()));
                     }
                     true
@@ -972,9 +976,15 @@ pub(crate) async fn dispatch(
             };
             if !bound {
                 audit_skill_read_refusal(state, &chat.user_id, "skill_not_bound");
-                read_attached(&reader, &agent, args, outline).await
+                Box::pin(read_attached(&reader, &agent, args, outline)).await
             } else {
-                read_attached(&reader.bound_skill(&agent), &agent, args, outline).await
+                Box::pin(read_attached(
+                    &reader.bound_skill(&agent),
+                    &agent,
+                    args,
+                    outline,
+                ))
+                .await
             }?
         }
         _ => {

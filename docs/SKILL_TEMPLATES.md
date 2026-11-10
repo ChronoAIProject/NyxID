@@ -79,9 +79,13 @@ Hard limits (enforced when reading). They count Unicode characters, not bytes:
 The reader returns **no outline**, never a cut-down one, when a required section
 is missing; a section appears twice or out of order; a heading is malformed; the
 Approach contains anything other than numbered steps, indented continuation lines
-and tag lines (including a code fence); a hard limit is exceeded; or a `Uses` tag
-does not resolve (below). Headings inside code fences don't count. A skill
-without an outline keeps working as an ordinary skill.
+and tag lines (including a code fence); a line uses tag syntax but is not a
+valid tag line (for example two `Uses` tags, or a tag mixed with prose); a hard
+limit is exceeded; or a `Uses` tag does not resolve (below). Headings inside
+code fences don't count: a fence closes only with the same character, a run at
+least as long as the opening one and nothing else on the line, and an
+unterminated fence runs to the end. A skill without an outline keeps working as
+an ordinary skill.
 
 ## Combining skills
 
@@ -89,7 +93,12 @@ without an outline keeps working as an ordinary skill.
    sense on its own.
 2. `Uses` must identify exactly one declared dependency, by name or GUID. Ornn
    declares dependencies in frontmatter `metadata.depends-on` as
-   `<name-or-GUID>@<major.minor>` or `<name>@<dist-tag>`.
+   `<name-or-GUID>@<major.minor>` or `<name>@<dist-tag>`, in flow
+   (`[a@1.0, b@beta]`) or block (`- a@1.0`) form. Only the `depends-on` key of
+   the top-level `metadata` mapping counts; the same text inside another key,
+   a block scalar or a nested mapping never does. Forms NyxID can't read with
+   certainty (a flow list spanning lines, quoted keys, a repeated key, nested
+   items) declare nothing, so every `Uses` tag fails closed.
 3. NyxID resolves each declared dependency to an exact GUID, version and
    SHA-256 when the skill is previewed and pinned (at most 16 resolved
    dependencies per skill; Ornn itself allows 50 declared). A `Uses` tag matches
@@ -120,8 +129,11 @@ NyxBot's instructions, tool list and tool results are unchanged.
   outlines continue with `next_offset`. A skill without an outline returns
   `outline_available: false`.
 - **Previewing.** `preview_agent_skill` adds an `outline` page for the verified
-  root package, so NyxBot can explain a skill before it is attached; long
-  outlines continue with `outline_offset`. The HTTP preview used by the app is
+  root package, so NyxBot can explain a skill before it is attached. When the
+  preview and the outline don't both fit one tool result, `outline` says so
+  instead of carrying content. Calling again with `outline_offset` returns an
+  outline-only page (start at `0`, continue with `next_offset`). Every result
+  stays within the tool-response budget. The HTTP preview used by the app is
   unchanged.
 - **Explaining.** NyxBot's instructions ask it to read the outline before
   multi-step or changing work a skill covers, explain it in plain words, and ask
@@ -130,8 +142,9 @@ NyxBot's instructions, tool list and tool results are unchanged.
   the template, and `draft_agent_skill` results may include `outline_warnings`
   with fixed codes (`missing_overview`, `missing_approach`, `step_count`,
   `outline_length`, `overview_table_or_code`, `missing_needs_produces`,
-  `uses_unresolved`, ...). Warnings never refuse a draft; existing validation
-  keeps its refusals. Drafts can't declare dependencies yet, so combined skills
+  `uses_unresolved`, ...). Warnings are reported after the draft is created and
+  never refuse it; existing validation keeps its refusals. NyxBot is told not to
+  draft or publish again because of them. Drafts can't declare dependencies yet, so combined skills
   are written and published by maintainers through the existing Ornn flow.
 
 Outline text is untrusted reference data, like every other skill read: a

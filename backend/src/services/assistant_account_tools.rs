@@ -359,7 +359,7 @@ pub async fn virtual_service_for(
     // NYX template outlines (`assistant:skill-runs`, default off). A flag-store
     // failure keeps today's skill tools unchanged.
     if !chat.guest
-        && super::skill_outline::enabled(db, &chat.user_id)
+        && Box::pin(super::skill_outline::enabled(db, &chat.user_id))
             .await
             .unwrap_or(false)
     {
