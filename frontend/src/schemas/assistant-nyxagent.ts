@@ -482,7 +482,17 @@ export const guestReadinessSchema = z.object({
   fix: z.string().nullish(),
 });
 export type GuestReadiness = z.infer<typeof guestReadinessSchema>;
+export const agentConfigurationSchema = z.object({
+  instructions_present: z.boolean(),
+  persona_present: z.boolean(),
+  memory_notes: z.number().int().nonnegative(),
+  skills: z.number().int().nonnegative(),
+  service_grants: z.number().int().nonnegative(),
+  account_read: z.boolean(),
+});
+export type AgentConfiguration = z.infer<typeof agentConfigurationSchema>;
 export const guestReadinessSettingsSchema = guestReadinessSchema.extend({
+  configuration: agentConfigurationSchema.nullish(),
   conversation_overrides: z.array(z.string()).default([]),
   conversation_overrides_truncated: z.boolean().default(false),
 });
