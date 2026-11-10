@@ -2629,7 +2629,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         && row.channel.as_ref().is_some_and(|o| o.thread.is_some())
         && !events
             .iter()
-            .any(|e| e.kind == super::async_service_operation::EVENT_KIND)
+            .any(super::async_service_operation::watch_delivery_event)
     {
         // A queued owner request retains its own authority even
         // when the preceding turn's guest is no longer eligible.
@@ -2688,7 +2688,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         TurnOrigin::Group => ("group", start.text.clone()),
         TurnOrigin::Trigger => ("event", start.text.clone()),
         TurnOrigin::User | TurnOrigin::Channel => {
-            // Only the owner's messages reset the event-turn guard.
+            // An owner's message resets the event-turn guard; a guest's does not.
             if !start.guest {
                 row.event_streak = 0;
                 if start.acknowledgement_id.is_none()
@@ -3818,10 +3818,11 @@ pub async fn push_events(
         .map_err(transactions::map_transaction_error)
 }
 
-/// Ordinary notices can be evicted only when no invocation continuation is
-/// queued. Delegated results follow the same FIFO eviction as ordinary notices;
-/// images must not monopolize the queue. Accepted source questions are never
-/// evicted. Capacity refusal aborts transactional producers unless they
+/// Invocation, provider approval, automation and accepted source events are never
+/// evicted. Queued invocation/approval continuations block ordinary notice eviction
+/// unless automation recovery can replace an ordinary notice.
+/// Delegated results follow ordinary FIFO eviction; images must not monopolize
+/// the queue. Capacity refusal aborts transactional producers unless they
 /// explicitly degrade optional publication without discarding their source work.
 pub async fn append_events_in_session(
     db: &Database,
@@ -3863,9 +3864,13 @@ pub async fn append_events_in_session(
                 .iter()
                 .any(|e| e.automation_work.is_some());
             if event.invocation_id.is_some()
+                || super::async_service_operation::cma_wake_event(event)
                 || event.automation_work.is_some()
                 || (!protected_automation
-                    && row.pending_events.iter().any(|e| e.invocation_id.is_some()))
+                    && row.pending_events.iter().any(|e| {
+                        e.invocation_id.is_some()
+                            || super::async_service_operation::cma_wake_event(e)
+                    }))
             {
                 return Err(AppError::Conflict("Assistant event queue is full".into()));
             }
@@ -3876,6 +3881,7 @@ pub async fn append_events_in_session(
                     e.source_event_ids.is_empty()
                         && e.automation_work.is_none()
                         && e.invocation_id.is_none()
+                        && !super::async_service_operation::cma_wake_event(e)
                 })
                 .ok_or_else(|| AppError::Conflict("Assistant event queue is full".into()))?;
             row.pending_events.remove(index);

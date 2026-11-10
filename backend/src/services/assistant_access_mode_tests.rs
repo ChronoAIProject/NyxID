@@ -507,7 +507,7 @@ async fn webhook_account_tool_card_satisfies_mode_and_policy_once() {
     f.state.db.drop().await.unwrap();
 }
 
-/// Every non-read account tool resolves a card summary against real rows.
+/// Every non-read account tool has coverage for its actual summary owner.
 #[tokio::test]
 async fn every_changing_account_tool_has_a_card_summary() {
     let f = orchestrator_fixture("mode_card_summaries").await;
@@ -624,6 +624,16 @@ async fn every_changing_account_tool_has_a_card_summary() {
     let covered: Vec<&str> = cases.iter().map(|(name, _, _)| *name).collect();
     for name in super::assistant_account_tools::TOOL_NAMES {
         if !super::assistant_account_tools::read_only(name) {
+            // CMA dispatch owns its cards before the generic account gate.
+            // cma_native_write_tools_create_bound_cards_without_remote_mutation
+            // exercises attachment copying through AccountTools against a loopback mock.
+            if super::assistant_cma_tools::owns(name) {
+                assert!(
+                    ["cma_save_attachment"].contains(name),
+                    "no dedicated CMA card summary case for {name}"
+                );
+                continue;
+            }
             assert!(covered.contains(name), "no card summary case for {name}");
         }
     }

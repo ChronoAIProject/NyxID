@@ -309,6 +309,7 @@ export function AuthFlow({
 
           <LoginMethods
             returnTo={returnTo}
+            disabled={loginMutation.isPending}
             onSignUp={() => slideToPanel(1)}
             onSocial={(provider) => {
               const params = new URLSearchParams();

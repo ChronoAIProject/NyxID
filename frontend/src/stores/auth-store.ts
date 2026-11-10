@@ -95,11 +95,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         client: "web",
       });
 
-      set({
-        isAuthenticated: true,
-        mfaRequired: false,
-        mfaToken: null,
-      });
+      // Standalone pages need the confirmed profile and feature flags before
+      // navigation; they may never mount a user query to populate the store.
+      await get().checkAuth({ requireSession: true });
 
       return { mfaRequired: false, response };
     } catch (error) {

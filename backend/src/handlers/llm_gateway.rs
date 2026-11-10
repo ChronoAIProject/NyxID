@@ -3341,6 +3341,7 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.requires_user_credential = true;
         let target = crate::services::proxy_service::ProxyTarget {
+            catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,
