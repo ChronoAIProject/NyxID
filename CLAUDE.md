@@ -353,6 +353,20 @@ sdk/                     # OAuth SDK monorepo (@nyxids/* npm namespace): oauth-c
 
 ## Key API Routes
 
+NyxBot Notifications is default off (`assistant:notifications`) and requires the
+NyxAgent engine flag. Upgrade all API replicas and scheduler workers before
+enabling it. The acting person's feed stores identifiers and state only;
+previews are joined after live visibility checks. Push preferences default off,
+and NyxBot's read-only `nyxid__list_notifications` tool never marks entries seen.
+See `docs/chat/12-notifications.md` for the normative contract.
+
+| Notifications route | Purpose |
+| --- | --- |
+| `GET /api/v1/assistant/nyxagent/notifications` | Cursor-paged feed with bounded previews and canonical source links |
+| `GET /api/v1/assistant/nyxagent/notifications/summary` | Bell counts and per-source unread markers |
+| `POST /api/v1/assistant/nyxagent/notifications/read` | Ids, source, or mark-all with server `before` fence |
+| `GET/PUT /api/v1/assistant/nyxagent/settings` | Additive `notifications.push` preferences, all false by default |
+
 All API routes under `/api/v1`:
 - `/auth` -- register, login, logout, refresh, verify-email, forgot/reset-password
 - `/auth/device/v2/{request,poll,poll-web}` and shared `/auth/device/{preview,options,approve,approve-agent-key,deny}` -- selectable login; legacy request/poll/poll-web remain account-only (Rule 12)
