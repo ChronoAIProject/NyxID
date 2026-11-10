@@ -242,6 +242,7 @@ async fn pm_f4_channel_and_event_activity_share_one_home_row_and_unlink_follows_
     let f = fixture("pm_f4_home").await;
     let db = &f.state.db;
     set_flag(&f, true).await;
+    push_prefs(&f, &f.owner, all_push()).await;
     let bot = team::ensure_nyxbot(db, &f.owner).await.unwrap();
     let home = team::home_thread(db, &f.state.encryption_keys, &bot)
         .await
@@ -291,6 +292,28 @@ async fn pm_f4_channel_and_event_activity_share_one_home_row_and_unlink_follows_
             .len(),
         1
     );
+    // The creating chat kind still authorizes the push, while preparation
+    // resolves the latest non-channel source instead of purging it.
+    let sent: Sent = Default::default();
+    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
+    let retained = rows_of(&f, &f.owner).await;
+    assert_eq!(
+        retained.len(),
+        1,
+        "push preparation must retain the merged feed row"
+    );
+    assert_eq!(retained[0].id, rows[0].id);
+    assert_eq!(retained[0].count, 2);
+    assert_eq!(summary(db, &f.owner).await.unwrap().unread_count, 1);
+    {
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].3.get("type").map(String::as_str),
+            Some("chat_update")
+        );
+        assert_eq!(sent[0].2, "Event reply");
+    }
     purge(db, doc! {fields::SOURCE_CHANNEL_ID: &channel}, None)
         .await
         .unwrap();
@@ -729,5 +752,64 @@ async fn pm_f2_a_missing_worker_singleton_is_recreated_and_delivery_continues() 
             .await
             .unwrap(),
         1
+    );
+}
+
+#[tokio::test]
+async fn pm_f4_a_chat_source_stays_hidden_when_its_push_was_created_as_an_agent_update() {
+    let f = fixture("pm_f4_push_chat_acl").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    push_prefs(&f, &f.owner, all_push()).await;
+    let conversation = seed_conversation(&f, &f.owner, "Latest channel activity").await;
+    let (channel, thread) = seed_channel(&f, &f.owner, None).await;
+    let mut source = conversation_source(&conversation);
+    source.source_type = SourceType::ChannelChat;
+    source.channel_id = Some(channel.clone());
+    source.thread_id = Some(thread);
+    let mut row = seeded(&f.owner, NotificationKind::ChatUpdate, source);
+    row.count = 2;
+    row.push.as_mut().unwrap().kind = Some(NotificationKind::AgentUpdate);
+    insert_row(&f, &row).await;
+    db.collection::<Document>(CHANNELS)
+        .update_one(doc! {"_id": &channel}, doc! {"$set": {"status": "failed"}})
+        .await
+        .unwrap();
+    let sent: Sent = Default::default();
+    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
+    assert!(
+        sent.lock().unwrap().is_empty(),
+        "the frozen push kind must not bypass the latest channel ACL"
+    );
+    let retained = rows_of(&f, &f.owner).await;
+    assert_eq!(retained.len(), 1);
+    let push = retained[0].push.as_ref().unwrap();
+    assert_eq!(push.state, "skipped");
+    assert_eq!(push.code.as_deref(), Some("source_unavailable"));
+    assert_eq!(summary(db, &f.owner).await.unwrap().unread_count, 0);
+    assert!(
+        list(&f.state, &f.owner, &page(50))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    db.collection::<Document>(CHANNELS)
+        .update_one(doc! {"_id": &channel}, doc! {"$set": {"status": "active"}})
+        .await
+        .unwrap();
+    assert_eq!(
+        list(&f.state, &f.owner, &page(50))
+            .await
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert_eq!(summary(db, &f.owner).await.unwrap().unread_count, 1);
+    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
+    assert!(
+        sent.lock().unwrap().is_empty(),
+        "repair restores the feed but never replays a skipped push"
     );
 }
