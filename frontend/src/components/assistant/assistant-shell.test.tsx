@@ -197,6 +197,8 @@ it("keeps execution access and elapsed request notices when a live card replaces
   );
   const card = screen.getByRole("region", { name: `CMA session: ${cmaSession.title}` });
   expect(within(card).getByRole("button", { name: "View execution" })).toBeVisible();
+  expect(within(card).getByText(/CMA still reports it as running/)).not.toBeVisible();
+  fireEvent.click(within(card).getByRole("button", { name: "Submission details" }));
   expect(within(card).getByText(/CMA still reports it as running/)).toBeVisible();
   expect(within(card).getByRole("button", { name: "Pin CMA session" })).toBeVisible();
   expect(within(card).getByText("Recent actions")).toBeVisible();
@@ -244,13 +246,19 @@ it.each([
 ] as const)("retains request status %s alongside the live agent status", (patch, label) => {
   viewport.desktop = true;
   renderCmaOperations([{ ...linkedRequest, ...patch }]);
+  const details = screen.getByRole("button", { name: "Submission details" });
+  expect(details).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByRole("region", { name: "CMA requests" })).not.toBeInTheDocument();
+  expect(screen.getByText("rsp-linked")).not.toBeVisible();
+  fireEvent.click(details);
   const requests = screen.getByRole("region", { name: "CMA requests" });
   expect(within(requests).getByRole("status")).toHaveTextContent(label);
   expect(requests.querySelector(".animate-spin")).toBeNull();
-  expect(within(requests).getByText("rsp-linked")).not.toBeVisible();
-  fireEvent.click(within(requests).getByRole("button", { name: "Submission details" }));
   expect(within(requests).getByText("rsp-linked")).toBeVisible();
   expect(within(requests).getByText("request")).toBeVisible();
+  expect(within(requests).queryByRole("button", { name: "Submission details" })).not.toBeInTheDocument();
+  fireEvent.click(details);
+  expect(requests).not.toBeVisible();
 });
 
 it("offers one execution panel for the newest active request and bounds older request rows", () => {
@@ -266,6 +274,8 @@ it("offers one execution panel for the newest active request and bounds older re
     reason: index === 3 || index === 4 ? null : "completed",
   }));
   renderCmaOperations(operations);
+  expect(screen.getAllByRole("button", { name: "Submission details" })).toHaveLength(1);
+  fireEvent.click(screen.getByRole("button", { name: "Submission details" }));
   const requests = screen.getByRole("region", { name: "CMA requests" });
   const controls = screen.getByRole("group", { name: "CMA session controls" });
   const execution = within(controls).getAllByRole("button", { name: "View execution" });
@@ -278,6 +288,7 @@ it("offers one execution panel for the newest active request and bounds older re
   expect(requests.querySelectorAll("[data-cma-request]")).toHaveLength(6);
   expect(within(controls).getAllByRole("button", { name: "View execution" })).toHaveLength(1);
   expect(within(requests).queryByRole("button", { name: "View execution" })).not.toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: "Submission details" })).toHaveLength(1);
 });
 
 it.each([true, false])("keeps live work ahead of a bounded submission history (desktop: %s)", (desktop) => {

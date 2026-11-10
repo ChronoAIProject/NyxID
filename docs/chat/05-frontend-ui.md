@@ -270,7 +270,10 @@ of loaded message pages, so a pending or unconfirmed submission appears even
 without an agent ID or its original reply. A live session card replaces its
 normal operation receipt only when both service and agent IDs match; failed
 or uncertain receipts remain visible. A consolidated live card retains the
-receipt's status, request notices and Submission details. One feature-gated
+receipt's status, request notices and metadata inside a single **Submission
+details** disclosure, collapsed by default. Opening it shows all request records
+together, with no per-request disclosures. **Session details** holds shared agent
+information. One feature-gated
 **View execution** header icon targets the newest pending request with a verified
 local `agent_ref_id`, or the newest verified request when none is pending,
 using its exact `response_id`, including while the card is minimised. The

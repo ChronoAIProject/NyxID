@@ -7,7 +7,9 @@ inventory never establish attribution.
 
 Each compact card leads with the CMA glyph and actual task title, followed by
 one line labelled **Agent:** for the overall agent status and its stream connection.
-The **Request status** section tracks each submitted request separately, so a
+One **Submission details** disclosure contains the **Request status** section
+and metadata for all submitted requests. It starts collapsed. Each request is
+tracked separately, so a
 newer queued request can appear alongside an older request still running. A
 tight shared list shows the three newest
 public actions; **Show all N actions** expands the bounded 30-action history.
@@ -110,7 +112,9 @@ remain outside automatic session discovery. Thread operation receipts use the
 assets preview area and follow the dedicated card layout, minimise control and
 metadata disclosure independently of automatic session discovery. Unconfirmed
 submissions show recorded status without a live stream, actions or pin.
-Matching live cards retain per-request status, notices and Submission details.
+Matching live cards retain per-request status, notices and metadata together
+inside one **Submission details** disclosure. Request rows have no nested
+disclosures. **Session details** continues to hold shared agent information.
 Their single header execution icon opens a panel focused on the newest pending
 verified request, or
 the newest verified request if none is pending. It uses the verified local Agent

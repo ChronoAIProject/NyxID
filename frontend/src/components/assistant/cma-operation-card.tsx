@@ -311,15 +311,29 @@ export function CmaOperationDetails({
   readonly scrollBody: RefObject<HTMLDivElement | null>;
   readonly visible: boolean;
 }) {
-  const lastChecked = operation.checked_at
-    ? new Date(operation.checked_at)
-    : null;
   return (
     <CmaCardDetails
       label="Submission details"
       scrollBody={scrollBody}
       visible={visible}
     >
+      <dl className="space-y-2">
+        <CmaOperationMetadata operation={operation} />
+      </dl>
+    </CmaCardDetails>
+  );
+}
+
+function CmaOperationMetadata({
+  operation,
+}: {
+  readonly operation: CmaOperation;
+}) {
+  const lastChecked = operation.checked_at
+    ? new Date(operation.checked_at)
+    : null;
+  return (
+    <>
       <div>
         <dt>Monitored by</dt>
         <dd className="mt-0.5 break-words text-muted-foreground">
@@ -361,7 +375,7 @@ export function CmaOperationDetails({
           </dd>
         </div>
       ) : null}
-    </CmaCardDetails>
+    </>
   );
 }
 
@@ -409,40 +423,44 @@ export function CmaSessionRequests({
   const ordered = orderedRequests(operations);
   if (!ordered.length) return null;
   return (
-    <section aria-label="CMA requests" className="space-y-2">
-      <h4 className="type-group-label text-text-tertiary">Request status</h4>
-      {ordered.slice(0, limit).map((operation) => (
-        <section
-          key={operation.id}
-          aria-label={`CMA request: ${operation.monitor_name}, ${operation.created_at}`}
-          data-cma-request={operation.id}
-          className="space-y-1"
-        >
-          <p className="text-13 text-muted-foreground">
-            {operation.monitor_name} ·{" "}
-            <time dateTime={operation.created_at}>
-              {Number.isFinite(Date.parse(operation.created_at))
-                ? new Date(operation.created_at).toLocaleString()
-                : "Time unavailable"}
-            </time>
-          </p>
-          <CmaOperationProgress operation={operation} animate={false} />
-          <CmaOperationDetails
-            operation={operation}
-            scrollBody={scrollBody}
-            visible={visible}
-          />
-        </section>
-      ))}
-      {ordered.length > limit ? (
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setLimit((value) => value + 3)}
-        >
-          Show older requests ({ordered.length - limit})
-        </Button>
-      ) : null}
-    </section>
+    <CmaCardDetails
+      label="Submission details"
+      scrollBody={scrollBody}
+      visible={visible}
+    >
+      <section aria-label="CMA requests" className="space-y-3">
+        <h4 className="type-group-label text-text-tertiary">Request status</h4>
+        {ordered.slice(0, limit).map((operation) => (
+          <section
+            key={operation.id}
+            aria-label={`CMA request: ${operation.monitor_name}, ${operation.created_at}`}
+            data-cma-request={operation.id}
+            className="space-y-1"
+          >
+            <p className="text-13 text-muted-foreground">
+              {operation.monitor_name} ·{" "}
+              <time dateTime={operation.created_at}>
+                {Number.isFinite(Date.parse(operation.created_at))
+                  ? new Date(operation.created_at).toLocaleString()
+                  : "Time unavailable"}
+              </time>
+            </p>
+            <CmaOperationProgress operation={operation} animate={false} />
+            <dl className="space-y-2 pt-1">
+              <CmaOperationMetadata operation={operation} />
+            </dl>
+          </section>
+        ))}
+        {ordered.length > limit ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setLimit((value) => value + 3)}
+          >
+            Show older requests ({ordered.length - limit})
+          </Button>
+        ) : null}
+      </section>
+    </CmaCardDetails>
   );
 }

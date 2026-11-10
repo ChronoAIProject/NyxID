@@ -147,7 +147,7 @@ export function CmaCardDetails({
         />
       </Button>
       <div ref={content} id={contentId} hidden={!open}>
-        <dl className="space-y-2 px-1 pb-1 pt-2">{children}</dl>
+        <div className="space-y-2 px-1 pb-1 pt-2">{children}</div>
       </div>
     </div>
   );

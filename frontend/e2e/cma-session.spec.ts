@@ -539,6 +539,11 @@ for (const width of [1440, 390]) {
       } });
     });
     await expect(page.locator("[data-cma-operation]")).toHaveCount(0);
+    const submissionDetails = live.getByRole("button", { name: "Submission details", exact: true });
+    await expect(submissionDetails).toHaveCount(1);
+    await expect(submissionDetails).toHaveAttribute("aria-expanded", "false");
+    await expect(live.getByRole("region", { name: "CMA requests", exact: true })).toHaveCount(0);
+    await submissionDetails.click();
     const requests = live.getByRole("region", { name: "CMA requests", exact: true });
     const activity = live.getByRole("region", { name: "CMA activity", exact: true });
     await expect(live.locator(".animate-spin")).toHaveCount(1);
@@ -569,15 +574,25 @@ for (const width of [1440, 390]) {
     await expect(activity.getByRole("listitem").first().locator(".animate-spin")).toHaveCount(1);
     await live.getByRole("button", { name: "Pin CMA session", exact: true }).click();
     await expect(live.getByRole("button", { name: "Unpin CMA session (Pinned)" })).toHaveAttribute("aria-pressed", "true");
-    const details = requests.locator('[data-cma-request="linked-request-0"]');
-    await details.getByRole("button", { name: "Submission details" }).click();
-    await expect(details.getByText("rsp-linked-0")).toBeVisible();
-    await details.getByRole("button", { name: "Submission details" }).click();
+    await expect(requests.getByText("rsp-linked-0", { exact: true })).toBeVisible();
+    await requests.getByText("rsp-linked-1", { exact: true }).scrollIntoViewIfNeeded();
+    await expect(requests.getByText("rsp-linked-1", { exact: true })).toBeVisible();
+    await expect(requests.getByRole("button", { name: "Submission details" })).toHaveCount(0);
+    await expect(submissionDetails).toHaveCount(1);
     await expect(execution).toBeVisible();
     await expect(composerInput(page)).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     await live.locator(":scope > div").last().evaluate((body) => { body.scrollTop = 0; });
-    await page.screenshot({ path: `/tmp/nyxid-cma-integrated-${width}.png` });
+    await page.screenshot({ path: `/tmp/nyxid-cma-submissions-expanded-${width}.png` });
+    await live.screenshot({ path: `/tmp/nyxid-cma-submissions-expanded-card-${width}.png` });
+    await submissionDetails.click();
+    await expect(requests).toHaveCount(0);
+    await expect(submissionDetails).toHaveAttribute("aria-expanded", "false");
+    await expect(execution).toBeVisible();
+    await expect(live.locator(".animate-spin")).toHaveCount(1);
+    await live.locator(":scope > div").last().evaluate((body) => { body.scrollTop = 0; });
+    await page.screenshot({ path: `/tmp/nyxid-cma-submissions-${width}.png` });
+    await live.screenshot({ path: `/tmp/nyxid-cma-submissions-card-${width}.png` });
   });
 }
 
