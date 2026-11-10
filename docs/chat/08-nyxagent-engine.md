@@ -17,6 +17,18 @@ model image round; legacy tool images preserve automatic inspection.
 
 ## Turn diagnostics and context continuity
 
+A browser or mobile **live reply interrupted** notice describes a lost client
+subscription, not a failed server turn. It is transient and keyed to the exact
+turn. History refresh (polling, live invalidation or foreground recovery) clears
+it when a saved assistant reply proves settlement, even if another turn is now
+running. A saved approval continuation can also resolve it through
+`continuation_of` → acknowledgement `creation_turn_id`; an unrelated reply or
+an allowed card alone cannot. An idle snapshot without the matching reply keeps
+the outcome unknown. Stored failures, Stop and `turn_lost` retain their normal
+outcome UI; a lost turn says to check completed actions, not that it may still be
+working. Interruption notices are not persisted or restored on reload, and
+recovery never replays the send automatically.
+
 Failed replies retain a normalized NyxID `error_code` and, only when the
 upstream named one, its sanitized `upstream_error_code`. NyxID's own classes
 (timeouts, Stop, preparation, settlement) never fill `upstream_error_code`.
