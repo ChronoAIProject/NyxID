@@ -26,7 +26,7 @@ import {
   TooltipContent,
 } from "@/components/ui/tooltip";
 import { CmaGlyph } from "@/components/service-icons/cma";
-import { CmaOperationCard, CmaOperationProgress } from "./cma-operation-card";
+import { CmaOperationCard, CmaSessionRequests } from "./cma-operation-card";
 import type { CmaOperation } from "@/schemas/cma-operation";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { safeCmaUrl } from "@/lib/assistant/cma-url";
@@ -73,6 +73,7 @@ export function CmaSessionObserver({
     operation.service_id === session.connection.id &&
     operation.agent_id === session.agentId &&
     (!operation.reason || operation.reason === "completed");
+  const [receiptLimit, setReceiptLimit] = useState(3);
   const receipts = operations.filter(
     (operation) =>
       !sessions.some(({ session }) => matchingSession(operation, session)),
@@ -83,9 +84,6 @@ export function CmaSessionObserver({
         aria-label="CMA sessions"
         className="flex min-h-0 shrink-0 flex-col gap-3"
       >
-        {receipts.map((operation) => (
-          <CmaOperationCard key={operation.id} operation={operation} />
-        ))}
         {sessions.map((observation) => (
           <CmaSessionCard
             key={`${observation.session.connection.id}:${observation.session.agentId}`}
@@ -94,6 +92,14 @@ export function CmaSessionObserver({
             operations={operations.filter((operation) => matchingSession(operation, observation.session))}
           />
         ))}
+        {receipts.slice(0, receiptLimit).map((operation) => (
+          <CmaOperationCard key={operation.id} operation={operation} />
+        ))}
+        {receipts.length > receiptLimit ? (
+          <Button variant="ghost" size="sm" onClick={() => setReceiptLimit((value) => value + 3)}>
+            Show older CMA submissions ({receipts.length - receiptLimit})
+          </Button>
+        ) : null}
       </aside>
     ) : null,
   );
@@ -116,6 +122,9 @@ export function FloatingCmaSessions() {
             "/assistant/machines",
             "/assistant/machines/new",
             "/assistant/machines/pair",
+            "/assistant/sandboxes",
+            "/assistant/sandboxes/$sandboxId",
+            "/assistant/cma-agents/$agentId",
           ].includes(match.routeId) &&
           match.status === "success" &&
           match.pathname.replace(/\/$/, "") ===
@@ -345,9 +354,7 @@ function CmaSessionCard({
         ) : null}
         <div id={detailsId} hidden={collapsed} className="space-y-2">
           <SessionActivity state={state} />
-          {operations.map((operation) => (
-            <CmaOperationProgress key={operation.id} operation={operation} showStatus={false} />
-          ))}
+          <CmaSessionRequests operations={operations} scrollBody={scrollBody} visible={!collapsed} />
           <SessionDetails
             session={session}
             state={state}

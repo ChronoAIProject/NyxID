@@ -221,6 +221,31 @@ describe("NyxAgent server-backed transport", () => {
     await ordinary.history(id);
     expect(ordinary.session(id).cmaOperations).toEqual([]);
   });
+  it("does not let a late older page overwrite a newer CMA snapshot", async () => {
+    const page = history();
+    const pending = {
+      id: "watch-race", turn_id: "turn", kind: "cma_response" as const,
+      operation_id: "rsp-race", agent_id: "agt_test", idempotency_key: "request-race",
+      status: "in_progress", phase: null, state: "waiting", reason: null,
+      monitor_name: "NyxBot", created_at: start, checked_at: afterReset,
+    };
+    page.cma_operations = [pending];
+    let finishOlder!: (response: Response) => void;
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.includes("before_seq=")
+      ? new Promise<Response>((resolve) => { finishOlder = resolve; })
+      : json(page);
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    const older = transport.history(id, 2);
+    page.cma_operations = [{ ...pending, status: "completed", state: "delivered", reason: "completed" }];
+    await transport.history(id);
+    const oldPage = history();
+    oldPage.cma_operations = [pending];
+    finishOlder(json(oldPage));
+    await older;
+    expect(transport.session(id).cmaOperations?.[0]?.status).toBe("completed");
+  });
+
   it("keeps stopped replies visibly stopped with a cancellation code", async () => {
     globalThis.__nyxidAssistantHttpMock = () =>
       json({

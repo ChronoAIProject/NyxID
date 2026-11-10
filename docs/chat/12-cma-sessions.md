@@ -101,9 +101,13 @@ remain outside automatic session discovery. Thread operation receipts use the
 assets preview area and follow the dedicated card layout, minimise control and
 metadata disclosure independently of automatic session discovery. Unconfirmed
 submissions show recorded status without a live stream, actions or pin.
-Matching live cards retain request notices and the feature-gated execution
-panel from their consolidated receipts. The execution panel uses the verified
-local Agent reference, never the remote session ID. Legacy receipts without the new server identity remain
+Matching live cards retain per-request status, notices and Submission details.
+Their single execution panel focuses the newest pending verified request, or
+the newest verified request if none is pending. It uses the verified local Agent
+reference, never the remote session ID. Request rows and unmatched submission
+history initially show three items; older items are revealed three at a time.
+Live sessions precede submission history in the shared assets area.
+Legacy receipts without the new server identity remain
 unattributed; no migration guesses their origin. Unrelated sessions created
 outside NyxID do not appear automatically.
 

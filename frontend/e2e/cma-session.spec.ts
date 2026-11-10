@@ -502,6 +502,61 @@ for (const width of [1440, 390]) {
   });
 }
 
+for (const width of [1440, 390]) {
+  test(`retains request status and one execution entry in the original live card (${width}px)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await mockCma(page, { actionCount: 5 });
+    await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
+    await page.evaluate(({ serviceId, agentId }) => {
+      const state = JSON.parse(sessionStorage.getItem("nyxagent-http-fixture-v4")!) as {
+        rows: [string, { history: { cma_operations: unknown[] } }][];
+      };
+      const conversation = new URL(location.href).searchParams.get("c");
+      const row = state.rows.find(([id]) => id === conversation)![1];
+      row.history.cma_operations = [0, 1].map((index) => ({
+        id: `linked-request-${index}`, turn_id: "older-unloaded-turn",
+        service_id: serviceId, agent_id: agentId,
+        agent_ref_id: "0dc85e4c-6aaf-47de-9df0-e07a69b8ee19",
+        response_id: `rsp-linked-${index}`, operation_id: `rsp-linked-${index}`,
+        kind: "cma_response", idempotency_key: `preview-request-${index}`,
+        status: index ? "in_progress" : "queued", phase: null,
+        state: "waiting", reason: null, monitor_name: "NyxBot",
+        created_at: new Date(Date.now() - (index ? 12 : 1) * 60_000).toISOString(),
+        checked_at: new Date().toISOString(),
+      }));
+      sessionStorage.setItem("nyxagent-http-fixture-v4", JSON.stringify(state));
+    }, { serviceId: cmaSession.connection.id, agentId: cmaSession.agentId });
+    await page.reload();
+    const live = card(page);
+    await expect(live).toBeVisible();
+    await page.evaluate(async () => {
+      const { useAuthStore } = await import("/src/stores/auth-store.ts");
+      const user = useAuthStore.getState().user!;
+      useAuthStore.getState().setUser({ ...user, capabilities: {
+        ...user.capabilities,
+        billing_available: user.capabilities?.billing_available ?? false,
+        enabled_features: [...(user.capabilities?.enabled_features ?? []), "assistant:cma-sandboxes"],
+      } });
+    });
+    await expect(page.locator("[data-cma-operation]")).toHaveCount(0);
+    const requests = live.getByRole("region", { name: "CMA requests", exact: true });
+    await expect(requests.locator('[data-cma-request="linked-request-0"]').getByRole("status")).toHaveText("Queued");
+    await expect(requests.locator('[data-cma-request="linked-request-1"]').getByRole("status")).toHaveText("Taking longer than usual");
+    await expect(requests.getByRole("button", { name: "View execution" })).toHaveCount(1);
+    await live.getByRole("button", { name: "Pin CMA session", exact: true }).click();
+    await expect(live.getByRole("button", { name: "Unpin CMA session (Pinned)" })).toHaveAttribute("aria-pressed", "true");
+    const details = requests.locator('[data-cma-request="linked-request-0"]');
+    await details.getByRole("button", { name: "Submission details" }).click();
+    await expect(details.getByText("rsp-linked-0")).toBeVisible();
+    await details.getByRole("button", { name: "Submission details" }).click();
+    await requests.getByRole("button", { name: "View execution" }).scrollIntoViewIfNeeded();
+    await expect(composerInput(page)).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await live.locator(":scope > div").last().evaluate((body) => { body.scrollTop = 0; });
+    await page.screenshot({ path: `/tmp/nyxid-cma-integrated-${width}.png` });
+  });
+}
+
 test("automatically shows running CMA, streams while minimised, restores, and removes finished sessions", async ({
   page,
 }) => {
@@ -956,6 +1011,9 @@ test("renders one pinned surface on shell, authenticated dashboard, standalone d
     "/assistant/machines",
     "/assistant/machines/new",
     "/assistant/machines/pair",
+    "/assistant/sandboxes",
+    "/assistant/sandboxes/sandbox-1",
+    "/assistant/cma-agents/0dc85e4c-6aaf-47de-9df0-e07a69b8ee19",
     "/keys",
     "/assistant/machines/node-1/desktop",
     "/assistant/machines/node-1/desktop/",
@@ -973,7 +1031,8 @@ test("renders one pinned surface on shell, authenticated dashboard, standalone d
   await card(page).getByRole("link", { name: "Open source chat" }).click();
   await expect(composerInput(page)).toBeVisible();
   await expect(sessions(page)).toHaveCount(1);
-  const sourceUrl = page.url();
+  const sourceUrl = new URL(page.url());
+  sourceUrl.searchParams.set("mock", "1");
   await card(page).getByRole("button", { name: "Unpin CMA session (Pinned)" }).click();
   await expect(card(page).getByRole("button", { name: "Pin CMA session", exact: true })).toHaveAttribute("aria-pressed", "false");
   for (const path of paths) {
@@ -982,7 +1041,7 @@ test("renders one pinned surface on shell, authenticated dashboard, standalone d
   }
   await page.reload();
   await expect(sessions(page)).toHaveCount(0);
-  await page.goto(sourceUrl);
+  await page.goto(sourceUrl.href);
   await expect(sessions(page)).toHaveCount(1);
   await expect(card(page).getByRole("button", { name: "Pin CMA session", exact: true })).toHaveAttribute("aria-pressed", "false");
 });

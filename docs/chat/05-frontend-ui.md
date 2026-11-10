@@ -270,9 +270,13 @@ of loaded message pages, so a pending or unconfirmed submission appears even
 without an agent ID or its original reply. A live session card replaces its
 normal operation receipt only when both service and agent IDs match; failed
 or uncertain receipts remain visible. A consolidated live card retains the
-receipt's request notices and feature-gated **View execution** panel, using
-only its verified local `agent_ref_id` and exact `response_id`. Cards do not
-render inside replies.
+receipt's status, request notices and Submission details. One feature-gated
+**View execution** panel targets the newest pending request with a verified
+local `agent_ref_id`, or the newest verified request when none is pending,
+using its exact `response_id`. Requests show pending work first and initially
+show three rows, with older rows revealed three at a time. Live cards precede
+submission history, which also initially shows three cards with an older-history
+control. Cards do not render inside replies.
 While a watch is submitting, waiting or cancelling, the selected
 thread refreshes history every five seconds, including after its assistant reply
 settles. Server polling continues independently of the page. Cards restore from

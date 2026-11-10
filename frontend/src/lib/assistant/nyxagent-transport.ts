@@ -424,6 +424,7 @@ export class NyxAgentTransport {
     if (request < (this.historyApplied.get(id) ?? 0) && existing) {
       if (!beforeSeq) return existing;
       page.conversation = existing.conversation;
+      page.cma_operations = existing.cma_operations;
     } else {
       this.historyApplied.set(id, request);
     }

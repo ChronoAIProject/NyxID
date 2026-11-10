@@ -39,6 +39,9 @@ vi.mock("@/hooks/use-assistant-viewport", () => ({ useAssistantViewport: () => u
 vi.mock("@/hooks/use-scroll-fades", () => ({ useScrollFades: () => {} }));
 vi.mock("@/hooks/use-theme", () => ({ useApplyTheme: () => {}, useResolvedTheme: () => "dark" }));
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: () => true }));
+vi.mock("./cma-agent-panel", () => ({ CmaAgentPanel: ({ agentId, responseId }: { agentId: string; responseId?: string }) =>
+  <button data-agent-id={agentId} data-response-id={responseId}>View execution</button>,
+}));
 vi.mock("./assistant-account-panel", () => ({ AssistantAccountPanel: () => null }));
 vi.mock("./offline-banner", () => ({ OfflineBanner: () => null }));
 vi.mock("./assistant-search", () => ({ AssistantSearchButton: () => null, AssistantSearchDialog: () => null }));
@@ -198,6 +201,90 @@ it("keeps execution access and elapsed request notices when a live card replaces
   expect(within(card).getByRole("button", { name: "Pin CMA session" })).toBeVisible();
   expect(within(card).getByText("Recent actions")).toBeVisible();
   expect(screen.queryByRole("region", { name: "CMA submission: CMA task" })).not.toBeInTheDocument();
+});
+
+function renderCmaOperations(operations: readonly CmaOperation[]) {
+  setOwner();
+  return render(
+    <TooltipProvider>
+      <CmaSessionContext value={[{
+        session: cmaSession,
+        state: { ...initialCmaSession(cmaSession), status: "ready" },
+        reconnect: () => undefined,
+      }]}>
+        <AssistantShell title="Chat" sidebar={null} cmaOperations={operations}>
+          <section aria-label="Transcript">Assistant reply</section>
+        </AssistantShell>
+      </CmaSessionContext>
+    </TooltipProvider>,
+  );
+}
+
+const linkedRequest: CmaOperation = {
+  ...receipt,
+  kind: "cma_response",
+  agent_id: cmaSession.agentId,
+  agent_ref_id: "0dc85e4c-6aaf-47de-9df0-e07a69b8ee19",
+  response_id: "rsp-linked",
+  operation_id: "rsp-linked",
+  reason: null,
+  state: "waiting",
+  status: "queued",
+};
+
+it.each([
+  [{ status: "queued" }, "Queued"],
+  [{ status: "waiting_approval" }, "Needs approval"],
+  [{ status: "connection_required" }, "Needs connection"],
+  [{ status: "paused" }, "Paused"],
+  [{ state: "submitting", status: null }, "Submitting"],
+  [{ status: null }, "Awaiting status"],
+  [{ state: "cancelling" }, "Stopping tracking"],
+  [{ state: "delivered", status: "completed", reason: "completed" }, "Completed"],
+] as const)("retains request status %s alongside the live agent status", (patch, label) => {
+  viewport.desktop = true;
+  renderCmaOperations([{ ...linkedRequest, ...patch }]);
+  const requests = screen.getByRole("region", { name: "CMA requests" });
+  expect(within(requests).getByRole("status")).toHaveTextContent(label);
+  expect(within(requests).getByText("rsp-linked")).not.toBeVisible();
+  fireEvent.click(within(requests).getByRole("button", { name: "Submission details" }));
+  expect(within(requests).getByText("rsp-linked")).toBeVisible();
+  expect(within(requests).getByText("request")).toBeVisible();
+});
+
+it("offers one execution panel for the newest active request and bounds older request rows", () => {
+  viewport.desktop = true;
+  const operations = Array.from({ length: 7 }, (_, index) => ({
+    ...linkedRequest,
+    id: `request-${index}`,
+    response_id: `rsp-${index}`,
+    operation_id: `rsp-${index}`,
+    created_at: new Date(Date.UTC(2026, 10, 10, index)).toISOString(),
+    state: index === 3 || index === 4 ? "waiting" : "delivered",
+    status: index === 3 || index === 4 ? "queued" : "completed",
+    reason: index === 3 || index === 4 ? null : "completed",
+  }));
+  renderCmaOperations(operations);
+  const requests = screen.getByRole("region", { name: "CMA requests" });
+  const execution = within(requests).getAllByRole("button", { name: "View execution" });
+  expect(execution).toHaveLength(1);
+  expect(execution[0]).toHaveAttribute("data-agent-id", linkedRequest.agent_ref_id);
+  expect(execution[0]).toHaveAttribute("data-response-id", "rsp-4");
+  expect(requests.querySelectorAll("[data-cma-request]")).toHaveLength(3);
+  expect(requests.querySelector("[data-cma-request]")).toHaveAttribute("data-cma-request", "request-4");
+  fireEvent.click(within(requests).getByRole("button", { name: "Show older requests (4)" }));
+  expect(requests.querySelectorAll("[data-cma-request]")).toHaveLength(6);
+  expect(within(requests).getAllByRole("button", { name: "View execution" })).toHaveLength(1);
+});
+
+it.each([true, false])("keeps live work ahead of a bounded submission history (desktop: %s)", (desktop) => {
+  viewport.desktop = desktop;
+  renderCmaOperations(Array.from({ length: 20 }, (_, index) => ({ ...receipt, id: `older-${index}` })));
+  const stack = screen.getByRole("complementary", { name: "CMA sessions" });
+  expect(stack.firstElementChild).toHaveAttribute("aria-label", `CMA session: ${cmaSession.title}`);
+  expect(stack.querySelectorAll("[data-cma-operation]")).toHaveLength(3);
+  fireEvent.click(within(stack).getByRole("button", { name: "Show older CMA submissions (17)" }));
+  expect(stack.querySelectorAll("[data-cma-operation]")).toHaveLength(6);
 });
 
 it.each([true, false])("has one title and Rename for legacy, workspace, loading and resolved threads (desktop: %s)", (desktop) => {

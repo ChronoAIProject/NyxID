@@ -324,9 +324,7 @@ describe("CMA submission card", () => {
       screen.queryByText(/final outcome could not be confirmed/),
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("list", { name: "CMA progress" }).querySelector("svg"),
-    ).toBeNull();
+    expect(screen.queryByText("Ready")).not.toBeInTheDocument();
 
     rerender(
       <CmaOperationCard
