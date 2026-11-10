@@ -177,6 +177,20 @@ pub fn enabled_in(features: &[String]) -> bool {
     features.iter().any(|key| key == FLAG_KEY)
 }
 
+/// Seed the cache from a feature snapshot the caller already resolved for
+/// `user_id` (the engine gate), so the admission that follows reads nothing
+/// and agrees with the gate even when an older cached decision differs.
+pub fn cache_features(db: &Database, user_id: &str, features: &[String]) {
+    let key = flag_cache_key(db, user_id);
+    let mut cache = flag_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.len() >= FLAG_CACHE_CAPACITY && !cache.contains_key(&key) {
+        cache.clear();
+    }
+    cache.insert(key, (Instant::now(), enabled_in(features)));
+}
+
 /// Forget cached decisions (tests flip the flag mid-run).
 pub fn reset_flag_cache() {
     flag_cache()
@@ -773,6 +787,7 @@ pub async fn record_card_pending_in_session(
     if !enabled {
         return Ok(());
     }
+    let (source_type, id) = card_visible_source(conversation);
     record_in_session(
         db,
         session,
@@ -780,8 +795,8 @@ pub async fn record_card_pending_in_session(
             user_id: audience,
             kind: NotificationKind::NeedsDecision,
             source: NotificationSource {
-                source_type: SourceType::Conversation,
-                id: conversation.id.clone(),
+                source_type,
+                id,
                 conversation_id: Some(conversation.id.clone()),
                 // Channel unlink and group deletion purge by these references.
                 channel_id: conversation
@@ -814,6 +829,23 @@ pub async fn record_card_pending_in_session(
         },
     )
     .await
+}
+
+/// The visible source a decision row belongs to (D6): a card raised through
+/// a hidden group member thread or collaboration slot is the group's (the
+/// sidebar marks the group and opening it reads the card), a card in a
+/// channel thread is that chat's, and a private thread is itself.
+/// `source.conversation_id` keeps the exact thread for purge and card joins.
+fn card_visible_source(conversation: &AssistantConversation) -> (SourceType, String) {
+    if let Some(group) = conversation.group_id.as_ref() {
+        (SourceType::Group, group.clone())
+    } else if let Some(binding) = conversation.collaboration.as_ref() {
+        (SourceType::CollaborationGroup, binding.group_id.clone())
+    } else if conversation.channel.is_some() {
+        (SourceType::ChannelChat, conversation.id.clone())
+    } else {
+        (SourceType::Conversation, conversation.id.clone())
+    }
 }
 
 /// Which decision rows a resolution applies to.
@@ -850,10 +882,13 @@ fn card_filter(scope: &CardScope<'_>) -> Document {
     filter
 }
 
+/// Resolving is the row's last activity: it is seen, and retention restarts
+/// from now (the card no longer needs to outlive its timeout).
 fn resolution_update(now: DateTime<Utc>, resolution: &str) -> Document {
     doc! {"$set": {
         "resolved_at": bson_date(now), "resolution": resolution,
         "unread": false, "updated_at": bson_date(now),
+        "expires_at": bson_date(now + Duration::days(RETENTION_DAYS)),
     }}
 }
 
@@ -864,7 +899,8 @@ pub async fn resolve_cards(
     resolution: &str,
     session: Option<&mut ClientSession>,
 ) -> AppResult<()> {
-    let action = db.collection::<Document>(COLLECTION_NAME).update_many(
+    let collection = db.collection::<Document>(COLLECTION_NAME);
+    let action = collection.update_many(
         card_filter(&scope),
         resolution_update(Utc::now(), resolution),
     );
@@ -1041,9 +1077,8 @@ pub async fn purge(
     filter: Document,
     session: Option<&mut ClientSession>,
 ) -> AppResult<()> {
-    let action = db
-        .collection::<Document>(COLLECTION_NAME)
-        .delete_many(filter);
+    let collection = db.collection::<Document>(COLLECTION_NAME);
+    let action = collection.delete_many(filter);
     match session {
         Some(session) => action.session(session).await?,
         None => action.await?,
@@ -1113,10 +1148,11 @@ pub fn preview_text(raw: &str) -> String {
         })
         .collect();
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut out: String = collapsed.chars().take(PREVIEW_CHARS).collect();
-    if collapsed.chars().count() > PREVIEW_CHARS {
-        out.push('…');
+    if collapsed.chars().count() <= PREVIEW_CHARS {
+        return collapsed;
     }
+    let mut out: String = collapsed.chars().take(PREVIEW_CHARS - 1).collect();
+    out.push('…');
     out
 }
 
@@ -2537,49 +2573,98 @@ async fn push_skip(db: &Database, id: &str, code: &str) -> AppResult<()> {
     .map(|_| ())
 }
 
-enum Claim {
-    Claimed(String),
+/// A row claimed for one send: the authoritative post-claim snapshot and
+/// the attempt token every later barrier write must present.
+#[derive(Clone, Debug)]
+pub(crate) struct ClaimedPush {
+    pub(crate) row: AssistantNotification,
+    pub(crate) attempt: String,
+}
+
+pub(crate) enum Claim {
+    Claimed(Box<ClaimedPush>),
+    /// The row was settled inside the claim (seen, capped or exhausted).
     Skipped,
+    /// Not due, already claimed by another replica, or gone.
     NotClaimed,
 }
 
-/// Claim one row for sending: the erasure fence, the per-source slot, the
+/// What a send attempt produced; `Unavailable` is a definite failure before
+/// any provider call.
+pub(crate) enum PushOutcome {
+    Accepted,
+    Refused(automation::Failure),
+    Unavailable(&'static str),
+    Unknown,
+}
+
+fn push_retry_window(first_attempt_at: DateTime<Utc>) -> DateTime<Utc> {
+    first_attempt_at + Duration::minutes(PUSH_RETRY_WINDOW_MINUTES)
+}
+
+/// Claim one row for sending. The caller's snapshot only names the row: the
+/// transaction re-reads it and decides from the current state, so a stale
+/// snapshot can never send early. Due time, the attempt limit and the retry
+/// window are enforced here; the erasure fence, the per-source slot, the
 /// rolling hourly budget and the row's `sending` barrier commit together, so
 /// neither a concurrent replica nor a concurrent erasure can double-send or
 /// recreate budget records after a purge.
-async fn claim_push(db: &Database, row: &AssistantNotification) -> AppResult<Claim> {
+pub(crate) async fn claim_push(db: &Database, row: &AssistantNotification) -> AppResult<Claim> {
     let mut session = db.client().start_session().await?;
     let work_db = db.clone();
-    let row = row.clone();
+    let row_id = row.id.clone();
     session
         .start_transaction()
         .and_run2(async move |session| {
             let db = &work_db;
-            let row = &row;
             let operation: AppResult<Claim> = async {
-                crate::services::erasure_admission::fence_in_session(db, &row.user_id, session)
-                    .await?;
                 let now = Utc::now();
                 let attempt = Uuid::new_v4().to_string();
+                // Due now: queued, or a retry whose time has come.
                 let Some(current) = db
                     .collection::<AssistantNotification>(COLLECTION_NAME)
-                    .find_one(doc! {"_id": &row.id, "push.state": {"$in": ["pending", "retrying"]}})
+                    .find_one(doc! {"_id": &row_id, "$or": [
+                        {"push.state": "pending"},
+                        {"push.state": "retrying", "push.retry_at": {"$lte": bson_date(now)}},
+                    ]})
                     .session(&mut *session)
                     .await?
                 else {
                     return Ok(Claim::NotClaimed);
                 };
-                let skip = |code: &'static str| doc! {"push.state": "skipped", "push.code": code};
+                crate::services::erasure_admission::fence_in_session(db, &current.user_id, session)
+                    .await?;
+                let rows = db.collection::<Document>(COLLECTION_NAME);
+                let settle =
+                    |set: Document| rows.update_one(doc! {"_id": &current.id}, doc! {"$set": set});
                 if current.resolved_at.is_some() || !current.unread {
-                    db.collection::<Document>(COLLECTION_NAME)
-                        .update_one(doc! {"_id": &row.id}, doc! {"$set": skip("already_seen")})
+                    settle(doc! {"push.state": "skipped", "push.code": "already_seen"})
                         .session(&mut *session)
                         .await?;
                     return Ok(Claim::Skipped);
                 }
-                let previous_attempt = current.push.as_ref().and_then(|push| push.attempt.clone());
+                let push = current
+                    .push
+                    .clone()
+                    .unwrap_or_else(|| push_state(&PushPlan::Pending));
+                let first_attempt_at = push.first_attempt_at.unwrap_or(now);
+                if push.attempts >= PUSH_MAX_ATTEMPTS || now >= push_retry_window(first_attempt_at)
+                {
+                    settle(
+                        doc! {"push.state": "failed", "push.code": "push_retries_exhausted",
+                        "push.retry_at": bson::Bson::Null},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                    return Ok(Claim::Skipped);
+                }
+                let previous_attempt = push.attempt.as_deref();
                 // Per visible source (person, source type, source id), whatever the kinds.
-                let slot = push_source_slot(&row.user_id, row.source.source_type, &row.source.id);
+                let slot = push_source_slot(
+                    &current.user_id,
+                    current.source.source_type,
+                    &current.source.id,
+                );
                 let cutoff = now - Duration::minutes(PUSH_SOURCE_INTERVAL_MINUTES);
                 let taken = db
                     .collection::<Document>(PUSH_SOURCES)
@@ -2590,11 +2675,10 @@ async fn claim_push(db: &Database, row: &AssistantNotification) -> AppResult<Cla
                         existing
                             .get_datetime("sent_at")
                             .is_ok_and(|at| at.to_chrono() > cutoff)
-                            && existing.get_str("attempt").ok() != previous_attempt.as_deref()
+                            && existing.get_str("attempt").ok() != previous_attempt
                     });
                 if taken {
-                    db.collection::<Document>(COLLECTION_NAME)
-                        .update_one(doc! {"_id": &row.id}, doc! {"$set": skip("source_rate")})
+                    settle(doc! {"push.state": "skipped", "push.code": "source_rate"})
                         .session(&mut *session)
                         .await?;
                     return Ok(Claim::Skipped);
@@ -2603,7 +2687,7 @@ async fn claim_push(db: &Database, row: &AssistantNotification) -> AppResult<Cla
                 let hour_ago = bson_date(now - Duration::hours(1));
                 let budget = db
                     .collection::<Document>(PUSH_BUDGETS)
-                    .find_one(doc! {"_id": &row.user_id})
+                    .find_one(doc! {"_id": &current.user_id})
                     .session(&mut *session)
                     .await?;
                 let mut reservations: Vec<Document> = budget
@@ -2615,15 +2699,14 @@ async fn claim_push(db: &Database, row: &AssistantNotification) -> AppResult<Cla
                             .filter_map(bson::Bson::as_document)
                             .filter(|item| {
                                 item.get_datetime("at").is_ok_and(|at| *at > hour_ago)
-                                    && item.get_str("attempt").ok() != previous_attempt.as_deref()
+                                    && item.get_str("attempt").ok() != previous_attempt
                             })
                             .cloned()
                             .collect()
                     })
                     .unwrap_or_default();
                 if reservations.len() >= PUSH_HOURLY_LIMIT {
-                    db.collection::<Document>(COLLECTION_NAME)
-                        .update_one(doc! {"_id": &row.id}, doc! {"$set": skip("hourly_limit")})
+                    settle(doc! {"push.state": "skipped", "push.code": "hourly_limit"})
                         .session(&mut *session)
                         .await?;
                     return Ok(Claim::Skipped);
@@ -2631,7 +2714,7 @@ async fn claim_push(db: &Database, row: &AssistantNotification) -> AppResult<Cla
                 reservations.push(doc! {"at": bson_date(now), "attempt": &attempt});
                 db.collection::<Document>(PUSH_BUDGETS)
                     .update_one(
-                        doc! {"_id": &row.user_id},
+                        doc! {"_id": &current.user_id},
                         doc! {"$set": {"reservations": reservations}},
                     )
                     .upsert(true)
@@ -2640,31 +2723,36 @@ async fn claim_push(db: &Database, row: &AssistantNotification) -> AppResult<Cla
                 db.collection::<Document>(PUSH_SOURCES)
                     .update_one(
                         doc! {"_id": &slot},
-                        doc! {"$set": {"sent_at": bson_date(now), "user_id": &row.user_id,
+                        doc! {"$set": {"sent_at": bson_date(now), "user_id": &current.user_id,
                         "attempt": &attempt}},
                     )
                     .upsert(true)
                     .session(&mut *session)
                     .await?;
-                let attempts = i64::from(current.push.as_ref().map_or(0, |push| push.attempts)) + 1;
-                let first_attempt_at = current
-                    .push
-                    .as_ref()
-                    .and_then(|push| push.first_attempt_at)
-                    .unwrap_or(now);
-                db.collection::<Document>(COLLECTION_NAME)
-                    .update_one(
-                        doc! {"_id": &row.id},
-                        doc! {"$set": {
-                            "push.state": "sending", "push.attempt": &attempt,
-                            "push.claimed_at": bson_date(now), "push.attempts": attempts,
-                            "push.first_attempt_at": bson_date(first_attempt_at),
-                            "push.retry_at": bson::Bson::Null,
-                        }},
-                    )
-                    .session(&mut *session)
-                    .await?;
-                Ok(Claim::Claimed(attempt))
+                let attempts = push.attempts + 1;
+                settle(doc! {
+                    "push.state": "sending", "push.attempt": &attempt,
+                    "push.claimed_at": bson_date(now), "push.attempts": i64::from(attempts),
+                    "push.first_attempt_at": bson_date(first_attempt_at),
+                    "push.retry_at": bson::Bson::Null,
+                })
+                .session(&mut *session)
+                .await?;
+                let mut claimed = current;
+                claimed.push = Some(PushState {
+                    state: "sending".into(),
+                    attempt: Some(attempt.clone()),
+                    code: push.code,
+                    attempts,
+                    claimed_at: Some(now),
+                    first_attempt_at: Some(first_attempt_at),
+                    retry_at: None,
+                    sent_at: push.sent_at,
+                });
+                Ok(Claim::Claimed(Box::new(ClaimedPush {
+                    row: claimed,
+                    attempt,
+                })))
             }
             .await;
             transactions::transaction_result(operation)
@@ -2676,23 +2764,102 @@ async fn claim_push(db: &Database, row: &AssistantNotification) -> AppResult<Cla
 /// Give back the reservations of a definite non-send (never after an
 /// accepted or ambiguous send), so the same row's retry is not throttled by
 /// its own earlier attempt.
-async fn release_reservations(
-    db: &Database,
-    row: &AssistantNotification,
-    attempt: &str,
-) -> AppResult<()> {
+async fn release_reservations(db: &Database, claimed: &ClaimedPush) -> AppResult<()> {
+    let row = &claimed.row;
     db.collection::<Document>(PUSH_SOURCES)
         .delete_one(doc! {
             "_id": push_source_slot(&row.user_id, row.source.source_type, &row.source.id),
-            "attempt": attempt,
+            "attempt": &claimed.attempt,
         })
         .await?;
     db.collection::<Document>(PUSH_BUDGETS)
         .update_one(
             doc! {"_id": &row.user_id},
-            doc! {"$pull": {"reservations": {"attempt": attempt}}},
+            doc! {"$pull": {"reservations": {"attempt": &claimed.attempt}}},
         )
         .await?;
+    Ok(())
+}
+
+/// Settle a claimed row without sending (definite skip): the barrier moves
+/// `sending -> skipped` under the attempt token and the reservations return.
+pub(crate) async fn skip_claimed(
+    db: &Database,
+    claimed: &ClaimedPush,
+    code: &'static str,
+) -> AppResult<()> {
+    let settled = push_transition(
+        db,
+        &claimed.row.id,
+        &["sending"],
+        Some(&claimed.attempt),
+        doc! {"push.state": "skipped", "push.code": code},
+    )
+    .await?;
+    if settled {
+        release_reservations(db, claimed).await?;
+    }
+    Ok(())
+}
+
+/// Settle the claimed row after the provider answered. Attempts and the retry
+/// window come from the claimed snapshot, never from an older read. Only a
+/// conclusive retryable refusal retries, at least a minute apart, at most
+/// [`PUSH_MAX_ATTEMPTS`] attempts, and never past the window after the first
+/// attempt; ambiguous outcomes keep their reservations and are never resent.
+pub(crate) async fn settle_push(
+    db: &Database,
+    claimed: &ClaimedPush,
+    outcome: PushOutcome,
+) -> AppResult<()> {
+    let now = Utc::now();
+    let push = claimed.row.push.as_ref();
+    let attempts = push.map_or(1, |push| push.attempts);
+    let first_attempt_at = push.and_then(|push| push.first_attempt_at).unwrap_or(now);
+    let (set, release) = match outcome {
+        PushOutcome::Accepted => (
+            doc! {"push.state": "sent", "push.sent_at": bson_date(now)},
+            false,
+        ),
+        PushOutcome::Refused(failure) => {
+            let retry_at = failure
+                .retry_after
+                .map(|delay| now + Duration::seconds((delay as i64).max(PUSH_RETRY_MIN_SECONDS)));
+            match retry_at.filter(|retry_at| {
+                attempts < PUSH_MAX_ATTEMPTS && *retry_at <= push_retry_window(first_attempt_at)
+            }) {
+                Some(retry_at) => (
+                    doc! {"push.state": "retrying", "push.code": failure.code,
+                    "push.retry_at": bson_date(retry_at)},
+                    true,
+                ),
+                None => (
+                    doc! {"push.state": "failed", "push.code": if failure.retry_after.is_some() {
+                        "push_retries_exhausted"
+                    } else {
+                        failure.code
+                    }},
+                    true,
+                ),
+            }
+        }
+        PushOutcome::Unavailable(code) => (doc! {"push.state": "failed", "push.code": code}, true),
+        PushOutcome::Unknown => (
+            doc! {"push.state": "unknown", "push.code": "push_delivery_unknown"},
+            false,
+        ),
+    };
+    let settled = push_transition(
+        db,
+        &claimed.row.id,
+        &["sending"],
+        Some(&claimed.attempt),
+        set,
+    )
+    .await?;
+    if settled && release {
+        release_reservations(db, claimed).await?;
+    }
     Ok(())
 }
 
@@ -2739,7 +2906,8 @@ async fn send_push(
 }
 
 /// The sweep with an injectable sender: `Err(code)` is a definite
-/// availability failure before any send.
+/// availability failure before any send. Every decision after the claim
+/// (flag, preference, access, preview, payload) uses the claimed snapshot.
 pub async fn sweep_with<F, Fut>(state: &AppState, send: F) -> AppResult<()>
 where
     F: Fn(String, String, String, HashMap<String, String>) -> Fut,
@@ -2776,11 +2944,17 @@ where
     let mut preferences: HashMap<String, NotificationPushPreferences> = HashMap::new();
     let mut flags: HashMap<String, bool> = HashMap::new();
     for row in pending {
-        let user = row.user_id.clone();
+        // Cheap pre-check on the snapshot; the claim re-reads and decides.
         if row.resolved_at.is_some() || !row.unread {
             push_skip(db, &row.id, "already_seen").await?;
             continue;
         }
+        let claimed = match claim_push(db, &row).await? {
+            Claim::Claimed(claimed) => *claimed,
+            Claim::Skipped | Claim::NotClaimed => continue,
+        };
+        let row = &claimed.row;
+        let user = row.user_id.clone();
         let enabled = match flags.get(&user) {
             Some(value) => *value,
             None => {
@@ -2790,7 +2964,7 @@ where
             }
         };
         if !enabled {
-            push_skip(db, &row.id, "flag_off").await?;
+            skip_claimed(db, &claimed, "flag_off").await?;
             continue;
         }
         let preference = match preferences.get(&user) {
@@ -2805,17 +2979,13 @@ where
             }
         };
         if !push_preferred(&preference, row.kind) {
-            push_skip(db, &row.id, "preference_off").await?;
+            skip_claimed(db, &claimed, "preference_off").await?;
             continue;
         }
         let Some(built) = resolve_items(state, &user, vec![row.clone()]).await?.pop() else {
             // Purged or hidden while queued.
-            push_skip(db, &row.id, "source_unavailable").await?;
+            skip_claimed(db, &claimed, "source_unavailable").await?;
             continue;
-        };
-        let attempt = match claim_push(db, &row).await? {
-            Claim::Claimed(attempt) => attempt,
-            Claim::Skipped | Claim::NotClaimed => continue,
         };
         // `type` is the closed kind: mobile refreshes the matching view on receipt.
         let mut data = HashMap::from([
@@ -2832,63 +3002,18 @@ where
         } else {
             built.preview.clone()
         };
-        let outcome = tokio::time::timeout(
+        let outcome = match tokio::time::timeout(
             PUSH_SEND_TIMEOUT,
             send(user.clone(), built.title.clone(), body, data),
         )
-        .await;
-        let attempts = row.push.as_ref().map_or(0, |push| push.attempts) + 1;
-        let first_attempt_at = row
-            .push
-            .as_ref()
-            .and_then(|push| push.first_attempt_at)
-            .unwrap_or(now);
-        let (set, release) = match outcome {
-            Ok(Ok(automation::Outcome::Accepted)) => (
-                doc! {"push.state": "sent", "push.sent_at": bson_date(Utc::now())},
-                false,
-            ),
-            Ok(Ok(automation::Outcome::Refused(failure))) => {
-                // Only a conclusive retryable refusal (429/503) retries, at least
-                // a minute apart, at most three attempts within thirty minutes.
-                let retry_after = failure.retry_after.filter(|_| {
-                    attempts < PUSH_MAX_ATTEMPTS
-                        && Utc::now()
-                            < first_attempt_at + Duration::minutes(PUSH_RETRY_WINDOW_MINUTES)
-                });
-                match retry_after {
-                    Some(delay) => (
-                        doc! {
-                            "push.state": "retrying", "push.code": failure.code,
-                            "push.retry_at": bson_date(
-                                Utc::now() + Duration::seconds((delay as i64).max(PUSH_RETRY_MIN_SECONDS)),
-                            ),
-                        },
-                        true,
-                    ),
-                    None => (
-                        doc! {
-                            "push.state": "failed",
-                            "push.code": if failure.retry_after.is_some() {
-                                "push_retries_exhausted"
-                            } else {
-                                failure.code
-                            },
-                        },
-                        true,
-                    ),
-                }
-            }
-            Ok(Err(code)) => (doc! {"push.state": "failed", "push.code": code}, true),
-            Ok(Ok(automation::Outcome::Unknown)) | Err(_) => (
-                doc! {"push.state": "unknown", "push.code": "push_delivery_unknown"},
-                false,
-            ),
+        .await
+        {
+            Ok(Ok(automation::Outcome::Accepted)) => PushOutcome::Accepted,
+            Ok(Ok(automation::Outcome::Refused(failure))) => PushOutcome::Refused(failure),
+            Ok(Err(code)) => PushOutcome::Unavailable(code),
+            Ok(Ok(automation::Outcome::Unknown)) | Err(_) => PushOutcome::Unknown,
         };
-        let settled = push_transition(db, &row.id, &["sending"], Some(&attempt), set).await?;
-        if settled && release {
-            release_reservations(db, &row, &attempt).await?;
-        }
+        settle_push(db, &claimed, outcome).await?;
         tracing::debug!(
             target: "nyxid::assistant_notifications",
             notification_id = %row.id, kind = row.kind.as_str(), "Notification push settled"

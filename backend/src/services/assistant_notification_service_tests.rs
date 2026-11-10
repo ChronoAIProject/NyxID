@@ -168,6 +168,8 @@ async fn specialist(f: &Fixture, name: &str) -> crate::models::assistant_agent::
     )
     .await
     .unwrap()
+    .unwrap()
+    .0
 }
 
 fn page(limit: usize) -> ListQuery {
@@ -1037,7 +1039,13 @@ async fn pending_cards_create_decision_rows_that_resolve_on_decide_expire_sweep_
         .unwrap();
     let rows = rows_of(&f, &f.owner).await;
     assert_eq!(rows[0].resolution.as_deref(), Some("decided"));
-    assert!(rows[0].resolved_at.is_some());
+    let resolved_at = rows[0].resolved_at.expect("resolved");
+    // Resolving is the last activity: retention restarts from it (D7).
+    assert_eq!(rows[0].updated_at, resolved_at);
+    assert_eq!(
+        rows[0].expires_at,
+        resolved_at + Duration::days(RETENTION_DAYS)
+    );
     assert!(
         list(
             &f.state,
@@ -1076,6 +1084,10 @@ async fn pending_cards_create_decision_rows_that_resolve_on_decide_expire_sweep_
         .find(|row| row.source.card_id.as_deref() == Some(second.id.as_str()))
         .unwrap();
     assert_eq!(expired.resolution.as_deref(), Some("expired"));
+    assert_eq!(
+        expired.expires_at,
+        expired.resolved_at.expect("resolved") + Duration::days(RETENTION_DAYS)
+    );
     // The sweep resolves a timed-out card no one touched.
     let third = action_card(&f, &row, &nyxbot.id, "Delete service z?").await;
     db.collection::<Document>(COLLECTION_NAME)
@@ -1115,6 +1127,104 @@ async fn pending_cards_create_decision_rows_that_resolve_on_decide_expire_sweep_
         .unwrap();
     assert_eq!(superseded.resolution.as_deref(), Some("superseded"));
     settle(&f, &row, "done", None).await;
+}
+
+#[tokio::test]
+async fn group_cards_mark_the_visible_group_and_opening_it_reads_them_without_resolving() {
+    let f = fixture("notif_group_cards").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    let researcher = specialist(&f, "researcher").await;
+    let group = groups::create(db, &f.owner, "Ops", &[researcher.id.clone()], "user")
+        .await
+        .unwrap();
+    // The member speaks through a hidden thread of the group.
+    let mut member = start(None, "Delete service g", TurnOrigin::Group);
+    member.agent_id = Some(researcher.id.clone());
+    member.group_id = Some(group.id.clone());
+    let row = begin(&f, &f.owner, &member).await;
+    assert_eq!(row.group_id.as_deref(), Some(group.id.as_str()));
+    let card = action_card(&f, &row, &researcher.id, "Delete service g?").await;
+    let rows = rows_of(&f, &f.owner).await;
+    assert_eq!(rows.len(), 1);
+    let pending = &rows[0];
+    assert_eq!(pending.kind, NotificationKind::NeedsDecision);
+    // D6: the visible source is the group; the hidden thread stays on the
+    // row for purge and card joins.
+    assert_eq!(pending.source.source_type, SourceType::Group);
+    assert_eq!(pending.source.id, group.id);
+    assert_eq!(pending.source.group_id.as_deref(), Some(group.id.as_str()));
+    assert_eq!(
+        pending.source.conversation_id.as_deref(),
+        Some(row.id.as_str())
+    );
+    assert_eq!(pending.source.card_id.as_deref(), Some(card.id.as_str()));
+    let before = summary(db, &f.owner).await.unwrap();
+    assert_eq!((before.unread_count, before.needs_decision_count), (1, 1));
+    assert_eq!(before.by_source.len(), 1);
+    assert_eq!(before.by_source[0].source_type, "group");
+    assert_eq!(before.by_source[0].id, group.id);
+    assert_eq!(
+        before.by_source[0].conversation_id.as_deref(),
+        Some(row.id.as_str())
+    );
+    let listed = list(&f.state, &f.owner, &page(10)).await.unwrap();
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].source.source_type, "group");
+    assert_eq!(listed.items[0].preview, "Delete service g?");
+    assert!(listed.items[0].url.contains(&format!("c={}", group.id)));
+    // Opening the group (the client's group read) sees the card; it stays
+    // pending until decided.
+    assert_eq!(
+        mark_read(
+            db,
+            &f.owner,
+            ReadScope::Source {
+                source_type: SourceType::Group,
+                id: group.id.clone(),
+            }
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    let seen = summary(db, &f.owner).await.unwrap();
+    assert_eq!((seen.unread_count, seen.needs_decision_count), (0, 0));
+    assert!(seen.by_source.is_empty());
+    let still_pending = list(
+        &f.state,
+        &f.owner,
+        &ListQuery {
+            pending_only: true,
+            ..page(10)
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(still_pending.items.len(), 1);
+    assert!(still_pending.items[0].read && !still_pending.items[0].resolved);
+    let stored = rows_of(&f, &f.owner).await;
+    assert!(stored[0].read_at.is_some() && stored[0].resolved_at.is_none());
+    // Deciding on the group page resolves the row in the decision transaction.
+    acks::decide(db, &f.owner, &row.id, &card.id, true)
+        .await
+        .unwrap();
+    let decided = rows_of(&f, &f.owner).await;
+    assert_eq!(decided[0].resolution.as_deref(), Some("decided"));
+    assert!(
+        list(
+            &f.state,
+            &f.owner,
+            &ListQuery {
+                pending_only: true,
+                ..page(10)
+            }
+        )
+        .await
+        .unwrap()
+        .items
+        .is_empty()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1201,7 +1311,7 @@ async fn group_notices_coalesce_and_outside_posts_do_not_notify_and_group_reads_
         1
     );
     assert_eq!(summary(db, &f.owner).await.unwrap().unread_count, 0);
-    // Deleting the group purges its rows at the next read of a dangling row.
+    // Deleting the group purges its rows in the delete transaction.
     groups::append(
         db,
         &f.owner,
@@ -1214,9 +1324,6 @@ async fn group_notices_coalesce_and_outside_posts_do_not_notify_and_group_reads_
     .await
     .unwrap();
     groups::delete(db, &f.owner, &group.id).await.unwrap();
-    purge(db, doc! {fields::SOURCE_GROUP_ID: &group.id}, None)
-        .await
-        .unwrap();
     assert!(rows_of(&f, &f.owner).await.is_empty());
 }
 
@@ -2055,12 +2162,333 @@ fn previews_are_single_line_bounded_and_markdown_free() {
         preview_text("# Title\n\n- **bold** item\n```\ncode\n```\n[link](https://x.y) ![img](u)"),
         "Title bold item link img"
     );
-    let long = "word ".repeat(100);
+    let long = "日本語テキスト ".repeat(60);
     let preview = preview_text(&long);
-    assert_eq!(preview.chars().count(), PREVIEW_CHARS + 1);
+    assert_eq!(preview.chars().count(), PREVIEW_CHARS);
+    assert!(preview.ends_with('…'));
+    assert!(long.starts_with(preview.trim_end_matches('…')));
+    let exact = "字".repeat(PREVIEW_CHARS);
+    assert_eq!(preview_text(&exact), exact);
+    let over = "字".repeat(PREVIEW_CHARS + 1);
+    let preview = preview_text(&over);
+    assert_eq!(preview.chars().count(), PREVIEW_CHARS);
     assert!(preview.ends_with('…'));
     assert_eq!(preview_text("a\u{202e}b\tc"), "ab c");
     assert_eq!(parse_kinds("agent_update, chat_update").unwrap().len(), 2);
     assert!(parse_kinds("nope").is_err());
     assert_eq!(reason_copy("grace_expired").starts_with("Skipped"), true);
+}
+
+#[tokio::test]
+async fn a_cached_feature_snapshot_makes_admission_read_free_and_authoritative() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let counter = reads.clone();
+    let handler = EventHandler::callback(move |event| {
+        if let CommandEvent::Started(event) = event
+            && matches!(event.command_name.as_str(), "find" | "aggregate")
+        {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let db =
+        connect_transaction_test_database_with_command_handler("notif_flag_cache", handler).await;
+    let f = fixture_with(db).await;
+    let db = &f.state.db;
+    reset_flag_cache();
+    // The cache remembers the flag as off.
+    assert!(!enabled(db, &f.owner).await.unwrap());
+    // The engine gate then resolves a newer snapshot with the flag on and
+    // seeds the cache from it: admission reads nothing and follows the gate,
+    // not the older cached decision.
+    flags::set_platform_override(db, FLAG_KEY, &FlagTarget::Global, true, &f.owner)
+        .await
+        .unwrap();
+    let features = flags::resolve_personal_features(db, &f.owner)
+        .await
+        .unwrap();
+    assert!(enabled_in(&features));
+    cache_features(db, &f.owner, &features);
+    reads.store(0, Ordering::SeqCst);
+    assert!(enabled(db, &f.owner).await.unwrap());
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    // And the other way round: a gate snapshot without the flag wins over a
+    // cached `true`.
+    cache_features(db, &f.owner, &[]);
+    reads.store(0, Ordering::SeqCst);
+    assert!(!enabled(db, &f.owner).await.unwrap());
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    // Snapshots are per database and person.
+    let other = person(&f).await;
+    reads.store(0, Ordering::SeqCst);
+    assert!(enabled(db, &other).await.unwrap());
+    assert!(reads.load(Ordering::SeqCst) > 0);
+}
+
+// ---------------------------------------------------------------------------
+// Push claim authority: due time, limits, and stale snapshots
+// ---------------------------------------------------------------------------
+
+fn refusal(retry_after: Option<u64>) -> automation::Failure {
+    automation::Failure {
+        code: if retry_after.is_some() {
+            "push_temporarily_refused"
+        } else {
+            "push_provider_rejected"
+        },
+        http_status: Some(429),
+        retry_after,
+    }
+}
+
+async fn claim(f: &Fixture, row: &AssistantNotification) -> Option<ClaimedPush> {
+    match claim_push(&f.state.db, row).await.unwrap() {
+        Claim::Claimed(claimed) => Some(*claimed),
+        Claim::Skipped | Claim::NotClaimed => None,
+    }
+}
+
+async fn reservations(f: &Fixture, user: &str) -> (u64, usize) {
+    let db = &f.state.db;
+    let sources = db
+        .collection::<Document>(PUSH_SOURCES)
+        .count_documents(doc! {"user_id": user})
+        .await
+        .unwrap();
+    let budget = db
+        .collection::<Document>(PUSH_BUDGETS)
+        .find_one(doc! {"_id": user})
+        .await
+        .unwrap()
+        .map_or(0, |budget| {
+            budget.get_array("reservations").map_or(0, Vec::len)
+        });
+    (sources, budget)
+}
+
+#[tokio::test]
+async fn stale_sweep_snapshot_cannot_send_a_retry_early() {
+    let f = fixture("notif_push_stale").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    push_prefs(&f, &f.owner, all_push()).await;
+    let thread = seed_conversation(&f, &f.owner, "Thread").await;
+    let row = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&thread),
+    );
+    insert_row(&f, &row).await;
+    // Sweep A claims from its snapshot and the provider refuses retryably.
+    let first = claim(&f, &row).await.expect("first claim");
+    assert_eq!(first.row.push.as_ref().unwrap().attempts, 1);
+    settle_push(db, &first, PushOutcome::Refused(refusal(Some(5))))
+        .await
+        .unwrap();
+    let push = push_of(&f, &row.id).await;
+    assert_eq!(push.state, "retrying");
+    assert!(push.retry_at.unwrap() > Utc::now());
+    assert_eq!(reservations(&f, &f.owner).await, (0, 0));
+    // Sweep B still holds the old `pending` snapshot: the claim re-reads and
+    // finds a retry that is not due, so nothing is sent early.
+    assert!(claim(&f, &row).await.is_none());
+    assert_eq!(push_of(&f, &row.id).await.state, "retrying");
+    // Once due, the claim succeeds with the persisted attempt count.
+    db.collection::<Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"push.retry_at": bson_date(Utc::now() - Duration::seconds(1))}},
+        )
+        .await
+        .unwrap();
+    let second = claim(&f, &row).await.expect("due retry");
+    assert_eq!(second.row.push.as_ref().unwrap().attempts, 2);
+    assert_ne!(second.attempt, first.attempt);
+    assert_eq!(reservations(&f, &f.owner).await, (1, 1));
+    settle_push(db, &second, PushOutcome::Accepted)
+        .await
+        .unwrap();
+    let push = push_of(&f, &row.id).await;
+    assert_eq!((push.state.as_str(), push.attempts), ("sent", 2));
+    // A settled attempt token is spent: a late settlement for it is a no-op.
+    settle_push(db, &first, PushOutcome::Accepted)
+        .await
+        .unwrap();
+    assert_eq!(push_of(&f, &row.id).await.attempts, 2);
+}
+
+#[tokio::test]
+async fn claim_enforces_attempt_limit_and_retry_window_from_the_persisted_row() {
+    let f = fixture("notif_push_limits").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    push_prefs(&f, &f.owner, all_push()).await;
+    let thread = seed_conversation(&f, &f.owner, "Thread").await;
+    // Exhausted attempts: the due retry settles as failed without a send.
+    let mut row = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&thread),
+    );
+    row.push = Some(PushState {
+        state: "retrying".into(),
+        attempt: Some("spent".into()),
+        code: Some("push_temporarily_refused".into()),
+        attempts: PUSH_MAX_ATTEMPTS,
+        claimed_at: Some(Utc::now() - Duration::minutes(5)),
+        first_attempt_at: Some(Utc::now() - Duration::minutes(5)),
+        retry_at: Some(Utc::now() - Duration::seconds(1)),
+        sent_at: None,
+    });
+    insert_row(&f, &row).await;
+    assert!(claim(&f, &row).await.is_none());
+    let push = push_of(&f, &row.id).await;
+    assert_eq!(
+        (push.state.as_str(), push.code.as_deref()),
+        ("failed", Some("push_retries_exhausted"))
+    );
+    assert_eq!(reservations(&f, &f.owner).await, (0, 0));
+    // Window elapsed: one earlier attempt 31 minutes ago, retry due now.
+    let other = seed_conversation(&f, &f.owner, "Other").await;
+    let mut row = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&other),
+    );
+    row.push = Some(PushState {
+        state: "retrying".into(),
+        attempt: Some("spent".into()),
+        code: None,
+        attempts: 1,
+        claimed_at: Some(Utc::now() - Duration::minutes(31)),
+        first_attempt_at: Some(Utc::now() - Duration::minutes(31)),
+        retry_at: Some(Utc::now() - Duration::seconds(1)),
+        sent_at: None,
+    });
+    insert_row(&f, &row).await;
+    assert!(claim(&f, &row).await.is_none());
+    assert_eq!(push_of(&f, &row.id).await.state, "failed");
+    // A retry that would land past the window fails at settlement instead.
+    let third = seed_conversation(&f, &f.owner, "Third").await;
+    let row = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&third),
+    );
+    insert_row(&f, &row).await;
+    let claimed = claim(&f, &row).await.expect("claim");
+    settle_push(db, &claimed, PushOutcome::Refused(refusal(Some(3600))))
+        .await
+        .unwrap();
+    let push = push_of(&f, &row.id).await;
+    assert_eq!(
+        (push.state.as_str(), push.code.as_deref()),
+        ("failed", Some("push_retries_exhausted"))
+    );
+    assert!(push.retry_at.is_none());
+    assert_eq!(reservations(&f, &f.owner).await, (0, 0));
+    // The retry delay honors Retry-After above the minute floor.
+    let fourth = seed_conversation(&f, &f.owner, "Fourth").await;
+    let row = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&fourth),
+    );
+    insert_row(&f, &row).await;
+    let claimed = claim(&f, &row).await.expect("claim");
+    settle_push(db, &claimed, PushOutcome::Refused(refusal(Some(120))))
+        .await
+        .unwrap();
+    let push = push_of(&f, &row.id).await;
+    assert_eq!(push.state, "retrying");
+    assert!(push.retry_at.unwrap() >= Utc::now() + Duration::seconds(118));
+}
+
+#[tokio::test]
+async fn claimed_snapshot_drives_preference_preview_and_payload_after_coalescing() {
+    let f = fixture("notif_push_coalesced").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    // Only mentions push; agent updates do not.
+    push_prefs(
+        &f,
+        &f.owner,
+        NotificationPushPreferences {
+            group_mention: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let group_id = Uuid::new_v4().to_string();
+    db.collection::<Document>(GROUPS)
+        .insert_one(
+            doc! {"_id": &group_id, "user_id": &f.owner, "name": "Research",
+            "collaboration": {"version": 1, "creator_user_id": &f.owner, "membership_revision": 1},
+            "participant_user_ids": [&f.owner], "member_agent_ids": [], "lead_agent_id": "",
+            "last_recipient_ids": [], "created_by": "user", "message_count": 0,
+            "pending_agent_ids": [], "hops_remaining": 0, "followers": [],
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()},
+        )
+        .await
+        .unwrap();
+    let message_id = Uuid::new_v4().to_string();
+    db.collection::<Document>(GROUP_MESSAGES)
+        .insert_one(doc! {"_id": &message_id, "group_id": &group_id, "user_id": &f.owner,
+            "seq": 7_i64, "role": "user", "text": "@bob please look", "created_at": bson::DateTime::now()})
+        .await
+        .unwrap();
+    let mut row = seeded(
+        &f.owner,
+        NotificationKind::GroupMention,
+        NotificationSource {
+            source_type: SourceType::CollaborationGroup,
+            id: group_id.clone(),
+            group_id: Some(group_id.clone()),
+            message_id: Some(message_id.clone()),
+            ..Default::default()
+        },
+    );
+    row.outcome = None;
+    insert_row(&f, &row).await;
+    // The sweep's snapshot says mention, but by claim time the same unread
+    // row coalesced an agent reply (kind flipped, latest message changed).
+    let reply_id = Uuid::new_v4().to_string();
+    db.collection::<Document>(GROUP_MESSAGES)
+        .insert_one(doc! {"_id": &reply_id, "group_id": &group_id, "user_id": &f.owner,
+            "seq": 8_i64, "role": "agent", "text": "Looked, all good.", "created_at": bson::DateTime::now()})
+        .await
+        .unwrap();
+    db.collection::<Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"kind": "agent_update", "source.message_id": &reply_id,
+            "updated_at": bson_date(Utc::now())}, "$inc": {"count": 1_i64}},
+        )
+        .await
+        .unwrap();
+    let sent: Sent = Default::default();
+    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
+    assert!(sent.lock().unwrap().is_empty());
+    let push = push_of(&f, &row.id).await;
+    assert_eq!(
+        (push.state.as_str(), push.code.as_deref()),
+        ("skipped", Some("preference_off"))
+    );
+    assert_eq!(reservations(&f, &f.owner).await, (0, 0));
+    // With the current kind preferred, the payload reflects the claimed row.
+    push_prefs(&f, &f.owner, all_push()).await;
+    db.collection::<Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"push.state": "pending"}},
+        )
+        .await
+        .unwrap();
+    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
+    let sent = sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    let (_, title, body, data) = &sent[0];
+    assert_eq!(data.get("type").map(String::as_str), Some("agent_update"));
+    assert_eq!(body, "Looked, all good.");
+    assert_eq!(title, "Research");
+    assert_eq!(reservations(&f, &f.owner).await, (1, 1));
 }
