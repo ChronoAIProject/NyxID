@@ -24,7 +24,7 @@ async fn owner_private_channel_replies_are_chat_updates_on_the_shared_home_threa
     assert_eq!(
         put_binding(
             State(state.clone()),
-            Path("bnd_owner_feed".into()),
+            Path("bnd_chats".into()),
             bearer(&key),
             Json(binding_body(&key, OWNER)),
         )
@@ -360,8 +360,8 @@ async fn provider_thread_delete_purges_exact_chat_and_lanes_but_retains_history(
         let other_response_id = Uuid::new_v4().to_string();
         if native {
             responses.insert_many([
-                doc! {"_id":&response_id,"channel_id":&row.id,"partition":PARTITION},
-                doc! {"_id":&other_response_id,"channel_id":&row.id,"partition":other_partition},
+                doc! {"_id":&response_id,"response_id":format!("resp_{response_id}"),"channel_id":&row.id,"partition":PARTITION},
+                doc! {"_id":&other_response_id,"response_id":format!("resp_{other_response_id}"),"channel_id":&row.id,"partition":other_partition},
             ]).await.unwrap();
         }
         for _ in 0..2 {
