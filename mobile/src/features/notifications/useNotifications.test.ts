@@ -247,25 +247,30 @@ const refresh = (x: ReturnType<typeof setup>, summary: unknown) => {
   x.h.render();
 };
 
-test("summary refreshes before the deadline neither restart nor skip it, and after it each refresh is judged at once", async () => {
+// The four cases below drive the hook's timer with node:test mock timers,
+// enabled before `setup` loads the module so the harness captures the mocked
+// setTimeout; a starved host cannot turn their timing into flakes.
+test("summary refreshes before the deadline neither restart nor skip it, and after it each refresh is judged at once", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const x = setup({ summary: exactSummary(2) });
   mountVisible(x);
   for (let i = 0; i < 3; i++) {
-    await wait(400);
+    t.mock.timers.tick(400);
     refresh(x, exactSummary(2));
   }
   assert.deepEqual(x.reads, [], "still inside the debounce");
-  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150 - 1200);
+  t.mock.timers.tick(VISIBLE_THREAD_READ_DELAY_MS - 1200);
   assert.equal(x.reads.length, 1, "a busy feed cannot postpone the open thread's read");
   refresh(x, exactSummary(5));
   assert.equal(x.reads.length, 2, "once due, a changed count reads without waiting again");
   x.h.unmount();
 });
 
-test("an unread count the server leaves unchanged is asked about three times, then only a change or a clear re-arms", async () => {
+test("an unread count the server leaves unchanged is asked about three times, then only a change or a clear re-arms", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const x = setup({ summary: exactSummary(2) });
   mountVisible(x);
-  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  t.mock.timers.tick(VISIBLE_THREAD_READ_DELAY_MS);
   assert.equal(x.reads.length, 1);
   refresh(x, exactSummary(2));
   refresh(x, exactSummary(2));
@@ -286,16 +291,17 @@ test("an unread count the server leaves unchanged is asked about three times, th
   x.h.unmount();
 });
 
-test("a background pause keeps what this open already read and re-arms the debounce; a navigation blur and return is a new open", async () => {
+test("a background pause keeps what this open already read and re-arms the debounce; a navigation blur and return is a new open", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const x = setup({ summary: truncatedSummary });
   mountVisible(x);
-  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  t.mock.timers.tick(VISIBLE_THREAD_READ_DELAY_MS);
   assert.equal(x.reads.length, 1, "truncated summaries read once per open");
   x.state.active = false;
   x.h.render();
   x.state.active = true;
   x.h.render();
-  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  t.mock.timers.tick(VISIBLE_THREAD_READ_DELAY_MS + 150);
   assert.equal(x.reads.length, 1, "resuming from the background does not read again");
   x.state.focused = false;
   x.state.active = false;
@@ -303,21 +309,22 @@ test("a background pause keeps what this open already read and re-arms the debou
   x.state.focused = true;
   x.state.active = true;
   x.h.render();
-  await wait(VISIBLE_THREAD_READ_DELAY_MS - 300);
+  t.mock.timers.tick(VISIBLE_THREAD_READ_DELAY_MS - 300);
   assert.equal(x.reads.length, 1, "a reopened thread waits the full debounce again");
-  await wait(450);
+  t.mock.timers.tick(300);
   assert.equal(x.reads.length, 2, "returning from another screen is a new open");
   x.state.epoch = 8;
   x.h.render();
-  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  t.mock.timers.tick(VISIBLE_THREAD_READ_DELAY_MS);
   assert.equal(x.reads.length, 3, "another account is a new open");
   x.h.unmount();
 });
 
-test("a pause preserves an exhausted budget while switching threads starts over, and the pending read is cancelled by a pause", async () => {
+test("a pause preserves an exhausted budget while switching threads starts over, and the pending read is cancelled by a pause", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const x = setup({ summary: exactSummary(2) });
   mountVisible(x);
-  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  t.mock.timers.tick(VISIBLE_THREAD_READ_DELAY_MS);
   refresh(x, exactSummary(2));
   refresh(x, exactSummary(2));
   refresh(x, exactSummary(2));
@@ -326,25 +333,27 @@ test("a pause preserves an exhausted budget while switching threads starts over,
   x.h.render();
   x.state.active = true;
   x.h.render();
-  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  t.mock.timers.tick(VISIBLE_THREAD_READ_DELAY_MS + 150);
   assert.equal(x.reads.length, 3, "a pause does not refill the budget for the same count");
   const other = `nyxa-${"d".repeat(32)}`;
   x.state.source = { type: "conversation", id: other };
   x.state.summary = { ...exactSummary(0), by_source: [{ source_type: "conversation", id: other, conversation_id: null, unread: 1 }] };
   x.h.render();
-  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  t.mock.timers.tick(VISIBLE_THREAD_READ_DELAY_MS);
   assert.deepEqual(JSON.parse(JSON.stringify(x.reads.at(-1))), { source: { type: "conversation", id: other } }, "another thread reads on its own");
   x.state.source = { type: "conversation", id: C };
   x.state.summary = exactSummary(2);
   x.h.render();
-  await wait(VISIBLE_THREAD_READ_DELAY_MS - 300);
+  t.mock.timers.tick(VISIBLE_THREAD_READ_DELAY_MS - 300);
   x.state.active = false;
   x.h.render();
-  await wait(600);
+  t.mock.timers.tick(600);
   assert.equal(x.reads.length, 4, "pausing before the debounce ends cancels that read");
   x.state.active = true;
   x.h.render();
-  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  t.mock.timers.tick(VISIBLE_THREAD_READ_DELAY_MS - 1);
+  assert.equal(x.reads.length, 4, "the resumed thread waits the full debounce");
+  t.mock.timers.tick(1);
   assert.equal(x.reads.length, 5, "coming back to the thread reads after a full debounce");
   x.h.unmount();
 });
