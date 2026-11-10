@@ -116,6 +116,7 @@ fn tool_failure(response: &Response) -> Option<crate::models::assistant_conversa
         return Some(failure.clone());
     }
     Some(ToolFailure {
+        reason: None,
         kind: if let Some(code) = response.extensions().get::<RpcFailureCode>() {
             if code.0 == -32603 {
                 "internal"
@@ -158,6 +159,7 @@ fn rpc_success(id: Option<serde_json::Value>, result: serde_json::Value) -> Resp
         response
             .extensions_mut()
             .insert(crate::models::assistant_conversation::ToolFailure {
+                reason: None,
                 kind: "tool_error".into(),
                 status: None,
             });
@@ -184,6 +186,7 @@ fn rpc_error(id: Option<serde_json::Value>, code: i32, message: &str) -> Respons
     response
         .extensions_mut()
         .insert(crate::models::assistant_conversation::ToolFailure {
+            reason: None,
             kind: if code == -32603 {
                 "internal"
             } else {
@@ -492,6 +495,7 @@ async fn service_tool_content(
             vec![serde_json::json!({ "type": "text", "text": text })],
             is_error,
             is_error.then(|| crate::models::assistant_conversation::ToolFailure {
+                reason: None,
                 kind: "service_status".into(),
                 status: Some(status),
             }),
@@ -1756,15 +1760,20 @@ pub async fn mcp_post(
                 Err(r) => return r,
             };
             let sse_capable = accepts_sse(&headers);
-            handle_tools_call(
-                &state,
-                &auth,
-                sid.as_deref(),
-                &request,
-                sse_capable,
-                billing_egress_permit,
-            )
-            .await
+            let trace = crate::turn_trace::TurnContext::for_request(
+                &headers,
+                auth.chat.as_ref().and_then(|chat| chat.turn_id.as_deref()),
+            );
+            trace
+                .scope(handle_tools_call(
+                    &state,
+                    &auth,
+                    sid.as_deref(),
+                    &request,
+                    sse_capable,
+                    billing_egress_permit,
+                ))
+                .await
         }
 
         "ping" => rpc_success(request.id, serde_json::json!({})),
@@ -1782,6 +1791,13 @@ async fn handle_public_rpc(
     request: &JsonRpcRequest,
     authority: &crate::services::platform_public_tools::PublicMcpAuthority,
 ) -> Response {
+    let trace = crate::turn_trace::TurnContext::for_request(
+        headers,
+        (request.method == "tools/call").then_some(authority.context().turn.turn_id.as_str()),
+    );
+    let mut operation =
+        crate::turn_trace::Operation::start(trace.context(), crate::turn_trace::Stage::Mcp);
+    let response = trace.scope(crate::turn_trace::scope(operation.context(), async {
     use crate::services::platform_public_tools as public;
     if let Err(error) = authority.validate_callback_headers(headers) {
         return app_error_to_rpc(request.id.clone(), &error);
@@ -1864,6 +1880,18 @@ async fn handle_public_rpc(
         }
         _ => rpc_error(request.id.clone(), -32601, "Public method not allowed"),
     }
+
+    })).await;
+    operation.finish(
+        if tool_succeeded(&response) {
+            crate::turn_trace::Outcome::Completed
+        } else {
+            crate::turn_trace::Outcome::Failed
+        },
+        Some(response.status().as_u16()),
+        None,
+    );
+    response
 }
 
 /// Translate an `AppError` into a JSON-RPC response. Used when callers hold the
@@ -2536,30 +2564,47 @@ async fn handle_tools_call(
     client_accepts_sse: bool,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> Response {
-    // Ineligible callers do not resolve the flag or add a database command.
-    let enabled = match auth.chat.as_ref() {
-        Some(chat) if crate::services::generated_artifacts::eligible(chat) => {
-            crate::services::generated_artifacts::enabled(&state.db, &chat.user_id)
-                .await
-                .unwrap_or(false)
-        }
-        _ => false,
-    };
-    let cell = tokio::sync::OnceCell::new();
-    let _ = cell.set(enabled);
-    GENERATED_ARTIFACTS_ENABLED
-        .scope(
-            cell,
-            handle_tools_call_inner(
-                state,
-                auth,
-                session_id,
-                request,
-                client_accepts_sse,
-                billing_egress_permit,
-            ),
-        )
-        .await
+    let mut operation = crate::turn_trace::Operation::start(
+        crate::turn_trace::TurnContext::current(),
+        crate::turn_trace::Stage::Mcp,
+    );
+    let response = crate::turn_trace::scope(operation.context(), async {
+        // Ineligible callers do not resolve the flag or add a database command.
+        let enabled = match auth.chat.as_ref() {
+            Some(chat) if crate::services::generated_artifacts::eligible(chat) => {
+                crate::services::generated_artifacts::enabled(&state.db, &chat.user_id)
+                    .await
+                    .unwrap_or(false)
+            }
+            _ => false,
+        };
+        let cell = tokio::sync::OnceCell::new();
+        let _ = cell.set(enabled);
+        GENERATED_ARTIFACTS_ENABLED
+            .scope(
+                cell,
+                handle_tools_call_inner(
+                    state,
+                    auth,
+                    session_id,
+                    request,
+                    client_accepts_sse,
+                    billing_egress_permit,
+                ),
+            )
+            .await
+    })
+    .await;
+    operation.finish(
+        if tool_succeeded(&response) {
+            crate::turn_trace::Outcome::Completed
+        } else {
+            crate::turn_trace::Outcome::Failed
+        },
+        Some(response.status().as_u16()),
+        None,
+    );
+    response
 }
 async fn handle_tools_call_inner(
     state: &AppState,
@@ -3625,6 +3670,7 @@ fn dispatch_service_tool<'a>(
                     vec![serde_json::json!({"type":"text","text":error.to_string()})],
                     true,
                     Some(crate::models::assistant_conversation::ToolFailure {
+                        reason: None,
                         kind: "resource_unavailable".into(),
                         status: None,
                     }),
@@ -4394,6 +4440,34 @@ fn permission_dispatch_auth(auth: &McpAuthContext) -> crate::errors::AppResult<a
     })
 }
 
+fn native_team_tool_result(
+    request_id: Option<serde_json::Value>,
+    name: &str,
+    value: &serde_json::Value,
+    is_error: bool,
+) -> Response {
+    let mut response = tool_result(request_id, &value.to_string(), is_error);
+    // Only a trusted native remember diagnostic may enrich persisted activity.
+    // Never interpret arbitrary downstream result text as safe UI metadata.
+    if name == "nyxid__remember"
+        && is_error
+        && let Ok(reason) = serde_json::from_value::<crate::errors::memory_write::MemoryWriteReason>(
+            value["details"]["reason"].clone(),
+        )
+    {
+        response
+            .extensions_mut()
+            .insert(crate::models::assistant_conversation::ToolFailure {
+                kind: "tool_error".into(),
+                status: None,
+                reason: serde_json::to_value(reason)
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned)),
+            });
+    }
+    response
+}
+
 async fn handle_account_tool(
     state: &AppState,
     auth: &McpAuthContext,
@@ -4452,12 +4526,13 @@ async fn handle_account_tool(
     if let Err(error) =
         crate::services::service_history::context::authenticated(&state.db, &user).await
     {
-        let result = crate::services::assistant_account_tools::error_result_for(
-            error,
-            auth.chat.as_ref(),
-            &state.config.frontend_url,
-        );
-        return tool_result(request_id, &result.value.to_string(), true);
+        let project_error = if name == "nyxid__remember" {
+            crate::services::assistant_account_tools::memory_error_result_for
+        } else {
+            crate::services::assistant_account_tools::error_result_for
+        };
+        let result = project_error(error, auth.chat.as_ref(), &state.config.frontend_url);
+        return native_team_tool_result(request_id, name, &result.value, true);
     }
     if crate::services::assistant_team_tools::is_team_tool(name) {
         let Some(chat) = auth.chat.as_ref() else {
@@ -4469,7 +4544,7 @@ async fn handle_account_tool(
         };
         let (value, is_error) =
             Box::pin(super::assistant_team::execute_tool(state, chat, name, args)).await;
-        return tool_result(request_id, &value.to_string(), is_error);
+        return native_team_tool_result(request_id, name, &value, is_error);
     }
     let result = tools.execute(&user, name, args).await;
     if let (Some(chat), Some(request)) = (auth.chat.as_ref(), result.permission_request.as_ref()) {
@@ -7670,6 +7745,7 @@ mod tests {
         downstream
             .extensions_mut()
             .insert(crate::models::assistant_conversation::ToolFailure {
+                reason: None,
                 kind: "service_status".into(),
                 status: Some(404),
             });
@@ -11164,6 +11240,7 @@ mod skill_authoring_discovery_tests {
         auth.is_api_key = true;
         auth.api_key_id = Some("chat-key".into());
         auth.chat = Some(ChatAuthority {
+            platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
             execution_unsupported: false,
@@ -11987,5 +12064,83 @@ mod broad_enrollment_tests {
         assert!(broad.execution_permission.is_some());
         assert_eq!(*reads.lock().unwrap(), baseline);
         state.db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+#[path = "memory_write_tests.rs"]
+mod memory_write_tests;
+
+#[cfg(test)]
+mod turn_trace_parity_tests {
+    use super::*;
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
+
+    #[tokio::test]
+    async fn mcp_activity_and_error_command_count_parity() {
+        let mut measured = Vec::new();
+        for enabled in [false, true] {
+            let mut f =
+                crate::services::assistant_authority_tests::orchestrator_fixture("turn_trace_mcp")
+                    .await;
+            let auth = super::machine_mcp_tests::authenticated_machine_chat(&f).await;
+            let commands = Arc::new(Mutex::new(BTreeMap::<String, usize>::new()));
+            let recorded = commands.clone();
+            let handler = EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event {
+                    let collection = event.command.get_str(&event.command_name).unwrap_or("");
+                    *recorded
+                        .lock()
+                        .unwrap()
+                        .entry(format!("{}:{collection}", event.command_name))
+                        .or_default() += 1;
+                }
+            });
+            let monitored =
+                crate::test_utils::connect_transaction_test_database_with_command_handler(
+                    "turn_trace_monitor",
+                    handler,
+                )
+                .await;
+            f.state.db = monitored.client().database(f.state.db.name());
+            commands.lock().unwrap().clear();
+            let trace = enabled.then(|| {
+                crate::turn_trace::TurnContext::for_turn(f.chat.turn_id.as_deref().unwrap())
+                    .unwrap()
+            });
+            let response = crate::turn_trace::scope(
+                trace,
+                Box::pin(handle_tools_call(
+                    &f.state,
+                    &auth,
+                    None,
+                    &JsonRpcRequest {
+                        jsonrpc: JSONRPC_VERSION.into(),
+                        id: Some(serde_json::json!(1)),
+                        method: "tools/call".into(),
+                        params: Some(serde_json::json!({"name":"nyx__call_tool","arguments":{}})),
+                    },
+                    false,
+                    crate::services::billing::route_inventory::internal_node_dispatch_permit(),
+                )),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(!tool_succeeded(&response));
+            measured.push(commands.lock().unwrap().clone());
+            f.state.db.drop().await.unwrap();
+            monitored.drop().await.unwrap();
+        }
+        assert_eq!(measured[0], measured[1]);
+        assert!(
+            measured[0]
+                .keys()
+                .any(|key| key.starts_with("update:") || key.starts_with("findAndModify:"))
+        );
+        eprintln!("turn trace MCP command parity: {:?}", measured[0]);
     }
 }

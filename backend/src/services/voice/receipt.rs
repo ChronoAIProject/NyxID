@@ -124,16 +124,12 @@ fn render(
     cards: &[Document],
 ) -> String {
     let mut text = format!("**Call receipt** · {}:{:02}", seconds / 60, seconds % 60);
-    let has_work = !requests.is_empty();
-    text.push_str("\n\n");
-    text.push_str(if has_work {
-        "Handed to NyxBot:\n"
-    } else {
-        "Just a conversation, nothing handed off."
-    });
-    if !has_work {
+    // Direct service calls use ordinary live turns rather than VoiceRequests.
+    // An empty task list does not establish that the call performed no actions.
+    if requests.is_empty() {
         return text;
     }
+    text.push_str("\n\nTasks:\n");
     for request in requests {
         let title = sources
             .get(&request.message_id)
@@ -221,7 +217,7 @@ mod tests {
     #[test]
     fn receipt_hides_empty_work_and_lists_human_statuses_and_results() {
         let empty = render(12, &[], &HashMap::new(), &[]);
-        assert!(empty.contains("Just a conversation, nothing handed off"));
+        assert_eq!(empty, "**Call receipt** · 0:12");
         assert!(!empty.contains("Cost:"));
         let done = request(RequestState::Completed, "r1", "m1");
         let queued = request(RequestState::Queued, "r2", "m2");
@@ -269,6 +265,7 @@ mod tests {
             },
         )]);
         let text = render(72, &[done, queued], &sources, &[]);
+        assert!(text.contains("Tasks:\n"));
         assert!(text.contains("Check my calendar"));
         assert!(text.contains("Done"));
         assert!(text.contains("Queued"));

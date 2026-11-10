@@ -57,6 +57,7 @@ const { mockNavigate, mockRefetch, mockUseAdminAuditLog, auditResponse, routeSea
         search_fields: [
           { key: "event_type", label: "Event type" },
           { key: "user_id", label: "User ID" },
+          { key: "turn_id_exact", label: "Turn ID (exact)" },
           { key: "api_key", label: "Agent / API key" },
           { key: "ip_address", label: "IP address" },
           { key: "user_agent", label: "User agent" },
@@ -459,3 +460,27 @@ describe("AdminAuditLogPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "View service history" }));
     expect(mockNavigate).toHaveBeenCalledWith({ to: "/keys/$keyId", params: { keyId: id } });
   });
+
+
+it("applies and removes an exact turn filter without substring search", async () => {
+  const turn = "e8242800-436d-4a66-8cdf-b0265db90ca1";
+  routeSearch.turn_id = turn;
+  const user = userEvent.setup();
+  render(<AdminAuditLogPage />);
+  expect(mockUseAdminAuditLog).toHaveBeenCalledWith(expect.objectContaining({ turn_id: turn }));
+  await user.click(screen.getByRole("button", { name: `Edit Turn ID (exact) search: is ${turn}` }));
+  await user.clear(screen.getByLabelText("Search audit log"));
+  await user.type(screen.getByLabelText("Search audit log"), `${turn.replaceAll("-", "")}{Enter}`);
+  expect(resolveLastNavigationSearch({ page: 3 })).toEqual({ turn_id: turn });
+  await user.click(screen.getByRole("button", { name: `Remove Turn ID (exact) search value: ${turn}` }));
+  expect(resolveLastNavigationSearch({ turn_id: turn })).toEqual({});
+});
+
+it("refuses a malformed turn ID before changing the query", async () => {
+  const user = userEvent.setup();
+  render(<AdminAuditLogPage />);
+  await user.click(screen.getByRole("combobox", { name: "Search field" }));
+  await user.click(screen.getByRole("option", { name: "Turn ID (exact)" }));
+  await user.type(screen.getByLabelText("Search audit log"), "invalid{Enter}");
+  expect(mockNavigate).not.toHaveBeenCalled();
+});

@@ -112,7 +112,18 @@ export function usageStatus(rows: BillingUsageRow[]) {
 }
 
 export function metricFamily(metric: string) {
-  if (["tokens", "input_tokens", "output_tokens"].includes(metric))
+  if (
+    [
+      "tokens",
+      "input_tokens",
+      "output_tokens",
+      "reasoning_tokens",
+      "image_input_tokens",
+      "image_output_tokens",
+      "audio_input_tokens",
+      "audio_output_tokens",
+    ].includes(metric)
+  )
     return "Tokens";
   if (["cache_read_tokens", "cache_write_tokens"].includes(metric))
     return "Cache";

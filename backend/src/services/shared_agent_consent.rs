@@ -50,7 +50,18 @@ pub async fn authorize(
     binding: &str,
     operation: &Value,
 ) -> AppResult<Result<Permit, Value>> {
-    authorize_inner(db, chat, access, service, binding, operation, true, false).await
+    authorize_inner(
+        db,
+        chat,
+        access,
+        service,
+        binding,
+        operation,
+        true,
+        false,
+        chat.approval_options(),
+    )
+    .await
 }
 
 /// Observe/create the connection card before an ordinary action card consumes
@@ -63,16 +74,26 @@ pub async fn prompt(
     binding: &str,
     operation: &Value,
 ) -> AppResult<Option<Value>> {
-    Ok(
-        authorize_inner(db, chat, access, service, binding, operation, false, false)
-            .await?
-            .err(),
+    Ok(authorize_inner(
+        db,
+        chat,
+        access,
+        service,
+        binding,
+        operation,
+        false,
+        false,
+        chat.approval_options(),
     )
+    .await?
+    .err())
 }
 
-/// Read-only observation for the dispatch coordinator. Once still needs its own
-/// claim; it is never turned into reusable execution authority.
-pub(crate) async fn always_covers(
+/// Read-only observation for the dispatch coordinator: an approved legacy
+/// decision needs no second review at rollout. It supplies no execution permit;
+/// the ordinary shared gate still checks live authority and claims Once before
+/// egress. A consumed, expired, skipped or differently bound row never matches.
+pub(crate) async fn has_approved_consent(
     db: &Database,
     chat: &ChatAuthority,
     access: &RequestAccess,
@@ -91,7 +112,7 @@ pub(crate) async fn always_covers(
     "conversation_id":&chat.conversation_id,"api_key_id":&chat.api_key_id,
     "connection_id":&service.id,"policy_revision":access.revision(),
     "behavior_digest":behavior(access),"authority_digest":binding,
-    "operation_digest":super::mcp_service::canonical_sha256(operation),"decision":"always",
+    "operation_digest":super::mcp_service::canonical_sha256(operation),"decision":{"$in":["always","once"]},
     "$or":[{"expires_at":null},{"expires_at":{"$gt":bson::DateTime::now()}}]};
     Ok(db
         .collection::<bson::Document>(CONSENTS_COLLECTION_NAME)
@@ -111,6 +132,7 @@ async fn authorize_inner(
     operation: &Value,
     consume_once: bool,
     voice: bool,
+    approval: super::approval_service::ApprovalOptions,
 ) -> AppResult<Result<Permit, Value>> {
     if (!voice && (!chat.turn_live || chat.turn_stopped)) || chat.turn_id.is_none() {
         return Err(AppError::AssistantTurnRequired);
@@ -208,9 +230,13 @@ async fn authorize_inner(
                     json!({"error": "shared_connection_skipped", "connection_id": service.id}),
                 ));
             }
-            _ => return Ok(Err(card(&row))),
+            _ => {
+                approval.require_request_support()?;
+                return Ok(Err(card(&row)));
+            }
         }
     }
+    approval.require_request_support()?;
     let now = Utc::now();
     let scope_key = super::mcp_service::canonical_sha256(json!({
         "actor": chat.user_id, "agent": chat.agent_id, "conversation": chat.conversation_id,
@@ -441,7 +467,8 @@ pub(crate) async fn authorize_voice(
     binding: &str,
     operation: &Value,
 ) -> AppResult<Permit> {
-    match authorize_inner(db, chat, access, service, binding, operation, true, true).await? {
+    match authorize_inner(db, chat, access, service, binding, operation, true, true,
+        super::approval_service::ApprovalOptions::NO_REQUEST).await? {
         Ok(permit) => Ok(permit),
         Err(_) => Err(AppError::Conflict("Choose Allow once or Always for this voice connection in your private chat, then start the call again".into())),
     }

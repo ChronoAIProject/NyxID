@@ -541,7 +541,7 @@ pub struct RuntimeFence {
     pub credential_epoch: Option<u64>,
     pub funding_cutoff: Option<DateTime<Utc>>,
 }
-fn execution_fence(machine: &ManagedMachine) -> AppResult<RuntimeFence> {
+pub(crate) fn execution_fence(machine: &ManagedMachine) -> AppResult<RuntimeFence> {
     lifecycle::validate_current_contract(machine)?;
     if machine.resource_state != ResourceState::Ready
         || machine.authorization_state != crate::models::remote_machine::AuthorizationState::Active

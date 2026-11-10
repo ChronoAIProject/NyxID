@@ -1,4 +1,4 @@
-//! Leased recovery for versioned chat results; message bodies stay in their thread.
+//! Leased recovery for versioned chat and push results; message bodies stay in their thread.
 use super::*;
 
 pub const ATTEMPT_SECONDS: u64 = 300;
@@ -9,6 +9,7 @@ pub struct DeliveryClaim {
     pub run: TriggerRun,
     pub attempt: String,
     pub expires_at: DateTime<Utc>,
+    pub lease_until: DateTime<Utc>,
 }
 
 pub enum Claim {
@@ -55,12 +56,18 @@ pub async fn claim(db: &Database, run: &TriggerRun) -> AppResult<Claim> {
             .and_then(|value| value.get_datetime("expires_at"))
             .map_err(|_| AppError::Internal("Result delivery deadline is unavailable".into()))?
             .to_chrono();
+        let lease_until = document
+            .get_document("result_delivery")
+            .and_then(|value| value.get_datetime("lease_until"))
+            .map_err(|_| AppError::Internal("Result delivery lease is unavailable".into()))?
+            .to_chrono();
         let run = bson::from_document(document)
             .map_err(|_| AppError::Internal("Result delivery identity is unavailable".into()))?;
         return Ok(Claim::Acquired(Box::new(DeliveryClaim {
             run,
             attempt,
             expires_at,
+            lease_until,
         })));
     }
     let Some(document) = db
@@ -116,17 +123,45 @@ pub async fn finish_unrecoverable(
         .start_transaction()
         .and_run((db, filter, frontend), |session, (db, filter, frontend)| {
             Box::pin(async move {
-                transactions::transaction_result(
+                let operation: AppResult<_> = async {
+                    super::notification_delivery::unrecoverable_in_session(db, filter, session)
+                        .await?;
+                    let saved = db
+                        .collection::<TriggerRun>(RUNS)
+                        .find_one(filter.clone())
+                        .session(&mut *session)
+                        .await?;
+                    let status = saved
+                        .as_ref()
+                        .and_then(|run| run.notification_delivery.as_ref());
+                    let accepted = status.is_some_and(|s| s.state == "accepted")
+                        && saved.as_ref().is_some_and(|run| {
+                            run.execution_outcome == Some(RunOutcome::Completed)
+                        });
                     super::finish_update(
                         db,
                         filter.clone(),
-                        RunOutcome::Failed,
-                        Some("result_delivery_interrupted"),
+                        if accepted {
+                            RunOutcome::Completed
+                        } else {
+                            RunOutcome::Failed
+                        },
+                        if accepted {
+                            None
+                        } else {
+                            Some(
+                                status
+                                    .and_then(|s| s.reason.as_deref())
+                                    .unwrap_or("result_delivery_interrupted"),
+                            )
+                        },
                         frontend,
                         session,
                     )
-                    .await,
-                )
+                    .await
+                }
+                .await;
+                transactions::transaction_result(operation)
             })
         })
         .await
@@ -158,7 +193,7 @@ pub async fn defer(db: &Database, claim: &DeliveryClaim, retry_after: u64) -> Ap
     })).await.map_err(transactions::map_transaction_error)
 }
 
-fn claim_filter(claim: &DeliveryClaim) -> Document {
+pub(super) fn claim_filter(claim: &DeliveryClaim) -> Document {
     doc! {"_id":&claim.run.id,"user_id":&claim.run.user_id,"turn_id":&claim.run.turn_id,"outcome":"started",
     "result_delivery.version":1,"result_delivery.claim_id":&claim.attempt,
     "result_delivery.lease_until":{"$gt":date(Utc::now())}}

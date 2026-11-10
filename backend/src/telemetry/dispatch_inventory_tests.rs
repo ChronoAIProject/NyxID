@@ -82,8 +82,10 @@ fn all_track_and_vendor_dispatch_paths_are_reviewed() {
         (
             "telemetry/mod.rs",
             "dispatch_checks_live_revision_across_independent_clients",
-            19,
+            14,
         ),
+        // Test-only bounded retry of an admission step (see its doc comment).
+        ("telemetry/mod.rs", "track_until_enqueued", 1),
     ]
     .into_iter()
     .map(|(file, function, count)| ((file.into(), function.into()), count))

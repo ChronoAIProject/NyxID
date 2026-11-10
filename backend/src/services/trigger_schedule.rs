@@ -4,6 +4,7 @@ pub mod compute;
 pub mod continuation;
 pub mod direct;
 pub mod group;
+pub mod notification_delivery;
 pub mod result_delivery;
 use super::api_key_mutation_service as transactions;
 use super::assistant_engine_policy as policy;
@@ -254,6 +255,8 @@ pub fn new_run(trigger: &Trigger, at: DateTime<Utc>, deadline: DateTime<Utc>) ->
         missed: None,
         waiting_for: Vec::new(),
         result_claimed: false,
+        execution_outcome: None,
+        notification_delivery: None,
         image_refs: Vec::new(),
         delegated_image_refs: Vec::new(),
         image_refs_truncated: 0,
@@ -672,6 +675,7 @@ async fn finish_update(
         .return_document(ReturnDocument::After);
     let mut run = action.session(&mut *session).await?;
     if let Some(run) = &mut run {
+        notification_delivery::notice_in_session(db, run, frontend, session).await?;
         Box::pin(record_terminal_in_session(
             db, session, run, reason, frontend,
         ))
@@ -694,24 +698,7 @@ async fn finish_record(db: &Database, run: &TriggerRun) -> AppResult<()> {
     db.collection::<Document>(WORK)
         .delete_one(doc! { "_id": &run.id })
         .await?;
-    let last_run = bson::to_bson(run)
-        .map_err(|error| AppError::Internal(format!("Serialize trigger run: {error}")))?;
-    db.collection::<Trigger>(TRIGGERS)
-        .update_one(
-            doc! {
-                "_id": &run.trigger_id,
-                "$or": [
-                    { "schedule_state.last_run": null },
-                    { "schedule_state.last_run.scheduled_at": { "$lte": date(run.scheduled_at) } },
-                ],
-            },
-            doc! {
-                "$set": {
-                    "schedule_state.last_run": last_run,
-                },
-            },
-        )
-        .await?;
+    project_last_run(db, run, None).await?;
     audit(
         db,
         &run.user_id,
@@ -725,6 +712,38 @@ async fn finish_record(db: &Database, run: &TriggerRun) -> AppResult<()> {
     )
     .await;
     trim_history(db, &run.trigger_id).await
+}
+
+/// The list/tool projection also shows pending delivery, without changing the
+/// authored trigger generation or deleting its recovery work.
+pub(super) async fn project_last_run(
+    db: &Database,
+    run: &TriggerRun,
+    session: Option<&mut ClientSession>,
+) -> AppResult<()> {
+    let last_run = bson::to_bson(run)
+        .map_err(|error| AppError::Internal(format!("Serialize trigger run: {error}")))?;
+    let collection = db.collection::<Trigger>(TRIGGERS);
+    let action = collection.update_one(
+        doc! {
+            "_id": &run.trigger_id,
+            "$or": [
+                { "schedule_state.last_run": null },
+                { "schedule_state.last_run.scheduled_at": { "$lte": date(run.scheduled_at) } },
+            ],
+        },
+        doc! {
+            "$set": {
+                "schedule_state.last_run": last_run,
+            },
+        },
+    );
+    if let Some(session) = session {
+        action.session(session).await?;
+    } else {
+        action.await?;
+    }
+    Ok(())
 }
 
 async fn trim_history(db: &Database, trigger_id: &str) -> AppResult<()> {
@@ -1412,8 +1431,14 @@ pub async fn terminal_result(
     session
         .start_transaction()
         .and_run2(async move |session| {
-            let operation =
-                record_terminal_in_session(&db, session, &run, result.as_deref(), &frontend).await;
+            let operation: AppResult<()> = async {
+                db.collection::<Document>(RUNS).update_one(
+                    doc! {"_id":&run.id,"user_id":&run.user_id,"turn_id":&run.turn_id,
+                        "outcome":{"$in":["started","waiting"]},"execution_outcome":{"$exists":false}},
+                    doc! {"$set":{"execution_outcome":if result.is_some() {"failed"} else {"completed"}}},
+                ).session(&mut *session).await?;
+                record_terminal_in_session(&db, session, &run, result.as_deref(), &frontend).await
+            }.await;
             transactions::transaction_result(operation)
         })
         .await

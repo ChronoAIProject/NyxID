@@ -40,6 +40,7 @@ fn price(operation: &str, credits: &str, status: PricingSyncStatus) -> Operation
 
 fn lane(status: PricingSyncStatus, operations: Vec<OperationPrice>) -> LanePricing {
     LanePricing {
+        model_prices: Vec::new(),
         metric: BillingMetric::Requests,
         credits_per_unit: "1".into(),
         lago_metric_code: "base".into(),
@@ -262,6 +263,7 @@ struct RecordingLago {
     synced: Mutex<Vec<ServicePriceSync>>,
     removed: Mutex<Vec<String>>,
     fail_removals: AtomicBool,
+    fail_sync_at: std::sync::atomic::AtomicUsize,
 }
 
 #[async_trait]
@@ -274,7 +276,13 @@ impl LagoApi for RecordingLago {
         Ok(crate::services::billing::taxes::zero_config())
     }
     async fn sync_standard_charge(&self, _plan: &str, input: &ServicePriceSync) -> AppResult<()> {
-        self.synced.lock().unwrap().push(input.clone());
+        let mut calls = self.synced.lock().unwrap();
+        calls.push(input.clone());
+        if calls.len() == self.fail_sync_at.load(Ordering::SeqCst) {
+            return Err(AppError::BillingProviderUnavailable(
+                "fixture failure".into(),
+            ));
+        }
         Ok(())
     }
     async fn remove_standard_charge(&self, _plan: &str, code: &str) -> AppResult<()> {
@@ -892,3 +900,6 @@ async fn request_allowance_covers_an_operation_priced_request() {
     );
     db.drop().await.unwrap();
 }
+
+#[path = "model_tariff_sync_tests.rs"]
+mod model_tariff_sync_tests;

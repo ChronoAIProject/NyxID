@@ -818,6 +818,9 @@ pub async fn confirm_action_with(
         if consume_action(db, chat, id, tool, args).await? {
             return Ok(None);
         }
+        if let Err(error) = chat.approval_options().require_request_support() {
+            return Ok(Some(json!(error.response_body())));
+        }
         if on_invalid == InvalidCard::Refuse {
             // Only explain this caller's exact card. A foreign or mismatched
             // id must not disclose another conversation or operation.
@@ -843,6 +846,9 @@ pub async fn confirm_action_with(
                     the call. Ask the user before requesting a new action card.",
             })));
         }
+    }
+    if let Err(error) = chat.approval_options().require_request_support() {
+        return Ok(Some(json!(error.response_body())));
     }
     let summary = if need.webhook {
         format!("Webhook automation requests: {summary}. Review this action before allowing it.")
@@ -1011,6 +1017,7 @@ mod access_mode_tests {
     #[test]
     fn webhook_policy_floor_remains_independent_of_owner_mode() {
         let mut chat = ChatAuthority {
+            platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
             execution_unsupported: false,
@@ -1051,6 +1058,7 @@ mod access_mode_tests {
 
 #[derive(Clone)]
 pub struct ChatAuthority {
+    pub(crate) platform_model_context: Option<String>,
     pub(crate) automation_work: Option<crate::models::trigger_run::AutomationWork>,
     pub(crate) execution_group_id: Option<String>,
     pub(crate) execution_unsupported: bool,
@@ -1094,6 +1102,14 @@ pub struct ChatAuthority {
     pub with_nyxbot: bool,
 }
 impl ChatAuthority {
+    /// The adapter chooses interaction capability once; approval writers use
+    /// the same transport-independent options as every other caller.
+    pub(crate) fn approval_options(&self) -> super::approval_service::ApprovalOptions {
+        super::approval_service::ApprovalOptions {
+            allow_request: !self.execution_voice_task,
+        }
+    }
+
     /// NyxBot threads run with Full access; specialists only with their grants.
     pub fn is_orchestrator(&self) -> bool {
         self.role == AgentRole::Orchestrator
@@ -1522,6 +1538,41 @@ pub async fn for_key(
     Box::pin(for_key_with_access(db, user, key, None)).await
 }
 
+// Follow the existing server-authored reporting lineage so a Voice task cannot
+// create an approval indirectly by assigning the operation to a specialist.
+async fn voice_execution(db: &Database, row: &AssistantConversation) -> AppResult<bool> {
+    let mut current = row.clone();
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        if current.voice_parent_conversation_id.is_some()
+            || current
+                .active_turn
+                .as_ref()
+                .is_some_and(|t| t.voice_request_id.is_some())
+        {
+            return Ok(true);
+        }
+        let Some(parent) = current
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.report_to.as_deref())
+        else {
+            return Ok(false);
+        };
+        if seen.len() >= 16 || !seen.insert(parent.to_owned()) {
+            return Ok(false);
+        }
+        let Some(row) = db
+            .collection::<AssistantConversation>(CONVERSATIONS)
+            .find_one(doc! {"_id":parent,"user_id":&row.user_id})
+            .await?
+        else {
+            return Ok(false);
+        };
+        current = row;
+    }
+}
+
 pub async fn for_key_with_access(
     db: &Database,
     user: &str,
@@ -1613,20 +1664,26 @@ pub async fn for_key_with_access(
         .map(|turn| (turn.report_to.clone(), turn.with_nyxbot))
         .unwrap_or((None, false));
     Ok(Some(ChatAuthority {
+        platform_model_context: live.and_then(|t| t.platform_model_context.clone()),
         automation_work: live.and_then(|t| t.automation_work.clone()),
         execution_group_id: conversation
             .collaboration
             .as_ref()
             .map(|b| b.group_id.clone())
             .or_else(|| conversation.group_id.clone()),
-        execution_voice_task: conversation.voice_parent_conversation_id.is_some()
-            || conversation
-                .active_turn
-                .as_ref()
-                .is_some_and(|t| t.voice_request_id.is_some()),
+        execution_voice_task: voice_execution(db, &conversation).await?,
         execution_unsupported: (conversation.automation_thread
             && conversation.voice_parent_conversation_id.is_none())
             || conversation.platform_thread.is_some()
+            || conversation.active_turn.as_ref().is_some_and(|t| {
+                (conversation.channel.is_some()
+                    || t.asked_from.is_some()
+                    || t.channel_context.is_some()
+                    || t.channel_event_id.is_some())
+                    && t.execution_task
+                        .as_ref()
+                        .is_none_or(|task| task.channel_source.is_none())
+            })
             || conversation.active_turn.as_ref().is_some_and(|t| {
                 t.trigger_run_id.is_some()
                     || t.automation_work.is_some()
@@ -2188,16 +2245,19 @@ pub struct RequestOrigin {
 /// Insert or reuse a card in a caller-owned transaction. The caller must
 /// commit its claim in this same transaction; this helper performs the usual
 /// authority fence, deduplication and voice-confirmation bookkeeping.
+/// Pass the initiating caller's approval capability separately from a recovered
+/// origin's authority, which may now describe an unrelated active turn.
 pub async fn request_in_session(
     db: &Database,
     chat: &ChatAuthority,
     request: Request<'_>,
     origin: Option<&RequestOrigin>,
+    approval: super::approval_service::ApprovalOptions,
     session: &mut ClientSession,
 ) -> AppResult<AssistantAcknowledgement> {
     let candidate = prepare_request_candidate(db, chat, request, None, None).await?;
     Ok(
-        request_candidate_in_session(db, chat, &candidate, origin, session)
+        request_candidate_in_session(db, chat, &candidate, origin, approval, session)
             .await?
             .0,
     )
@@ -2221,7 +2281,12 @@ async fn request_tracked_with_machine_context(
         .start_transaction()
         .and_run2(async move |session| {
             let operation = Box::pin(request_candidate_in_session(
-                &db, &chat, &candidate, None, session,
+                &db,
+                &chat,
+                &candidate,
+                None,
+                chat.approval_options(),
+                session,
             ))
             .await;
             mutations::transaction_result(operation)
@@ -2374,6 +2439,7 @@ async fn request_candidate_in_session(
     chat: &ChatAuthority,
     candidate: &AssistantAcknowledgement,
     origin: Option<&RequestOrigin>,
+    approval: super::approval_service::ApprovalOptions,
     session: &mut ClientSession,
 ) -> AppResult<(AssistantAcknowledgement, bool)> {
     let now = candidate.created_at;
@@ -2422,6 +2488,7 @@ async fn request_candidate_in_session(
     {
         return Ok((existing, false));
     }
+    approval.require_request_support()?;
     let mut row = candidate.clone();
     row.routing = routing;
     // Ordinary denials stay bound to the initiating user/orchestrator
@@ -3199,6 +3266,7 @@ pub(crate) async fn decide_in_session(
             .await?;
     }
     let chat = ChatAuthority {
+        platform_model_context: None,
         automation_work: None,
         execution_group_id: target
             .collaboration

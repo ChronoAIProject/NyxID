@@ -109,6 +109,145 @@ async fn child(f: &Fixture, parent: &str) -> (String, String) {
     }).await.unwrap();
     (id, secret.to_string())
 }
+
+#[tokio::test]
+async fn seeded_catalog_enables_owner_publication_and_exact_device_discovery() {
+    use crate::handlers::assistant_voice::{publish_voice_service, voice_service};
+    use axum::{
+        body::{Body, to_bytes},
+        extract::{Path, State},
+        http::Request,
+    };
+    use tower::ServiceExt;
+
+    Box::pin(async {
+        let (f, _) = fixture("voice_seed_publication").await;
+        let mut agent =
+            crate::services::assistant_team_service::agent_for_conversation(&f.state.db, &f.row)
+                .await
+                .unwrap();
+        agent.description = "帮助你查看和控制已授权的平板。".into();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &agent.id},
+                doc! {"$set": {"description": &agent.description}},
+            )
+            .await
+            .unwrap();
+        let human = crate::test_utils::test_auth_user(&f.owner);
+        // Reproduce the missing-catalog failure independently of rollout flags.
+        assert!(matches!(
+            super::binding::publish(&f.state.db, &f.owner, &agent.id, &f.state.config.base_url)
+                .await,
+            Err(crate::errors::AppError::NotFound(_))
+        ));
+        super::catalog::seed(&f.state.db, &f.state.config.base_url)
+            .await
+            .unwrap();
+        // The seed publishes no connection and enables no feature.
+        assert!(
+            super::binding::get(&f.state.db, &f.owner, &agent.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            publish_voice_service(
+                State(f.state.clone()),
+                human.clone(),
+                Path(agent.id.clone())
+            )
+            .await,
+            Err(crate::errors::AppError::Forbidden(_))
+        ));
+        crate::services::security_readiness_service::ready_test_replica(&f.state.db).await;
+        flags::set_platform_override(
+            &f.state.db,
+            flags::VOICE_AGENT_KEY_FLAG_KEY,
+            &flags::FlagTarget::Global,
+            true,
+            &f.owner,
+        )
+        .await
+        .unwrap();
+        let published = publish_voice_service(
+            State(f.state.clone()),
+            human.clone(),
+            Path(agent.id.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        let read = voice_service(State(f.state.clone()), human, Path(agent.id.clone()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(published, read);
+        assert_eq!(read["service"]["agent_id"], agent.id);
+        assert_eq!(read["service"]["is_active"], true);
+        let service_id = read["service"]["id"].as_str().unwrap().to_string();
+        let created = key_service::create_api_key(
+            &f.state.db,
+            &f.owner,
+            "seeded-device",
+            "read proxy",
+            None,
+            None,
+            Some(std::slice::from_ref(&service_id)),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let (_, private) = crate::routes::build_router_with_state(f.state.clone());
+        let app = private.with_state(f.state.clone());
+        for path in [
+            "/api/v1/keys".to_string(),
+            format!("/api/v1/proxy/nyxbot-voice/{service_id}/voice/agents"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(&path)
+                        .header("authorization", format!("Bearer {}", created.full_key))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 128 * 1024).await.unwrap();
+            assert_eq!(status, 200, "{path}: {}", String::from_utf8_lossy(&bytes));
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if path == "/api/v1/keys" {
+                let connections = body["keys"].as_array().unwrap();
+                assert_eq!(connections.len(), 1);
+                assert_eq!(connections[0]["id"], service_id);
+                assert_eq!(
+                    connections[0]["catalog_service_slug"],
+                    super::access::SERVICE_SLUG
+                );
+            } else {
+                assert_eq!(body["agents"].as_array().unwrap().len(), 1);
+                assert_eq!(body["agents"][0]["agent_id"], agent.id);
+                assert_eq!(body["agents"][0]["description"], agent.description);
+                assert_eq!(body["agents"][0]["service_id"], service_id);
+            }
+        }
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn voice_key_uses_existing_service_grants_and_no_bot_hardcoding() {
     Box::pin(async {
@@ -402,6 +541,33 @@ async fn voice_child_http_discovery_and_start_enforce_exact_bot_connection() {
         assert_eq!(body["agents"].as_array().unwrap().len(), 1);
         assert_eq!(body["agents"][0]["agent_id"], agent.id);
         assert_eq!(body["agents"][0]["service_id"], service_id);
+        // One fresh options response contains the same saved defaults as
+        // discovery. Clearing settings must not resurrect a cached choice.
+        for saved in [Some(platform(&voice)), None] {
+            crate::services::assistant_settings_service::update(
+                &f.state.db, &f.owner,
+                crate::services::assistant_settings_service::Update {
+                    voice: Some(saved.clone()), ..Default::default()
+                },
+            ).await.unwrap();
+            let response = app.clone().oneshot(Request::builder()
+                .uri(format!("/api/v1/proxy/nyxbot-voice/{service_id}/voice/options?conversation_id={}", f.row.id))
+                .header("authorization", format!("Bearer {secret}"))
+                .body(Body::empty()).unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 128*1024).await.unwrap();
+            assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["preferences"], serde_json::to_value(saved).unwrap());
+            assert_eq!(body["greetings"], true);
+            assert!(body["options"].is_array());
+            assert_eq!(body["recording"], false);
+        }
+        let response = app.clone().oneshot(Request::builder()
+            .uri(format!("/api/v1/proxy/nyxbot-voice/{service_id}/voice/options?conversation_id={}", f.nyxbot_thread))
+            .header("authorization", format!("Bearer {secret}"))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), 403, "Combined options cannot select another Bot");
         let response = app.clone().oneshot(Request::builder().method("POST")
             .uri(format!("/api/v1/proxy/nyxbot-voice/{service_id}/voice/sessions/{}/control", Uuid::new_v4()))
             .header("authorization", format!("Bearer {secret}"))
@@ -931,11 +1097,14 @@ async fn voice_granted_child_runtime_controls_and_announcements_ignore_service_a
             .await.unwrap();
         assert!(!started.session.execution_enrolled, "Device OpenAI voice cannot inherit owner permissions");
         let notice_id = Uuid::new_v4().to_string();
+        let greeting_id = Uuid::new_v4().to_string();
         for (path, data) in [
             (format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/control", started.session.id),
                 json!({"command_id":Uuid::new_v4(),"expected_revision":0,"action":"mute"})),
             (format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/announcements", started.session.id),
                 json!({"request_id":notice_id,"text":"hello"})),
+            (format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/announcements", started.session.id),
+                json!({"request_id":greeting_id,"greeting":true})),
         ] {
             let response = app.clone().oneshot(Request::builder().method("POST").uri(path)
                 .header("authorization", format!("Bearer {secret}"))
@@ -944,14 +1113,23 @@ async fn voice_granted_child_runtime_controls_and_announcements_ignore_service_a
             let status=response.status(); let bytes=to_bytes(response.into_body(),128*1024).await.unwrap();
             assert_eq!(status, 200, "{}", String::from_utf8_lossy(&bytes));
         }
+        let invalid = app.clone().oneshot(Request::builder().method("POST")
+            .uri(format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/announcements", started.session.id))
+            .header("authorization", format!("Bearer {secret}"))
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"request_id":Uuid::new_v4(),"greeting":true,"text":"script"}).to_string())).unwrap())
+            .await.unwrap();
+        assert_eq!(invalid.status(), 400);
+        for request_id in [&notice_id, &greeting_id] {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 let notice = f.state.db.collection::<super::announcements::Announcement>(super::announcements::COLLECTION)
-                    .find_one(doc! {"session_id":&started.session.id,"request_id":&notice_id}).await.unwrap().unwrap();
+                    .find_one(doc! {"session_id":&started.session.id,"request_id":request_id}).await.unwrap().unwrap();
                 if notice.state == "accepted" { break; }
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             }
         }).await.expect("the sideband must dispatch without a service approval");
+        }
         let response = app.oneshot(Request::builder().method("POST")
             .uri(format!("/api/v1/proxy/nyxbot-voice/{service}/voice/sessions/{}/control", started.session.id))
             .header("authorization", format!("Bearer {secret}"))
@@ -1529,4 +1707,130 @@ async fn device_voice_cannot_inherit_enrolled_owner_permissions_or_task_root() {
         })
         .await;
     }
+}
+
+#[tokio::test]
+async fn direct_voice_tools_use_bot_authority_without_widening_the_device_key() {
+    use crate::models::assistant_agent::AgentGrants;
+    use crate::services::assistant_team_service as team;
+    use axum::{Extension, Router, routing::post};
+    use serde_json::json;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    Box::pin(async {
+        let (mut f, voice, voice_service, raw) = setup("voice_device_vs_bot_tools").await;
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"state":"ready"})))
+            .mount(&upstream)
+            .await;
+        let target = crate::services::assistant_authority_tests::connected(
+            &f.state.db,
+            &f.owner,
+            "panel-state",
+            &upstream.uri(),
+        )
+        .await;
+        let agent = team::agent_for_conversation(&f.state.db, &f.row)
+            .await
+            .unwrap();
+        team::set_grants(
+            &f.state.db,
+            &f.owner,
+            &agent.id,
+            team::GrantChange::Add(AgentGrants {
+                service_ids: vec![target.clone()],
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        let caller = auth(&f, &raw).await;
+        let board_key = caller.api_key_id.clone().unwrap();
+        let proof = keys::authorize(&f.state.db, &caller, &f.row.id)
+            .await
+            .unwrap();
+        let call = session::admit_for_client_key(
+            &f.state.db,
+            &f.owner,
+            &f.row.id,
+            &Uuid::new_v4().to_string(),
+            platform(&voice),
+            "fixture".into(),
+            "worker",
+            proof,
+        )
+        .await
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        f.state.config.base_url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/mcp", post(crate::handlers::mcp_transport::mcp_post))
+            .layer(Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Mcp,
+                ),
+            ))
+            .with_state(f.state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let read = super::tools::Invocation::parse(
+            "nyx__call_tool",
+            &json!({"tool_name":"panel-state__request",
+            "arguments_json":json!({"method":"GET","path":"/status"}).to_string()})
+            .to_string(),
+        )
+        .unwrap()
+        .unwrap();
+        let mut tools = super::tools::Executions::default();
+        let result = tools
+            .invoke(&f.state, &call, "delegation", "read", &read)
+            .await
+            .unwrap();
+        assert_ne!(result["isError"], true, "{result}");
+        assert!(result.to_string().contains("ready"), "{result}");
+        // Real MCP chat-key responses store camera pixels as turn attachments.
+        // The native Responses client must supply them as actual visual input.
+        use base64::Engine;
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a8ioAAAAASUVORK5CYII=";
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path("/snapshot"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(
+                base64::engine::general_purpose::STANDARD.decode(png).unwrap(),
+            ).insert_header("Content-Type", "image/png"))
+            .with_priority(1)
+            .mount(&upstream).await;
+        let photo = super::tools::Invocation::parse("nyx__call_tool",
+            &json!({"tool_name":"panel-state__request", "arguments_json":
+                json!({"method":"GET","path":"/snapshot"}).to_string()}).to_string(),
+        ).unwrap().unwrap();
+        let image = tools.invoke(&f.state, &call, "delegation", "photo", &photo).await.unwrap();
+        let (image_result, images) = super::tools::presentation(image);
+        assert_eq!(image_result["isError"], false, "{image_result}");
+        assert_eq!(images.len(), 1, "{image_result}");
+        assert_eq!(images[0]["image_url"], format!("data:image/png;base64,{png}"));
+        let list = super::tools::Invocation::parse("nyx__list_connected_services", "{}").unwrap().unwrap();
+        let repeated = tools.invoke(&f.state, &call, "delegation", "list", &list).await.unwrap();
+        assert!(super::tools::presentation(repeated).1.is_empty(), "Old pixels are not resent");
+        let board = key_service::get_api_key(&f.state.db, &f.owner, &board_key)
+            .await
+            .unwrap();
+        assert_eq!(board.allowed_service_ids, vec![voice_service]);
+        assert!(!board.allow_all_services);
+        assert!(!board.allowed_service_ids.contains(&target));
+        f.state
+            .db
+            .collection::<bson::Document>(KEYS)
+            .update_one(doc! {"_id":&board_key}, doc! {"$set":{"is_active":false}})
+            .await
+            .unwrap();
+        assert!(
+            tools
+                .invoke(&f.state, &call, "delegation", "revoked-board", &read)
+                .await
+                .is_err()
+        );
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 2);
+        tools.close(&f.state).await;
+        server.abort();
+    })
+    .await;
 }

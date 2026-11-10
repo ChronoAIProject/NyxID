@@ -152,6 +152,9 @@ pub struct TaskRef {
 /// Persisted on existing roots and their server-admitted descendants only.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskAdmission {
+    /// Verified original channel source, inherited only through server task lineage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_source: Option<Box<super::execution_permission_channel::ChannelSource>>,
     pub version: u32,
     pub task: TaskRef,
     pub actor_user_id: String,

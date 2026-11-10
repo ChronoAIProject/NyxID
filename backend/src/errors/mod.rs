@@ -1,4 +1,5 @@
 pub mod access_denial;
+pub mod memory_write;
 pub mod refresh;
 pub mod skill_draft;
 pub mod voice_start;
@@ -153,6 +154,10 @@ pub enum AppError {
     VoiceQueueFull,
     #[error("Voice provider adapters are not enabled")]
     VoiceProviderUnavailable,
+    #[error(
+        "This operation requires approval, but this caller does not support approval requests. The operation was not executed. No approval request was created."
+    )]
+    ApprovalUnsupported,
 
     #[error("Service monitoring is unavailable")]
     MonitoringUnavailable,
@@ -208,6 +213,9 @@ pub enum AppError {
 
     #[error("Validation error: {0}")]
     ValidationError(String),
+
+    #[error("{0}")]
+    MemoryWrite(memory_write::MemoryWriteReason),
 
     /// Owner selection diagnostics keep the validation_error / 1008 contract.
     #[error("{reason}: {message}")]
@@ -869,6 +877,7 @@ impl AppError {
 
     pub(crate) fn status_code(&self) -> StatusCode {
         match self {
+            Self::MemoryWrite(reason) => reason.legacy_error().status_code(),
             Self::RefreshRefused { source, .. } => source.status_code(),
             Self::VoiceStartFailed(failure) => failure.source.status_code(),
             Self::BadRequest(_)
@@ -888,6 +897,7 @@ impl AppError {
             Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive | Self::ErasurePreparing => StatusCode::CONFLICT,
             Self::VoiceQueueFull => StatusCode::TOO_MANY_REQUESTS,
+            Self::ApprovalUnsupported => StatusCode::FORBIDDEN,
             Self::SecurityReadinessUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::VoiceProviderUnavailable | Self::MonitoringUnavailable => {
                 StatusCode::SERVICE_UNAVAILABLE
@@ -1107,6 +1117,8 @@ impl AppError {
 
     pub(crate) fn error_code(&self) -> u32 {
         match self {
+            Self::MemoryWrite(memory_write::MemoryWriteReason::MemoryStorageError) => 1007,
+            Self::MemoryWrite(reason) => reason.legacy_error().error_code(),
             Self::RefreshRefused { source, .. } => source.error_code(),
             Self::VoiceStartFailed(failure) => failure.source.error_code(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
@@ -1120,6 +1132,7 @@ impl AppError {
             Self::Conflict(_) => 1004,
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
+            Self::ApprovalUnsupported => 12502,
             Self::SecurityReadinessUnavailable => 12900,
             Self::VoiceProviderUnavailable => 12501,
             Self::MonitoringUnavailable => 13300,
@@ -1390,6 +1403,7 @@ impl AppError {
 
     pub(crate) fn error_key(&self) -> &str {
         match self {
+            Self::MemoryWrite(reason) => reason.error_key(),
             Self::RefreshRefused { source, .. } => source.error_key(),
             Self::VoiceStartFailed(failure) => failure.source.error_key(),
             Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
@@ -1403,6 +1417,7 @@ impl AppError {
             Self::AssistantTurnActive => "turn_active",
             Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
+            Self::ApprovalUnsupported => "approval_unsupported",
             Self::SecurityReadinessUnavailable => "security_readiness_unavailable",
             Self::VoiceProviderUnavailable => "voice_provider_unavailable",
             Self::MonitoringUnavailable => "monitoring_unavailable",
@@ -1675,6 +1690,9 @@ impl AppError {
             _ => None,
         };
         let details = match &self {
+            AppError::MemoryWrite(reason) => {
+                Some(serde_json::json!({"reason": reason, "category": reason.category()}))
+            }
             AppError::ServiceSelectionInvalid { reason, .. } => {
                 Some(serde_json::json!({"reason": reason}))
             }

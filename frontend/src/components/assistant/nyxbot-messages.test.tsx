@@ -1,7 +1,7 @@
 import { createMemoryHistory, createRootRoute, createRoute, createRouter, RouterProvider } from "@tanstack/react-router";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { ChatMessage } from "@/lib/assistant/chat-types";
 import { NyxBotEventNotice, NyxBotOrchestratorMessage } from "./nyxbot-messages";
 
@@ -138,4 +138,33 @@ it("stamps an orchestrator instruction with its send time", () => {
   );
   const article = screen.getByRole("article", { name: "Message from NyxBot" });
   expect(article.querySelector(`time[datetime="${sent}"]`)).toBeInTheDocument();
+});
+
+
+it("shows a queued channel event's retained image and download without opening its notice", async () => {
+  const endpoint = "/assistant/nyxagent/conversations/thread/attachments/photo";
+  const fetch = vi.fn((request: { endpoint: string }) => {
+    expect(request.endpoint).toBe(endpoint);
+    return new Response(new Uint8Array([1]), { headers: { "content-type": "image/png" } });
+  });
+  globalThis.__nyxidAssistantHttpMock = fetch;
+  const original = { createObjectURL: URL.createObjectURL, revokeObjectURL: URL.revokeObjectURL };
+  Object.assign(URL, { createObjectURL: vi.fn(() => "blob:retained-photo"), revokeObjectURL: vi.fn() });
+  try {
+    const { unmount } = render(<NyxBotEventNotice message={{
+      ...message("event", `${HEADER}\n- Message from the owner on Discord: "see the photo".`),
+      images: [
+        { id: "photo", origin: "user_upload", contentType: "image/png", label: "photo", endpoint },
+        { id: "file", origin: "user_upload", contentType: "application/octet-stream", label: "original.bin", endpoint: endpoint.replace("photo", "file") },
+      ],
+    }} />);
+    expect(await screen.findByRole("img", { name: "Image from photo" })).toHaveAttribute("src", "blob:retained-photo");
+    expect(screen.getByText("original.bin")).toBeVisible();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]?.[0]).toMatchObject({ endpoint });
+    unmount();
+  } finally {
+    Object.assign(URL, original);
+    globalThis.__nyxidAssistantHttpMock = undefined;
+  }
 });

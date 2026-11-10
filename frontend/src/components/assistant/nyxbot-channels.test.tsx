@@ -30,6 +30,15 @@ vi.mock("@/hooks/use-orgs", () => ({ useOrgs: () => ({ data: data.orgs }) }));
 vi.mock("@/hooks/use-feature-flag", () => ({
   useFeature: () => data.orgChannels,
 }));
+vi.mock("./bot-audience-settings", () => ({
+  BotAudienceSettings: ({ channel, canManage, busy, onReconnect }: {
+    channel: { status: string }; canManage: boolean; busy: boolean; onReconnect: () => void;
+  }) => <section aria-label="Who can talk to this bot">
+    {channel.status !== "active" && canManage ? <button disabled={busy} onClick={onReconnect}>
+      {channel.status === "pending" ? "Finish connecting" : "Reconnect"}
+    </button> : null}
+  </section>,
+}));
 vi.mock("./org-specialist-channel-settings", () => ({
   OrgSpecialistChannelSettings: () => <section data-member-verification="" tabIndex={-1} aria-label="Verify my chat account">Member verification</section>,
 }));
@@ -430,4 +439,10 @@ it("deep links to member verification within the matching organization connectio
   const row = screen.getByRole("listitem", { name: "Other bot connection" });
   expect(within(row).getByRole("region", { name: "Verify my chat account" })).toHaveFocus();
   expect(data.connect).not.toHaveBeenCalled();
+});
+
+it.each(["active", "pending", "failed"])("keeps the audience section mounted for %s bindings", (status) => {
+  data.channels = [connection(status, status === "failed" ? "org_access_lost" : undefined)];
+  render(<ChannelBotsManager agents={[agent("first")]} />);
+  expect(screen.getByRole("region", { name: "Who can talk to this bot" })).toBeVisible();
 });

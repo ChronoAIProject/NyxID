@@ -20,6 +20,8 @@ import { CopyableField } from "@/components/shared/copyable-field";
 import { ChannelChats } from "@/components/assistant/nyxbot-channel-chats";
 import { useChannelBots } from "@/hooks/use-channel-bots";
 import { OrgSpecialistChannelSettings } from "@/components/assistant/org-specialist-channel-settings";
+import { BotAudienceSettings } from "@/components/assistant/bot-audience-settings";
+import { useGroupedDraftGuard } from "@/lib/grouped-drafts";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useOrgs } from "@/hooks/use-orgs";
@@ -105,6 +107,7 @@ export function ChannelBotsManager({
   readonly connectionId?: string;
 }) {
   const channels = useNyxBotChannels();
+  const drafts = useGroupedDraftGuard();
   const focusedConnection = useRef<HTMLLIElement | null>(null);
   const [connectedOrg, setConnectedOrg] = useState<string>();
   const hasRequestedConnection = channels.data?.some((row) => row.id === connectionId) ?? false;
@@ -182,6 +185,7 @@ export function ChannelBotsManager({
   }
 
   async function requestLink(botId: string, agentId: string | undefined) {
+    if (connectedBotIds.has(botId) && drafts && !await drafts.confirmDiscard()) return;
     setError(undefined);
     setConnectedOrg(undefined);
     try {
@@ -209,6 +213,7 @@ export function ChannelBotsManager({
       return;
     }
     if (agentId === agentOf(row)) return;
+    if (drafts && !await drafts.confirmDiscard()) return;
     setError(undefined);
     try {
       await link.mutateAsync({ channelAgentId: row.id, agentId });
@@ -223,6 +228,7 @@ export function ChannelBotsManager({
   }
 
   async function remove(row: NyxAgentChannelAgent) {
+    if (drafts && !await drafts.confirmDiscard()) return;
     setError(undefined);
     setConnectedOrg(undefined);
     try {
@@ -279,7 +285,7 @@ export function ChannelBotsManager({
                 : a.owner_kind !== "org",
             );
             return (
-              <li key={row.id} ref={row.id === connectionId ? focusedConnection : undefined} tabIndex={-1} aria-label={`${row.bot_label} connection`} className="scroll-mt-4 focus-visible:outline focus-visible:outline-ring">
+              <li key={row.id} ref={row.id === connectionId ? focusedConnection : undefined} tabIndex={-1} aria-label={`${row.bot_label} connection`} className="space-y-6 scroll-mt-4 focus-visible:outline focus-visible:outline-ring">
                 <GroupedList
                   title="Connected bot"
                   footer={
@@ -370,19 +376,7 @@ export function ChannelBotsManager({
                       </button>
                     </GroupedRow>
                   ) : null}
-                  {!canManage ? null : row.status === "failed" ? (
-                    <GroupedRow asChild interactive>
-                      <button
-                        type="button"
-                        disabled={busy || !target}
-                        onClick={() =>
-                          void requestLink(row.channel_bot_id, target?.id)
-                        }
-                      >
-                        Reconnect
-                      </button>
-                    </GroupedRow>
-                  ) : live && !row.org_specialist ? (
+                  {canManage && live && !row.org_specialist ? (
                     <GroupedRow asChild interactive>
                       <button
                         type="button"
@@ -438,6 +432,9 @@ export function ChannelBotsManager({
                     </GroupedRow>
                   )}
                 </GroupedList>
+                <BotAudienceSettings channel={row} agent={agent?.id === agentOf(row) ? agent : agents.find((candidate) => candidate.id === agentOf(row))}
+                  canManage={canManage} busy={busy || !target}
+                  onReconnect={() => { if (target) void requestLink(row.channel_bot_id, target.id); }} />
                 {row.org_specialist && live ? (
                   <OrgSpecialistChannelSettings id={row.id} />
                 ) : null}

@@ -155,6 +155,7 @@ mod assistant_feedback_tests;
 pub mod assistant_group;
 pub mod assistant_nyxagent;
 pub mod assistant_onboarding;
+pub mod assistant_platform_models;
 pub mod assistant_team;
 pub mod channel_platforms;
 #[cfg(test)]
@@ -235,3 +236,6 @@ pub mod cma_sessions;
 pub mod org_specialist_channels;
 
 pub(crate) mod execution_permission_resume;
+
+mod platform_model_gateway;
+pub mod platform_models;

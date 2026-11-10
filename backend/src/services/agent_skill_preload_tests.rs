@@ -75,6 +75,7 @@ impl Registry {
             memory: vec![],
             display_name: None,
             persona: None,
+            voice_instructions: None,
             destroyed_at: None,
             created_at: now,
             updated_at: now,

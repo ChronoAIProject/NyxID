@@ -1020,6 +1020,11 @@ jobs:
 
       # Measure WITHOUT the gate (enforced as the final step below). `report` is
       # package-scoped so the % isn't diluted by the rest of the workspace.
+      # --no-report implies --no-clean. Cached executables from older source
+      # revisions otherwise contribute stale, uncovered mappings to `report`.
+      # Keep dependency artifacts, but rebuild workspace coverage objects.
+      - name: Clear stale workspace coverage objects
+        run: cargo llvm-cov clean --workspace
       - name: Build head coverage with incremental retry
         run: >-
           python3 .github/scripts/retry_incremental.py

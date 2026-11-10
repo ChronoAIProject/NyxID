@@ -158,6 +158,25 @@ function makeConfig(
   };
 }
 
+it.each([
+  ["current_conversation", "Only this conversation"],
+  ["private_conversations", "Across my private conversations"],
+])("shows the saved %s scope in both layouts", (contextScope, label) => {
+  fixtures.grants = [
+    makeGrant({
+      execution: {
+        supported: true,
+        validity: "persistent",
+        valid_until: null,
+        context_scope: contextScope,
+      },
+    }),
+  ];
+  fixtures.total = 1;
+  render(<ApprovalGrantsPage />);
+  expect(screen.getAllByText(`Applies to: ${label}`)).toHaveLength(2);
+});
+
 describe("ApprovalGrantsPage", () => {
   it("requests the first page with a perPage of 20", () => {
     render(<ApprovalGrantsPage />);

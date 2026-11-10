@@ -1794,3 +1794,23 @@ grant, runtime and lease checks before dispatch.
 When `assistant:org-instruction-v1` is active, NyxBot and personal specialists must have trusted owner selection of each exact org connection this turn or one approved card for the bounded command and its declared service identities, including Full access. A selected declaration does not authorize another declaration or a pool sibling. Saved-login, destructive and machine policies remain independent. New jobs retain an instruction receipt for that job only; unproven legacy org jobs refuse and require a reviewed replacement command. See [service execution](NYXBOT_SERVICE_EXECUTION.md).
 
 The existing owner-card trust boundary is unchanged: a signed-in owner UI decision or verified owner-channel reply (including `yes <code>`) is accepted. An agent driving the owner's signed-in browser can click an existing card. This rule does not add hardware presence, a separate decision principal, or a stronger card authentication protocol.
+
+
+### Execution-permission review for service HTTP
+
+Nodes advertising `machine_execution_approval_v1` can negotiate consolidated
+permission review for an Assistant job's bounded service request. The process
+keeps its HTTP connection open (at most the existing 120 seconds); approval
+returns the actual response. Waiting timeout/disconnect sends nothing and cannot
+be approved later. Fewer than 15 seconds of remaining approval time produces a
+timeout-shaped response without a card. Old nodes keep existing service-approval
+requests and blocking wait behavior, with no new-format proposals.
+
+`X-NyxID-Approval-Mode: async` is the only background opt-in. With negotiated
+support, the returned opaque handle can be read at the local job gateway's
+`/_nyxid/approvals/{id}/status`, using that job's existing local token. The node
+signs this readback; it never dispatches, and a finished/cancelled job cannot read
+results. Idempotency-Key is an async dedupe locator only, not an opt-in; Prefer
+retains its provider meaning. Approval cannot replay a command or extend a lease.
+External Machine principals remain excluded. See [Execution permissions](EXECUTION_PERMISSIONS.md#machine-service-http-proposals-part-b2)
+for source fences, retention, release/readiness and result-delivery cadence.

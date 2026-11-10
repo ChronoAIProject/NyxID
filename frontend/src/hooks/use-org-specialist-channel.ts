@@ -4,7 +4,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import {
   orgChannelSettingsSchema,
   orgChannelChallengeSchema,
-  type OrgChannelGuestForm,
+  type OrgChannelGuestUpdate,
 } from "@/schemas/org-specialist-channel";
 
 export function useOrgSpecialistChannel(id: string, challenge?: string) {
@@ -22,10 +22,11 @@ export function useOrgSpecialistChannel(id: string, challenge?: string) {
     retry: false,
   });
   const save = useMutation({
-    mutationFn: async (body: OrgChannelGuestForm) =>
+    mutationFn: async (body: OrgChannelGuestUpdate) =>
       orgChannelSettingsSchema.parse(
         await assistantJson(`${root}/org-specialist`, { method: "PUT", body }),
       ),
+    onError: () => { void queryClient.invalidateQueries({ queryKey: key }); },
     onSuccess: (data) => {
       queryClient.setQueryData(key, data);
       void queryClient.invalidateQueries({

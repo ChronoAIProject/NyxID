@@ -37,6 +37,11 @@ impl Resume {
             .session(&mut *session)
             .await?
             .ok_or_else(refused)?;
+        let version = AssistantVersion::of(&row)?;
+        if version.number() != self.version {
+            return Err(conflict());
+        }
+        version.require(db).await?;
         fence_endpoint(db, session, proposal(&row)?).await?;
 
         let update = if dispatch {
@@ -44,7 +49,7 @@ impl Resume {
         } else {
             doc! {"$inc":{"execution_dispatch_fence":1_i64}}
         };
-        if db.collection::<Document>(REQUESTS).update_one(doc!{"_id":&self.request_id,"status":"approved","execution_proposal.version":VERSION as i32,"execution_proposal.v1.state":"preparing","execution_proposal.v1.claim_id":&self.claim_id,"execution_proposal.v1.grant_id":&self.grant_id},update).session(session).await?.matched_count!=1{return Err(uncertain());}
+        if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":&self.request_id,"status":"approved","execution_proposal.v1.state":"preparing","execution_proposal.v1.claim_id":&self.claim_id,"execution_proposal.v1.grant_id":&self.grant_id}),version.update(update)).session(session).await?.matched_count!=1{return Err(uncertain());}
         Ok(())
     }
 }
@@ -72,15 +77,20 @@ pub(crate) async fn resume_turn(
     }
     let mut notes = Vec::new();
     for id in ids {
-        let request=state.db.collection::<ApprovalRequest>(REQUESTS).find_one(doc!{"_id":id,"user_id":&row.user_id,"execution_proposal.v1.conversation_id":&row.id,"execution_proposal.v1.key_id":&row.credential_api_key_id}).await?.ok_or_else(missing)?;
+        let request=state.db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(doc!{"_id":id,"user_id":&row.user_id,"execution_proposal.v1.conversation_id":&row.id,"execution_proposal.v1.key_id":&row.credential_api_key_id})).await?.ok_or_else(missing)?;
         let p = proposal(&request)?;
+        let version = AssistantVersion::of(&request)?;
         if turn.execution_task.as_ref().is_none_or(|t| {
             t.task != p.task.task
                 || t.epoch != p.task.epoch
                 || t.actor_user_id != p.task.actor_user_id
                 || t.audience != p.task.audience
+                || t.channel_source != p.task.channel_source
         }) {
             return Err(refused());
+        }
+        if p.task.channel_source.is_some() {
+            super::super::super::execution_permission_channel::check(&state.db, &p.task).await?;
         }
         if request.status != "approved" {
             notes.push("The execution permission was not approved. Nothing was sent.".into());
@@ -100,9 +110,9 @@ pub(crate) async fn resume_turn(
         }
         if matches!(p.state.as_str(), "dispatched" | "unknown") {
             let mut session = state.db.client().start_session().await?;
-            session.start_transaction().and_run((&state.db,id),|session,(db,id)|Box::pin(async move {
+            session.start_transaction().and_run((&state.db,id),move |session,(db,id)|Box::pin(async move {
                 let result:AppResult<()>=async {
-                    if db.collection::<Document>(REQUESTS).update_one(doc!{"_id":*id,"execution_proposal.v1.state":{"$in":["dispatched","unknown"]}},doc!{"$set":{"execution_proposal.v1.state":"unknown","execution_proposal.v1.failure_code":"provider_outcome_unknown"},"$unset":{"execution_proposal.v1.payload":""}}).session(&mut *session).await?.matched_count==1 {
+                    if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":*id,"execution_proposal.v1.state":{"$in":["dispatched","unknown"]}}),version.update(doc!{"$set":{"execution_proposal.v1.state":"unknown","execution_proposal.v1.failure_code":"provider_outcome_unknown"},"$unset":{"execution_proposal.v1.payload":""}})).session(&mut *session).await?.matched_count==1 {
                         lifecycle::retire_operations(db,session,&[(*id).to_owned()]).await?;
                     }
                     Ok(())
@@ -120,6 +130,7 @@ pub(crate) async fn resume_turn(
             continue;
         }
         super::super::super::security_readiness_service::require(&state.db, READINESS).await?;
+        version.require(&state.db).await?;
         let live = async {
             tasks::check(&state.db, &p.task).await?;
             require_enrolled(&state.db, &row.user_id, None).await
@@ -168,7 +179,7 @@ pub(crate) async fn resume_turn(
         }
         let resume = Resume {
             connected_wait: None,
-            version: 1,
+            version: version.number(),
             source_credential_id: p.source_credential_id.clone(),
             request_id: id.into(),
             claim_id: claim_id.clone(),
@@ -183,7 +194,7 @@ pub(crate) async fn resume_turn(
         let current = state
             .db
             .collection::<ApprovalRequest>(REQUESTS)
-            .find_one(doc! {"_id":id,"execution_proposal.v1.claim_id":&claim_id})
+            .find_one(version.selector(doc! {"_id":id,"execution_proposal.v1.claim_id":&claim_id}))
             .await?
             .ok_or_else(conflict)?;
         let sent = proposal(&current)?.state == "dispatched";
@@ -272,9 +283,9 @@ pub(crate) async fn resume_turn(
             update.insert("$unset", doc! {"execution_proposal.v1.payload":""});
         }
         let mut session = state.db.client().start_session().await?;
-        session.start_transaction().and_run((&state.db,id,&claim_id,&update,state_name),|session,(db,id,claim,update,state_name)|Box::pin(async move {
+        session.start_transaction().and_run((&state.db,id,&claim_id,&update,state_name),move |session,(db,id,claim,update,state_name)|Box::pin(async move {
             let result:AppResult<()>=async {
-                if db.collection::<Document>(REQUESTS).update_one(doc!{"_id":*id,"execution_proposal.v1.claim_id":*claim,"execution_proposal.v1.delivery_abandoned":{"$ne":true},"execution_proposal.v1.state":{"$in":["preparing","dispatched"]}},(*update).clone()).session(&mut *session).await?.matched_count!=1{return Err(uncertain());}
+                if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":*id,"execution_proposal.v1.claim_id":*claim,"execution_proposal.v1.delivery_abandoned":{"$ne":true},"execution_proposal.v1.state":{"$in":["preparing","dispatched"]}}),version.update((*update).clone())).session(&mut *session).await?.matched_count!=1{return Err(uncertain());}
                 if *state_name!="waiting" {lifecycle::retire_operations(db,session,&[(*id).to_owned()]).await?;}
                 Ok(())
             }.await;
@@ -304,12 +315,7 @@ pub(crate) async fn result_for_human(
             )
         }));
     }
-    let Some(p) = row
-        .execution_proposal
-        .as_ref()
-        .filter(|e| e.version == VERSION)
-        .and_then(|e| e.v1.as_ref())
-    else {
+    let Ok(p) = proposal(row) else {
         return Ok(None);
     };
     let Some(result) = p.result.as_ref() else {
@@ -334,16 +340,18 @@ async fn claim_preparation(db: &Database, id: &str, claim: &str, turn: &str) -> 
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run((db,id,claim,turn),|session,(db,id,claim,turn)|Box::pin(async move {
         let result:AppResult<bool>=async {
-            let filter=doc!{"_id":*id,"status":"approved","execution_proposal.version":VERSION as i32,"$or":[
+            let filter=doc!{"_id":*id,"status":"approved","$or":[
                 {"execution_proposal.v1.state":"queued"},
                 {"execution_proposal.v1.state":"preparing","execution_proposal.v1.claimed_at":{"$lt":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(2))}}
             ]};
-            let Some(row)=db.collection::<ApprovalRequest>(REQUESTS).find_one(filter.clone()).session(&mut *session).await? else {return Ok(false)};
+            let Some(row)=db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(filter.clone())).session(&mut *session).await? else {return Ok(false)};
             let p=proposal(&row)?;
-            if db.collection::<Document>(REQUESTS).update_one(filter,doc!{"$set":{
+            let version=AssistantVersion::of(&row)?;
+            version.require(db).await?;
+            if db.collection::<Document>(REQUESTS).update_one(version.selector(filter),version.update(doc!{"$set":{
                 "execution_proposal.v1.state":"preparing","execution_proposal.v1.claim_id":*claim,
                 "execution_proposal.v1.resume_turn_id":*turn,"execution_proposal.v1.claimed_at":bson::DateTime::now()
-            }}).session(&mut *session).await?.matched_count!=1{return Ok(false);}
+            }})).session(&mut *session).await?.matched_count!=1{return Ok(false);}
             if p.state=="preparing" && let Some(grant)=&p.grant_id {
                 db.collection::<Document>("approval_grants").update_one(doc!{
                     "_id":grant,"revoked":false,"approval_request_id":*id,

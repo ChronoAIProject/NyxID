@@ -237,6 +237,7 @@ pub async fn list_endpoints(
 ) -> AppResult<Json<EndpointListResponse>> {
     // Verify service exists
     let service = fetch_service(&state, &service_id).await?;
+    crate::services::platform_key_service::require_ordinary_use(&service)?;
     require_http_service(&service)?;
 
     let may_write =

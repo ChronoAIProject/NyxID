@@ -889,7 +889,7 @@ async fn native_discord_follow_reuses_members_expiry_stop_and_other_mentions_imp
     upstream.abort();
 }
 
-async fn native_flag(state: &AppState, enabled: bool) {
+pub(super) async fn native_flag(state: &AppState, enabled: bool) {
     state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {
         "_id":Uuid::new_v4().to_string(),"org_user_id":bson::Bson::Null,
         "flag_key":"nyxbot:gateway-discord","target_kind":"user","target_key":OWNER,"enabled":enabled,
@@ -985,7 +985,11 @@ async fn native_enrollment_both_paths_gate_preparation_and_preserve_source_on_re
             None
         );
         let writes = calls.lock().await;
-        for (_, _, body) in writes.iter().filter(|c| c.0 == "POST" || c.0 == "PUT") {
+        for (_, _, body) in writes
+            .iter()
+            .filter(|c| (c.0 == "POST" || c.0 == "PUT") && !c.1.ends_with("/routing"))
+        {
+            assert!(body.get("routing").is_none());
             assert_eq!(body["sources"].as_array().unwrap().len(), 1);
             assert_eq!(body["sources"][0]["type"], "discord");
             assert_eq!(body["sources"][0]["bot_id"], "100");
@@ -1255,6 +1259,18 @@ async fn native_media_is_explicit_and_async_updates_keep_original_event() {
     let output = body_text(respond(&state, &key, &request, "703").await).await;
     assert!(output.contains(recovery::MEDIA_UNAVAILABLE), "{output}");
     assert!(calls.lock().await.is_empty());
+    let media_event = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"channel_id":&row.id,"event_id":"discord:100:703"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(media_event.source_media_declared, Some(1));
+    assert!(
+        media_event.media.is_none(),
+        "native media never acquires a fetch claim"
+    );
     let response = respond(&state, &key, &native_event(&row, "704", "Hello"), "704").await;
     let id = response.headers()["x-cma-response-id"]
         .to_str()
@@ -1450,58 +1466,121 @@ async fn native_async_reply_thread_mode_and_delivery_receipts_iteration(native_t
         .insert_one(service)
         .await
         .unwrap();
-    for (receipt, expected) in [
-        (
-            json!({"delivery":{"outcome":"confirmed"}}),
-            "reply_confirmed",
-        ),
-        (
-            json!({"delivery":{"outcome":"rejected","reason":"test"}}),
-            "reply_rejected",
-        ),
-        (
-            json!({"delivery":{"outcome":"unsupported"}}),
-            "reply_unsupported",
-        ),
-        (
-            json!({"delivery":{"outcome":"rate_limited","retry_after":1}}),
-            "reply_rate_limited",
-        ),
-        (
-            json!({"delivery":{"outcome":"unknown","reason":"test"}}),
-            "reply_unknown",
-        ),
-        (json!({}), "reply_unknown"),
-    ] {
-        gateway.reset().await;
-        Mock::given(method("POST"))
-            .and(path("/events/opaque-native-ref/replies"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(receipt))
-            .expect(1)
-            .mount(&gateway)
-            .await;
-        let result = native_responses::send_update(
-            &state,
-            &row,
-            origin,
-            stored.conversation_id.as_deref().unwrap(),
-            "Update",
-        )
-        .await;
-        assert_eq!(result.is_ok(), expected == "reply_confirmed", "{expected}");
-        let requests = gateway.received_requests().await.unwrap();
-        assert_eq!(
-            requests.len(),
-            1,
-            "no automatic retry of an uncertain receipt"
-        );
-        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
-        assert_eq!(
-            body.get("thread_reply"),
-            native_thread.then_some(&Value::Bool(true))
-        );
-        let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
-        assert_eq!(saved.gateway_native_delivery.as_deref(), Some(expected));
+    for occurrence in [None, Some("permission-result-occurrence")] {
+        for (receipt, expected) in [
+            (
+                json!({"delivery":{"outcome":"confirmed"}}),
+                "reply_confirmed",
+            ),
+            (
+                json!({"delivery":{"outcome":"rejected","reason":"test"}}),
+                "reply_rejected",
+            ),
+            (
+                json!({"delivery":{"outcome":"unsupported"}}),
+                "reply_unsupported",
+            ),
+            (
+                json!({"delivery":{"outcome":"rate_limited","retry_after":1}}),
+                "reply_rate_limited",
+            ),
+            (
+                json!({"delivery":{"outcome":"unknown","reason":"test"}}),
+                "reply_unknown",
+            ),
+            (json!({}), "reply_unknown"),
+        ] {
+            gateway.reset().await;
+            Mock::given(method("POST"))
+                .and(path("/events/opaque-native-ref/replies"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(receipt))
+                .expect(1)
+                .mount(&gateway)
+                .await;
+            // A later ambient turn cannot take ownership of this source's delivery.
+            let other_turn = crate::turn_trace::TurnContext::for_turn(&Uuid::new_v4().to_string());
+            let (result, trace) =
+                crate::turn_trace::capture(crate::turn_trace::scope(other_turn, async {
+                    if let Some(occurrence) = occurrence {
+                        native_responses::send_occurrence(
+                            &state,
+                            &row,
+                            origin,
+                            stored.conversation_id.as_deref().unwrap(),
+                            "Update",
+                            occurrence,
+                        )
+                        .await
+                    } else {
+                        native_responses::send_update(
+                            &state,
+                            &row,
+                            origin,
+                            stored.conversation_id.as_deref().unwrap(),
+                            "Update",
+                        )
+                        .await
+                        .map(|()| "confirmed")
+                    }
+                }))
+                .await;
+            let expected_outcome = match expected {
+                "reply_confirmed" => "confirmed",
+                "reply_rejected" | "reply_unsupported" | "reply_rate_limited" => "rejected",
+                _ => "unknown",
+            };
+            if occurrence.is_some() {
+                assert_eq!(result.unwrap(), expected_outcome, "{expected}");
+            } else {
+                assert_eq!(result.is_ok(), expected == "reply_confirmed", "{expected}");
+            }
+            let original_turn = event.turn_id.as_deref().unwrap();
+            assert!(!trace.is_empty());
+            assert!(
+                trace
+                    .iter()
+                    .all(|record| record["turn_id"] == original_turn)
+            );
+            let sent = trace
+                .iter()
+                .find(|record| record["stage"] == "channel" && record["phase"] == "end")
+                .unwrap();
+            assert_eq!(sent["outcome"], expected_outcome);
+            let part_end = trace
+                .iter()
+                .find(|record| record["stage"] == "channel_part" && record["phase"] == "end")
+                .unwrap();
+            assert_eq!(part_end["outcome"], expected_outcome);
+            let part = trace
+                .iter()
+                .find(|record| record["stage"] == "channel_part" && record["phase"] == "start")
+                .unwrap();
+            let gateway_span = trace
+                .iter()
+                .find(|record| record["stage"] == "gateway" && record["phase"] == "start")
+                .unwrap();
+            assert_eq!(gateway_span["parent_span_id"], part["span_id"]);
+            let requests = gateway.received_requests().await.unwrap();
+            assert_eq!(
+                requests.len(),
+                1,
+                "no automatic retry of an uncertain receipt"
+            );
+            assert_eq!(
+                requests[0]
+                    .headers
+                    .get("idempotency-key")
+                    .map(|value| value.to_str().unwrap()),
+                occurrence.map(|_| "permission-result-occurrence:0"),
+            );
+            let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+            assert_eq!(
+                body.get("thread_reply"),
+                native_thread.then_some(&Value::Bool(true))
+            );
+            let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
+            assert_eq!(saved.gateway_native_delivery.as_deref(), Some(expected));
+        }
     }
     upstream.abort();
 }
@@ -1522,7 +1601,7 @@ async fn native_gateway_problem_code_is_bounded_persisted_surfaced_and_attempt_f
         status: 400,
         body: json!({"code":"discord.invalid_intents-v1", "detail":"private token https://private.example"}),
     };
-    record_gateway_rejection(&state, &row, "attempt", &response)
+    record_gateway_rejection(&state, &row, "attempt", &response, "create")
         .await
         .unwrap();
     let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
@@ -1553,6 +1632,7 @@ async fn native_gateway_problem_code_is_bounded_persisted_surfaced_and_attempt_f
             status: 400,
             body: json!({"code":"stale"}),
         },
+        "channel_update",
     )
     .await
     .unwrap();
@@ -1595,6 +1675,7 @@ async fn native_gateway_problem_code_is_bounded_persisted_surfaced_and_attempt_f
                 status: 400,
                 body: json!({"code":code,"detail":"private token"}),
             },
+            "create",
         )
         .await
         .unwrap();

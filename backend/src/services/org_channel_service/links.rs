@@ -79,7 +79,7 @@ pub(crate) async fn receive(
     let actor = row.get_str("user_id").map_err(|_| super::denied())?;
     member(db, actor, channel).await?;
     Ok(db.collection::<Document>(CHALLENGES).update_one(doc!{"_id":row.get_str("_id").map_err(|_|super::denied())?,"state":"issued"},
-        doc!{"$set":{"state":"observed","sender_hash":super::sender_hash(&channel.id,sender),
+        doc!{"$set":{"state":"observed","sender_hash":super::sender_identity(channel,sender),
             "sender_label":label.unwrap_or("Chat account").chars().take(80).collect::<String>()},"$unset":{"code_hash":""}}).await?.matched_count==1)
 }
 

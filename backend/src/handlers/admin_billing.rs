@@ -238,8 +238,10 @@ fn service_rows(
     state: &AppState,
     services: &[crate::models::downstream_service::DownstreamService],
     rates: &std::collections::HashMap<String, crate::models::billing_rate_cache::BillingRateCache>,
+    model_tariffs: &[crate::models::platform_model_tariff::ModelTariff],
 ) -> AppResult<Vec<BillingServiceResponse>> {
     let env = ResolverEnv {
+        model_tariffs,
         billing_enabled: state.billing.billing_enabled(),
         resale_enabled: state.billing.resale_enabled(),
         rate_ttl_secs: rate_ttl_secs(state)?,
@@ -267,7 +269,9 @@ async fn service_row(state: &AppState, id: &str) -> AppResult<BillingServiceResp
         .ok_or_else(|| crate::errors::AppError::NotFound("service not found".into()))?;
     let services = [service];
     let rates = config::load_rates_for(&state.db, &services).await?;
-    Ok(service_rows(state, &services, &rates)?.remove(0))
+    let model_tariffs =
+        crate::services::billing::model_tariffs::load_for(&state.db, &services).await?;
+    Ok(service_rows(state, &services, &rates, &model_tariffs)?.remove(0))
 }
 
 /// GET /api/v1/admin/billing/overview
@@ -278,7 +282,14 @@ pub async fn get_overview(
     require_admin_or_operator(&state, &auth, "admin.billing.overview").await?;
     let services = config::load_billed_services(&state.db).await?;
     let rates = config::load_rates_for(&state.db, &services).await?;
-    Ok(Json(service_rows(&state, &services, &rates)?))
+    let model_tariffs =
+        crate::services::billing::model_tariffs::load_for(&state.db, &services).await?;
+    Ok(Json(service_rows(
+        &state,
+        &services,
+        &rates,
+        &model_tariffs,
+    )?))
 }
 
 /// GET /api/v1/admin/billing/services/{id}
@@ -313,9 +324,11 @@ pub async fn resync_service(
     .await?;
     let services = [outcome.service];
     let rates = config::load_rates_for(&state.db, &services).await?;
+    let model_tariffs =
+        crate::services::billing::model_tariffs::load_for(&state.db, &services).await?;
     Ok(Json(ResyncResponse {
         synced: outcome.synced,
-        service: service_rows(&state, &services, &rates)?.remove(0),
+        service: service_rows(&state, &services, &rates, &model_tariffs)?.remove(0),
     }))
 }
 

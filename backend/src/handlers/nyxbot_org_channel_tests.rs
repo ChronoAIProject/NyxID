@@ -300,7 +300,7 @@ async fn org_specialist_provider_uses_confirmed_member_thread_dedup_and_live_aut
     state.db.drop().await.unwrap();
 }
 
-async fn org_channel(
+pub(super) async fn org_channel(
     state: &AppState,
     native: bool,
 ) -> (
@@ -344,6 +344,7 @@ async fn org_channel(
             description: "Organization support".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             machines: None,
@@ -474,6 +475,7 @@ async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_th
         OWNER,
         &row,
         org::management::GuestSettings {
+            expected_revision: None,
             enabled: true,
             service_ids: vec![],
             daily_credits: Credits::from_whole(1),
@@ -940,3 +942,6 @@ async fn org_channel_signed_relay_uses_verified_actor_and_deduplicates() {
     server.abort();
     state.db.drop().await.unwrap();
 }
+
+#[path = "nyxbot_org_access_tests.rs"]
+mod access_tests;

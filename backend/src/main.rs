@@ -27,6 +27,7 @@ mod services;
 mod ssh_cli;
 mod telemetry;
 mod telemetry_erasure_cli;
+mod turn_trace;
 
 #[cfg(test)]
 mod test_utils;
@@ -414,6 +415,7 @@ async fn server_main() {
         )
         .with(tracing_subscriber::fmt::layer().with_target(true))
         .init();
+    turn_trace::init();
 
     // Login and Ssh don't touch the database; handle them before we connect.
     // Other subcommands (like CleanupOrphans) fall through to the post-DB path.
@@ -622,6 +624,16 @@ async fn server_main() {
     services::provider_service::seed_default_services(&db, encryption_keys.as_ref())
         .await
         .expect("Failed to seed default services");
+
+    if services::voice::catalog::seed(&db, &config.base_url)
+        .await
+        .is_err()
+    {
+        tracing::error!(
+            slug = services::voice::access::SERVICE_SLUG,
+            "Failed to seed NyxBot Voice catalog service; continuing startup"
+        );
+    }
 
     services::inference_service::backfill(&db)
         .await
@@ -2001,9 +2013,10 @@ fn private_cors(allowed_origins: std::collections::HashSet<axum::http::HeaderVal
             "DNT".parse().unwrap(),
             "X-NyxID-Account-Deletion-Policy".parse().unwrap(),
         ]))
-        .expose_headers([axum::http::HeaderName::from_static(
-            mw::assistant_trace::TRACE_HEADER,
-        )])
+        .expose_headers([
+            axum::http::HeaderName::from_static(mw::assistant_trace::TRACE_HEADER),
+            axum::http::HeaderName::from_static(turn_trace::REQUEST_HEADER),
+        ])
         .allow_credentials(true)
 }
 

@@ -707,3 +707,37 @@ it.each(["cancelled", "continuation_limit_exceeded"])(
     expect(screen.queryByRole("button", { name: "Cancel run" })).not.toBeInTheDocument();
   },
 );
+
+it("separates task execution from actionable push failure, retry and acceptance", async () => {
+  const user = userEvent.setup();
+  mocks.triggers.mockReturnValue({ data: { triggers: [trigger] } });
+  mocks.history.mockReturnValue({ data: { pages: [{ runs: [
+    {
+      id: "push-failed", outcome: "failed", execution_outcome: "completed",
+      scheduled_at: trigger.created_at, reason: "push_disabled", duration_ms: 2000, thread_id: "saved-report",
+      notification_delivery: { state: "failed", reason: "push_disabled", message: "Mobile push is disabled. Enable notifications in the NyxID app.", attempts: 0 },
+    },
+    {
+      id: "push-pending", outcome: "started", execution_outcome: "completed",
+      scheduled_at: trigger.created_at, reason: null, duration_ms: null, thread_id: "pending-report",
+      notification_delivery: { state: "retrying", reason: "push_temporarily_refused", message: "NyxID will retry the saved report without running the task again.", attempts: 1, http_status: 429, retry_at: "2026-11-07T10:00:00Z" },
+    },
+    {
+      id: "task-failed", outcome: "failed", execution_outcome: "failed",
+      scheduled_at: trigger.created_at, reason: "model_unavailable", duration_ms: 2000, thread_id: "failed-task",
+      notification_delivery: { state: "accepted", reason: null, message: null, attempts: 1 },
+    },
+  ] }] } });
+  render(<AutomationsPage />);
+  await user.click(screen.getAllByRole("button", { name: "Morning summary" })[0]!);
+  expect(screen.getAllByText("Task execution")).toHaveLength(3);
+  expect(screen.getAllByText("Mobile push delivery")).toHaveLength(3);
+  expect(screen.getByText(/Mobile push is disabled/)).toBeInTheDocument();
+  expect(screen.queryByText("push disabled")).not.toBeInTheDocument();
+  expect(screen.getByText("model unavailable")).toBeInTheDocument();
+  expect(screen.getByText("Accepted by push provider")).toBeInTheDocument();
+  expect(screen.getByText(/without running the task again/)).toBeInTheDocument();
+  expect(screen.getByText(/Next delivery attempt:/)).toBeInTheDocument();
+  expect(screen.getByText(/Provider HTTP 429/)).toBeInTheDocument();
+  expect(screen.getAllByRole("link", { name: "Open thread" })[0]).toHaveAttribute("href", expect.stringContaining("saved-report"));
+});

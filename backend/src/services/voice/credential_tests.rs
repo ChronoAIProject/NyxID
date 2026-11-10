@@ -66,6 +66,7 @@ async fn configure(state: &mut crate::AppState, owner: &str) -> DownstreamServic
     service.auth_method = "bearer".into();
     service.base_url = "https://api.openai.com/v1".into();
     service.platform_key = Some(PlatformKeyConfig {
+        purpose: Default::default(),
         enabled: true,
         audience: PlatformKeyAudience::Public,
         allowed_owner_ids: vec![],
@@ -1068,6 +1069,7 @@ async fn shared_transports_voice_provider_revocation_and_actor_billing() {
                 description: "Voice specialist".into(),
                 display_name: None,
                 persona: None,
+                voice_instructions: None,
                 targets: Default::default(),
                 account_read: false,
                 machines: None,
@@ -1115,19 +1117,62 @@ async fn shared_transports_voice_provider_revocation_and_actor_billing() {
             preferences.connection_id = Some(connection);
         }
         let request = Uuid::new_v4().to_string();
-        assert!(
-            super::shared::admit(&f.state.db, &f.owner, &f.row, &request, &preferences)
-                .await
-                .is_err()
-        );
-        let card = f
+        assert!(matches!(
+            super::shared::admit(&f.state.db, &f.owner, &f.row, &request, &preferences).await,
+            Err(crate::errors::AppError::ApprovalUnsupported)
+        ));
+        let consents = f
             .state
             .db
-            .collection::<AgentConsent>("assistant_agent_consents")
-            .find_one(doc! {"decision":"pending"})
+            .collection::<AgentConsent>("assistant_agent_consents");
+        assert_eq!(consents.count_documents(doc! {}).await.unwrap(), 0);
+        // Existing exact consent remains usable after Voice stops creating new
+        // approval requests. Preserve this transport/revocation/billing fixture.
+        let auth = crate::mw::auth::api_key_auth_user_for_voice(&f.state.db, &f.row)
             .await
-            .unwrap()
             .unwrap();
+        let access = auth.org_agent_access.as_ref().unwrap().shared().unwrap();
+        let selected = super::shared::connection(
+            access,
+            &preferences.service_id,
+            preferences.connection_id.as_deref(),
+        )
+        .unwrap();
+        let binding = crate::services::assistant_service_execution::connection_binding(
+            &f.state.db,
+            &selected.id,
+            &f.row.credential_api_key_id,
+        )
+        .await
+        .unwrap();
+        let now = chrono::Utc::now();
+        let card = AgentConsent {
+            id: Uuid::new_v4().to_string(),
+            actor_user_id: f.owner.clone(),
+            agent_id: agent.id.clone(),
+            owner_id: publisher.clone(),
+            conversation_id: f.row.id.clone(),
+            turn_id: request.clone(),
+            api_key_id: f.row.credential_api_key_id.clone(),
+            connection_id: selected.id.clone(),
+            catalog_service_id: service.id.clone(),
+            policy_revision: access.revision(),
+            behavior_digest: consent::behavior(access),
+            authority_digest: binding,
+            operation_digest: crate::services::mcp_service::canonical_sha256(
+                json!({"kind":"voice_session", "preferences":&preferences}),
+            ),
+            scope_key: Uuid::new_v4().to_string(),
+            stateless_model: false,
+            operation_summary: "Legacy exact Voice consent".into(),
+            decision: ConsentDecision::Pending,
+            acknowledgement_id: None,
+            expires_at: Some(now + chrono::Duration::minutes(25)),
+            claim_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        consents.insert_one(&card).await.unwrap();
         consent::decide(&f.state.db, &f.owner, &card.id, ConsentDecision::Once)
             .await
             .unwrap();

@@ -28,6 +28,12 @@ pub(crate) fn attach_resume(auth: &mut crate::mw::auth::AuthUser, resume: Resume
         context.bind_generated_correlation(v);
     }
     context.descendant = old.descendant.clone();
+    if let Some(machine) = old.machine.get() {
+        let _ = context.machine.set(machine.clone());
+    }
+    if let Some(token) = old.cancellation.get() {
+        context.bind_cancellation(token.clone());
+    }
     context.resume = Some(Arc::new(resume));
     context.enable_authoring();
     let context = Arc::new(context);
@@ -152,27 +158,36 @@ pub(crate) async fn execute(
         return Ok(None);
     };
     let outcome = async {
+        let mut auth = if let ProposalSource::Machine { binding } = &p.source {
+            let job = binding.job(&state.db).await?;
+            let auth = Box::pin(crate::services::machine_gateway_service::job_auth(&state.db,&job)).await?;
+            let context=auth.execution_permission.as_ref().ok_or_else(refused)?;
+            context.machine.set(Arc::new(machine::Admission {binding:(**binding).clone(),deadline:row.expires_at,job_deadline:job.expires_at,cancellation:Default::default()})).map_err(|_|refused())?;
+            auth
+        } else {
         let key=state.db.collection::<crate::models::api_key::ApiKey>("api_keys").find_one(doc!{"_id":&p.key_id,"user_id":&row.user_id,"is_active":true,"$or":[{"expires_at":null},{"expires_at":{"$gt":bson::DateTime::now()}}]}).await?.ok_or_else(refused)?;
-        let mut auth = crate::mw::auth::api_key_auth_user(
+        crate::mw::auth::api_key_auth_user(
             &state.db,
             &key,
             p.source_credential_id.clone(),
             None,
             None,
         )
-        .await?;
+        .await?
+        };
         attach_resume(&mut auth, resume.clone())?;
         if let Some(context) = &auth.execution_permission {
             let _ = context.ingress.set(adapter.clone());
         }
-        Box::pin(crate::handlers::execution_permission_resume::send(
+        let response = Box::pin(crate::handlers::execution_permission_resume::send(
             state,
             &auth,
             resume.effect.clone(),
             adapter,
             resume.independent_card_id.clone(),
         ))
-        .await
+        .await?;
+        machine::delivery(state,&auth,response).await
     }
     .await;
     complete_response(state, row, &resume, outcome).await
@@ -381,6 +396,16 @@ async fn maintain(state: &crate::AppState, row: &ApprovalRequest) -> AppResult<(
             }
             return Err(error);
         }
+    }
+    if let ProposalSource::Machine { binding } = &p.source
+        && let Err(error) = binding
+            .live(&state.db, p.task.as_ref().ok_or_else(refused)?)
+            .await
+    {
+        if error.is_forbidden() {
+            return cancel(&state.db, &row.id, "machine_source_unavailable").await;
+        }
+        return Err(error);
     }
     if p.state == "pending" {
         notify_once(state, row).await?;
@@ -615,6 +640,39 @@ pub(super) async fn notify_once(state: &crate::AppState, row: &ApprovalRequest) 
             None,
         )
         .await?;
+    }
+    Ok(())
+}
+
+/// Only the final local pre-send check may use this: the occurrence barrier was
+/// committed, but this process has not handed the request to the provider.
+pub(crate) async fn not_sent_before_handoff(db: &Database, resume: &Resume) -> AppResult<()> {
+    let mut session = db.client().start_session().await?;
+    session.start_transaction().await?;
+    let changed = db
+        .collection::<Document>("approval_requests")
+        .update_one(
+            doc! {"_id": &resume.request_id, "execution_proposal.version": 2,
+            "execution_proposal.v2.source.kind": "machine",
+            "execution_proposal.v2.claim_id": &resume.claim_id,
+            "execution_proposal.v2.state": "dispatched"},
+            doc! {"$set": {"execution_proposal.v2.state": "not_sent",
+            "execution_proposal.v2.failure_code": "machine_source_unavailable"},
+            "$unset": {"execution_proposal.v2.payload": "", "execution_proposal.v2.result": ""}},
+        )
+        .session(&mut session)
+        .await?;
+    if changed.matched_count == 1 {
+        super::super::lifecycle::retire_operations(
+            db,
+            &mut session,
+            std::slice::from_ref(&resume.request_id),
+        )
+        .await?;
+    }
+    session.commit_transaction().await?;
+    if let Some(guard) = &resume.connected_wait {
+        guard.disarm();
     }
     Ok(())
 }

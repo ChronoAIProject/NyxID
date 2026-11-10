@@ -159,8 +159,22 @@ enforcement is independent of the flag.
 
 `spawn_subagent` and `update_subagent` also take `display_name` and `persona`
 (`update_subagent` with `nyxbot` sets NyxBot's own). Every agent: `remember`
-(optional `replace_id`) and `forget`. Memory and personas refuse obvious
+(optional `replace_id`) and `forget`. `remember` reports stable content-free
+validation, capacity, missing-replacement, authorization, conflict and storage/internal
+diagnostics in the tool result and activity panel. Keep notes to 500 characters
+and 50 total; split long facts deliberately. Confirm saved facts only from
+successful receipts, and report any still-unresolved writes. Later success never
+silently relabels an earlier failed write. See [memory diagnostics](08-nyxagent-engine.md#nyxbot-agents).
+Memory and personas refuse obvious
 credential shapes.
+
+Operation discovery uses `nyxid__get_agent_operations` with optional exact
+`service_id`, `limit`, and `cursor`. Follow `next_cursor` until `complete=true`,
+combining each service's operations, selected IDs, rules and inputs before
+editing scopes. A changed snapshot requires restarting without the cursor;
+never guess omitted IDs or widen to all operations to work around a partial
+result. Pages fit the assistant result budget without clipping policy fields.
+See [operation discovery pagination](../AGENT_OPERATION_SCOPES.md#native-discovery-pagination-2271).
 
 ## 8. Permission requests (specialist → NyxBot)
 
@@ -317,6 +331,24 @@ grants, read and delete memory notes, and link chat apps to any agent. NyxBot's
 instructions list its specialists, pending requests, its memory, and messages the
 owner sent directly to specialists since the thread's previous user message; it
 is not woken by those direct chats.
+
+The agent list includes every visible live agent, not just populated chats:
+a new idle specialist appears even when its home has no messages. Personal
+agents and specialists from active organization memberships keep their existing
+scope checks; shared specialists use their live sharing ACL. Destroyed rows are
+hidden by default in the sidebar. Discovery includes only the 200 most recently
+destroyed agents (destruction time descending, ID as a stable tie-breaker);
+archives never consume live roster slots. Live personal/org agents remain
+oldest-first with an ID tie-breaker and NyxBot pinned first; shared entries keep
+their existing stable order. REST and tools use
+the same roster. The additive REST `destroyed_truncated` flag shows “Older
+destroyed agents not shown.” under Show destroyed; exact detail links to older
+destroyed agents remain readable subject to existing authorization. Archive
+summary work is bounded to the returned rows. Creation invalidates the
+browser roster, and the committed home-thread insert also refreshes it over the
+live stream. Reload reads the roster again. Loading, an empty roster, and a
+failed load are distinct states; a failed load or refresh offers Retry without
+discarding an already loaded roster.
 
 ### 10a. Group chats
 
@@ -797,7 +829,7 @@ or `everyone`: anyone who messages the bot privately gets their own thread, as a
 guest.
 
 The linked channel also has `private_chat_posts` (absent/false by default).
-The owner can enable it in **Chats and who can talk**, through the human-only
+The owner can enable it in **Chats and posting**, through the human-only
 channel PATCH, or through NyxBot's `nyxid__update_channel_access`. New private
 customer chats then start with `allow_posts: true` when a verified message
 registers them. It does not open private-chat access, contact someone who has
@@ -1415,7 +1447,12 @@ the cancelled run. Guests receive the fixed note `attachments from guests are
 not shared with the assistant` and cause no download or upload. Media-bearing
 messages never answer approval/text decisions or coalesce by question digest.
 See [Inbound channel media](10-uploads.md#inbound-channel-media) for item/byte/time
-limits, dedup horizons, queued expiry and the admin drain/rollback procedure.
+limits, dedup horizons, queued expiry and the admin drain/rollback procedure. The default-off
+`assistant:channel-guest-media` exception admits personal-agent guests' own
+current-message media into their channel private/shared thread, never the owner
+home. Human-owner retention reads and exact-current-turn untrusted model input
+are described in [uploads](10-uploads.md#personal-channel-guest-media); org
+specialist guests remain attachment-free.
 
 ## Drafting agent skills
 
@@ -1861,15 +1898,53 @@ First-party human endpoints under `/assistant/nyxagent/channels/{id}` are
 `GET/PUT org-specialist`, `POST/DELETE member-link`,
 `GET member-link/{challenge}`, and `POST member-link/{challenge}/confirm`.
 Other live org admins can manage/unlink the binding without reading member DMs
-or obtaining provider keys. Relinking resets verification and guest exposure;
+or obtaining provider keys. Changing the specialist resets verification and guest exposure;
 changing personal ↔ org target requires disconnect/reconnect. Loss of the
-transport admin, org/bot/agent authority, or feature readiness retires the link
-with `org_access_lost`. Guest-policy changes invalidate pending guest authority.
+transport admin or org/bot/agent authority retires the link with
+`org_access_lost`. Flag-off, unavailable security readiness and dependency errors
+suspend new work and defer retryable deliveries without deleting the binding,
+route or key; work resumes when availability returns. Guest-policy changes invalidate pending guest authority.
 Relay/native/gateway use the same local validator; CMA never decides membership
 or payer. A verified private chat moves between relay and gateway with its member
 home reply binding and guest execution lane; adoption is atomic and keeps the
 relay alias for flag-off return, without merging already established chats. Roll out with the flag off, upgrade all executing workers, drain old
 workers, then enable for an admin. Disable and retire before binary downgrade.
+
+### Guest settings and binding recovery
+
+Every listed binding has a **Who can talk to this bot** section, separate from
+member verification. Failed and pending bindings retain read-only settings and
+a reconnect action. Organization admins enable guests immediately with the
+server default daily budget (one credit); subsequent budget and delegated-service
+edits use reviewed saves and a guest-policy revision fence. Dirty drafts survive
+spend/verification refreshes and conflicts. Personal bindings retain their private
+chat audience selector and link to the specialist's Grants settings.
+
+Rebuilding the same organization/bot/specialist carries forward the newest
+compatible saved guest policy. Current admin, bot, specialist and service
+authority is rechecked transactionally. Changed or revoked service grants,
+changed guest operation scopes, node credentials and moved services are dropped.
+An incompatible latest predecessor is a boundary; recovery never searches past
+it for an older policy. Invalid budgets or an unavailable/suspended org wallet
+leave restored exposure off. Member verification and conversation lanes are not
+copied. Rebuilds share the original sender-hash namespace only for refusal checks:
+previously verified or erased identities must verify afresh and cannot silently
+become organization-paid guests. The restored policy gets a fresh revision and retains the original
+`continuity_channel_id`, so today's spend and outstanding reservations continue to
+count against the cap, including after late settlement. Policy edits preserve
+that ledger identity. Upgrade all executing replicas before rebuilding bindings
+with preserved guest exposure; older binaries do not read this ledger identity.
+
+NyxBot uses the existing sensitive `update_channel_access` tool with an
+`org_guests` object (`expected_revision` from `list_channel_agents`, optional
+`enabled`, `daily_credits`, `service_ids`). Omitted values retain the saved
+policy; first enable uses the server default budget. The tool shares web
+validation/admin authorization and existing owner confirmations. It refuses
+mixed guest-policy and posting/audience mutations. Enabling guests also opens
+private guest admission; budget-only edits and recovery preserve the saved
+private-chat audience. Group audience settings remain independent. Settings,
+channel listings and chat tool results share the organization/personal billing
+explanation.
 
 ### Finding organization channel member verification (#2242)
 

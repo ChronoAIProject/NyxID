@@ -345,6 +345,22 @@ it("sets a display name and persona, and clears them by emptying the fields", as
   );
 });
 
+it("saves and clears voice instructions without changing other Bot settings", async () => {
+  agent = agentRow({ voice_instructions: "Read live device state." });
+  const { user } = renderSheet();
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  const profile = await within(sheet).findByLabelText("Profile", { selector: "form" });
+  const guidance = within(profile).getByLabelText("Voice instructions", { selector: "textarea" });
+  expect(guidance).toHaveValue("Read live device state.");
+  await user.clear(guidance);
+  await user.click(screen.getByText("Save changes", { selector: "button" }));
+  await confirmChanges();
+  await waitFor(() => expect(writes).toContainEqual({
+    method: "PATCH", endpoint: "/assistant/nyxagent/agents/agent-researcher",
+    body: { voice_instructions: "" },
+  }));
+});
+
 it("shows the server's refusal of a display name", async () => {
   const { user } = renderSheet();
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
@@ -1244,6 +1260,16 @@ it("indexes connected bot handles, unopened chats and available bots, revealing 
   expect(chat).toHaveFocus();
   expect(chat).toBeVisible();
   expect(chat).toHaveTextContent("Café research room · Group");
+  // Audience access moved out of the chats page; search must reveal its exact root section.
+  fireEvent.change(search, { target: { value: "guest access" } });
+  await act(async () => fireEvent.click(screen.getByLabelText("Who can talk to this bot Channels › Helper", { selector: "button" })));
+  await act(() => vi.advanceTimersByTimeAsync(32));
+  const audience = screen.getByRole("region", { name: "Who can talk to this bot · Helper" });
+  expect(audience).toHaveFocus();
+  expect(audience).toBeVisible();
+  expect(within(audience).getByRole("button", { name: "About Who can talk to this bot" })).toBeVisible();
+  expect(within(audience).getByRole("combobox", { name: "Who can talk to Helper in private chats" })).toBeVisible();
+  expect(within(audience).getByRole("link", { name: /Guest service access/ })).toHaveAttribute("href", `/assistant?agent=${agent.id}&details=grants`);
   fireEvent.change(search, { target: { value: "help desk" } });
   // Leaving the previous drill-in resolves its guard before scheduling the focus frame.
   await act(async () => fireEvent.click(screen.getByLabelText("Help desk Channels › Available bots", { selector: "button" })));
@@ -1256,7 +1282,7 @@ it("indexes connected bot handles, unopened chats and available bots, revealing 
   fireEvent.click(page.getByRole("button", { name: "Back to Channels" }));
   await act(() => vi.advanceTimersByTimeAsync(32));
   const channels = within(screen.getByRole("tabpanel", { name: "Channels" }));
-  expect(channels.getByRole("button", { name: "Chats and who can talk" })).toBeVisible();
+  expect(channels.getByRole("button", { name: "Chats and posting" })).toBeVisible();
   expect(writes).toHaveLength(0);
 });
 

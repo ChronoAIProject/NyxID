@@ -755,6 +755,7 @@ export function AssistantScreen({
       return (
         <AssistantSystemMessage
           message={item}
+          conversationId={assistant.conversationId}
           onOpenAutomations={() =>
             navigation.dispatch(workspaceNavigateAction("Automations"))
           }

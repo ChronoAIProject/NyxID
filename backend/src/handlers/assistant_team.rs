@@ -564,6 +564,20 @@ pub(crate) async fn after_turn(
     let also = engine::take_deliveries(&state.db, owner, &row.id)
         .await
         .unwrap_or_default();
+    if turn
+        .execution_task
+        .as_ref()
+        .and_then(|task| task.channel_source.as_ref())
+        .is_some_and(|source| source.original_turn_id != turn.turn_id)
+    {
+        // This settled continuation has its own fenced occurrence. Never send
+        // it through a mutable home-thread target or the original stream claim.
+        if crate::services::execution_permission_channel::deliveries::owns_result(row, turn) {
+            super::nyxbot::execution_delivery::for_turn(state, &turn.turn_id).await;
+        }
+        let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
+        return;
+    }
     if error.is_some() {
         // They were told an answer would come: say it did not.
         for origin in &also {
@@ -1153,7 +1167,7 @@ fn action_summary(name: &str, args: &Value) -> String {
         "disconnect_channel_bot" => "Disconnect a channel bot",
         "retry_channel_gateway" => "Retry native Discord gateway activation",
         "update_channel_chat" => "Change who may talk in a channel chat",
-        "update_channel_access" => "Change private chat access and posting defaults",
+        "update_channel_access" => "Change bot audience, guest access and posting defaults",
         "stop_following_thread" => "Stop following a channel thread",
         "machine_pair" => "Pair a machine",
         "remember" => "Save a memory note",
@@ -1186,6 +1200,26 @@ fn action_summary(name: &str, args: &Value) -> String {
         }
     }
     if name == "update_channel_access" {
+        if let Some(guests) = args["org_guests"].as_object() {
+            if let Some(enabled) = guests.get("enabled").and_then(Value::as_bool) {
+                details.push(format!(
+                    "organization guests {}",
+                    if enabled { "on" } else { "off" }
+                ));
+            }
+            if let Some(budget) = guests.get("daily_credits").and_then(Value::as_str) {
+                details.push(format!(
+                    "daily organization guest budget {} credits",
+                    crate::services::assistant_nyxagent::identifier(budget)
+                ));
+            }
+            if let Some(services) = guests.get("service_ids").and_then(Value::as_array) {
+                details.push(format!(
+                    "{} delegated organization services",
+                    services.len()
+                ));
+            }
+        }
         if let Some(posts) = args["private_chat_posts"].as_bool() {
             details.push(format!(
                 "new private chat posts {}",
@@ -1229,6 +1263,24 @@ fn action_summary(name: &str, args: &Value) -> String {
 /// it is an error result. Team and channel tools need a NyxBot thread key;
 /// memory tools belong to every agent.
 pub(crate) async fn execute_tool(
+    state: &AppState,
+    chat: &ChatAuthority,
+    tool_name: &str,
+    args: &Value,
+) -> (Value, bool) {
+    let (mut value, error) = execute_tool_inner(state, chat, tool_name, args).await;
+    if tool_name == "nyxid__remember"
+        && error
+        && (chat.guest || chat.collaboration_thread)
+        && value.get("details").is_none()
+    {
+        let reason = crate::errors::memory_write::MemoryWriteReason::MemoryUnauthorized;
+        value["details"] = json!({"reason": reason, "category": reason.category()});
+    }
+    (value, error)
+}
+
+async fn execute_tool_inner(
     state: &AppState,
     chat: &ChatAuthority,
     tool_name: &str,
@@ -1453,11 +1505,12 @@ async fn execute_authorized_tool_impl(
     let outcome = match result {
         Ok(outcome) => outcome,
         Err(error) => {
-            let tool = crate::services::assistant_account_tools::error_result_for(
-                error,
-                Some(chat),
-                &state.config.frontend_url,
-            );
+            let project_error = if name == "remember" {
+                crate::services::assistant_account_tools::memory_error_result_for
+            } else {
+                crate::services::assistant_account_tools::error_result_for
+            };
+            let tool = project_error(error, Some(chat), &state.config.frontend_url);
             (tool.value, true)
         }
     };
@@ -1483,6 +1536,9 @@ async fn execute_authorized_tool_impl(
             "agent_id": chat.agent_id,
             "tool_name": tool_name,
             "outcome": if outcome.1 {"refused"} else {"success"},
+            "reason": if name == "remember" { outcome.0["details"]["reason"].clone() } else { Value::Null },
+            "note_chars": if name == "remember" { args["text"].as_str().map(|s| s.chars().count()) } else { None },
+            "replace_requested": if name == "remember" { Some(args["replace_id"].is_string()) } else { None },
         })),
     )
     .await;
@@ -1691,6 +1747,7 @@ async fn dispatch_specialists(
                 description: text_arg(args, "description").to_owned(),
                 display_name: args["display_name"].as_str().map(str::to_owned),
                 persona: args["persona"].as_str().map(str::to_owned),
+                voice_instructions: None,
                 targets: targets.clone(),
                 account_read: args["account_read"].as_bool().unwrap_or(false),
                 specialty: args["specialty"].as_str().map(str::to_owned),
@@ -1952,14 +2009,24 @@ async fn dispatch_operation_scopes(
                     "Specialists may read only their own operation scopes".into(),
                 ));
             }
-            (
-                json!({"services": if args["guests"].as_bool() == Some(true) {
-                    Box::pin(crate::services::agent_operation_scope_service::guest_options(db, owner, &agent.id)).await?
-                } else {
-                    Box::pin(crate::services::agent_operation_scope_service::options(db, &state.node_ws_manager, owner, &agent.id)).await?
-                }}),
-                false,
+            let request = serde_json::from_value(args.clone())
+                .map_err(|_| AppError::ValidationError("Invalid discovery page".into()))?;
+            match Box::pin(
+                crate::services::agent_operation_scope_service::options_page(
+                    db, chat, &agent.id, &request,
+                ),
             )
+            .await
+            {
+                Ok(page) => (page, false),
+                Err(error @ AppError::Conflict(_)) => (
+                    json!({"error":error.error_key(),"error_code":error.error_code(),
+                        "reason":"discovery_snapshot_changed",
+                        "message":"Operation discovery changed or the cursor belongs to another caller/filter. Discard collected pages and restart get_agent_operations without cursor. No acknowledgement is needed."}),
+                    true,
+                ),
+                Err(error) => return Err(error),
+            }
         }
         "set_agent_operations" => {
             let agent = team::live_specialist(db, owner, text_arg(args, "subagent")).await?;
@@ -2316,6 +2383,7 @@ async fn dispatch_agent_settings(
                 team::AgentStyle {
                     display_name: args["display_name"].as_str(),
                     persona: args["persona"].as_str(),
+                    voice_instructions: None,
                 },
             )
             .await?;
@@ -2973,6 +3041,24 @@ async fn dispatch_channels(
                 false,
             )
         }
+        "update_channel_access" if args.get("org_guests").is_some() => {
+            if ["private_chats", "private_chat_posts", "apply_to_existing"]
+                .iter()
+                .any(|key| args.get(*key).is_some())
+            {
+                return Err(AppError::ValidationError("Change organization guest settings separately from posting or private-chat settings".into()));
+            }
+            (
+                Box::pin(super::org_specialist_channels::update_tool(
+                    state,
+                    owner,
+                    text_arg(args, "channel_agent_id"),
+                    &args["org_guests"],
+                ))
+                .await?,
+                false,
+            )
+        }
         "update_channel_access" => (
             Box::pin(super::nyxbot::chats::update_access(
                 state,
@@ -3158,10 +3244,19 @@ async fn agent_responses(
     state: &AppState,
     owner: &str,
     include_destroyed: bool,
-) -> AppResult<Vec<AgentResponse>> {
+    requested: Option<&crate::models::assistant_agent::AssistantAgent>,
+) -> AppResult<(Vec<AgentResponse>, bool)> {
     let nyxbot = team::ensure_nyxbot(&state.db, owner).await?;
-    let mut summaries = team::summaries(&state.db, owner, true, include_destroyed, 300).await?;
+    let (mut summaries, destroyed_truncated) =
+        team::summaries_with_archive(&state.db, owner, true, include_destroyed, 300).await?;
     summaries.extend(crate::services::shared_agent_service::summaries(&state.db, owner).await?);
+    if let Some(agent) = requested
+        && agent.destroyed_at.is_some()
+        && !summaries.iter().any(|summary| summary.id == agent.id)
+    {
+        summaries
+            .extend(team::summaries_for_agents(&state.db, owner, vec![agent.clone()], 300).await?);
+    }
     let channels = super::nyxbot::list(state, owner).await?;
     let mut responses = Vec::new();
     for summary in summaries {
@@ -3184,7 +3279,7 @@ async fn agent_responses(
             summary,
         });
     }
-    Ok(responses)
+    Ok((responses, destroyed_truncated))
 }
 
 #[derive(Default, Deserialize)]
@@ -3201,9 +3296,16 @@ pub async fn list_agents(
 ) -> AppResult<Json<Value>> {
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let agents = agent_responses(&state, &owner, query.include_destroyed.unwrap_or(false)).await?;
+    let (agents, destroyed_truncated) = agent_responses(
+        &state,
+        &owner,
+        query.include_destroyed.unwrap_or(false),
+        None,
+    )
+    .await?;
     Ok(Json(json!({
         "agents": agents,
+        "destroyed_truncated": destroyed_truncated,
         "limits": SettingsResponse::from(settings::get(&state.db, &owner).await?),
     })))
 }
@@ -3223,6 +3325,8 @@ pub struct CreateAgentRequest {
     display_name: Option<String>,
     #[serde(default)]
     persona: Option<String>,
+    #[serde(default)]
+    voice_instructions: Option<String>,
     #[serde(default)]
     services: Vec<String>,
     #[serde(default)]
@@ -3258,6 +3362,7 @@ pub async fn create_agent(
         description: body.description,
         display_name: body.display_name,
         persona: body.persona,
+        voice_instructions: body.voice_instructions,
         targets,
         account_read: body.account_read,
         specialty: None,
@@ -3330,8 +3435,9 @@ pub async fn get_agent(
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     let agent = team::agent(&state.db, &owner, &id).await?;
-    let response = agent_responses(&state, &owner, true)
+    let response = agent_responses(&state, &owner, true, Some(&agent))
         .await?
+        .0
         .into_iter()
         .find(|row| row.summary.id == agent.id)
         .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
@@ -3380,6 +3486,9 @@ pub struct UpdateAgentRequest {
     /// Empty clears it.
     #[serde(default)]
     persona: Option<String>,
+    /// Empty clears it. Applies to new voice calls.
+    #[serde(default)]
+    voice_instructions: Option<String>,
     /// NyxAgent model for the agent's new threads, from the live list.
     #[serde(default)]
     model: Option<String>,
@@ -3425,6 +3534,7 @@ pub async fn update_agent(
         team::AgentStyle {
             display_name: body.display_name.as_deref(),
             persona: body.persona.as_deref(),
+            voice_instructions: body.voice_instructions.as_deref(),
         },
     )
     .await?;
@@ -3445,7 +3555,7 @@ pub async fn update_agent(
     }
     Ok(Json(json!({"id": agent.id, "name": agent.name,
         "description": agent.description, "display_name": agent.display_name,
-        "persona": agent.persona, "model": agent.model,
+        "persona": agent.persona, "voice_instructions": agent.voice_instructions, "model": agent.model,
         "access_mode_override": agent.access_mode_override,
         "channel_checking_notice": agent.channel_checking_notice})))
 }
@@ -3817,6 +3927,7 @@ pub fn spawn_sweeps(state: AppState) {
     crate::services::nyxbot_gateway_release_service::spawn_worker(state.clone());
     super::mcp_transport::async_operations::spawn_sweep(state.clone());
     super::nyxbot::late_delivery::spawn_sweep(state.clone());
+    super::nyxbot::execution_delivery::spawn_sweep(state.clone());
     super::assistant_voice::spawn_dispatch(state.clone());
     crate::services::voice::runtime::spawn_recovery(state.clone());
     tokio::spawn(async move {

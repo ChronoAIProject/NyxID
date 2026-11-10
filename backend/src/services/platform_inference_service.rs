@@ -1496,6 +1496,7 @@ mod tests {
             .await
             .unwrap();
         service.platform_key = Some(PlatformKeyConfig {
+            purpose: Default::default(),
             enabled: true,
             audience: PlatformKeyAudience::Public,
             allowed_owner_ids: vec![],
@@ -1509,6 +1510,7 @@ mod tests {
         let code = format!("platform_svc_{}_pk", service.slug);
         service.billing = Some(ServiceBilling {
             platform_key_pricing: Some(LanePricing {
+                model_prices: Vec::new(),
                 metric: BillingMetric::Requests,
                 credits_per_unit: "0.001".into(),
                 lago_metric_code: code.clone(),

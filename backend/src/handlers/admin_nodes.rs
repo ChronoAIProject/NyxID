@@ -88,6 +88,7 @@ fn admin_node_info_from_model(
                 credential_ack_correlation: owner.credential_ack_correlation,
                 credential_target_update_v1: owner.credential_target_update_v1,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
+                machine_execution_approval_v1: owner.machine_execution_approval_v1,
                 proxy_max_body_size: owner.proxy_max_body_size,
             },
         }

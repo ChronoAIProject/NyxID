@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import { MessageTime } from "@/components/assistant/message-time";
+import { ToolImage } from "./blocks/tool-image";
 import type { ChatMessage } from "@/lib/assistant/chat-types";
 import {
   describeEventNotice,
@@ -151,6 +152,11 @@ export function NyxBotEventNotice({ message }: { readonly message: ChatMessage }
       {notices.map((notice, index) => (
         <EventRow key={index} notice={notice} />
       ))}
+      {message.images?.length ? (
+        <div className="flex flex-wrap gap-2 p-3">
+          {message.images.map((image) => <ToolImage key={image.id} image={image} />)}
+        </div>
+      ) : null}
     </div>
   );
 }

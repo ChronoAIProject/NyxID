@@ -189,7 +189,7 @@ pub(crate) async fn reserve(
     session.start_transaction().and_run2(async move |session| {
         let work:AppResult<_>=Box::pin(async {
             let mut fence=fence.clone(); fence.insert("gateway_setup_release_id",bson::Bson::Null);
-            if db.collection::<Document>(CHANNELS).update_one(fence,doc! {"$set":{"gateway_setup_release_id":&release.id,"binding_id":&release.binding_id}})
+            if db.collection::<Document>(CHANNELS).update_one(fence,doc! {"$inc":{"execution_policy_revision":1_i64},"$set":{"gateway_setup_release_id":&release.id,"binding_id":&release.binding_id}})
                 .session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
             db.collection::<Release>(RELEASES).insert_one(&release).session(&mut *session).await?;
             if native_source {
@@ -571,7 +571,7 @@ pub(crate) async fn retire_attempt(
                         unset.insert("link_code_hash","");unset.insert("link_code_expires_at","");
                     }
                     db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&row.id,"gateway_setup_release_id":&id},doc! {
-                        "$set":set,"$unset":unset}).session(&mut *session).await?;
+                        "$inc":{"execution_policy_revision":1_i64},"$set":set,"$unset":unset}).session(&mut *session).await?;
                 }
             }
             queue(&db,&release,reason,session).await?;
@@ -602,9 +602,11 @@ pub(crate) async fn retire_connection(
             if (reason==ReleaseReason::SetupFailed && current.status!="pending") || (reason==ReleaseReason::OrgAccessLost && !matches!(current.status.as_str(),"pending"|"active")) {return Ok(Vec::new());}
             let ids=retire_in_session(&state,&current,reason,session).await?;
             if current.org_specialist.is_some() {super::org_channel_service::lifecycle::retire_in_session(&db,session,&current.id,None).await?;}
-            db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id},doc! {"$set":{"status":&status,"last_error":&error,"gateway_no_progress":false,"updated_at":bson::DateTime::now()},
+            db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id},doc! {"$inc":{"execution_policy_revision":1_i64},"$set":{"status":&status,"last_error":&error,"gateway_no_progress":false,"updated_at":bson::DateTime::now()},
                 "$unset":{"gateway_setup_release_id":"","agent_key_ciphertext":"","pending_agent_api_key_id":"","pending_route_api_key_id":"","link_code_hash":"","link_code_expires_at":""}}).session(&mut *session).await?;
             super::channel_thread_follow_service::suspend_in_session(&db,&current.user_id,&current.id,error.as_deref().unwrap_or("disconnected"),session).await?;
+            db.collection::<Document>(crate::models::execution_permission_channel::COLLECTION_NAME).delete_many(
+                doc!{"task.channel_source.channel_id":&current.id}).session(&mut *session).await?;
             for key in [Some(current.route_api_key_id.as_str()),current.pending_route_api_key_id.as_deref()].into_iter().flatten() {
                 super::channel_routing_service::retire_key_routes_in_session(&db,bot_owner(&current),&current.channel_bot_id,key,session).await?;
                 revoke_in_session(&db,bot_owner(&current),key,session).await?;
@@ -1210,7 +1212,7 @@ pub(crate) async fn settle_native_drains(db: &Database) -> AppResult<()> {
                         {"gateway_source":guard.get("gateway_source").cloned().ok_or_else(conflict)?},
                         {"gateway_source":bson::Bson::Null,"gateway_native_activation":"relay_draining"},
                     ],
-                },doc! {"$set":{"gateway_native_activation":if released {"relay_ready"} else {"relay_draining"}},
+                },doc! {"$inc":{"execution_policy_revision":1_i64},"$set":{"gateway_native_activation":if released {"relay_ready"} else {"relay_draining"}},
                     "$unset":{"gateway_source":"","gateway_native_phase":""}}).session(&mut *session).await?;
                 Ok(())
             }.await;
@@ -1388,7 +1390,7 @@ pub(crate) async fn fallback(
             if let Some(key)=current.agent_api_key_id.as_deref() {revoke_in_session(&db,&current.user_id,key,session).await?;}
             super::channel_routing_service::fence_route_key(&db,&next_key,session).await?;
             db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id,"status":"pending"},doc! {
-                "$set":{"transport":"direct","route_api_key_id":&next_key,"gateway_no_progress":false,"gateway_fallback_at":bson::DateTime::now()},
+                "$inc":{"execution_policy_revision":1_i64},"$set":{"transport":"direct","route_api_key_id":&next_key,"gateway_no_progress":false,"gateway_fallback_at":bson::DateTime::now()},
                 "$unset":{"gateway_setup_release_id":"","agent_api_key_id":"","agent_key_ciphertext":"","gateway_channel_id":"","gateway_record_id":"","gateway_version":"","binding_id":"","gateway_bot_id":"","gateway_source":"","gateway_native_phase":""}})
                 .session(&mut *session).await?;
             Ok(ids)

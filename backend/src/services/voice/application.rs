@@ -89,15 +89,24 @@ pub async fn options(
     }
     let user = auth.user_id.to_string();
     voice::require_enabled(&state.db, &user).await?;
-    let options = if let Some(id) = q.conversation_id {
-        let thread = voice::thread(&state.db, &user, &id).await?;
-        voice::options(&state.db, &state.encryption_keys, &thread).await?
-    } else {
-        voice::settings_options(&state.db, &state.encryption_keys, &user).await?
-    };
-    Ok(serde_json::json!({"options":options,"limits": {
+    let (options, settings) = tokio::try_join!(
+        async {
+            if let Some(id) = q.conversation_id {
+                let thread = voice::thread(&state.db, &user, &id).await?;
+                voice::options(&state.db, &state.encryption_keys, &thread).await
+            } else {
+                voice::settings_options(&state.db, &state.encryption_keys, &user).await
+            }
+        },
+        crate::services::assistant_settings_service::get(&state.db, &user),
+    )?;
+    // A saved binding can prepare a call with one fresh settings request.
+    // Session creation still resolves the binding and provider authority live.
+    Ok(
+        serde_json::json!({"options":options,"preferences":settings.voice.map(Preferences::from),"greetings":true,"limits": {
         "call_seconds":crate::models::assistant_voice::MAX_CALL_SECONDS,"idle_seconds":crate::models::assistant_voice::IDLE_SECONDS,"idle_warning_seconds":crate::models::assistant_voice::IDLE_WARNING_SECONDS,
-        "transmitting_calls":1,"queued_requests":crate::models::assistant_voice::MAX_QUEUED},"recording":false}))
+        "transmitting_calls":1,"queued_requests":crate::models::assistant_voice::MAX_QUEUED},"recording":false}),
+    )
 }
 
 #[derive(Deserialize)]
@@ -193,6 +202,13 @@ pub struct SessionResponse {
 impl From<crate::models::assistant_voice_session::VoiceSession> for SessionResponse {
     fn from(row: crate::models::assistant_voice_session::VoiceSession) -> Self {
         let idle = crate::services::voice::progress::idle_seconds(&row, chrono::Utc::now());
+        let idle_warning = row.state
+            == crate::models::assistant_voice_session::SessionState::Active
+            && row.live_slot
+            && !row.end_requested
+            && idle
+                >= crate::models::assistant_voice::IDLE_SECONDS
+                    - crate::models::assistant_voice::IDLE_WARNING_SECONDS;
         Self {
             id: row.id,
             generation: row.generation,
@@ -207,7 +223,7 @@ impl From<crate::models::assistant_voice_session::VoiceSession> for SessionRespo
             reserved_until: row.reserved_until,
             final_usage_confirmed: row.final_usage_confirmed,
             end_reason: row.end_reason,
-            idle_warning: idle >= 165,
+            idle_warning,
             resumable: !row.dictation
                 && row.protocol
                     != Some(crate::models::downstream_service::VoiceProtocol::XaiRealtime)
@@ -281,7 +297,9 @@ pub struct ControlRequest {
 #[serde(deny_unknown_fields)]
 pub struct AnnouncementRequest {
     pub(crate) request_id: String,
-    pub(crate) text: String,
+    pub(crate) text: Option<String>,
+    #[serde(default)]
+    pub(crate) greeting: bool,
 }
 pub async fn announcement(
     state: &AppState,
@@ -302,13 +320,19 @@ pub async fn announcement(
         false,
     )
     .await?;
-    let row = crate::services::voice::announcements::enqueue(
-        &state.db,
-        &call,
-        &body.request_id,
-        &body.text,
-    )
-    .await?;
+    let row = match (body.greeting, body.text.as_deref()) {
+        (true, None) => {
+            super::announcements::enqueue_greeting(&state.db, &call, &body.request_id).await?
+        }
+        (false, Some(text)) => {
+            super::announcements::enqueue(&state.db, &call, &body.request_id, text).await?
+        }
+        _ => {
+            return Err(AppError::ValidationError(
+                "Provide text or greeting:true, never both".into(),
+            ));
+        }
+    };
     Ok(serde_json::json!({"request_id":row.request_id,"state":row.state}))
 }
 pub async fn control(
@@ -478,10 +502,11 @@ pub async fn agents(
         }
         let thread = Box::pin(team::home_thread(&state.db, &state.encryption_keys, &agent)).await?;
         rows.push(json!({"agent_id":agent.id,"name":agent.name,
-            "display_name":agent.display_name,"service_id":service_id,"conversation_id":thread.id}));
+            "display_name":agent.display_name,"description":agent.description,
+            "service_id":service_id,"conversation_id":thread.id}));
     }
     let settings = crate::services::assistant_settings_service::get(&state.db, &user).await?;
-    Ok(json!({"agents":rows,"preferences":settings.voice.map(Preferences::from)}))
+    Ok(json!({"agents":rows,"preferences":settings.voice.map(Preferences::from),"greetings":true}))
 }
 
 #[derive(serde::Deserialize)]

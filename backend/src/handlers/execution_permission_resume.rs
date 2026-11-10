@@ -18,6 +18,16 @@ pub(crate) async fn send(
     independent_card: Option<String>,
 ) -> AppResult<Response> {
     match adapter {
+        PreparedAdapter::Machine { binding, .. } => {
+            Box::pin(http_inner(
+                state,
+                auth,
+                effect,
+                independent_card,
+                Some(*binding),
+            ))
+            .await
+        }
         PreparedAdapter::Unsupported => {
             Err(AppError::Forbidden("Retained source is unavailable".into()))
         }
@@ -112,17 +122,28 @@ async fn http(
     effect: PreparedEffect,
     independent_card: Option<String>,
 ) -> AppResult<Response> {
+    http_inner(state, auth, effect, independent_card, None).await
+}
+async fn http_inner(
+    state: &AppState,
+    auth: &AuthUser,
+    effect: PreparedEffect,
+    independent_card: Option<String>,
+    machine: Option<crate::models::execution_proposal::MachineSource>,
+) -> AppResult<Response> {
     let query = if let Some(query) = &effect.query {
         format!("{query}&_nyxid_via={}", effect.connection)
     } else {
         format!("_nyxid_via={}", effect.connection)
     };
     let path = effect.path.as_str();
-    // Generic MCP connections have no catalog row. Resolve their live
-    // slug only to select the ordinary route; _nyxid_via still pins the
-    // retained connection and the coordinator checks its full snapshot.
-    let slug = if effect.endpoint.as_deref()
-        == Some(crate::services::mcp_service::GENERIC_PROXY_ENDPOINT_ID)
+    // Generic MCP and Machine calls may use custom connections without a
+    // catalog row. Machine ingress originally selected this same slug route.
+    // The live slug selects the route; _nyxid_via pins the retained connection
+    // and the coordinator checks its full snapshot before sending.
+    let slug = if machine.is_some()
+        || effect.endpoint.as_deref()
+            == Some(crate::services::mcp_service::GENERIC_PROXY_ENDPOINT_ID)
     {
         Some(
             crate::services::user_service_service::find_user_service_by_id(
@@ -161,6 +182,29 @@ async fn http(
     request
         .extensions_mut()
         .insert(super::assistant_nyxagent::SERVER_TURN_POLICY);
+    if let Some(binding) = machine {
+        request
+            .extensions_mut()
+            .insert(crate::services::machine_gateway_service::Ingress {
+                declared_id: binding.declared_id.clone(),
+                git: None,
+                job: Some(
+                    crate::services::machine_gateway_service::JobAuthority::Assistant(
+                        binding.job_id.clone(),
+                    ),
+                ),
+            });
+        request.extensions_mut().insert(
+            crate::services::machine_gateway_service::MachineUsageAttribution {
+                node_id: binding.node_id,
+                job_id: binding.job_id,
+                runtime_id: binding.runtime_id,
+                runtime_generation: binding.runtime_generation,
+                grant_id: None,
+                principal_kind: "assistant",
+            },
+        );
+    }
     if let Some(slug) = slug {
         return Box::pin(super::proxy::proxy_request_by_slug_inner(
             state,

@@ -140,7 +140,7 @@ pub(crate) async fn upload_authorized(
     bytes: Vec<u8>,
     access: Option<super::org_group_service::Access>,
 ) -> AppResult<TurnAttachment> {
-    store_authorized(db, keys, user, scope, name, bytes, access, None).await
+    store_authorized(db, keys, user, scope, name, bytes, access, None, None).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -154,7 +154,35 @@ pub(crate) async fn upload_channel_authorized(
     source: crate::models::assistant_channel_media::UploadSource,
 ) -> AppResult<TurnAttachment> {
     owner_scope(db, user, scope).await?;
-    store_authorized(db, keys, user, scope, name, bytes, None, Some(source)).await
+    store_authorized(db, keys, user, scope, name, bytes, None, Some(source), None).await
+}
+
+/// Relay v2 retains an opaque original just like Telegram preparation. This
+/// does not make an unvalidated raster eligible for model image input.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upload_channel_original_authorized(
+    db: &Database,
+    keys: &EncryptionKeys,
+    user: &str,
+    scope: &str,
+    name: &str,
+    bytes: Vec<u8>,
+    source: crate::models::assistant_channel_media::UploadSource,
+    mime_hint: Option<&str>,
+) -> AppResult<TurnAttachment> {
+    owner_scope(db, user, scope).await?;
+    store_authorized(
+        db,
+        keys,
+        user,
+        scope,
+        name,
+        bytes,
+        None,
+        Some(source),
+        Some(mime_hint.unwrap_or("application/octet-stream")),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -167,6 +195,7 @@ async fn store_authorized(
     bytes: Vec<u8>,
     access: Option<super::org_group_service::Access>,
     source: Option<crate::models::assistant_channel_media::UploadSource>,
+    original_mime: Option<&str>,
 ) -> AppResult<TurnAttachment> {
     use sha2::{Digest, Sha256};
     // Legacy rows may lack a digest; attachment-write egress can hash their
@@ -179,7 +208,11 @@ async fn store_authorized(
         .unwrap_or_default();
     let size = bytes.len() as i64;
     // A bounded copy is retained for encrypted storage; the parser receives its own process.
-    let extracted = attachment_extraction::extract(bytes.clone(), extension).await?;
+    let extracted = if let Some(mime) = original_mime {
+        extract_channel_original(bytes.clone(), extension, Some(mime)).await?
+    } else {
+        attachment_extraction::extract(bytes.clone(), extension).await?
+    };
     let mut row = AssistantUpload {
         source,
         content_sha256,
@@ -321,6 +354,36 @@ pub struct PreparedChannelUpload {
     chunks: Vec<(String, Vec<u8>)>,
 }
 
+async fn extract_channel_original(
+    bytes: Vec<u8>,
+    extension: String,
+    mime_hint: Option<&str>,
+) -> AppResult<Extracted> {
+    if bytes.is_empty() || bytes.len() > attachment_extraction::MAX_BYTES {
+        return Err(AppError::ChannelMediaTooLarge);
+    }
+    Ok(
+        match attachment_extraction::extract(bytes, extension).await {
+            Ok(extracted) => extracted,
+            // Preserve the original encrypted file even when this parser cannot
+            // interpret it. Unvalidated images never enter image-model input.
+            Err(AppError::BadRequest(_)) => Extracted {
+                content_type: mime_hint
+                    .filter(|m| {
+                        m.len() <= 100
+                            && m.parse::<mime::Mime>().is_ok()
+                            && (m.starts_with("audio/") || m.starts_with("video/"))
+                    })
+                    .unwrap_or("application/octet-stream")
+                    .into(),
+                text: String::new(),
+                sections: Vec::new(),
+            },
+            Err(error) => return Err(error),
+        },
+    )
+}
+
 pub(crate) async fn prepare_channel_upload(
     keys: &EncryptionKeys,
     user: &str,
@@ -334,27 +397,7 @@ pub(crate) async fn prepare_channel_upload(
         .map(|(_, s)| s.to_ascii_lowercase())
         .unwrap_or_default();
     let size = bytes.len() as i64;
-    if bytes.is_empty() || bytes.len() > attachment_extraction::MAX_BYTES {
-        return Err(AppError::ChannelMediaTooLarge);
-    }
-    let extracted = match attachment_extraction::extract(bytes.clone(), extension).await {
-        Ok(extracted) => extracted,
-        // Preserve the original encrypted file even when this parser cannot
-        // interpret it. Unvalidated images never enter image-model input.
-        Err(AppError::BadRequest(_)) => Extracted {
-            content_type: mime_hint
-                .filter(|m| {
-                    m.len() <= 100
-                        && m.parse::<mime::Mime>().is_ok()
-                        && (m.starts_with("audio/") || m.starts_with("video/"))
-                })
-                .unwrap_or("application/octet-stream")
-                .into(),
-            text: String::new(),
-            sections: Vec::new(),
-        },
-        Err(error) => return Err(error),
-    };
+    let extracted = extract_channel_original(bytes.clone(), extension, mime_hint).await?;
     use sha2::{Digest, Sha256};
     let mut row = AssistantUpload {
         source: None,
@@ -683,6 +726,9 @@ pub async fn for_chat(db: &Database, chat: &ChatAuthority, id: &str) -> AppResul
         .find_one(filter.clone())
         .await?;
     if let Some(row) = row {
+        if row.source.as_ref().is_some_and(|s| s.guest.is_some()) {
+            return Err(missing());
+        }
         return Ok(row);
     }
     Box::pin(super::assistant_upload_retention::require_available(
@@ -756,6 +802,7 @@ async fn tool_image_bytes(
     tool_image_for_chat(db, chat, id)
         .await?
         .ok_or_else(missing)?;
+    super::assistant_platform_model::record_image_read(db, chat, id, &bytes).await?;
     Ok(Some((row.content_type, bytes)))
 }
 
@@ -769,14 +816,32 @@ pub async fn chat_bytes(
     if image_only && let Some(image) = tool_image_bytes(db, keys, chat, id).await? {
         return Ok(image);
     }
-    let row = for_chat(db, chat, id).await?;
+    let channel_guest = image_only && chat.guest && !chat.collaboration_thread;
+    let row = if channel_guest {
+        super::assistant_channel_media::guest::for_chat(db, chat, id).await?
+    } else {
+        for_chat(db, chat, id).await?
+    };
     if image_only && !row.content_type.starts_with("image/") {
         return Err(missing());
     }
     let bytes = payload(db, keys, &row).await?;
+    if channel_guest {
+        #[cfg(test)]
+        super::assistant_channel_media::test_hooks::reach(
+            db,
+            chat.turn_id.as_deref().unwrap_or_default(),
+            "guest_decrypted",
+        )
+        .await;
+        super::assistant_channel_media::guest::for_chat(db, chat, id).await?;
+    }
     if chat.collaboration_thread {
         // Membership, the exact request and guest opt-in may change during decryption.
         for_chat(db, chat, id).await?;
+    }
+    if image_only {
+        super::assistant_platform_model::record_image_read(db, chat, id, &bytes.1).await?;
     }
     Ok(bytes)
 }
@@ -2890,6 +2955,7 @@ mod integration_tests {
                 description: "Read only my own conversations".into(),
                 display_name: None,
                 persona: None,
+                voice_instructions: None,
                 targets: Default::default(),
                 account_read: false,
                 specialty: None,

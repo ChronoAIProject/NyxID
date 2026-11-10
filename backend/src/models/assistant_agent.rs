@@ -10,6 +10,7 @@ pub const MAX_MEMORY_NOTES: usize = 50;
 pub const MAX_MEMORY_NOTE_CHARS: usize = 500;
 pub const MAX_DISPLAY_NAME_CHARS: usize = 40;
 pub const MAX_PERSONA_CHARS: usize = 2000;
+pub const MAX_VOICE_INSTRUCTIONS_CHARS: usize = 2000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -174,6 +175,10 @@ pub struct AssistantAgent {
     /// Personality and tone the user asked for. Style only, never authority.
     #[serde(default)]
     pub persona: Option<String>,
+    /// Bot-level voice behavior and guidance for any connected service, shared
+    /// by all voice clients. Never execution authority or a client binding.
+    #[serde(default)]
+    pub voice_instructions: Option<String>,
     /// Destroyed agents keep read-only threads and cannot act.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub destroyed_at: Option<DateTime<Utc>>,

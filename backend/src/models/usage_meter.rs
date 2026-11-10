@@ -244,6 +244,8 @@ pub struct MachineUsageAttribution {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct UsageMeterRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_tariff: Option<Box<crate::models::platform_model_tariff::ModelMeterBinding>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_channel_guest: Option<crate::models::org_channel::GuestUsage>,
     #[serde(rename = "_id")]
     pub id: String,

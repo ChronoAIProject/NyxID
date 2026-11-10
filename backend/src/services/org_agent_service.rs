@@ -147,11 +147,12 @@ pub async fn validate_grants(db: &Database, actor: &str, agent: &AssistantAgent)
             "Organization agents cannot receive personal account access or saved logins".into(),
         ));
     }
-    if !agent.grants.platform_service_ids.is_empty() {
-        return Err(AppError::ValidationError(
-            "Grant the organization's platform connection ID instead of an unbound catalog service"
-                .into(),
-        ));
+    for id in &agent.grants.platform_service_ids {
+        let model = db.collection::<crate::models::platform_model::PlatformModel>("platform_models")
+            .find_one(doc! {"billing_service_id":id,"enabled":true,"lifecycle":"active"}).await?
+            .ok_or_else(|| AppError::ValidationError("Grant the organization's connection ID; only platform model offerings support an unbound catalog grant".into()))?;
+        super::assistant_platform_model::require_ready(db).await?;
+        super::platform_model_service::authorized_model(db, actor, &model.public_id).await?;
     }
     let acl = access(db, actor, &agent.user_id).await?;
     for id in &agent.grants.service_ids {

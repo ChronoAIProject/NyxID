@@ -37,6 +37,12 @@ use crate::{
 
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
+    super::assistant_platform_model::READINESS,
+    super::feature_flag_service::ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY,
+    super::platform_model_service::REGISTRY_READINESS,
+    super::platform_model_service::EXECUTION_READINESS,
+    super::platform_model_execution::images::READINESS,
+    super::billing::model_tariffs::READINESS,
     "assistant:generated-artifacts",
     "assistant:org-agents",
     super::org_channel_service::FLAG,
@@ -55,12 +61,16 @@ pub const CAPABILITIES: &[&str] = &[
     "permissions:execution-authoring-v1",
     super::execution_permission_enrollment::READINESS,
     "permissions:execution-authoring-v2",
+    super::execution_permission_dispatch::machine::READINESS,
+    super::execution_permission_dispatch::proposals::v3::READINESS,
+    super::execution_permission_channel::READINESS,
     super::feature_flag_service::HOSTED_CONNECT_INTENT_FLAG_KEY,
     "approval:required-web-v1",
     // Older transport writers do not wait for relay sockets before remote setup.
     "channel:discord-gateway",
     super::nyxbot_gateway_source::READINESS,
     super::nyxbot_response_recovery::RELAY_READINESS,
+    super::channel_media_authority::READINESS,
 ];
 pub const AUTOMATION_COMPLETION: &str = "automation:coordinator-completion-v2";
 const MAX_AGE_SECS: i64 = 45;
@@ -328,6 +338,11 @@ async fn report_for(db: &Database, local: &Runtime, capability: &str) -> AppResu
 }
 
 pub async fn require(db: &Database, capability: &str) -> AppResult<()> {
+    if capability == super::platform_model_service::FLAG {
+        // Keep this optional foundation out of every existing flag caller's
+        // inline future layout.
+        return Box::pin(super::platform_model_service::require_execution_ready(db)).await;
+    }
     if (CAPABILITIES.contains(&capability) || capability == AUTOMATION_COMPLETION)
         && !report(db, capability).await?.ready
     {
@@ -351,16 +366,24 @@ pub async fn require_platform(db: &Database, local_required: bool) -> AppResult<
 
 #[cfg(test)]
 pub(crate) async fn ready_test_replica(db: &Database) {
-    ready_test_replica_inner(db, false).await;
+    drop(ready_test_replica_inner(db, false).await);
 }
 
 #[cfg(test)]
 pub(crate) async fn ready_automation_test_replica(db: &Database) {
-    ready_test_replica_inner(db, true).await;
+    drop(ready_test_replica_inner(db, true).await);
 }
 
 #[cfg(test)]
-async fn ready_test_replica_inner(db: &Database, automation_enabled: bool) {
+pub(crate) async fn controlled_ready_test_replica(db: &Database) -> tokio::task::JoinHandle<()> {
+    ready_test_replica_inner(db, false).await
+}
+
+#[cfg(test)]
+async fn ready_test_replica_inner(
+    db: &Database,
+    automation_enabled: bool,
+) -> tokio::task::JoinHandle<()> {
     let local = Runtime {
         identity: ReplicaIdentity {
             instance_name: "test-backend".into(),
@@ -414,7 +437,7 @@ async fn ready_test_replica_inner(db: &Database, automation_enabled: bool) {
             .await
             .expect("test replica heartbeat");
         }
-    });
+    })
 }
 
 #[cfg(test)]

@@ -143,7 +143,13 @@ fn reserve_and_open_durable_once<'a>(
         let mut allowance_candidates = Vec::with_capacity(layers.len());
         for layer in &layers {
             let mut periods = Vec::new();
-            if layer.layer == BillingLayer::Platform {
+            if layer.layer == BillingLayer::Platform
+                && !(ctx.model_tariff.is_some()
+                    && super::amounts::rate_pico(
+                        layer.credits_per_unit_pico,
+                        layer.credits_per_unit_micros,
+                    ) == 0)
+            {
                 for definition in super::allowances::applicable_allowances(
                     db,
                     &ctx.billing_owner_id,
@@ -218,6 +224,7 @@ fn reserve_and_open_durable_once<'a>(
         let result = session.start_transaction().and_run2(async move |session| {
         let result: AppResult<super::reservation::BillingReservation> = async {
             let now = Utc::now();
+            if let Some(tariff)=&ctx.model_tariff {super::model_tariffs::fence_admission(&db,session,tariff).await?;}
             if let Some(admission) = &ctx.public_admission {
                 use crate::models::platform_public_budget::{CALLS,PublicCallReservation};
                 if admission.expires_at <= now { return Err(AppError::BillingProviderUnavailable("Public admission expired".into())); }
@@ -313,14 +320,14 @@ fn reserve_and_open_durable_once<'a>(
                     return Err(AppError::Conflict(WALLET_ADMISSION_BUSY.into()));
                 }
                 let prepaid = wallet.plan_kind == crate::models::billing_wallet::PlanKind::Prepaid;
-                let available = if !prepaid && wallet.has_payment_instrument {
+                let available = if ctx.model_tariff.is_none() && !prepaid && wallet.has_payment_instrument {
                     wallet.available_with_overdraft_credits()?
                 } else { wallet.available_credits()? };
                 if !prepaid && wallet.available_with_overdraft_credits()? <= Credits::ZERO {
                     return Err(AppError::WalletSuspended);
                 }
                 if available < total {
-                    return Err(if !prepaid && wallet.has_payment_instrument {
+                    return Err(if ctx.model_tariff.is_none() && !prepaid && wallet.has_payment_instrument {
                         AppError::WalletSuspended
                     } else { AppError::InsufficientCredits });
                 }
@@ -1911,6 +1918,7 @@ mod tests {
             .expect("insert grant");
 
         let row = UsageMeterRow {
+            model_tariff: None,
             org_channel_guest: None,
             rollup_pending: true,
             id: row_id.to_string(),

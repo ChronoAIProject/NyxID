@@ -22,15 +22,16 @@ type UploadProps = ComponentProps<typeof UploadComposer>;
 type Props = Omit<UploadProps, "onSend"> & {
   readonly conversation?: NyxAgentConversation;
   readonly agentModel?: string;
+  readonly agentId?: string;
   readonly agentOverride?: NyxAgentAccessMode | null;
   readonly onVoiceSettings?: () => void;
   readonly onSend: (...args: [...Parameters<UploadProps["onSend"]>, model?: string]) => Promise<void>;
 };
 
 /** Key by person + thread: pending guidance must never move with navigation. */
-export function NyxAgentComposer({ conversation, agentModel, agentOverride, onVoiceSettings, ...props }: Props) {
+export function NyxAgentComposer({ conversation, agentModel, agentId, agentOverride, onVoiceSettings, ...props }: Props) {
   const [draftModel, setDraftModel] = useState<string>();
-  const models = useNyxAgentModels();
+  const models = useNyxAgentModels(true, { conversationId: conversation?.id, agentId });
   const selectedModel = conversation?.model ?? draftModel ?? agentModel ?? "nyxagent/chat";
   const cannotViewImages = modelCannotViewImages(models.data?.find((model) => model.id === selectedModel));
   const [connection, setConnection] = useState<KeyInfo>();
@@ -60,6 +61,7 @@ export function NyxAgentComposer({ conversation, agentModel, agentOverride, onVo
     onVoiceSettings={onVoiceSettings}
     footerControls={<ComposerSettings
       conversationId={conversation?.id}
+      agentId={agentId}
       model={selectedModel}
       onDraftModelChange={setDraftModel}
       agentOverride={agentOverride}

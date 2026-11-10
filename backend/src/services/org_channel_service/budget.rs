@@ -79,9 +79,13 @@ pub(crate) async fn reserve(
         .guests;
     let cap = policy.daily_credits.ok_or_else(super::denied)?;
     let admitted_at = Utc::now();
-    let day = day_key(&payer.channel_id, admitted_at);
+    let channel = policy
+        .continuity_channel_id
+        .as_deref()
+        .unwrap_or(&payer.channel_id);
+    let day = day_key(channel, admitted_at);
     db.collection::<Document>(BUDGETS).update_one(doc!{"_id":&day},doc!{"$setOnInsert":{
-        "channel_id":&payer.channel_id,"org_id":&payer.org_id,"day":admitted_at.format("%Y-%m-%d").to_string(),
+        "channel_id":channel,"org_id":&payer.org_id,"day":admitted_at.format("%Y-%m-%d").to_string(),
         "reserved_credits":Credits::ZERO,"spent_credits":Credits::ZERO,"created_at":bson::DateTime::now()}})
         .upsert(true).session(&mut *session).await?;
     for row in rows {

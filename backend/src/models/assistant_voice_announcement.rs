@@ -13,6 +13,8 @@ pub struct Announcement {
     #[serde(default)]
     pub conversation_id: String,
     pub text: String,
+    #[serde(default)]
+    pub greeting: bool,
     pub state: String,
     pub not_after: bson::DateTime,
     pub expires_at: bson::DateTime,

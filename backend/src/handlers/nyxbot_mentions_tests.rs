@@ -414,6 +414,7 @@ async fn external_bot_mentions_start_only_bounded_guest_turns_without_sender_oau
                 description: "Community assistant".into(),
                 display_name: None,
                 persona: None,
+                voice_instructions: None,
                 targets: Default::default(),
                 account_read: false,
                 specialty: None,

@@ -14,6 +14,8 @@ pub const MAX_REPLY_PARTS: usize = 64;
 pub struct Delivery {
     id: String,
     parts: Vec<ReplyPart>,
+    trace: Option<crate::turn_trace::TurnContext>,
+    operations: Vec<Option<crate::turn_trace::Operation>>,
 }
 
 impl Delivery {
@@ -49,15 +51,26 @@ impl Delivery {
         db.collection::<ChannelReplyDelivery>(COLLECTION_NAME)
             .insert_one(&record)
             .await?;
+        let trace = crate::turn_trace::TurnContext::current();
         Ok(Self {
             id: record.id,
             parts: record.parts,
+            trace,
+            operations: if trace.is_some() {
+                (0..count).map(|_| None).collect()
+            } else {
+                Vec::new()
+            },
         })
     }
 
     pub async fn attempting(&mut self, db: &mongodb::Database, index: usize) -> AppResult<()> {
         self.parts[index].status = PartStatus::Uncertain;
-        self.save_part(db, index).await
+        self.save_part(db, index).await?;
+        if let Some(operation) = self.operations.get_mut(index) {
+            *operation = Some(crate::turn_trace::Operation::part(self.trace, index));
+        }
+        Ok(())
     }
 
     pub async fn accepted(
@@ -73,6 +86,9 @@ impl Delivery {
             outbound_message_id: Some(outbound_message_id.into()),
             failure_code: None,
         };
+        if let Some(Some(operation)) = self.operations.get_mut(index) {
+            operation.finish(crate::turn_trace::Outcome::Confirmed, None, None);
+        }
         self.save_part(db, index).await
     }
 
@@ -87,6 +103,17 @@ impl Delivery {
             part.status = PartStatus::Failed;
         }
         part.failure_code = Some(error.error_code());
+        if let Some(Some(operation)) = self.operations.get_mut(index) {
+            operation.finish(
+                if part.status == PartStatus::Failed {
+                    crate::turn_trace::Outcome::Rejected
+                } else {
+                    crate::turn_trace::Outcome::Unknown
+                },
+                None,
+                Some(error.error_code()),
+            );
+        }
         self.save_part(db, index).await
     }
 
@@ -133,6 +160,14 @@ impl Delivery {
             .await?;
         if result.matched_count != 1 {
             return Err(unconfirmed());
+        }
+        if let Some(trace) = self.trace {
+            crate::turn_trace::milestone(
+                &trace.turn_id(),
+                crate::turn_trace::Stage::Channel,
+                None,
+                Some(crate::turn_trace::Outcome::Confirmed),
+            );
         }
         Ok(())
     }

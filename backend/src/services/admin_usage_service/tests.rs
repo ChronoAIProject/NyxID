@@ -806,6 +806,7 @@ async fn admin_query_execution_stats() {
                 actor: None,
                 user_id: None,
                 api_key_id: None,
+                turn_id: None,
                 created_dates: None,
                 created_from: matches!(name, "date" | "search_date").then_some(from.as_str()),
                 created_to: matches!(name, "date" | "search_date").then_some(to.as_str()),

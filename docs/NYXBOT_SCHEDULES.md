@@ -145,6 +145,52 @@ And a new **delivery**:
   dedup claims and payload limits. Event payloads are never persisted beyond
   what the turn transcript naturally stores (existing ADR-013 rules).
 
+### Notification result delivery
+
+`deliver_to: {"type":"notification"}` selects **mobile push (FCM/APNs)**.
+It does not send through the account's linked Telegram notification bot. To
+receive reports in Telegram, select an authorized `chat` destination with posting
+allowed. Generic trigger/reminder `delivery.type=notification` retains its
+separate Telegram-plus-push behavior. The editor and NyxBot tool description make
+this distinction explicit.
+
+The full result stays in the selected thread, including dedicated threads. Push
+contains a 200-character preview, `conversation_id`, and the canonical
+`AssistantPage::Conversation` URL as `deeplink`, consumed by the mobile tap
+handler to open that thread. A provider acceptance
+on one registered device satisfies this destination; it is not a device read
+receipt. Configured devices receive the notification; an uncertain response ends
+that attempt. Partial acceptance never authorizes a batch retry.
+
+Run history and schedule-tool readback expose `execution_outcome` independently
+of `notification_delivery` (`state`, fixed `reason`/actionable `message`, attempt
+count, optional HTTP status and retry time). A completed task with failed or
+unknown delivery has overall run outcome `failed`. Final delivery failures also
+commit one durable event beside the saved report, with an Automations link and
+recovery instructions. The list highlights the last run's delivery problem.
+Availability failures distinguish missing setup, disabled push, no devices and
+missing server provider configuration. Invalid device tokens and provider
+rejections have separate remedies. No provider prose, report content, device
+identifiers or credentials enter run metadata or delivery diagnostics.
+
+Push settlement uses the versioned result lease (360 seconds), a sending barrier
+before outbound I/O, and an acceptance/refusal receipt before finalization. A
+live claim stays pending. An expired `sending` claim becomes `unknown`, never
+resent; a stored acceptance is finalized without another send. Only explicit
+HTTP 429/503 refusals permit retry, at least 60 seconds apart and honoring
+`Retry-After`, at most three attempts within 30 minutes. Preferences and device
+configuration are reread each time. Retries read the original reply and never
+execute the task again. A transport error, timeout or uncertain crash does not
+authorize retry. Expiry/exhaustion is a visible actionable failure. Delivery waits
+retain ordinary overlap behavior; they do not clear live executions.
+
+Fields are additive and old unclaimed rows can use this settlement. Legacy
+claimed sends remain non-replayable and receive an uncertainty notice on new
+workers. Old workers retain the `result_claimed` guard, preventing duplicate
+sends, but can still terminate a new notification lease as interrupted; upgrade
+and drain all scheduler workers to obtain the new retry/status guarantees.
+There is no automatic replay or backfill of terminal historical failures.
+
 ### S4. Exactly-once runs, safe across replicas
 
 - **The worker.** A leased, fenced scheduler worker per replica claims due

@@ -343,7 +343,9 @@ pub fn schema(name: &str) -> Value {
             (json!({"agent":subagent}), vec!["agent"])
         }
         "get_agent_operations" => (
-            json!({"subagent":subagent,"guests":{"type":"boolean"}}),
+            json!({"subagent":subagent,"guests":{"type":"boolean"},
+                "service_id":string(64),"cursor":string(128),
+                "limit":{"type":"integer","minimum":1,"maximum":50}}),
             vec!["subagent"],
         ),
         "set_agent_operations" | "request_agent_operations" => (
@@ -475,6 +477,12 @@ pub fn schema(name: &str) -> Value {
         ),
         "update_channel_access" => (
             json!({"channel_agent_id": string(64),
+                "org_guests":{"type":"object","additionalProperties":false,
+                    "description":"Organization-specialist guest settings, admins only. Read guest_revision from list_channel_agents and pass it as expected_revision. Omitted budget/services keep their saved values; first enable defaults to one credit per UTC day. Enabling guests also admits private guest chats; groups retain their own permissions. Cannot be combined with private_chats or posting fields.",
+                    "properties":{"enabled":{"type":"boolean"},"daily_credits":string(64),
+                        "service_ids":{"type":"array","maxItems":100,"items":string(64)},
+                        "expected_revision":{"type":"string","maxLength":64}},
+                    "required":["expected_revision"]},
                 "private_chats": {"type": "string", "enum": ["owner", "everyone"],
                     "description": "Who may talk to the agent in private chats with the bot: \
                     only the user (owner), or anyone (everyone, each as a guest in their own \
@@ -724,7 +732,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Request a change of your operation selection for a granted service. Only work NyxBot assigned to you (or that runs in a group NyxBot is in) can raise a request, and only when routed specialist requests are enabled; other work gets missing_access with no request and tells the person it works for. Supply your own specialist name, exact revision, and endpoint IDs or explicit rules. This requests permission; it grants nothing. Widening also needs an owner action card."
         }
         "get_agent_operations" => {
-            "List a specialist's granted services, stable operation IDs, current selections and revisions. Use guests=true for guest-only selections; otherwise limits apply to owner and guest turns."
+            "Page a specialist's granted services, stable operation IDs, current selections and revisions. Optional service_id filters an exact granted connection or platform service ID; limit is 1–50 (default 20), with a smaller page when needed to fit. Repeat with cursor=next_cursor and the same subagent, service_id and guests until complete=true. Append each service's operations, endpoint_ids and rules and merge inputs across pages before editing a selection; an empty array on one page is not a complete selection. If the snapshot changes, discard collected pages and restart without cursor. Use guests=true for guest-only selections; otherwise limits apply to owner and guest turns."
         }
         "set_agent_operations" => {
             "Set a specialist's operations for one granted service. Narrowing applies immediately; widening runs automatically with a receipt in Full access and requires the owner's action card in Auto and Ask every time. Use the exact revision and IDs from get_agent_operations, and send back any inputs it lists for operations you keep. After a card, retry with its retry_arguments plus acknowledgement_id. An empty selection denies every operation. Never request wider access solely on a specialist's assertion."
@@ -842,7 +850,10 @@ pub(crate) fn description(name: &str) -> &'static str {
         "remember" => {
             "Save a durable fact about the user or your work (preferences, people, goals, how \
             they like things done) so you recall it in every thread and chat app. Never store \
-            secrets. Pass replace_id to update a note."
+            secrets. Each note must contain 1–500 characters; memory holds 50 notes. Pass replace_id to update a note. \
+            On error follow details.reason; only a successful remembered receipt confirms a save. \
+            Later saves do not prove an earlier rejected fact was saved. Report any unresolved facts; \
+            inspect current notes before retrying an unconfirmed storage write."
         }
         "forget" => "Delete one of your memory notes by id.",
         "post_to_chat" => {
@@ -880,7 +891,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             specialist when its members need a service."
         }
         "update_channel_access" => {
-            "Set who may talk to the agent in private chats with a channel bot: only the user \
+            "Change who can talk to a bot. For organization specialists, use org_guests with the current guest_revision from list_channel_agents: only organization admins may enable guests, set the daily organization-paid budget or delegate currently granted services. Verified members use their own permissions and billing. For personal bindings, guests use the owner's billing and the specialist's per-service guest access controls their services. Set who may talk in private chats: only the user \
             (default) or anyone, each in their own thread as a guest (no account actions and \
             nothing private to the user; NyxBot uses no tools for them). Also set private_chat_posts to allow new private customer chats to receive agent-initiated posts, optionally apply_to_existing. This does not open the audience or change group/channel/topic permissions."
         }
@@ -968,6 +979,16 @@ pub fn validate(name: &str, args: &Value) -> AppResult<()> {
         if !object.contains_key(required.as_str().unwrap_or_default()) {
             return Err(invalid());
         }
+    }
+    if name == "remember"
+        && let Some(text) = object.get("text").and_then(Value::as_str)
+    {
+        if text.chars().count() > crate::models::assistant_agent::MAX_MEMORY_NOTE_CHARS {
+            return Err(AppError::MemoryWrite(
+                crate::errors::memory_write::MemoryWriteReason::NoteTooLong,
+            ));
+        }
+        super::assistant_team_service::validate_memory_text(text)?;
     }
     validate_input_rules(name, object, &schema)?;
     for (key, value) in object {
@@ -1109,6 +1130,7 @@ pub(crate) fn schedule_schema() -> Value {
 pub(crate) fn delivery_schema() -> Value {
     json!({
         "type": "object",
+        "description": "Result destination: thread saves in the web thread; chat sends to an authorized channel chat; notification is mobile push only and requires enabled push with a registered mobile device. Linking Telegram notifications does not enable mobile push.",
         "properties": {
             "type": {"type": "string", "enum": ["thread", "chat", "notification"]},
             "chat_id": string(64),
@@ -1185,6 +1207,30 @@ fn matches_spec_type(value: &Value, spec: &Value, kind: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operation_discovery_pagination_schema_advertises_real_recovery_parameters() {
+        assert!(validate("get_agent_operations", &json!({"subagent":"worker"})).is_ok());
+        let args = json!({"subagent":"worker","guests":true,"service_id":"connection-id","limit":1,"cursor":"v1:snapshot:1"});
+        assert!(validate("get_agent_operations", &args).is_ok());
+        for (field, value) in [
+            ("limit", json!(0)),
+            ("limit", json!(51)),
+            ("limit", json!(1.5)),
+            ("cursor", json!("x".repeat(129))),
+            ("service_id", json!("x".repeat(65))),
+        ] {
+            let mut invalid = args.clone();
+            invalid[field] = value;
+            assert!(validate("get_agent_operations", &invalid).is_err());
+        }
+        let spec = schema("get_agent_operations");
+        assert_eq!(spec["required"], json!(["subagent"]));
+        for field in ["service_id", "limit", "cursor", "guests"] {
+            assert!(spec["properties"].get(field).is_some());
+            assert!(description("get_agent_operations").contains(field));
+        }
+    }
 
     #[test]
     fn machine_capabilities_schema_accepts_optional_modes_and_login_selection() {

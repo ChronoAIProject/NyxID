@@ -235,6 +235,13 @@ pub async fn load_rates_for(
         .flat_map(referenced_metric_codes)
         .map(|code| BillingRateCache::cache_id(&code, None))
         .collect();
+    ids.extend(
+        super::model_tariffs::load_for(db, services)
+            .await?
+            .into_iter()
+            .flat_map(|t| t.components)
+            .map(|c| BillingRateCache::cache_id(&c.lago_metric_code, None)),
+    );
     ids.sort();
     ids.dedup();
     if ids.is_empty() {
@@ -271,6 +278,7 @@ fn referenced_metric_codes(service: &DownstreamService) -> Vec<String> {
 pub enum EffectiveReason {
     /// `BILLING_ENABLED=false`: nothing is charged anywhere.
     BillingDisabled,
+    ModelTariffRequired,
     /// `platform_charge_nyxid_credentials_only` exempts this credential class.
     NyxidCredentialsOnly,
     /// The class's lane primary is synced; the lane price applies.
@@ -301,7 +309,7 @@ impl EffectiveReason {
     fn source(self) -> BillingConfigSource {
         match self {
             Self::BillingDisabled => BillingConfigSource::Env,
-            Self::LaneSynced => BillingConfigSource::Service,
+            Self::LaneSynced | Self::ModelTariffRequired => BillingConfigSource::Service,
             Self::LaneUnsyncedLegacy | Self::LegacyPlatformBillable => BillingConfigSource::Legacy,
             Self::NyxidCredentialsOnly
             | Self::LaneUnsyncedFree
@@ -369,6 +377,8 @@ pub struct EffectiveResale {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct EffectiveServiceBilling {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub model_prices: Vec<super::model_tariffs::Explanation>,
     /// The metric HTTP traffic meters when no synced lane overrides it.
     pub fallback_metric: BillingMetric,
     pub classes: Vec<EffectiveClassBilling>,
@@ -377,6 +387,7 @@ pub struct EffectiveServiceBilling {
 
 /// Inputs shared by every service in one resolution pass.
 pub struct ResolverEnv<'a> {
+    pub model_tariffs: &'a [crate::models::platform_model_tariff::ModelTariff],
     pub billing_enabled: bool,
     pub resale_enabled: bool,
     pub rate_ttl_secs: i64,
@@ -384,7 +395,7 @@ pub struct ResolverEnv<'a> {
     pub rates: &'a HashMap<String, BillingRateCache>,
 }
 
-fn route_context(
+pub(super) fn route_context(
     service: &DownstreamService,
     class: CredentialClass,
     resale_enabled: bool,
@@ -638,6 +649,22 @@ fn resolve_class(
     service: &DownstreamService,
     class: CredentialClass,
 ) -> EffectiveClassBilling {
+    if service.platform_key.as_ref().is_some_and(|p| {
+        p.purpose == crate::models::downstream_service::PlatformKeyPurpose::ModelOffering
+    }) {
+        return EffectiveClassBilling {
+            credential_classes: vec![class],
+            lane: BillingLane::for_credential(class).map(|l| match l {
+                BillingLane::Byok => "byok",
+                BillingLane::PlatformKey => "platform_key",
+            }),
+            platform_charged: false,
+            source: BillingConfigSource::Service,
+            reason: EffectiveReason::ModelTariffRequired,
+            prices: vec![],
+            pending: vec![],
+        };
+    }
     let ctx = route_context(service, class, env.resale_enabled);
     let reason = reason_for(service, class);
     debug_assert_eq!(reason.platform_charged(), ctx.service_platform_billable);
@@ -730,6 +757,14 @@ pub fn resolve_service_billing(
         .as_ref()
         .is_some_and(|b| b.active_resale_spec().is_some());
     EffectiveServiceBilling {
+        model_prices: super::model_tariffs::explain(
+            service,
+            env.model_tariffs,
+            env.rates,
+            env.now,
+            u64::try_from(env.rate_ttl_secs).unwrap_or(0),
+            env.billing_enabled,
+        ),
         fallback_metric: super::metric_resolution::platform_metric_for_request(service, false),
         classes,
         resale: EffectiveResale {
@@ -744,6 +779,14 @@ pub fn resolve_service_billing(
             },
         },
     }
+}
+
+#[cfg(test)]
+pub(crate) fn model_test_route(
+    service: &DownstreamService,
+    class: CredentialClass,
+) -> BillingRouteContext {
+    route_context(service, class, false)
 }
 
 #[cfg(test)]

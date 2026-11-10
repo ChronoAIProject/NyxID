@@ -296,6 +296,7 @@ pub struct ConversationResponse {
     title: String,
     title_source: crate::models::assistant_conversation::TitleSource,
     model: String,
+    model_unavailable: bool,
     /// Always `full`: the Ask/Full choice was retired. Kept for older clients.
     access_mode: crate::models::assistant_conversation::AccessMode,
     created_at: DateTime<Utc>,
@@ -314,6 +315,15 @@ pub struct ConversationResponse {
     channel: Option<ChannelOriginResponse>,
 }
 impl ConversationResponse {
+    async fn project_model(&mut self, db: &mongodb::Database, actor: &str) -> AppResult<()> {
+        let public =
+            crate::services::assistant_platform_model::public_selection(db, actor, &self.model)
+                .await?;
+        self.model_unavailable = self.model.starts_with("nyxid/") && public.is_empty();
+        self.model = public;
+        Ok(())
+    }
+
     fn with_artifacts(mut self, enabled: bool) -> Self {
         if !enabled && let Some(turn) = self.active_turn.as_mut() {
             turn.attachments
@@ -410,6 +420,7 @@ impl From<AssistantConversation> for ConversationResponse {
             title: row.title,
             title_source: row.title_source,
             model: row.model,
+            model_unavailable: false,
             access_mode: crate::models::assistant_conversation::AccessMode::Full,
             created_at: row.created_at,
             last_message_at: row.updated_at,
@@ -959,6 +970,9 @@ pub async fn list(
             dto
         })
         .collect();
+    for dto in &mut conversations {
+        dto.project_model(&state.db, &user_id).await?;
+    }
     let receipts = conversations
         .iter_mut()
         .filter_map(|c| c.active_turn.as_mut())
@@ -1176,6 +1190,7 @@ pub async fn history(
     let mut conversation = ConversationResponse::from(conversation)
         .with_agent(agent_id.as_deref(), &agents)
         .with_chat(&chats);
+    conversation.project_model(&state.db, &user_id).await?;
     if let Some(turn) = conversation.active_turn.as_mut() {
         turn.reply = reply.map(Into::into);
     }
@@ -1701,6 +1716,7 @@ pub async fn rename(
         .with_artifacts(artifacts_enabled)
         .with_agent(agent_id.as_deref(), &agents)
         .with_chat(&chats);
+    dto.project_model(&state.db, &user_id).await?;
     dto.pending_acknowledgements = count;
     let receipts = dto
         .active_turn
@@ -1883,7 +1899,9 @@ impl From<ModelResponse> for ModelInfo {
 
 /// Keep upstream display metadata; the routing alias is not a model name.
 fn model_response(row: &Value) -> Option<ModelResponse> {
-    let id = row["id"].as_str().filter(|id| engine::valid_model(id))?;
+    let id = row["id"]
+        .as_str()
+        .filter(|id| engine::valid_legacy_model(id))?;
     let label = ["display_name", "label", "name"]
         .into_iter()
         .filter_map(|key| row[key].as_str())
@@ -2025,6 +2043,31 @@ pub(crate) async fn require_available_model(
     if !engine::valid_model(model) {
         return Err(AppError::AssistantModelUnavailable);
     }
+    if model.starts_with("nyxid/") {
+        let agent = crate::services::assistant_team_service::ensure_nyxbot(
+            &state.db,
+            &auth.user_id.to_string(),
+        )
+        .await?;
+        crate::services::assistant_platform_model::validate_selection(
+            &state.db,
+            &auth.user_id.to_string(),
+            &agent,
+            model,
+            false,
+        )
+        .await?;
+        crate::services::assistant_platform_model::selection_plan(
+            state,
+            &auth.user_id.to_string(),
+            model,
+        )
+        .await?;
+        if !platform_bridge_ready(state, auth).await {
+            return Err(AppError::AssistantModelUnavailable);
+        }
+        return Ok(());
+    }
     // The same metered proxy classification as the models route itself.
     match live_models(state, auth, Some(SERVER_TURN_POLICY)).await {
         Some(rows) if !rows.iter().any(|row| row.id == model && row.available) => {
@@ -2032,6 +2075,45 @@ pub(crate) async fn require_available_model(
         }
         _ => Ok(()),
     }
+}
+
+pub(crate) async fn platform_bridge_ready(state: &AppState, auth: &AuthUser) -> bool {
+    let lookup = async {
+        let credential = credentials::load_existing(
+            &state.db,
+            &state.encryption_keys,
+            &auth.user_id.to_string(),
+        )
+        .await?
+        .ok_or(AppError::AssistantModelUnavailable)?;
+        let response = proxy(
+            state,
+            auth,
+            &credential,
+            "GET",
+            "v1/capabilities",
+            None,
+            None,
+            Some(crate::services::assistant_platform_model::CAPABILITY_POLICY),
+        )
+        .await?;
+        if !response.status().is_success() {
+            return Err(AppError::AssistantModelUnavailable);
+        }
+        let bytes = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .map_err(|_| AppError::AssistantModelUnavailable)?;
+        let value: Value =
+            serde_json::from_slice(&bytes).map_err(|_| AppError::AssistantModelUnavailable)?;
+        Ok::<_, AppError>(crate::services::assistant_platform_model::bridge_ready(
+            &value,
+        ))
+    };
+    tokio::time::timeout(Duration::from_secs(5), lookup)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or(false)
 }
 
 pub async fn models(
@@ -2099,6 +2181,22 @@ async fn proxy_raw(
             "NyxAgent catalog configuration is invalid".into(),
         ));
     }
+    let platform_model = if let Some(body) = body
+        .as_ref()
+        .filter(|v| v.get("nyxid_model_context").is_some())
+    {
+        let handle = body["nyxid_model_context"]["handle"]
+            .as_str()
+            .ok_or(AppError::AssistantModelUnavailable)?;
+        let row = state.db.collection::<AssistantConversation>("assistant_conversations")
+            .find_one(doc! {"user_id":auth.user_id.to_string(),"active_turn.platform_model_context":handle,
+                "active_turn.stop_requested":false}).await?
+            .ok_or(AppError::AssistantTurnRequired)?;
+        crate::services::assistant_platform_model::Orchestration::for_body(state, &row, body)
+            .await?
+    } else {
+        None
+    };
     let payload = body
         .map(|body| serde_json::to_vec(&body))
         .transpose()
@@ -2128,6 +2226,9 @@ async fn proxy_raw(
         .map_err(|_| AppError::Internal("Assistant request encoding failed".into()))?;
     if let Some(policy) = policy {
         request.extensions_mut().insert(policy);
+    }
+    if let Some(proof) = platform_model {
+        request.extensions_mut().insert(proof);
     }
     if method == "POST" && path == "v1/responses" {
         request
@@ -2311,7 +2412,7 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
         let origin = crate::services::assistant_checking_notice::destination(row)?;
         let state = self.state.clone();
         let row = row.clone();
-        Some(tokio::spawn(async move {
+        Some(crate::turn_trace::spawn(async move {
             use crate::services::assistant_checking_notice as notice;
             let turn = row.active_turn.as_ref().expect("claimed turn");
             let remaining = (turn.started_at
@@ -2352,25 +2453,42 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
         credential: &crate::services::platform_manager_contract::RuntimeCredential,
         request: crate::services::platform_manager_contract::NyxAgentRequest,
     ) -> AppResult<Response> {
-        let crate::services::platform_manager_contract::NyxAgentExecutionContext::Owner {
-            user_id,
-            ..
-        } = context
-        else {
-            return Err(AppError::Forbidden("Owner execution required".into()));
+        let turn = match context {
+            crate::services::platform_manager_contract::NyxAgentExecutionContext::Owner {
+                turn,
+                ..
+            } => &turn.turn_id,
+            crate::services::platform_manager_contract::NyxAgentExecutionContext::Public(
+                context,
+            ) => &context.turn.turn_id,
         };
-        if user_id != &self.auth.user_id.to_string() {
-            return Err(AppError::Forbidden("Owner execution required".into()));
-        }
-        proxy_raw(
-            &self.state,
-            &self.auth,
-            credential.raw_key.as_str(),
-            request.method.as_str(),
-            &request.relative_path,
-            request.body,
-            (!request.idempotency_key.is_empty()).then_some(request.idempotency_key.as_str()),
-            request.billing_policy,
+        crate::turn_trace::response(
+            crate::turn_trace::TurnContext::for_turn(turn),
+            crate::turn_trace::Stage::Engine,
+            async {
+                let crate::services::platform_manager_contract::NyxAgentExecutionContext::Owner {
+                    user_id,
+                    ..
+                } = context
+                else {
+                    return Err(AppError::Forbidden("Owner execution required".into()));
+                };
+                if user_id != &self.auth.user_id.to_string() {
+                    return Err(AppError::Forbidden("Owner execution required".into()));
+                }
+                proxy_raw(
+                    &self.state,
+                    &self.auth,
+                    credential.raw_key.as_str(),
+                    request.method.as_str(),
+                    &request.relative_path,
+                    request.body,
+                    (!request.idempotency_key.is_empty())
+                        .then_some(request.idempotency_key.as_str()),
+                    request.billing_policy,
+                )
+                .await
+            },
         )
         .await
     }
@@ -2414,6 +2532,9 @@ pub async fn turns(
             )
             .await,
         );
+    }
+    if let Some(model) = input.model.as_deref().filter(|m| m.starts_with("nyxid/")) {
+        require_available_model(&state, &auth, model).await?;
     }
     let (row, receiver) = start_turn(&state, auth, &start, policy, permit).await?;
     let mut response = subscribe_events(receiver);

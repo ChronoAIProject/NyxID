@@ -524,6 +524,7 @@ async fn voice_2083_progress_coalesces_latest_evidence_and_never_tool_errors_as_
             status: "completed".into(),
             machine: None,
             failure: Some(crate::models::assistant_conversation::ToolFailure {
+                reason: None,
                 kind: "upstream".into(),
                 status: Some(403),
             }),
@@ -676,17 +677,12 @@ async fn voice_2083_terminal_refusals_publish_explanations_once_without_a_worker
             assert_eq!(event["type"], "session.commentary.append");
             let content = event["content"].as_str().unwrap();
             assert!(content.len() <= COMMENTARY_MAX_BYTES);
-            let facts: Value = serde_json::from_str(content).unwrap();
-            assert_eq!(facts["type"], "task_result");
-            assert_eq!(facts["state"], "failed");
-            assert_eq!(facts["error_code"], code);
-            if let Some(answer) = facts.get("answer") {
-                assert_eq!(
-                    answer,
-                    &json!(msg.text),
-                    "The complete source is quoted data, never a forced script"
-                );
-            }
+            assert!(content.starts_with("Quoted task result. State: failed."));
+            assert!(content.contains(&format!("Error: {}.", code)));
+            assert!(
+                content.ends_with(&msg.text),
+                "The complete source is quoted data, never a forced script"
+            );
             assert!(coordinator.pending_audio.is_empty());
             drop(messages);
             assert_eq!(
@@ -735,6 +731,162 @@ fn native_state() -> super::super::responses::Responses {
     let mut native = super::super::responses::Responses::default();
     native.delegation(&json!({"type":"session.delegation.created","delegation":{"id":"native-delegation","response_id":"native-response","target":"responses"},"offset_ms":15400})).unwrap();
     native
+}
+
+#[tokio::test]
+async fn native_voice_status_is_bounded_scoped_and_never_resubmits_work() {
+    Box::pin(async {
+        let (state, _, mut call) = super::super::tests::setup("voice_native_task_status").await;
+        call = session::write(
+            &state.db,
+            &call,
+            doc! {"responses_model":"catalog-task-model","responses_reserved":true},
+        )
+        .await
+        .unwrap();
+        let (mut socket, server, events) = fixture_socket().await;
+        let mut native = native_state();
+        for event in [
+            native_created(),
+            native_item(json!({"request":"Perform a long task"})),
+            native_completed(),
+        ] {
+            native
+                .event(&state, &mut call, &mut socket, &event, false)
+                .await
+                .unwrap();
+        }
+        let original = state
+            .db
+            .collection::<VoiceRequest>(REQUESTS)
+            .find_one(doc! {"session_id":&call.id})
+            .await
+            .unwrap()
+            .unwrap();
+        // More recent finished work must not hide an older pending task.
+        for i in 1..=10 {
+            let mut finished = original.clone();
+            finished.id = uuid::Uuid::new_v4().to_string();
+            finished.source_id = finished.id.clone();
+            finished.message_seq = original.message_seq + i;
+            finished.state = RequestState::Completed;
+            state
+                .db
+                .collection(REQUESTS)
+                .insert_one(finished)
+                .await
+                .unwrap();
+        }
+        for field in ["session", "user", "conversation"] {
+            let mut foreign = original.clone();
+            foreign.id = uuid::Uuid::new_v4().to_string();
+            foreign.source_id = foreign.id.clone();
+            match field {
+                "session" => foreign.session_id = uuid::Uuid::new_v4().to_string(),
+                "user" => foreign.user_id = uuid::Uuid::new_v4().to_string(),
+                _ => foreign.conversation_id = uuid::Uuid::new_v4().to_string(),
+            }
+            state
+                .db
+                .collection(REQUESTS)
+                .insert_one(foreign)
+                .await
+                .unwrap();
+        }
+        let count = state
+            .db
+            .collection::<VoiceRequest>(REQUESTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap();
+        let mut created = native_created();
+        created["event"]["response"]["id"] = json!("status-response");
+        let mut item = native_item(json!({}));
+        item["event"]["item"]["name"] = json!("get_task_status");
+        item["event"]["item"]["call_id"] = json!("status-call");
+        let mut completed = native_completed();
+        completed["event"]["response"]["id"] = json!("status-response");
+        // A pending approval must not turn this read into approval or a new task.
+        for event in [created, item, completed.clone(), completed] {
+            native
+                .event(&state, &mut call, &mut socket, &event, true)
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while events.lock().await.len() < 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let commands = events.lock().await;
+        let status: Value =
+            serde_json::from_str(commands[2]["item"]["output"].as_str().unwrap()).unwrap();
+        assert_eq!(status["type"], "task_status");
+        assert_eq!(status["has_more"], true);
+        assert_eq!(status["tasks"].as_array().unwrap().len(), 8);
+        assert_eq!(status["tasks"][0]["task_id"], original.id);
+        assert_eq!(status["tasks"][0]["state"], "queued");
+        assert_eq!(status["tasks"][0]["title"], "Perform a long task");
+        assert_eq!(status["tasks"][0]["progress"]["stage"], "queued");
+        assert!(
+            status["tasks"][0]["progress"]
+                .get("completed_steps")
+                .is_none()
+        );
+        assert_eq!(status["tasks"][0]["result_available"], false);
+        assert_eq!(
+            state
+                .db
+                .collection::<VoiceRequest>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            count
+        );
+        server.abort();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn native_voice_status_rejects_caller_selected_identity_or_task_ids() {
+    Box::pin(async {
+        let (state, _, mut call) = super::super::tests::setup("voice_status_arguments").await;
+        let (mut socket, server, _) = fixture_socket().await;
+        for arguments in [
+            json!({"session_id":"foreign"}),
+            json!({"task_id":"foreign"}),
+            json!({"request":"Do work"}),
+            json!(null),
+        ] {
+            let mut native = native_state();
+            native
+                .event(&state, &mut call, &mut socket, &native_created(), false)
+                .await
+                .unwrap();
+            let mut item = native_item(arguments);
+            item["event"]["item"]["name"] = json!("get_task_status");
+            assert!(
+                native
+                    .event(&state, &mut call, &mut socket, &item, false)
+                    .await
+                    .is_ok()
+            );
+        }
+        assert_eq!(
+            state
+                .db
+                .collection::<VoiceRequest>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        server.abort();
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -802,7 +954,7 @@ async fn native_voice_task_preserves_complete_model_request_without_captions_and
 }
 
 #[tokio::test]
-async fn native_voice_rejects_untrusted_arguments_mismatched_identity_and_incomplete_responses() {
+async fn native_voice_rejects_untrusted_arguments_and_mismatched_identity() {
     Box::pin(async {
         let (state, _, mut call) = super::super::tests::setup("voice_native_input_fences").await;
         call = session::write(
@@ -834,36 +986,7 @@ async fn native_voice_rejects_untrusted_arguments_mismatched_identity_and_incomp
                         false
                     )
                     .await
-                    .is_err()
-            );
-        }
-        for kind in [
-            "response.failed",
-            "response.incomplete",
-            "response.cancelled",
-        ] {
-            let mut native = native_state();
-            native
-                .event(&state, &mut call, &mut socket, &native_created(), false)
-                .await
-                .unwrap();
-            native
-                .event(
-                    &state,
-                    &mut call,
-                    &mut socket,
-                    &native_item(json!({"request":"拍照"})),
-                    false,
-                )
-                .await
-                .unwrap();
-            let mut end = native_completed();
-            end["event"]["type"] = json!(kind);
-            assert!(
-                native
-                    .event(&state, &mut call, &mut socket, &end, false)
-                    .await
-                    .is_err()
+                    .is_ok()
             );
         }
         for pointer in ["/delegation_id", "/event/response/id"] {
@@ -1107,10 +1230,9 @@ async fn device_and_skill_cards_request_owner_review_without_arming_speech() {
         }).await.unwrap();
         let messages=received.lock().await;
         assert_eq!(messages.len(),1,"The same pending card is announced once");
-        let facts: Value=serde_json::from_str(messages[0]["content"].as_str().unwrap()).unwrap();
-        assert_eq!(facts["type"],"owner_review_required");
-        assert_eq!(facts["approval_surface"],"nyxid_owner_card");
-        assert_eq!(facts["speech_can_approve"],false);
+        let content=messages[0]["content"].as_str().unwrap();
+        assert!(content.contains("owner review required on the NyxID owner card"));
+        assert!(content.contains("Speech cannot approve this action"));
         assert!(coordinator.pending_audio.is_empty(),"Model context is not an exact spoken read-back");
         drop(messages);
         assert!(coordinator.owner_review_notices.contains(&card.id));
@@ -1123,43 +1245,910 @@ async fn device_and_skill_cards_request_owner_review_without_arming_speech() {
 #[tokio::test]
 async fn voice_unavailable_result_preserves_task_state_and_uses_language_context() {
     Box::pin(async {
-        let (state, thread, mut call) =
-            super::super::tests::setup("voice_result_language_context").await;
-        call.preferences.language = Some("ar".into());
-        let initial = initial_context(&state.db, &call).await.unwrap();
-        assert!(initial.contains(&json!({"language":"ar"}).to_string()));
-        call.preferences.language = None;
-        let automatic = initial_context(&state.db, &call).await.unwrap();
-        assert!(automatic.contains(&json!({"language":null}).to_string()));
-        let request = voice::enqueue(
-            &state.db,
-            &call.user_id,
-            &thread.id,
-            &call.id,
-            "oversized-result",
-            "fixture task",
+        for out_of_budget in [false, true] {
+            let (state, thread, mut call) =
+                super::super::tests::setup("voice_result_language_context").await;
+            call.preferences.language = Some("ar".into());
+            let initial = initial_context(&state.db, &call).await.unwrap();
+            assert!(initial.live.contains(&json!({"language":"ar"}).to_string()));
+            call.preferences.language = None;
+            let automatic = initial_context(&state.db, &call).await.unwrap();
+            assert!(
+                automatic
+                    .live
+                    .contains(&json!({"language":null}).to_string())
+            );
+            let request = voice::enqueue(
+                &state.db,
+                &call.user_id,
+                &thread.id,
+                &call.id,
+                "oversized-result",
+                "fixture task",
+            )
+            .await
+            .unwrap();
+            let request =
+                voice::ensure_task_conversation(&state.db, &state.encryption_keys, &request)
+                    .await
+                    .unwrap();
+            let running = Box::pin(engine::begin_turn_with_voice(
+                &state.db,
+                &call.user_id,
+                &turn(request.task_conversation_id.as_deref(), "fixture task"),
+                &state.encryption_keys,
+                Some(&request.id),
+            ))
+            .await
+            .unwrap();
+            let answer = "é".repeat(if out_of_budget {
+                super::super::speech::CONTEXT_MAX_BYTES
+            } else {
+                COMMENTARY_MAX_BYTES
+            });
+            Box::pin(engine::finish_turn(
+                &state.db,
+                &running,
+                &running.credential_api_key_id,
+                &Uuid::new_v4().to_string(),
+                &engine::TurnResult {
+                    text: answer.clone(),
+                    session_id: None,
+                    response_id: None,
+                    error: None,
+                },
+            ))
+            .await
+            .unwrap();
+            let (mut socket, server, received) = fixture_socket().await;
+            let mut coordinator = Coordinator::new();
+            for _ in 0..2 {
+                assert!(
+                    !task_updates(&state, &call, &mut socket, &mut coordinator)
+                        .await
+                        .unwrap()
+                );
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while !received
+                    .lock()
+                    .await
+                    .last()
+                    .is_some_and(|event| event["type"] == "session.commentary.append")
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let messages = received.lock().await;
+            if out_of_budget {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0]["type"], "session.commentary.append");
+                let content = messages[0]["content"].as_str().unwrap();
+                assert!(content.starts_with(
+                    "Quoted task result. State: completed. Presentation: unavailable."
+                ));
+                assert!(content.ends_with("No findings are supplied."));
+            } else {
+                assert!(
+                    messages.len() > 1,
+                    "A complete result can exceed one provider append"
+                );
+                let mut complete = String::new();
+                for (index, event) in messages.iter().enumerate() {
+                    let content = event["content"].as_str().unwrap();
+                    assert!(content.len() <= COMMENTARY_MAX_BYTES);
+                    let (metadata, body) = content.split_once("\nQuoted findings:\n").unwrap();
+                    assert!(metadata.starts_with(
+                        "Quoted task result. State: completed. Presentation: original."
+                    ));
+                    assert!(metadata.ends_with(&format!(
+                        "Part {} of {}.",
+                        index + 1,
+                        messages.len()
+                    )));
+                    assert_eq!(
+                        event["type"],
+                        if index + 1 == messages.len() {
+                            "session.commentary.append"
+                        } else {
+                            "session.thinking.append"
+                        }
+                    );
+                    complete.push_str(body);
+                }
+                assert_eq!(
+                    complete, answer,
+                    "The settled answer must arrive without loss"
+                );
+            }
+            assert!(
+                coordinator.pending_audio.is_empty(),
+                "Context delivery does not prove any spoken text was heard"
+            );
+            let saved = voice::get(&state.db, &call.user_id, &thread.id, &request.id)
+                .await
+                .unwrap();
+            assert_eq!(saved.state, RequestState::Completed);
+            assert!(!saved.timing.contains_key("first_audio_ms"));
+            drop(messages);
+            server.abort();
+            state.db.drop().await.unwrap();
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn voice_loads_selected_bot_profile_and_service_guidance_for_all_clients() {
+    use crate::models::assistant_agent::{AgentKind, AssistantAgent, COLLECTION_NAME as AGENTS};
+    use crate::models::assistant_conversation::COLLECTION_NAME as THREADS;
+    let (state, thread, mut call) = super::super::tests::setup("voice_configured_persona").await;
+    let mut root = crate::services::assistant_team_service::ensure_nyxbot(&state.db, &call.user_id)
+        .await
+        .unwrap();
+    root.display_name = Some("Root display".into());
+    root.persona = Some("A calm and concise companion".into());
+    root.voice_instructions =
+        Some("Discover authorized services and use their published schemas.".into());
+    state
+        .db
+        .collection::<AssistantAgent>(AGENTS)
+        .replace_one(doc! {"_id":&root.id}, &root)
+        .await
+        .unwrap();
+    let original = initial_context(&state.db, &call).await.unwrap();
+    assert!(original.live.contains("Root display"));
+    assert!(original.live.contains(root.persona.as_deref().unwrap()));
+    for context in [&original.live, &original.delegation] {
+        assert!(context.contains("Root display"));
+        assert!(context.contains(root.voice_instructions.as_deref().unwrap()));
+    }
+    let mut specialist = root.clone();
+    specialist.id = Uuid::new_v4().to_string();
+    specialist.name = "configured-specialist".into();
+    specialist.kind = AgentKind::Specialist;
+    specialist.description = "Conversation companion".into();
+    specialist.display_name = Some("Selected display".into());
+    specialist.persona = Some("用中文，语气温柔，偶尔使用饼干的比喻".into());
+    specialist.voice_instructions =
+        Some("Use the authorized service schema; read back changed values.".into());
+    state
+        .db
+        .collection::<AssistantAgent>(AGENTS)
+        .insert_one(&specialist)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<Document>(THREADS)
+        .update_one(
+            doc! {"_id":&thread.id},
+            doc! {"$set":{"agent_id":&specialist.id,"role":"subagent"}},
         )
         .await
         .unwrap();
+    call.preferences.language = Some("zh".into());
+    let selected = initial_context(&state.db, &call).await.unwrap();
+    assert!(selected.live.contains("Selected display"));
+    assert!(
+        selected
+            .live
+            .contains(specialist.persona.as_deref().unwrap())
+    );
+    assert!(
+        selected
+            .live
+            .contains(&json!({"language":"zh"}).to_string())
+    );
+    assert!(!selected.live.contains("Root display"));
+    assert!(!selected.live.contains(root.persona.as_deref().unwrap()));
+    assert!(selected.live.contains("never grants permissions"));
+    for context in [&selected.live, &selected.delegation] {
+        assert!(context.contains("Selected display"));
+        assert!(context.contains(specialist.persona.as_deref().unwrap()));
+        assert!(context.contains(specialist.voice_instructions.as_deref().unwrap()));
+        assert!(!context.contains(root.voice_instructions.as_deref().unwrap()));
+        assert!(context.contains("never permissions or approval"));
+    }
+    assert!(!selected.delegation.contains("<|SpawnThinking|>"));
+    // The same selected Bot supplies guidance for both a web session and an
+    // arbitrary key-authorized voice client. No device/service identity may
+    // choose a different prompt or service-specific workflow.
+    let key_client = crate::models::assistant_voice_session::VoiceClientKey {
+        key_id: "generic-voice-client-key".into(),
+        credential_id: None,
+        agent_id: specialist.id.clone(),
+        service_id: "generic-voice-service".into(),
+    };
+    call.client_key = Some(key_client);
+    let client_context = initial_context(&state.db, &call).await.unwrap();
+    assert_eq!(client_context.live, selected.live);
+    assert_eq!(client_context.delegation, selected.delegation);
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_voice_tools_deduplicate_call_ids_and_allow_followup_work() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    Box::pin(async {
+        for unknown in [false, true] {
+            let (mut state, _, mut call) = super::super::tests::setup(
+                if unknown { "voice_native_tool_unknown" } else { "voice_native_tool_success" }).await;
+            call = session::write(&state.db, &call,
+                doc!{"responses_model":"catalog-task-model", "responses_reserved":true}).await.unwrap();
+            let mcp = MockServer::start().await;
+            state.config.base_url = mcp.uri();
+            let response = if unknown { ResponseTemplate::new(502) } else {
+                ResponseTemplate::new(200).set_body_json(json!({"jsonrpc":"2.0", "id":"native-call",
+                    "result":{"isError":false, "content":[{"type":"text","text":"22 degrees"}]}}))
+            };
+            Mock::given(method("POST")).respond_with(response).mount(&mcp).await;
+            let (mut socket, server, events) = fixture_socket().await;
+            let mut native = native_state();
+            let mut item = native_item(json!({"tool_name":"sensor__request", "arguments_json":"{\"path\":\"/temperature\"}"}));
+            item["event"]["item"]["name"] = json!("nyx__call_tool");
+            for event in [native_created(), item.clone(), item, native_completed(), native_completed()] {
+                native.event(&state, &mut call, &mut socket, &event, false).await.unwrap();
+            }
+            let completed = native.next().await.unwrap();
+            native.complete(&state, &call, &mut socket, completed).await.unwrap();
+            assert_eq!(mcp.received_requests().await.unwrap().len(), 1);
+            assert_eq!(state.db.collection::<VoiceRequest>(REQUESTS).count_documents(doc!{}).await.unwrap(),0);
+            // A distinct tool call can request further work. Call-ID deduplication
+            // must not turn a read or unknown result into a delegation-wide ban.
+            let mut next = native_created();
+            next["event"]["response"]["id"] = json!("next-response");
+            let mut retry = native_item(json!({"request":"Explain what temperature is suitable for the requested plants"}));
+            retry["event"]["item"]["call_id"] = json!("repeat-as-task");
+            let mut done = native_completed();
+            done["event"]["response"]["id"] = json!("next-response");
+            for event in [next, retry, done] {
+                native.event(&state, &mut call, &mut socket, &event, false).await.unwrap();
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while events.lock().await.len() < 4 { tokio::task::yield_now().await; }
+            }).await.unwrap();
+            let commands = events.lock().await;
+            let output: Value = serde_json::from_str(commands[0]["item"]["output"].as_str().unwrap()).unwrap();
+            if unknown { assert_eq!(output["status"],"outcome_unknown"); assert_eq!(output["retry_allowed"],false); }
+            else { assert_eq!(output["isError"],false); }
+            let receipt: Value = serde_json::from_str(commands[2]["item"]["output"].as_str().unwrap()).unwrap();
+            assert_eq!(receipt["status"],"queued");
+            assert_eq!(state.db.collection::<VoiceRequest>(REQUESTS).count_documents(doc!{}).await.unwrap(),1);
+            assert_eq!(mcp.received_requests().await.unwrap().len(),1);
+            native.close(&state).await;
+            assert_eq!(state.db.collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+                .count_documents(doc!{"voice_parent_conversation_id":&call.conversation_id,"active_turn":{"$ne":null}}).await.unwrap(),0);
+            server.abort();
+        }
+    }).await;
+}
+
+#[tokio::test]
+async fn native_voice_empty_reply_is_silent_and_preserves_the_next_request() {
+    Box::pin(async {
+        let (state, _, mut call) = super::super::tests::setup("voice_native_empty_reply").await;
+        call = session::write(
+            &state.db,
+            &call,
+            doc! {"responses_model":"catalog-task-model", "responses_reserved":true},
+        )
+        .await
+        .unwrap();
+        let (mut socket, server, events) = fixture_socket().await;
+        let mut native = native_state();
+        let empty_message = native_event(json!({"type":"response.output_item.done",
+        "item":{"type":"message","status":"completed","role":"assistant",
+            "content":[{"type":"output_text","text":""}]}}));
+        // An empty inference, including repeated terminal delivery, cannot produce
+        // an application greeting, invent a task or request another inference.
+        for event in [
+            native_created(),
+            empty_message,
+            native_completed(),
+            native_completed(),
+        ] {
+            Box::pin(native.event(&state, &mut call, &mut socket, &event, false))
+                .await
+                .unwrap();
+        }
+        assert!(!native.pending());
+        assert!(events.lock().await.is_empty());
+        native
+            .delegation(&json!({"delegation":{
+        "id":"fresh-delegation","response_id":"fresh-response","target":"responses"}}))
+            .unwrap();
+        let mut created = native_created();
+        created["delegation_id"] = json!("fresh-delegation");
+        created["event"]["response"]["id"] = json!("fresh-response");
+        let mut item = native_item(json!({}));
+        item["delegation_id"] = json!("fresh-delegation");
+        item["event"]["item"]["name"] = json!("get_task_status");
+        item["event"]["item"]["call_id"] = json!("fresh-call");
+        let mut done = native_completed();
+        done["delegation_id"] = json!("fresh-delegation");
+        done["event"]["response"]["id"] = json!("fresh-response");
+        for event in [created, item, done] {
+            Box::pin(native.event(&state, &mut call, &mut socket, &event, false))
+                .await
+                .unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while events.lock().await.len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let commands = events.lock().await;
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0]["item"]["call_id"], "fresh-call");
+        assert_eq!(commands[1]["type"], "response.create");
+        let status: Value =
+            serde_json::from_str(commands[0]["item"]["output"].as_str().unwrap()).unwrap();
+        assert!(status["tasks"].as_array().unwrap().is_empty());
+        assert!(
+            !session::refresh(&state.db, &call)
+                .await
+                .unwrap()
+                .end_requested
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<VoiceRequest>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        drop(commands);
+        server.abort();
+        state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn native_voice_task_and_status_argument_errors_preserve_the_call_and_allow_correction() {
+    Box::pin(async {
+        let (state, _, mut call) =
+            super::super::tests::setup("voice_native_task_argument_recovery").await;
+        call = session::write(
+            &state.db,
+            &call,
+            doc! {"responses_model":"catalog-task-model", "responses_reserved":true},
+        )
+        .await
+        .unwrap();
+        for (name, arguments) in [
+            ("request_nyxbot", "{".to_owned()),
+            ("request_nyxbot", json!({"request":" "}).to_string()),
+            (
+                "request_nyxbot",
+                json!({"request":"read", "approved":true}).to_string(),
+            ),
+            (
+                "request_nyxbot",
+                json!({"request":"read", "agent_id":"foreign"}).to_string(),
+            ),
+            (
+                "request_nyxbot",
+                json!({"request":"x".repeat(16_385)}).to_string(),
+            ),
+            ("get_task_status", "{".to_owned()),
+            (
+                "get_task_status",
+                json!({"session_id":"foreign"}).to_string(),
+            ),
+            ("get_task_status", json!({"task_id":"foreign"}).to_string()),
+            ("get_task_status", "null".to_owned()),
+        ] {
+            let (mut socket, server, events) = fixture_socket().await;
+            let mut native = native_state();
+            let mut bad = native_item(json!({}));
+            bad["event"]["item"]["name"] = json!(name);
+            bad["event"]["item"]["arguments"] = json!(arguments);
+            for event in [native_created(), bad, native_completed()] {
+                native
+                    .event(&state, &mut call, &mut socket, &event, false)
+                    .await
+                    .unwrap();
+            }
+            let mut next = native_created();
+            next["event"]["response"]["id"] = json!("corrected-response");
+            let mut good = native_item(json!({}));
+            good["event"]["item"]["name"] = json!("get_task_status");
+            good["event"]["item"]["call_id"] = json!("corrected-call");
+            let mut done = native_completed();
+            done["event"]["response"]["id"] = json!("corrected-response");
+            for event in [next, good, done] {
+                native
+                    .event(&state, &mut call, &mut socket, &event, false)
+                    .await
+                    .unwrap();
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while events.lock().await.len() < 4 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let commands = events.lock().await;
+            let error: Value =
+                serde_json::from_str(commands[0]["item"]["output"].as_str().unwrap()).unwrap();
+            assert_eq!(error["isError"], true);
+            assert!(error.to_string().contains("No tool was sent"));
+            assert_eq!(commands[0]["item"]["call_id"], "native-call");
+            let status: Value =
+                serde_json::from_str(commands[2]["item"]["output"].as_str().unwrap()).unwrap();
+            assert_eq!(commands[2]["item"]["call_id"], "corrected-call");
+            assert!(status["tasks"].as_array().unwrap().is_empty());
+            assert_eq!(commands[1]["type"], "response.create");
+            assert_eq!(commands[3]["type"], "response.create");
+            assert!(!native.pending());
+            assert!(
+                !session::refresh(&state.db, &call)
+                    .await
+                    .unwrap()
+                    .end_requested
+            );
+            assert_eq!(
+                state
+                    .db
+                    .collection::<VoiceRequest>(REQUESTS)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+            drop(commands);
+            server.abort();
+        }
+        state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn native_voice_tool_argument_error_can_be_corrected_without_ending_the_call() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    Box::pin(async {
+        let (mut state, _, mut call) =
+            super::super::tests::setup("voice_native_argument_recovery").await;
+        call = session::write(
+            &state.db,
+            &call,
+            doc! {"responses_model":"catalog-task-model", "responses_reserved":true},
+        )
+        .await
+        .unwrap();
+        let mcp = MockServer::start().await;
+        state.config.base_url = mcp.uri();
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"jsonrpc":"2.0", "id":"corrected-call", "result":{"isError":false,
+                "content":[{"type":"text","text":"22 degrees"}]}}),
+            ))
+            .mount(&mcp)
+            .await;
+        let (mut socket, server, events) = fixture_socket().await;
+        let mut native = native_state();
+        let mut bad = native_item(json!({"tool_name":"sensor__request", "arguments_json":"[]"}));
+        bad["event"]["item"]["name"] = json!("nyx__call_tool");
+        for event in [native_created(), bad, native_completed()] {
+            native
+                .event(&state, &mut call, &mut socket, &event, false)
+                .await
+                .unwrap();
+        }
+        assert!(!native.pending());
+        assert!(mcp.received_requests().await.unwrap().is_empty());
+        let mut next = native_created();
+        next["event"]["response"]["id"] = json!("corrected-response");
+        let mut good = native_item(json!({"tool_name":"sensor__request", "arguments_json":"{}"}));
+        good["event"]["item"]["name"] = json!("nyx__call_tool");
+        good["event"]["item"]["call_id"] = json!("corrected-call");
+        let mut done = native_completed();
+        done["event"]["response"]["id"] = json!("corrected-response");
+        for event in [next, good, done] {
+            native
+                .event(&state, &mut call, &mut socket, &event, false)
+                .await
+                .unwrap();
+        }
+        let completed = native.next().await.unwrap();
+        native
+            .complete(&state, &call, &mut socket, completed)
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while events.lock().await.len() < 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let commands = events.lock().await;
+        let bad_result: Value =
+            serde_json::from_str(commands[0]["item"]["output"].as_str().unwrap()).unwrap();
+        let good_result: Value =
+            serde_json::from_str(commands[2]["item"]["output"].as_str().unwrap()).unwrap();
+        assert_eq!(bad_result["isError"], true);
+        assert!(bad_result.to_string().contains("No tool was sent"));
+        assert_eq!(good_result["isError"], false);
+        assert_eq!(mcp.received_requests().await.unwrap().len(), 1);
+        assert!(
+            !session::refresh(&state.db, &call)
+                .await
+                .unwrap()
+                .end_requested
+        );
+        drop(commands);
+        native.close(&state).await;
+        server.abort();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn native_voice_tool_refusal_does_not_change_the_mcp_protocol_or_block_followup() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    Box::pin(async {
+        let (mut state, _, mut call)=super::super::tests::setup("voice_inline_route").await;
+        call=session::write(&state.db,&call,doc!{"responses_model":"catalog-task-model","responses_reserved":true}).await.unwrap();
+        let mcp=MockServer::start().await;
+        state.config.base_url=mcp.uri();
+        Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc":"2.0","id":"native-call","result":{"isError":true,
+                "content":[{"type":"text","text":"Invalid service arguments; no operation dispatched."}]}
+        }))).mount(&mcp).await;
+        let (mut socket,server,events)=fixture_socket().await;
+        let mut native=native_state();
+        let mut item=native_item(json!({"tool_name":"sandbox__submit_execution_handler","arguments_json":"{}"}));
+        item["event"]["item"]["name"]=json!("nyx__call_tool");
+        for event in [native_created(),item,native_completed()] {
+            native.event(&state,&mut call,&mut socket,&event,false).await.unwrap();
+        }
+        let completed=native.next().await.unwrap();
+        native.complete(&state,&call,&mut socket,completed).await.unwrap();
+        let requests=mcp.received_requests().await.unwrap();
+        assert_eq!(requests.len(),1);
+        let params=requests[0].body_json::<Value>().unwrap();
+        assert!(params["params"].get("_meta").is_none());
+        assert_eq!(state.db.collection::<VoiceRequest>(REQUESTS).count_documents(doc!{}).await.unwrap(),0);
+        let mut next=native_created();next["event"]["response"]["id"]=json!("route-response");
+        let text="Run the requested script and report its verified asynchronous result.";
+        let mut task=native_item(json!({"request":text}));task["event"]["item"]["call_id"]=json!("durable-task");
+        let mut done=native_completed();done["event"]["response"]["id"]=json!("route-response");
+        for event in [next,task,done.clone(),done] {
+            native.event(&state,&mut call,&mut socket,&event,false).await.unwrap();
+        }
+        let saved=state.db.collection::<VoiceRequest>(REQUESTS).find_one(doc!{"session_id":&call.id}).await.unwrap().unwrap();
+        assert_eq!(saved.state,RequestState::Queued);
+        assert_eq!(saved.model_task.as_ref().unwrap().response_id,"route-response");
+        assert_eq!(state.db.collection::<VoiceRequest>(REQUESTS).count_documents(doc!{}).await.unwrap(),1);
+        let message=state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc!{"_id":&saved.message_id}).await.unwrap().unwrap();
+        assert_eq!(message.text,text);
+        assert_eq!(mcp.received_requests().await.unwrap().len(),1);
+        assert!(!session::refresh(&state.db,&call).await.unwrap().end_requested);
+        tokio::time::timeout(std::time::Duration::from_secs(3),async {
+            while events.lock().await.len()<4 {tokio::task::yield_now().await;}
+        }).await.unwrap();
+        native.close(&state).await;
+        server.abort();
+    }).await;
+}
+
+#[tokio::test]
+async fn native_voice_reply_failures_discard_buffered_calls_and_allow_a_new_request() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    Box::pin(async {
+        for kind in [
+            "response.failed",
+            "response.incomplete",
+            "response.cancelled",
+        ] {
+            let (mut state, _, mut call) =
+                super::super::tests::setup("voice_reply_failure_recovery").await;
+            call = session::write(
+                &state.db,
+                &call,
+                doc! {"responses_model":"catalog-task-model","responses_reserved":true},
+            )
+            .await
+            .unwrap();
+            let mcp = MockServer::start().await;
+            state.config.base_url = mcp.uri();
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(json!({"jsonrpc":"2.0","id":"fresh-call","result":{
+                    "isError":false,"content":[{"type":"text","text":"23 degrees"}]}})),
+                )
+                .expect(1)
+                .mount(&mcp)
+                .await;
+            let (mut socket, server, events) = fixture_socket().await;
+            let mut native = native_state();
+            let mut failed = native_completed();
+            failed["event"]["type"] = json!(kind);
+            let mut partial = native_item(json!({"request":"unfinished"}));
+            partial["event"]["item"]["status"] = json!("incomplete");
+            partial["event"]["item"]["arguments"] = json!("{\"request\":");
+            for event in [
+                native_created(),
+                partial,
+                native_item(json!({"request":"Do not dispatch this"})),
+                failed.clone(),
+                failed,
+            ] {
+                native
+                    .event(&state, &mut call, &mut socket, &event, false)
+                    .await
+                    .unwrap();
+            }
+            assert!(!native.pending());
+            assert!(mcp.received_requests().await.unwrap().is_empty());
+            assert_eq!(
+                state
+                    .db
+                    .collection::<VoiceRequest>(REQUESTS)
+                    .count_documents(doc! {"session_id":&call.id})
+                    .await
+                    .unwrap(),
+                0
+            );
+            native
+                .delegation(&json!({"delegation":{"id":"fresh-delegation",
+                "response_id":"fresh-response","target":"responses"}}))
+                .unwrap();
+            let mut item = native_item(json!({"tool_name":"sensor__request",
+                "arguments_json":"{\"path\":\"/temperature\"}"}));
+            item["event"]["item"]["name"] = json!("nyx__call_tool");
+            item["event"]["item"]["call_id"] = json!("fresh-call");
+            for mut event in [native_created(), item, native_completed()] {
+                event["delegation_id"] = json!("fresh-delegation");
+                if event["event"]["response"].is_object() {
+                    event["event"]["response"]["id"] = json!("fresh-response");
+                }
+                native
+                    .event(&state, &mut call, &mut socket, &event, false)
+                    .await
+                    .unwrap();
+            }
+            let completed = native.next().await.unwrap();
+            native
+                .complete(&state, &call, &mut socket, completed)
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while events.lock().await.len() < 3 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let commands = events.lock().await;
+            assert_eq!(
+                commands.len(),
+                3,
+                "A duplicate terminal event must not speak again"
+            );
+            assert_eq!(
+                commands[0]["type"],
+                if kind == "response.cancelled" {
+                    "session.thinking.append"
+                } else {
+                    "session.commentary.append"
+                }
+            );
+            let facts: Value =
+                serde_json::from_str(commands[0]["content"].as_str().unwrap()).unwrap();
+            assert_eq!(facts["type"], "voice_reply_unavailable");
+            assert_eq!(
+                facts["response_status"],
+                kind.trim_start_matches("response.")
+            );
+            assert_eq!(facts["retry_allowed"], false);
+            assert!(facts.get("task_id").is_none() && facts.get("state").is_none());
+            let output: Value =
+                serde_json::from_str(commands[1]["item"]["output"].as_str().unwrap()).unwrap();
+            assert_eq!(output["content"][0]["text"], "23 degrees");
+            drop(commands);
+            assert_eq!(mcp.received_requests().await.unwrap().len(), 1);
+            super::super::tools::validate_call(&state, &call)
+                .await
+                .unwrap();
+            native.close(&state).await;
+            server.abort();
+            state.db.drop().await.unwrap();
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn native_voice_failed_final_reply_preserves_direct_effect_without_replay() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+    Box::pin(async {
+        let (mut state, _, mut call) =
+            super::super::tests::setup("voice_reply_failure_after_effect").await;
+        call = session::write(
+            &state.db,
+            &call,
+            doc! {"responses_model":"catalog-task-model","responses_reserved":true},
+        )
+        .await
+        .unwrap();
+        let mcp = MockServer::start().await;
+        state.config.base_url = mcp.uri();
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"jsonrpc":"2.0","id":"native-call","result":{
+                "isError":false,"content":[{"type":"text","text":"Setting changed"}]}})),
+            )
+            .expect(1)
+            .mount(&mcp)
+            .await;
+        let (mut socket, server, events) = fixture_socket().await;
+        let mut native = native_state();
+        let mut item = native_item(json!({"tool_name":"sensor__request",
+            "arguments_json":"{\"method\":\"POST\",\"path\":\"/setting\"}"}));
+        item["event"]["item"]["name"] = json!("nyx__call_tool");
+        for event in [native_created(), item, native_completed()] {
+            native
+                .event(&state, &mut call, &mut socket, &event, false)
+                .await
+                .unwrap();
+        }
+        let completed = native.next().await.unwrap();
+        native
+            .complete(&state, &call, &mut socket, completed)
+            .await
+            .unwrap();
+        let mut created = native_created();
+        created["event"]["response"]["id"] = json!("failed-final");
+        let mut failed = native_completed();
+        failed["event"]["response"]["id"] = json!("failed-final");
+        failed["event"]["type"] = json!("response.failed");
+        let mut replay = native_item(json!({"request":"Repeat the setting change"}));
+        replay["event"]["item"]["call_id"] = json!("must-not-submit");
+        for event in [created, replay, failed.clone(), failed] {
+            native
+                .event(&state, &mut call, &mut socket, &event, false)
+                .await
+                .unwrap();
+        }
+        assert!(!native.pending());
+        assert_eq!(mcp.received_requests().await.unwrap().len(), 1);
+        assert_eq!(
+            state
+                .db
+                .collection::<VoiceRequest>(REQUESTS)
+                .count_documents(doc! {"session_id":&call.id})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+                .count_documents(doc! {"voice_parent_conversation_id":&call.conversation_id,
+                "active_turn":{"$ne":null}})
+                .await
+                .unwrap(),
+            0
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while events.lock().await.len() < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(events.lock().await.len(), 3);
+        super::super::tools::validate_call(&state, &call)
+            .await
+            .unwrap();
+        native.close(&state).await;
+        server.abort();
+        state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn native_voice_reply_failure_keeps_accepted_task_running_and_delivers_its_result() {
+    Box::pin(async {
+        let (state, _, mut call) =
+            super::super::tests::setup("voice_reply_failure_after_submission").await;
+        call = session::write(
+            &state.db,
+            &call,
+            doc! {"responses_model":"catalog-task-model","responses_reserved":true},
+        )
+        .await
+        .unwrap();
+        let (mut socket, server, events) = fixture_socket().await;
+        let mut native = native_state();
+        for event in [
+            native_created(),
+            native_item(json!({"request":"Perform a long task"})),
+            native_completed(),
+        ] {
+            native
+                .event(&state, &mut call, &mut socket, &event, false)
+                .await
+                .unwrap();
+        }
+        let request = state
+            .db
+            .collection::<VoiceRequest>(REQUESTS)
+            .find_one(doc! {"session_id":&call.id})
+            .await
+            .unwrap()
+            .unwrap();
         let request = voice::ensure_task_conversation(&state.db, &state.encryption_keys, &request)
             .await
             .unwrap();
         let running = Box::pin(engine::begin_turn_with_voice(
             &state.db,
             &call.user_id,
-            &turn(request.task_conversation_id.as_deref(), "fixture task"),
+            &turn(
+                request.task_conversation_id.as_deref(),
+                "Perform a long task",
+            ),
             &state.encryption_keys,
             Some(&request.id),
         ))
         .await
         .unwrap();
+        let before = voice::get(&state.db, &call.user_id, &call.conversation_id, &request.id)
+            .await
+            .unwrap();
+        assert_eq!(before.state, RequestState::Claimed);
+        let mut created = native_created();
+        created["event"]["response"]["id"] = json!("failed-acknowledgement");
+        let mut failed = native_completed();
+        failed["event"]["response"]["id"] = json!("failed-acknowledgement");
+        failed["event"]["type"] = json!("response.incomplete");
+        for event in [created, failed.clone(), failed] {
+            native
+                .event(&state, &mut call, &mut socket, &event, false)
+                .await
+                .unwrap();
+        }
+        let after = voice::get(&state.db, &call.user_id, &call.conversation_id, &request.id)
+            .await
+            .unwrap();
+        assert_eq!(after.state, RequestState::Claimed);
+        assert_eq!(after.turn_id, before.turn_id);
+        let status = super::super::progress::task_status(&state.db, &call)
+            .await
+            .unwrap();
+        assert!(status.to_string().contains(&request.id));
+        assert_eq!(
+            state
+                .db
+                .collection::<VoiceRequest>(REQUESTS)
+                .count_documents(doc! {"session_id":&call.id})
+                .await
+                .unwrap(),
+            1
+        );
         Box::pin(engine::finish_turn(
             &state.db,
             &running,
             &running.credential_api_key_id,
             &Uuid::new_v4().to_string(),
             &engine::TurnResult {
-                text: "é".repeat(COMMENTARY_MAX_BYTES),
+                text: "Verified long task result".into(),
                 session_id: None,
                 response_id: None,
                 error: None,
@@ -1167,7 +2156,7 @@ async fn voice_unavailable_result_preserves_task_state_and_uses_language_context
         ))
         .await
         .unwrap();
-        let (mut socket, server, received) = fixture_socket().await;
+        voice::publish_completed_results(&state.db).await.unwrap();
         let mut coordinator = Coordinator::new();
         for _ in 0..2 {
             assert!(
@@ -1177,32 +2166,142 @@ async fn voice_unavailable_result_preserves_task_state_and_uses_language_context
             );
         }
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            while received.lock().await.is_empty() {
+            while events.lock().await.len() < 4 {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .unwrap();
-        let messages = received.lock().await;
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0]["type"], "session.commentary.append");
-        let facts: Value = serde_json::from_str(messages[0]["content"].as_str().unwrap()).unwrap();
-        assert_eq!(facts["type"], "task_result");
-        assert_eq!(facts["state"], "completed");
-        assert_eq!(facts["presentation"], "unavailable");
-        assert!(facts.get("answer").is_none());
-        assert!(
-            coordinator.pending_audio.is_empty(),
-            "Context delivery does not prove any spoken text was heard"
-        );
-        let saved = voice::get(&state.db, &call.user_id, &thread.id, &request.id)
+        let commands = events.lock().await;
+        assert_eq!(commands.len(), 4);
+        assert_eq!(commands[3]["type"], "session.commentary.append");
+        assert_eq!(commands[3]["content"], "Verified long task result");
+        drop(commands);
+        let settled = voice::get(&state.db, &call.user_id, &call.conversation_id, &request.id)
             .await
             .unwrap();
-        assert_eq!(saved.state, RequestState::Completed);
-        assert!(!saved.timing.contains_key("first_audio_ms"));
-        drop(messages);
+        assert_eq!(settled.state, RequestState::Completed);
+        assert_eq!(settled.turn_id, before.turn_id);
+        super::super::tools::validate_call(&state, &call)
+            .await
+            .unwrap();
+        native.close(&state).await;
         server.abort();
         state.db.drop().await.unwrap();
     })
     .await;
+}
+
+#[tokio::test]
+async fn native_voice_reconciles_only_provider_confirmed_terminal_failure() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+    Box::pin(async {
+        for status in ["incomplete", "failed", "cancelled"] {
+            let (state, _, mut call) = super::super::tests::setup("voice_native_failure_reconcile").await;
+            call = session::write(&state.db, &call,
+                doc! {"responses_model":"catalog-task-model","responses_reserved":true}).await.unwrap();
+            let upstream = MockServer::start().await;
+            Mock::given(method("GET")).and(path("/v1/responses/native-response"))
+                .and(header("authorization","Bearer provider-fixture"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "id":"native-response","status":status,
+                    "usage":{"input_tokens":80,"output_tokens":20,"total_tokens":100},
+                    "output":[{"type":"function_call","status":"completed","name":"request_nyxbot",
+                        "call_id":"untrusted-output","arguments":"{\"request\":\"Do not execute\"}"}]
+                }))).expect(1).mount(&upstream).await;
+            let provider = super::super::openai::OpenAi::fixture(
+                zeroize::Zeroizing::new("provider-fixture".into()), *upstream.address());
+            let (mut socket, server, events) = fixture_socket().await;
+            let mut native = native_state();
+            for event in [native_created(), native_item(json!({"request":"Never dispatch before terminal success"}))] {
+                native.event(&state, &mut call, &mut socket, &event, false).await.unwrap();
+            }
+            // Human error wording has no authority, and is not matched.
+            let error = json!({"type":"error","error":{"type":"invalid_request_error",
+                "code":"invalid_request_error","message":"arbitrary provider wording"}});
+            assert!(native.recover_failure(&state, &mut call, &mut socket, &provider, &error).await.unwrap());
+            assert!(!native.pending());
+            assert_eq!(call.responses.usage().unwrap()["native-response"].tokens,100);
+            assert_eq!(state.db.collection::<VoiceRequest>(REQUESTS)
+                .count_documents(doc! {"session_id":&call.id}).await.unwrap(),0);
+            // A late duplicate terminal event cannot deliver a second notice.
+            let mut terminal = native_completed();
+            terminal["event"]["type"] = json!(format!("response.{status}"));
+            native.event(&state, &mut call, &mut socket, &terminal, false).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while events.lock().await.is_empty() {tokio::task::yield_now().await;}
+            }).await.unwrap();
+            let commands = events.lock().await;
+            assert_eq!(commands.len(),1);
+            let facts: Value = serde_json::from_str(commands[0]["content"].as_str().unwrap()).unwrap();
+            assert_eq!(facts["response_status"],status);
+            drop(commands);
+            super::super::tools::validate_call(&state, &call).await.unwrap();
+            native.close(&state).await;
+            server.abort();state.db.drop().await.unwrap();
+        }
+    }).await;
+}
+
+#[tokio::test]
+async fn native_voice_reconciliation_fails_closed_without_exact_terminal_evidence() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    Box::pin(async {
+        let (state, _, mut call) = super::super::tests::setup("voice_native_reconcile_fences").await;
+        call = session::write(&state.db, &call,
+            doc! {"responses_model":"catalog-task-model","responses_reserved":true}).await.unwrap();
+        let upstream = MockServer::start().await;
+        let provider = super::super::openai::OpenAi::fixture(
+            zeroize::Zeroizing::new("provider-fixture".into()), *upstream.address());
+        let (mut socket, server, events) = fixture_socket().await;
+        let error = json!({"type":"error","error":{"type":"invalid_request_error","code":"invalid_request_error"}});
+        let mut native = native_state();
+        native.event(&state, &mut call, &mut socket, &native_created(), false).await.unwrap();
+        for pointer in ["/client_event_id", "/error/client_event_id"] {
+            let mut command_error = error.clone();
+            if pointer == "/client_event_id" {command_error["client_event_id"]=json!("bad-command");}
+            else {command_error["error"]["client_event_id"]=json!("bad-command");}
+            assert!(!native.recover_failure(&state, &mut call, &mut socket, &provider, &command_error).await.unwrap());
+        }
+        let mut auth_error = error.clone();
+        auth_error["error"]["type"] = json!("authentication_error");
+        assert!(!native.recover_failure(&state, &mut call, &mut socket, &provider, &auth_error).await.unwrap());
+        assert!(upstream.received_requests().await.unwrap().is_empty());
+        for (id, status, rejects_identity) in [
+            ("native-response","in_progress",false),
+            ("native-response","completed",false),
+            ("foreign-response","incomplete",true),
+        ] {
+            upstream.reset().await;
+            Mock::given(method("GET")).and(path("/v1/responses/native-response"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":id,"status":status})))
+                .expect(1).mount(&upstream).await;
+            let outcome = native.recover_failure(&state, &mut call, &mut socket, &provider, &error).await;
+            if rejects_identity {assert!(outcome.is_err());} else {assert!(!outcome.unwrap());}
+            assert!(events.lock().await.is_empty());
+        }
+        upstream.reset().await;
+        // An uncorrelated error cannot choose among concurrent inferences.
+        native.delegation(&json!({"delegation":{"id":"other-delegation","response_id":"other-response","target":"responses"}})).unwrap();
+        let mut created = native_created();
+        created["delegation_id"] = json!("other-delegation");
+        created["event"]["response"]["id"] = json!("other-response");
+        native.event(&state, &mut call, &mut socket, &created, false).await.unwrap();
+        assert!(!native.recover_failure(&state, &mut call, &mut socket, &provider, &error).await.unwrap());
+        assert!(upstream.received_requests().await.unwrap().is_empty());
+        // Revocation is checked before even fetching a known inference record.
+        let mut revoked = native_state();
+        revoked.event(&state, &mut call, &mut socket, &native_created(), false).await.unwrap();
+        state.db.collection::<Document>(COLLECTION_NAME).update_one(doc! {"_id":&call.id},
+            doc! {"$set":{"end_requested":true}}).await.unwrap();
+        assert!(revoked.recover_failure(&state, &mut call, &mut socket, &provider, &error).await.is_err());
+        assert!(upstream.received_requests().await.unwrap().is_empty());
+        server.abort();state.db.drop().await.unwrap();
+    }).await;
 }

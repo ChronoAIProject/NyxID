@@ -1262,7 +1262,7 @@ async fn handle_node_connection(
             "type": "auth_ok",
             "node_id": &node_id,
             "heartbeat_interval_secs": state.config.node_heartbeat_interval_secs,
-            "capabilities": { "proxy_binary_chunks": true },
+            "capabilities": { "proxy_binary_chunks": true, "machine_execution_approval_v1": true },
             "managed_runtime": managed_runtime,
             "managed_runtime_window": managed_runtime_window
         });
@@ -3084,6 +3084,7 @@ mod tests {
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
+                machine_execution_approval_v1: false,
                 ..NodeCapabilitiesMsg::default()
             }),
             None,
@@ -3207,6 +3208,7 @@ mod tests {
                 proxy_upload_v1: false,
                 http_cancellation: false,
                 remote_credential_crypto_v1: true,
+                machine_execution_approval_v1: false,
                 ..NodeCapabilitiesMsg::default()
             }),
             None,

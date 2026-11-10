@@ -14,12 +14,16 @@ async fn fixture_session_restricts_browser_and_finalizes_only_on_provider_close(
         assert_eq!(headers["authorization"],"Bearer fixture-secret");
         assert_eq!(body["session"]["model"],"catalog-live-model");
         assert_eq!(body["session"]["store"],false);
+        assert!(body["session"].get("input").is_none());
         let delegation=&body["session"]["delegation"];
+        assert!(delegation["responses"]["instructions"].as_str().unwrap().contains("fixture Bot voice guidance"));
         assert_eq!(delegation["type"],"responses");
         assert_eq!(delegation["responses"]["model"],"catalog-task-model");
-        assert_eq!(delegation["responses"]["tools"].as_array().unwrap().len(),1);
+        assert_eq!(delegation["responses"]["tools"].as_array().unwrap().len(),5);
         assert_eq!(delegation["responses"]["tools"][0]["name"],"request_nyxbot");
         assert_eq!(delegation["responses"]["tools"][0]["parameters"]["required"],json!(["request"]));
+        assert_eq!(delegation["responses"]["tools"][1]["name"],"get_task_status");
+        assert_eq!(delegation["responses"]["tools"][1]["parameters"],json!({"type":"object","properties":{},"required":[],"additionalProperties":false}));
         assert_eq!(body["session"]["client"]["data_channel"]["allowed_client_events"],json!([]));
         assert!(body["session"].get("tools").is_none());
         assert_eq!(body["session"]["audio"]["output"]["voice"], "marin");
@@ -46,6 +50,7 @@ async fn fixture_session_restricts_browser_and_finalizes_only_on_provider_close(
             "fixture instructions",
             "marin",
             "catalog-live-model",
+            Some("fixture Bot voice guidance"),
         )
         .await
         .unwrap();
@@ -122,7 +127,7 @@ async fn initialization_rejections_release_but_malformed_sdp_keeps_the_closable_
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let provider = OpenAi::fixture(Zeroizing::new("fixture-secret".into()), address);
         let error = provider
-            .create("v=0", "instructions", "marin", "gpt-live-1")
+            .create("v=0", "instructions", "marin", "gpt-live-1", None)
             .await
             .err()
             .unwrap();
@@ -149,7 +154,7 @@ async fn voice_create_rejection_retains_only_safe_provider_metadata() {
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let provider = OpenAi::fixture(Zeroizing::new("fixture-secret".into()), address);
     let failure = provider
-        .create("v=0", "secret instructions", "marin", "gpt-live-1")
+        .create("v=0", "secret instructions", "marin", "gpt-live-1", None)
         .await
         .err()
         .unwrap();
@@ -194,11 +199,43 @@ async fn voice_create_expiry_is_optional_metadata_not_an_answer_requirement() {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let provider = OpenAi::fixture(Zeroizing::new("fixture-secret".into()), address);
         let created = provider
-            .create("v=0", "context", "marin", "gpt-live-1")
+            .create("v=0", "context", "marin", "gpt-live-1", None)
             .await
             .unwrap();
         assert_eq!(created.expires_at, expected);
         assert_eq!(created.provider_id, "live:opaque.v2");
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn native_response_reconciliation_bounds_bodies_and_never_follows_redirects() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let upstream = MockServer::start().await;
+    let destination = MockServer::start().await;
+    let provider = OpenAi::fixture(Zeroizing::new("fixture-secret".into()), *upstream.address());
+    for template in [
+        ResponseTemplate::new(302).insert_header("location", destination.uri()),
+        ResponseTemplate::new(401),
+        ResponseTemplate::new(200).set_body_string("x".repeat(MAX_FRAME + 1)),
+        ResponseTemplate::new(200).set_body_string("invalid-json"),
+    ] {
+        upstream.reset().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/responses/known-response"))
+            .respond_with(template)
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        assert!(provider.response("known-response").await.is_err());
+        assert!(destination.received_requests().await.unwrap().is_empty());
+    }
+    upstream.reset().await;
+    for invalid in ["", ".", "..", "line\nbreak"] {
+        assert!(provider.response(invalid).await.is_err());
+    }
+    assert!(upstream.received_requests().await.unwrap().is_empty());
 }

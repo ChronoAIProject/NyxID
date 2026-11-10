@@ -846,6 +846,7 @@ async fn stale_evidence_never_deletes_an_effective_operation_body() {
 #[test]
 fn approval_refuses_non_owner_guest_and_non_orchestrator() {
     let mut chat = crate::services::assistant_acknowledgement_service::ChatAuthority {
+        platform_model_context: None,
         automation_work: None,
         execution_group_id: None,
         execution_unsupported: false,
@@ -905,6 +906,7 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         memory: Vec::new(),
         display_name: None,
         persona: None,
+        voice_instructions: None,
         destroyed_at: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -983,6 +985,7 @@ async fn org_review_fixture(
             description: "Learning worker".into(),
             display_name: None,
             persona: None,
+            voice_instructions: None,
             targets: Default::default(),
             account_read: false,
             specialty: None,
