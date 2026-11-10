@@ -437,6 +437,8 @@ pub(super) async fn create(
     )
     .await?;
     let request = ApprovalRequest {
+        activity_outcome: None,
+        activity_execution: None,
         execution_proposal: Some(version.envelope(p)),
         assistant_group: group_binding,
         id,

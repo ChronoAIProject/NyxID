@@ -2489,3 +2489,36 @@ setup carries the same verified org origin and payer, with no user-supplied
 model/credential choices. The provider admin is only the transport principal.
 Readiness, live sender/agent/binding checks and source fences apply on every
 turn, key use and delivery. See the [channel contract](09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).
+
+
+### Approval-gated activity outcomes (#2315)
+
+New turn activities can carry `decision: { kind, id, state }`. The link is written
+only by NyxID's acknowledgement, execution-permission or proxy approval gate.
+It contains identifiers and closed states only, never tool input/output. The
+legacy activity `status` is retained for mixed fleets; the MCP `isError` result,
+result digest and continuation loop-guard digest are unchanged. New clients use
+the decision projection when present. Rows without it keep their existing UI.
+
+History batches the linked IDs and projects their current state: `waiting`,
+`allowed`, `denied`, `expired`, `completed`, `failed`, `cancelled`, or
+`unavailable`. Allow means permission, not completion. Exact card consumption
+records the executing conversation/turn/activity; only that occurrence's result
+can confirm completion. A successful unrelated continuation does not count.
+Authored skills require the reviewed revision's pinned publication. Machine
+jobs require their live job receipt. Execution-permission proposals v1–v4 use
+their retained occurrence and metadata-only response outcome; receipt completion
+alone does not prove HTTP success. Native permission-key MCP also uses its
+trusted tool-outcome marker, since HTTP 200 can carry a tool failure. No payload
+or retained result is decrypted for presentation. Missing/old outcome evidence stays unconfirmed.
+
+Web and mobile show “Waiting for approval”, “Completed after approval”,
+“Declined” or “Approval expired” with matching counts. A linked card is counted
+once even when it also appears as a receipt. Actual execution failures remain
+failed; a gated call is never counted as a generic failed action. Stop does not
+erase confirmed effects, and interrupted execution without a confirmed result
+never becomes success. Raw HTTP calls add an activity only when a decision gate
+runs; ordinary model callbacks add neither an activity nor a presentation read.
+A WebSocket/CONNECT handshake alone does not confirm stream completion.
+
+Shared-recipient connection-consent steps use the same optional decision metadata, scoped to the acting person. Once, Always and a consumed consent mean allowed, not proven execution; revoked or missing evidence remains unavailable.

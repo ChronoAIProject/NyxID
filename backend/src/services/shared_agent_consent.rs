@@ -226,13 +226,22 @@ async fn authorize_inner(
                 }));
             }
             ConsentDecision::Skip => {
+                super::assistant_activity_decision::bind(
+                    db,
+                    chat,
+                    "shared_consent",
+                    &row.id,
+                    false,
+                    None,
+                )
+                .await?;
                 return Ok(Err(
                     json!({"error": "shared_connection_skipped", "connection_id": service.id}),
                 ));
             }
             _ => {
                 approval.require_request_support()?;
-                return Ok(Err(card(&row)));
+                return Ok(Err(activity_card(db, chat, &row).await?));
             }
         }
     }
@@ -299,11 +308,21 @@ async fn authorize_inner(
             let existing = rows.find_one(pending).await?.ok_or_else(|| {
                 AppError::Conflict("Consent changed concurrently; retry the request".into())
             })?;
-            return Ok(Err(card(&existing)));
+            return Ok(Err(activity_card(db, chat, &existing).await?));
         }
         return Err(error.into());
     }
-    Ok(Err(card(&row)))
+    Ok(Err(activity_card(db, chat, &row).await?))
+}
+
+async fn activity_card(
+    db: &Database,
+    chat: &ChatAuthority,
+    row: &AgentConsent,
+) -> AppResult<Value> {
+    super::assistant_activity_decision::bind(db, chat, "shared_consent", &row.id, false, None)
+        .await?;
+    Ok(card(row))
 }
 
 fn card(row: &AgentConsent) -> Value {

@@ -6,6 +6,8 @@ pub const COLLECTION_NAME: &str = "assistant_acknowledgements";
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantAcknowledgement {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_execution: Option<super::assistant_conversation::ActivityExecution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automation_work: Option<super::trigger_run::AutomationWork>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_task: Option<super::execution_permission::TaskAdmission>,

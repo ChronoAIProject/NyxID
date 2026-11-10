@@ -250,6 +250,9 @@ impl std::fmt::Debug for PlatformTurnOrigin {
 /// the label is a tool identifier, never arguments, results, or secrets.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnActivity {
+    /// Trusted decision linkage, presentation only; never execution authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<ActivityDecision>,
     #[serde(default)]
     pub machine: Option<Box<super::machine_receipt::MachineReceipt>>,
     pub id: String,
@@ -267,6 +270,28 @@ pub struct TurnActivity {
     pub started_at: DateTime<Utc>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub ended_at: Option<DateTime<Utc>>,
+}
+
+/// Additive strings keep old replicas readable. State is refreshed from the
+/// exact live card/effect receipt, never inferred from a successful turn.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ActivityDecision {
+    pub kind: String,
+    pub id: String,
+    pub state: String,
+    #[serde(default)]
+    pub executing: bool,
+}
+
+/// Exact execution consuming a decision. No arguments or provider result.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ActivityExecution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<Box<super::machine_receipt::MachineReceipt>>,
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub activity_id: String,
+    pub status: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

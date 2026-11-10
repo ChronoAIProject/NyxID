@@ -2658,6 +2658,8 @@ async fn history_surfaces_pending_proxy_approvals_raised_by_the_chat_key() {
             .await
             .unwrap();
     let request = |label: &str, status: &str, minutes: i64| ApprovalRequest {
+        activity_outcome: None,
+        activity_execution: None,
         execution_proposal: None,
         assistant_group: None,
         id: uuid::Uuid::new_v4().to_string(),
@@ -2750,6 +2752,7 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        activity_execution: None,
         automation_work: None,
         execution_task: None,
         connect_own: None,
@@ -4556,6 +4559,7 @@ fn activity_response_failure_contract_omits_absent_http_status() {
         ("internal", None),
     ] {
         let response: ActivityResponse = TurnActivity {
+            decision: None,
             retry_identity: None,
             digest: None,
             machine: None,
@@ -6234,4 +6238,27 @@ fn generated_active_turn_fields_are_hidden_when_disabled_in_all_conversation_res
         assert_eq!(files[0]["origin"], "tool");
         assert!(files[0].get("filename").is_none());
     }
+}
+
+#[test]
+fn activity_decision_projection_is_additive_and_excludes_internal_execution_flags() {
+    let legacy =
+        bson::doc! {"id":"step","label":"tool","status":"error","started_at":bson::DateTime::now()};
+    let row: crate::models::assistant_conversation::TurnActivity =
+        bson::from_document(legacy.clone()).unwrap();
+    let public = serde_json::to_value(ActivityResponse::from(row)).unwrap();
+    assert!(public.get("decision").is_none());
+    let mut new = legacy;
+    new.insert(
+        "decision",
+        bson::doc! {"kind":"acknowledgement","id":"card","state":"waiting","executing":false},
+    );
+    let row: crate::models::assistant_conversation::TurnActivity =
+        bson::from_document(new).unwrap();
+    let public = serde_json::to_value(ActivityResponse::from(row)).unwrap();
+    assert_eq!(public["status"], "error");
+    assert_eq!(
+        public["decision"],
+        json!({"kind":"acknowledgement","id":"card","state":"waiting"})
+    );
 }

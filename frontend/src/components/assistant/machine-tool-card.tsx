@@ -1,3 +1,4 @@
+import { activityDecisionPresentation, type ActivityDecision } from "@/lib/assistant/activity-decision";
 import { useEffect, useState } from "react";
 import { RECEIPT_MAX_W } from "@/lib/assistant/banner";
 import { useMachinePreviewPolicy } from "@/hooks/use-machine-activity";
@@ -11,9 +12,11 @@ import { ToolImage } from "./blocks/tool-image";
 
 export function MachineToolCard({
   receipt,
+  decision,
   conversationId,
   images = [],
 }: {
+  readonly decision?: ActivityDecision | null;
   readonly receipt: MachineReceipt;
   readonly conversationId?: string;
   readonly images?: readonly ChatImage[];
@@ -22,6 +25,7 @@ export function MachineToolCard({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
   const [open, setOpen] = useState(false);
+  const gated = activityDecisionPresentation(decision);
   const command = receipt.action.startsWith("command.");
   const Icon = command
     ? Terminal
@@ -64,18 +68,19 @@ export function MachineToolCard({
         <span
           role="status"
           className={
-            receipt.status === "error"
+            (gated ? gated.status === "error" : receipt.status === "error")
               ? "text-destructive"
               : "text-muted-foreground"
           }
         >
-          {receipt.status}
+          {gated?.label ?? receipt.status}
         </span>
         {receipt.exit_code !== null && <span>Exit {receipt.exit_code}</span>}
         {receipt.bytes !== null && (
           <span>{receipt.bytes.toLocaleString()} bytes</span>
         )}
       </div>
+      {gated ? <p className="text-muted-foreground">{gated.detail}</p> : null}
       <p className="break-all text-12 text-muted-foreground">
         {receipt.machine_name?.trim() ||
           `Machine ${receipt.node_id.slice(0, 8)}`}{" "}
@@ -99,7 +104,7 @@ export function MachineToolCard({
             ))}
         </dl>
       </details>
-      {receipt.error_code !== null && (
+      {(!gated || gated.status === "error") && receipt.error_code !== null && (
         <p role="alert">Machine error {receipt.error_code}</p>
       )}
       {image && <ToolImage image={image} />}

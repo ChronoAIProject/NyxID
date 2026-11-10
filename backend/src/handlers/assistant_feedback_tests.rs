@@ -76,6 +76,7 @@ mod fixtures {
 
     pub fn activity(label: &str, status: &str) -> TurnActivity {
         TurnActivity {
+            decision: None,
             retry_identity: None,
             failure: None,
             machine: None,

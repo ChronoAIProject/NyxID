@@ -165,7 +165,7 @@ export function GroupMessageRow({
         {message.activities
           ?.filter((activity) => activity.machine)
           .map((activity) => (
-            <MachineToolCard key={activity.id} receipt={activity.machine!} />
+            <MachineToolCard key={activity.id} receipt={activity.machine!} decision={activity.decision} />
           ))}
       </div>
     );
@@ -238,7 +238,7 @@ export function GroupMessageRow({
           {message.activities
             ?.filter((activity) => activity.machine)
             .map((activity) => (
-              <MachineToolCard key={activity.id} receipt={activity.machine!} />
+              <MachineToolCard key={activity.id} receipt={activity.machine!} decision={activity.decision} />
             ))}
           {message.attachments?.map((item) => (
             <ToolImage

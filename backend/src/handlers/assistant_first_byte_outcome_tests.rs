@@ -252,6 +252,7 @@ fn first_byte_outcome_legacy_uncertain_and_truncated_evidence() {
     assert!(incomplete.retry_warning.is_some());
     row.activities
         .push(crate::models::assistant_conversation::TurnActivity {
+            decision: None,
             retry_identity: None,
             id: "a".into(),
             label: "nyxid__create_schedule".into(),
