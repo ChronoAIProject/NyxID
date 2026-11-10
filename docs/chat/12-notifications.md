@@ -314,9 +314,12 @@ Upgrade every API replica and scheduler worker before enabling
 servers. The flag defaults off and resolves for the acting person, including
 organization overrides. Existing notifications are not backfilled.
 
-Human handlers reuse the feature snapshot returned by the engine gate. Turn
-admission snapshots the notification decision on `ActiveTurn`; settlement,
-turn-loss recovery and turn-bound cards reuse it without reading flags again.
+Human handlers reuse the feature snapshot returned by the engine gate. Ordinary
+turn admission snapshots the notification decision on `ActiveTurn`; settlement,
+turn-loss recovery and cards for that person reuse the known decision. Group and
+trigger turns defer this snapshot because their public reply and terminal
+producers own the feed update. If either raises a card, or a card targets a
+different person, card creation resolves that person's cached flag at that point.
 Other producers use a bounded process cache with a 30-second lifetime. Flag
 changes therefore converge on those producers within that window; admitted turns
 retain their snapshot until settlement. The cache contains rollout decisions,
