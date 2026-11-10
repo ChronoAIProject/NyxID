@@ -2088,3 +2088,28 @@ async fn shared_agent_crew_name_collisions_require_exact_identity() {
 
 #[path = "assistant_group_retirement_tests.rs"]
 mod retirement;
+
+#[tokio::test]
+async fn notifications_are_purged_with_personal_group_transcript() {
+    use crate::test_utils::{
+        assert_notification_probe as probe, seed_notification_purge_probe as seed,
+    };
+    let (state, _, server) = setup("notifications_group_purge").await;
+    let agent = researcher(&state).await;
+    let group = groups::create(
+        &state.db,
+        OWNER,
+        "Reports",
+        std::slice::from_ref(&agent.id),
+        "user",
+    )
+    .await
+    .unwrap();
+    let removed = seed(&state.db, "another-recipient", doc! {"group_id":&group.id}).await;
+    let retained = seed(&state.db, OWNER, doc! {"group_id":"another-group"}).await;
+    groups::delete(&state.db, OWNER, &group.id).await.unwrap();
+    probe(&state.db, &removed, false).await;
+    probe(&state.db, &retained, true).await;
+    server.abort();
+    state.db.drop().await.unwrap();
+}

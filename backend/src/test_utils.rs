@@ -4156,3 +4156,39 @@ mod tests {
         }
     }
 }
+
+/// A content-free row for lifecycle tests, independent of the purge inventory.
+/// Each test chooses the references it expects its real source deletion to remove.
+pub(crate) async fn seed_notification_purge_probe(
+    db: &mongodb::Database,
+    user_id: &str,
+    references: Document,
+) -> String {
+    let id = Uuid::new_v4().to_string();
+    let mut source = doc! {"type":"conversation", "id":Uuid::new_v4().to_string()};
+    source.extend(references);
+    db.collection::<Document>("assistant_notifications")
+        .insert_one(doc! {
+            "_id":&id,"user_id":user_id,"kind":"agent_update","source":source,
+            "source_key":&id,"coalesced":false,"unread":true,"count":1_i64,
+            "read_at":null,"resolved_at":null,"resolution":null,"card_expires_at":null,
+            "outcome":null,"reason":null,"push":null,
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+            "expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::days(30)),
+        })
+        .await
+        .unwrap();
+    id
+}
+
+pub(crate) async fn assert_notification_probe(db: &mongodb::Database, id: &str, present: bool) {
+    assert_eq!(
+        db.collection::<Document>("assistant_notifications")
+            .find_one(doc! {"_id":id})
+            .await
+            .unwrap()
+            .is_some(),
+        present,
+        "notification {id} presence after source transition"
+    );
+}

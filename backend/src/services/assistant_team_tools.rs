@@ -10,6 +10,7 @@ use crate::{
 };
 
 pub const TOOL_NAMES: &[&str] = &[
+    "list_notifications",
     "create_schedule",
     "list_schedules",
     "update_schedule",
@@ -167,6 +168,7 @@ pub fn read_only(name: &str) -> bool {
     matches!(
         name,
         "task_status"
+            | "list_notifications"
             | "get_agent_sharing"
             | "list_schedules"
             | "wait_for_subagents"
@@ -260,6 +262,15 @@ pub fn schema(name: &str) -> Value {
             )
         }
         "list_schedules" => (json!({}), vec![]),
+        "list_notifications" => (
+            json!({
+                "since": {"type":"string","format":"date-time","maxLength":64,"description":"Only activity updated at or after this RFC3339 timestamp."},
+                "kinds": {"type":"array","maxItems":6,"uniqueItems":true,"items":{"type":"string","enum":["automation_result","automation_problem","needs_decision","agent_update","chat_update","group_mention"]}},
+                "unread_only": {"type":"boolean","default":true},
+                "limit": {"type":"integer","minimum":1,"maximum":50,"default":20}
+            }),
+            vec![],
+        ),
         "delete_schedule" | "run_schedule_now" => (json!({"id":string(64)}), vec!["id"]),
         "spawn_subagent" => (
             json!({
@@ -643,6 +654,9 @@ pub(crate) fn description(name: &str) -> &'static str {
         }
         "create_schedule" => {
             "Schedule owner-requested work for NyxBot or a specialist. Use the owner's timezone from settings; ask if unknown. Confirm the returned next runs in plain words. Prefer deliver_to for requested pushed results."
+        }
+        "list_notifications" => {
+            "Read the owner's Notifications with bounded previews and links. When the owner asks what they missed, or a NyxBot automation asks for a digest, call this tool. Defaults to unread activity; optional kinds, since and limit narrow the results. Reading never marks notifications as seen. Available only in the owner's NyxBot threads, including scheduled NyxBot turns."
         }
         "list_schedules" => {
             "List the owner's schedules and assistant webhook automations, including confirmation policy, timezone and next runs."
@@ -1207,6 +1221,54 @@ fn matches_spec_type(value: &Value, spec: &Value, kind: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_digest_arguments_are_bounded_and_read_only() {
+        assert!(validate("list_notifications", &json!({})).is_ok());
+        assert!(
+            validate(
+                "list_notifications",
+                &json!({
+                    "since":"2026-11-10T00:00:00Z",
+                    "kinds":["automation_result","needs_decision"],
+                    "unread_only":false,
+                    "limit":50
+                })
+            )
+            .is_ok()
+        );
+        for args in [
+            json!({"limit":0}),
+            json!({"limit":51}),
+            json!({"limit":1.5}),
+            json!({"kinds":["private_message"]}),
+            json!({"unread_only":"true"}),
+            json!({"user_id":"another-person"}),
+            json!({"mark_read":true}),
+        ] {
+            assert!(validate("list_notifications", &args).is_err(), "{args}");
+        }
+        assert_eq!(
+            crate::services::assistant_acknowledgement_service::known_action_class(
+                "nyxid__list_notifications",
+                &json!({})
+            ),
+            Some(crate::services::assistant_acknowledgement_service::OwnerActionClass::Read)
+        );
+        assert!(!is_agent_tool("list_notifications"));
+        let annotations =
+            crate::services::mcp_service::tool_annotations("nyxid__list_notifications", &[])
+                .unwrap();
+        assert_eq!(
+            annotations,
+            json!({
+                "title":"Read NyxBot notifications",
+                "readOnlyHint":true,
+                "destructiveHint":false,
+                "openWorldHint":false
+            })
+        );
+    }
 
     #[test]
     fn operation_discovery_pagination_schema_advertises_real_recovery_parameters() {

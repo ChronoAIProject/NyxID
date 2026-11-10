@@ -4827,3 +4827,288 @@ async fn org_channel_enabled_admin_tools_retain_confirmation_and_members_cannot_
     }
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn notifications_are_purged_by_conversation_delete_agent_destroy_and_agent_purge() {
+    use crate::test_utils::{
+        assert_notification_probe as probe, seed_notification_purge_probe as seed,
+    };
+    let (state, _, server) = setup("notifications_team_purge").await;
+    let (first, _) = orchestrator(&state).await;
+    let second = user_turn(&state, None, None, "Another topic").await;
+    let deleted = seed(
+        &state.db,
+        "another-recipient",
+        doc! {"conversation_id":&first.id},
+    )
+    .await;
+    let retained = seed(&state.db, OWNER, doc! {"conversation_id":&second.id}).await;
+    engine::delete(&state.db, OWNER, &first.id).await.unwrap();
+    probe(&state.db, &deleted, false).await;
+    probe(&state.db, &retained, true).await;
+    let chat = chat_for(&state, &second).await;
+    spawn(
+        &state,
+        &chat,
+        json!({"name":"notices","description":"Prepare reports"}),
+    )
+    .await;
+    let agent = team::specialist(&state.db, OWNER, "notices").await.unwrap();
+    let destroyed = seed(&state.db, OWNER, doc! {"agent_id":&agent.id}).await;
+    team::destroy(&state.db, OWNER, &agent.id).await.unwrap();
+    probe(&state.db, &destroyed, false).await;
+    let purged = seed(&state.db, "another-recipient", doc! {"agent_id":&agent.id}).await;
+    team::purge(&state.db, OWNER, &agent.id).await.unwrap();
+    probe(&state.db, &purged, false).await;
+    probe(&state.db, &retained, true).await;
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn notification_tool_is_hidden_and_refused_while_flag_is_off() {
+    let (state, _, server) = setup("notifications_tool_off").await;
+    let (_, chat) = orchestrator(&state).await;
+    let tools =
+        crate::services::assistant_account_tools::virtual_service_for(&state.db, &chat).await;
+    assert!(
+        !tools
+            .endpoints
+            .iter()
+            .any(|tool| tool.name == "list_notifications")
+    );
+    let (result, error) =
+        execute_tool(&state, &chat, "nyxid__list_notifications", &json!({})).await;
+    assert!(error, "{result}");
+    assert_eq!(result["error"], "not_found");
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn notification_tool_is_private_bounded_read_only_and_allows_nyxbot_trigger_turns() {
+    use crate::models::{
+        trigger::{TriggerDelivery, TriggerTokenLocation, TriggerVerification},
+        trigger_schedule::{ConfirmationPolicy, DeliverTo, TriggerSource},
+    };
+    use crate::services::{
+        feature_flag_service as flags, trigger_schedule as schedules, trigger_service,
+    };
+    let (state, _, server) = setup("notifications_tool_owner").await;
+    flags::set_platform_override(
+        &state.db,
+        flags::ASSISTANT_NOTIFICATIONS_FLAG_KEY,
+        &flags::FlagTarget::User(OWNER.into()),
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    let (row, chat) = orchestrator(&state).await;
+    let message = transcript(&state, &row.id)
+        .await
+        .into_iter()
+        .find(|m| m.role == "assistant")
+        .unwrap();
+    let notification = crate::test_utils::seed_notification_purge_probe(
+        &state.db,
+        OWNER,
+        doc! {
+            "id":&row.id,"conversation_id":&row.id,"agent_id":&chat.agent_id,
+            "message_id":&message.id,"turn_id":&message.turn_id
+        },
+    )
+    .await;
+    let other = crate::test_utils::seed_notification_purge_probe(
+        &state.db,
+        "another-person",
+        doc! {
+            "id":&row.id,"conversation_id":&row.id,"message_id":&message.id
+        },
+    )
+    .await;
+    let listed =
+        crate::services::assistant_account_tools::virtual_service_for(&state.db, &chat).await;
+    assert!(
+        listed
+            .endpoints
+            .iter()
+            .any(|tool| tool.name == "list_notifications")
+    );
+    let (page, error) = execute_tool(
+        &state,
+        &chat,
+        "nyxid__list_notifications",
+        &json!({"limit":1}),
+    )
+    .await;
+    assert!(!error, "{page}");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["id"], notification);
+    assert_eq!(page["items"][0]["preview"], "Work finished");
+    assert!(page["items"][0]["url"].as_str().unwrap().contains(&row.id));
+    assert!(!page.to_string().contains(&other));
+    let stored = state
+        .db
+        .collection::<bson::Document>("assistant_notifications")
+        .find_one(doc! {"_id":&notification})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored.get_bool("unread").unwrap());
+    assert!(matches!(stored.get("read_at"), Some(bson::Bson::Null)));
+    for args in [
+        json!({"limit":51}),
+        json!({"since":"yesterday"}),
+        json!({"user_id":"another-person"}),
+    ] {
+        assert!(
+            execute_tool(&state, &chat, "nyxid__list_notifications", &args)
+                .await
+                .1
+        );
+    }
+    let mut guest = chat.clone();
+    guest.guest = true;
+    assert!(
+        !crate::services::assistant_account_tools::virtual_service_for(&state.db, &guest)
+            .await
+            .endpoints
+            .iter()
+            .any(|tool| tool.name == "list_notifications")
+    );
+    let (refusal, error) =
+        execute_tool(&state, &guest, "nyxid__list_notifications", &json!({})).await;
+    assert!(error);
+    assert_eq!(refusal, acks::guest_refusal());
+    spawn(
+        &state,
+        &chat,
+        json!({"name":"digest-helper","description":"Prepare a digest"}),
+    )
+    .await;
+    let specialist = chat_for(&state, &specialist_home(&state, "digest-helper").await).await;
+    assert!(
+        !crate::services::assistant_account_tools::virtual_service_for(&state.db, &specialist)
+            .await
+            .endpoints
+            .iter()
+            .any(|tool| tool.name == "list_notifications")
+    );
+    let (refusal, error) =
+        execute_tool(&state, &specialist, "nyxid__list_notifications", &json!({})).await;
+    assert!(error);
+    assert_eq!(refusal["error"], "orchestrator_only");
+
+    // Admit a real NyxBot automation turn through the scheduler's leased run barrier.
+    let trigger = trigger_service::create(
+        &state.db,
+        &state.encryption_keys,
+        trigger_service::CreateInput {
+            source: TriggerSource::Webhook,
+            setup_watch_id: None,
+            schedule: None,
+            overlap: Default::default(),
+            user_id: OWNER.into(),
+            label: "Morning digest".into(),
+            user_service_id: None,
+            verification: TriggerVerification::Token {
+                location: TriggerTokenLocation::Bearer,
+            },
+            delivery: TriggerDelivery::Assistant {
+                agent_id: chat.agent_id.clone(),
+                confirmation_policy: ConfirmationPolicy::default(),
+                thread_policy: None,
+                instruction: "Summarise missed notifications".into(),
+                deliver_to: DeliverTo::Thread,
+            },
+        },
+    )
+    .await
+    .unwrap()
+    .trigger;
+    let now = chrono::Utc::now();
+    let run = schedules::new_run(&trigger, now, now + chrono::Duration::minutes(5));
+    state
+        .db
+        .collection::<crate::models::trigger_run::TriggerRun>(
+            crate::models::trigger_run::COLLECTION_NAME,
+        )
+        .insert_one(&run)
+        .await
+        .unwrap();
+    let fence = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection::<bson::Document>(schedules::WORK)
+        .insert_one(doc! {
+            "_id":&run.id,"trigger_id":&trigger.id,"fence":&fence,
+            "at":bson::DateTime::from_chrono(now+chrono::Duration::minutes(1)),
+        })
+        .await
+        .unwrap();
+    let mut start = TurnStart::from(&engine::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+        conversation_id: Some(row.id.clone()),
+        agent_id: None,
+        text: "Summarise missed notifications".into(),
+        model: None,
+        access_mode: None,
+    });
+    start.origin = crate::models::assistant_conversation::TurnOrigin::Trigger;
+    start.trigger = Some(schedules::TurnClaim {
+        enroll_v2: false,
+        run_id: run.id.clone(),
+        fence,
+        trigger_updated_at: trigger.updated_at,
+        continuation: false,
+    });
+    let active = Box::pin(engine::begin_turn(
+        &state.db,
+        OWNER,
+        start,
+        &state.encryption_keys,
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        active
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .trigger_run_id
+            .as_deref(),
+        Some(run.id.as_str())
+    );
+    let triggered = chat_for(&state, &active).await;
+    let listed =
+        crate::services::assistant_account_tools::virtual_service_for(&state.db, &triggered).await;
+    assert!(
+        listed
+            .endpoints
+            .iter()
+            .any(|tool| tool.name == "list_notifications")
+    );
+    let (page, error) = execute_tool(
+        &state,
+        &triggered,
+        "nyxid__list_notifications",
+        &json!({"limit":1}),
+    )
+    .await;
+    assert!(!error, "{page}");
+    assert_eq!(page["items"][0]["id"], notification);
+    assert!(
+        state
+            .db
+            .collection::<bson::Document>("assistant_notifications")
+            .find_one(doc! {"_id":&notification,"unread":true})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}

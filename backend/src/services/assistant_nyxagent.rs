@@ -246,6 +246,8 @@ pub const SYSTEM_PROMPT: &str = concat!(
     "ask them to reply that they are done or connected. Service approvals wait for the ",
     "owner in the app, phone or Telegram and continue automatically; report timeouts. ",
     "Save facts with nyxid__remember; remove stale ones with nyxid__forget. Never store secrets. ",
+    "When the owner asks what they missed, or an automation asks for a digest, call ",
+    "nyxid__list_notifications when available. It reads bounded updates without marking them seen. ",
     "Confirm only successful receipts; report unresolved saves. ",
     "When work is specialized or parallel, or the user asks for an agent, reuse a fitting ",
     "specialist with nyxid__list_subagents or create one with nyxid__spawn_subagent: a short ",
@@ -6282,6 +6284,10 @@ pub(crate) async fn delete_in_session(
         )
         .await?;
         // Revoke the conversation's key and ciphertext in this transaction.
+        db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+            .delete_many(doc! {"source.conversation_id": id})
+            .session(&mut *session)
+            .await?;
         let credential = db
             .collection::<bson::Document>(
                 crate::models::assistant_agent_credential::COLLECTION_NAME,

@@ -2293,6 +2293,12 @@ async fn collaboration_cleanup_waits_for_settlement_then_removes_requester_artif
     share(&f, &agent, &[&f.member]).await;
     let group = join(&f, &group, &f.member).await;
     let claim = runtime_start(&f, &f.member, &group, &agent).await;
+    let notification = crate::test_utils::seed_notification_purge_probe(
+        &f.state.db,
+        &f.member,
+        doc! {"conversation_id":&claim.conversation.id},
+    )
+    .await;
     change(
         &f,
         &f.admin,
@@ -2329,6 +2335,7 @@ async fn collaboration_cleanup_waits_for_settlement_then_removes_requester_artif
     .await
     .unwrap();
     cleanup::sweep(&f.state.db).await.unwrap();
+    crate::test_utils::assert_notification_probe(&f.state.db, &notification, false).await;
     for (collection, filter) in [
         (
             crate::models::assistant_conversation::COLLECTION_NAME,
@@ -3976,5 +3983,38 @@ async fn collaboration_broad_enrollment_marks_only_live_admissions() {
     .await
     .unwrap();
     assert!(request.execution_task.is_none());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn notifications_follow_collaboration_departure_and_group_deletion() {
+    use crate::test_utils::{
+        assert_notification_probe as probe, seed_notification_purge_probe as seed,
+    };
+    let (f, _, group) = setup("notifications_collab_purge").await;
+    let group = join(&f, &group, &f.member).await;
+    let departing = seed(&f.state.db, &f.member, doc! {"group_id":&group.id}).await;
+    let remaining = seed(&f.state.db, &f.admin, doc! {"group_id":&group.id}).await;
+    let unrelated = seed(&f.state.db, &f.member, doc! {"group_id":"another-group"}).await;
+    change(
+        &f,
+        &f.admin,
+        &group,
+        Change::Remove {
+            person_id: f.member.clone(),
+        },
+    )
+    .await;
+    probe(&f.state.db, &departing, false).await;
+    probe(&f.state.db, &remaining, true).await;
+    crate::handlers::collaboration_group::delete_group(
+        axum::extract::State(f.state.clone()),
+        crate::test_utils::test_auth_user(&f.admin),
+        axum::extract::Path(group.id.clone()),
+    )
+    .await
+    .unwrap();
+    probe(&f.state.db, &remaining, false).await;
+    probe(&f.state.db, &unrelated, true).await;
     f.state.db.drop().await.unwrap();
 }

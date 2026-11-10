@@ -24,6 +24,16 @@ pub(crate) async fn retire_in_session(
         )
         .session(&mut *tx)
         .await?;
+    db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .delete_many({
+            let mut notification_filter = doc! {"source.channel_id":channel};
+            if let Some(actor) = actor {
+                notification_filter.insert("user_id", actor);
+            }
+            notification_filter
+        })
+        .session(&mut *tx)
+        .await?;
     db.collection::<Document>(CHALLENGES)
         .delete_many(filter)
         .session(&mut *tx)
@@ -81,6 +91,10 @@ pub(crate) async fn delete_conversation(
     tx: &mut ClientSession,
     conversation: &str,
 ) -> AppResult<()> {
+    db.collection::<Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .delete_many(doc! {"source.conversation_id":conversation})
+        .session(&mut *tx)
+        .await?;
     for collection in [LANES, MESSAGES] {
         db.collection::<Document>(collection)
             .delete_many(doc! {"conversation_id":conversation})

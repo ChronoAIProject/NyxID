@@ -414,3 +414,192 @@ fn denial_guidance_verified_first_party_guard_matches_early_guard() {
         assert_eq!(body.details.unwrap()["credential_type"], kind);
     }
 }
+
+#[tokio::test]
+async fn notification_routes_are_first_party_human_only_and_require_both_flags() {
+    use crate::services::feature_flag_service as flags;
+    let db =
+        crate::test_utils::connect_transaction_test_database("notifications_auth_matrix").await;
+    crate::services::assistant_notification_service::ensure_indexes(&db)
+        .await
+        .unwrap();
+    let state = crate::test_utils::test_app_state(db.clone());
+    let actor = Uuid::new_v4();
+    let owner = actor.to_string();
+    db.collection::<User>(USERS)
+        .insert_one(crate::test_utils::test_user(
+            &owner,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    let human = jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &actor,
+        "openid profile",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let (_, private) = crate::routes::build_router();
+    let app = private.with_state(state);
+    let root = "/api/v1/assistant/nyxagent/notifications";
+    for enabled in [false, true] {
+        flags::set_platform_override(
+            &db,
+            flags::ASSISTANT_NOTIFICATIONS_FLAG_KEY,
+            &flags::FlagTarget::User(owner.clone()),
+            enabled,
+            &owner,
+        )
+        .await
+        .unwrap();
+        for (method, suffix) in [("GET", ""), ("GET", "/summary"), ("POST", "/read")] {
+            let uri = format!("{root}{suffix}");
+            let body = if method == "POST" {
+                json!({"ids":[Uuid::new_v4().to_string()]}).to_string()
+            } else {
+                String::new()
+            };
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(&uri)
+                        .header("authorization", format!("Bearer {human}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.clone()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if enabled {
+                assert!(
+                    response.status().is_success(),
+                    "{method} {uri}: {}",
+                    response.status()
+                );
+                if method == "GET" {
+                    let value = json_body(response).await;
+                    if suffix.is_empty() {
+                        assert_eq!(value["items"], json!([]));
+                    } else {
+                        assert_eq!(value["unread_count"], 0);
+                    }
+                }
+            } else {
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+                let value = json_body(response).await;
+                assert_eq!(value["error"], "not_found");
+                assert_eq!(value["message"], "Not found: Assistant route not found.");
+            }
+            for (kind, claims) in [
+                ("relay", json!({"relay":true})),
+                ("service_account", json!({"sa":true})),
+                (
+                    "delegated",
+                    json!({"delegated":true,"scope":"account:read"}),
+                ),
+                ("oauth_client", json!({"client_id":"third-party-client"})),
+            ] {
+                let token = format!(
+                    "header.{}.signature",
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+                );
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header("authorization", format!("Bearer {token}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.clone()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::FORBIDDEN,
+                    "{kind} {method} {uri}"
+                );
+                assert_eq!(
+                    json_body(response).await["details"]["credential_type"],
+                    kind
+                );
+            }
+            for token in [
+                "nyxid_ag_ordinary-key",
+                "nyxid_sk_conversation-key",
+                "nyx_conversation-key",
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(&uri)
+                            .header("authorization", format!("Bearer {token}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.clone()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {uri}");
+                assert_eq!(
+                    json_body(response).await["details"]["credential_type"],
+                    "api_key"
+                );
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(&uri)
+                        .header("x-api-key", "nyxid_ag_header-key")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(
+                delegated_read_denied_path(&uri),
+                "delegated account:read must not admit {uri}"
+            );
+        }
+    }
+    flags::set_platform_override(
+        &db,
+        flags::NYXAGENT_ENGINE_FLAG_KEY,
+        &flags::FlagTarget::User(owner.clone()),
+        false,
+        &owner,
+    )
+    .await
+    .unwrap();
+    for suffix in ["", "/summary"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{root}{suffix}"))
+                    .header("authorization", format!("Bearer {human}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    db.drop().await.unwrap();
+}

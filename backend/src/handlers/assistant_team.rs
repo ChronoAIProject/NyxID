@@ -1556,6 +1556,12 @@ fn dispatch<'a>(
     delegation_approved: bool,
 ) -> futures::future::BoxFuture<'a, AppResult<(Value, bool)>> {
     match name {
+        "list_notifications" => Box::pin(async move {
+            Ok((
+                super::assistant_notifications::list_for_tool(state, &chat.user_id, args).await?,
+                false,
+            ))
+        }),
         "task_status" => Box::pin(async move {
             Ok((
                 crate::services::assistant_task_status::read(&state.db, chat, args).await?,

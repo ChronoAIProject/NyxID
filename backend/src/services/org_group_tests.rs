@@ -2195,3 +2195,44 @@ async fn org_group_global_candidacy_uses_the_existing_person_read() {
     assert!(!access(&f, &f.member, &group.id).await.execution_enrolled);
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn notifications_follow_org_group_participant_and_transcript_purge() {
+    let f = Fixture::new("notifications_org_group_purge").await;
+    let (agent, _) = f.create().await;
+    let group = create(&f, &agent).await.group;
+    let member_access = access(&f, &f.member, &group.id).await;
+    let request = enqueue(&f, &member_access, &agent, &[]).await;
+    let thread = start(&f, &member_access, &agent, &request).await;
+    finish(&f, &thread).await;
+    let direct =
+        seed_notification_purge_probe(&f.state.db, &f.member, doc! {"conversation_id":&thread.id})
+            .await;
+    let departing =
+        seed_notification_purge_probe(&f.state.db, &f.member, doc! {"group_id":&group.id}).await;
+    let remaining =
+        seed_notification_purge_probe(&f.state.db, &f.admin, doc! {"group_id":&group.id}).await;
+    let unrelated =
+        seed_notification_purge_probe(&f.state.db, &f.member, doc! {"group_id":"another-group"})
+            .await;
+    groups::update(
+        &f.state.db,
+        access(&f, &f.admin, &group.id).await,
+        None,
+        None,
+        Some(std::slice::from_ref(&f.admin)),
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_notification_probe(&f.state.db, &direct, false).await;
+    assert_notification_probe(&f.state.db, &departing, false).await;
+    assert_notification_probe(&f.state.db, &remaining, true).await;
+    groups::delete(&f.state.db, &access(&f, &f.admin, &group.id).await)
+        .await
+        .unwrap();
+    assert_notification_probe(&f.state.db, &remaining, false).await;
+    assert_notification_probe(&f.state.db, &unrelated, true).await;
+    f.state.db.drop().await.unwrap();
+}

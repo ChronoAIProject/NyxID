@@ -150,6 +150,10 @@ pub(super) async fn depart(
     user: &str,
     session: &mut ClientSession,
 ) -> AppResult<()> {
+    db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
+        .delete_many(doc! {"source.group_id":group,"user_id":user})
+        .session(&mut *session)
+        .await?;
     db.collection::<bson::Document>(model::MENTION_NOTIFICATIONS)
         .delete_many(doc! {"group_id":group,"user_id":user})
         .session(session)

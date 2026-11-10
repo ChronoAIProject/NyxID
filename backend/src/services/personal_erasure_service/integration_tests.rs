@@ -649,3 +649,30 @@ async fn automation_receipts_are_erased_by_exact_owner_and_block_final_completio
     receipts.delete_one(doc! {"_id": "leftover"}).await.unwrap();
     assert!(local::source(&db, &job).await.unwrap());
 }
+
+#[tokio::test]
+async fn notification_feed_is_erased_for_exact_person_and_blocks_completion_if_leftover() {
+    let (db, owner) = tests::fixture().await;
+    let state = test_app_state(db.clone());
+    let removed = crate::test_utils::seed_notification_purge_probe(&db, &owner, doc! {}).await;
+    let retained =
+        crate::test_utils::seed_notification_purge_probe(&db, "another-person", doc! {}).await;
+    accept(&db, &owner, &owner, None).await.unwrap();
+    let job = db
+        .collection::<PersonalErasureJob>(JOBS)
+        .find_one(doc! {"user_id":&owner})
+        .await
+        .unwrap()
+        .unwrap();
+    until_source_removed(&state, &owner).await;
+    crate::test_utils::assert_notification_probe(&db, &removed, false).await;
+    crate::test_utils::assert_notification_probe(&db, &retained, true).await;
+    let leftover = crate::test_utils::seed_notification_purge_probe(&db, &owner, doc! {}).await;
+    assert!(!local::source(&db, &job).await.unwrap());
+    db.collection::<Document>("assistant_notifications")
+        .delete_one(doc! {"_id":leftover})
+        .await
+        .unwrap();
+    assert!(local::source(&db, &job).await.unwrap());
+    db.drop().await.unwrap();
+}

@@ -190,6 +190,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner},
         ),
         (
+            m::assistant_notification::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
             m::assistant_acknowledgement::COLLECTION_NAME,
             doc! {"user_id":owner},
         ),
