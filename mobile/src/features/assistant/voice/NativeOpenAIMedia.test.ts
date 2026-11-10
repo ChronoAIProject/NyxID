@@ -22,6 +22,11 @@ class Events {
   removeEventListener(type: string, listener: Listener) {
     this.listeners.get(type)?.delete(listener);
   }
+  firstListener(type: string) {
+    const listener = this.listeners.get(type)?.values().next().value;
+    assert.ok(listener, `Expected a registered ${type} listener`);
+    return listener;
+  }
   dispatch(type: string, event: Event = {}) {
     for (const listener of this.listeners.get(type) ?? []) listener(event);
   }
@@ -177,6 +182,16 @@ function harness() {
     peer(value: Peer) {
       nextPeer = value;
     },
+    stream(index = 0) {
+      const stream = streams[index];
+      assert.ok(stream, `Expected native capture ${index + 1}`);
+      return stream;
+    },
+    createdPeer(index = 0) {
+      const peer = peers[index];
+      assert.ok(peer, `Expected native peer ${index + 1}`);
+      return peer;
+    },
     captures: () => captures,
     start: () => media.prepare("openai_live", signal.signal),
     timeout(ms: number) {
@@ -197,20 +212,20 @@ test("native preparation keeps capture disabled, negotiates once and releases re
   try {
     assert.equal(await h.start(), "private-sdp-offer");
     assert.equal(h.captures(), 1);
-    assert.equal(h.streams[0].track.enabled, false);
-    assert.equal(h.peers[0].added[0], h.streams[0].track);
+    assert.equal(h.stream().track.enabled, false);
+    assert.equal(h.createdPeer().added[0], h.stream().track);
     assert.equal(h.intervals.size, 1);
     await h.media.answer("private-sdp-answer");
-    assert.deepEqual(h.peers[0].answers, ["private-sdp-answer"]);
+    assert.deepEqual(h.createdPeer().answers, ["private-sdp-answer"]);
     assert.equal(
       JSON.stringify(h.media.getDiagnostics()).includes("private-sdp"),
       false,
     );
     h.media.close();
-    assert.deepEqual(h.streams[0].releases, [true]);
-    assert.equal(h.streams[0].track.stops, 1);
-    assert.equal(h.peers[0].closes, 1);
-    assert.equal(h.peers[0].channel.closes, 1);
+    assert.deepEqual(h.stream().releases, [true]);
+    assert.equal(h.stream().track.stops, 1);
+    assert.equal(h.createdPeer().closes, 1);
+    assert.equal(h.createdPeer().channel.closes, 1);
     assert.equal(h.intervals.size, 0);
     assert.equal(h.timeouts.size, 0);
     assert.equal(h.errors().length, 0);
@@ -223,7 +238,7 @@ test("readiness requires exactly the bounded session.started event and fires onc
   const h = harness();
   try {
     await h.start();
-    const channel = h.peers[0].channel;
+    const channel = h.createdPeer().channel;
     channel.dispatch("open");
     for (const data of [
       "{",
@@ -264,14 +279,14 @@ test("native playback supports hold attenuation, speaker mute and late remote tr
     await h.start();
     const remote = new Track();
     h.media.hold(true);
-    h.peers[0].dispatch("track", { track: remote });
+    h.createdPeer().dispatch("track", { track: remote });
     assert.equal(remote.enabled, true);
     assert.deepEqual(remote.volumes, [0.25]);
     h.media.muteSpeaker(true);
     assert.equal(remote.enabled, false);
     assert.equal(remote.volumes.at(-1), 0);
     const another = new Track();
-    h.peers[0].dispatch("track", { track: another });
+    h.createdPeer().dispatch("track", { track: another });
     assert.equal(another.enabled, false);
     h.media.muteSpeaker(false);
     assert.equal(another.volumes.at(-1), 0.25);
@@ -291,11 +306,11 @@ test("input toggles only the live input track and never enables it from hold", a
   try {
     await h.start();
     h.media.hold(true);
-    assert.equal(h.streams[0].track.enabled, false);
+    assert.equal(h.stream().track.enabled, false);
     h.media.setInput(true);
-    assert.equal(h.streams[0].track.enabled, true);
+    assert.equal(h.stream().track.enabled, true);
     h.media.setInput(false);
-    assert.equal(h.streams[0].track.enabled, false);
+    assert.equal(h.stream().track.enabled, false);
   } finally {
     h.media.close();
   }
@@ -348,7 +363,7 @@ test("only one adapter may own native input and closing one cannot close another
     first.media.close();
     await second.start();
     first.media.close();
-    assert.equal(second.streams[0].track.readyState, "live");
+    assert.equal(second.stream().track.readyState, "live");
   } finally {
     first.media.close();
     second.media.close();
@@ -364,7 +379,8 @@ test("ICE gathering must complete before returning the actual complete local off
   try {
     await tick();
     assert.equal(h.timeouts.size, 1);
-    peer.localDescription!.sdp = "complete-offer";
+    assert.ok(peer.localDescription, "Expected the initial local offer");
+    peer.localDescription.sdp = "complete-offer";
     peer.iceGatheringState = "complete";
     peer.dispatch("icegatheringstatechange");
     assert.equal(await start, "complete-offer");
@@ -383,7 +399,7 @@ test("ICE timeout rejects preparation and tears down input, peer and temporary l
   await tick();
   h.timeout(5000);
   await assert.rejects(start, /too long/);
-  assert.deepEqual(h.streams[0].releases, [true]);
+  assert.deepEqual(h.stream().releases, [true]);
   assert.equal(peer.closes, 1);
   assert.equal(peer.listeners.get("icegatheringstatechange")?.size, 0);
   assert.equal(h.errors().length, 1);
@@ -393,13 +409,13 @@ test("an abort during answer cannot leave local audio or a pending operation ali
   const h = harness();
   const pending = deferred<void>();
   await h.start();
-  h.peers[0].answerResult = pending.promise;
+  h.createdPeer().answerResult = pending.promise;
   const answer = h.media.answer("answer");
   h.signal.abort();
   await assert.rejects(answer, /closed/);
   pending.resolve();
   await tick();
-  assert.deepEqual(h.streams[0].releases, [true]);
+  assert.deepEqual(h.stream().releases, [true]);
   assert.equal(h.timeouts.size, 0);
   assert.equal(h.errors().length, 0);
 });
@@ -421,7 +437,7 @@ test("offer and answer operations time out without retaining capture or callback
     }
     h.timeout(15000);
     await assert.rejects(task, /too long/);
-    assert.deepEqual(h.streams[0].releases, [true]);
+    assert.deepEqual(h.stream().releases, [true]);
     assert.equal(peer.closes, 1);
     assert.equal(h.errors().length, 1);
     assert.equal(h.timeouts.size, 0);
@@ -434,16 +450,16 @@ test("an ended microphone and failed peer each terminate media exactly once", as
     const h = harness();
     try {
       await h.start();
-      if (failure === "track") h.streams[0].track.dispatch("ended");
+      if (failure === "track") h.stream().track.dispatch("ended");
       if (failure === "peer") {
-        h.peers[0].connectionState = "failed";
-        h.peers[0].dispatch("connectionstatechange");
+        h.createdPeer().connectionState = "failed";
+        h.createdPeer().dispatch("connectionstatechange");
       }
-      if (failure === "channel") h.peers[0].channel.dispatch("close");
+      if (failure === "channel") h.createdPeer().channel.dispatch("close");
       assert.equal(h.errors().length, 1);
-      assert.deepEqual(h.streams[0].releases, [true]);
-      assert.equal(h.peers[0].closes, 1);
-      h.peers[0].channel.dispatch("error");
+      assert.deepEqual(h.stream().releases, [true]);
+      assert.equal(h.createdPeer().closes, 1);
+      h.createdPeer().channel.dispatch("error");
       assert.equal(h.errors().length, 1);
     } finally {
       h.media.close();
@@ -455,13 +471,13 @@ test("stale native callbacks cannot end or announce readiness for the next captu
   const h = harness();
   try {
     await h.start();
-    const staleTrack = [...h.streams[0].track.listeners.get("ended")!][0];
-    const staleMessage = [...h.peers[0].channel.listeners.get("message")!][0];
+    const staleTrack = h.stream().track.firstListener("ended");
+    const staleMessage = h.createdPeer().channel.firstListener("message");
     h.media.close();
     await h.start();
     staleTrack({});
     staleMessage({ data: JSON.stringify({ type: "session.started" }) });
-    assert.equal(h.streams[1].track.readyState, "live");
+    assert.equal(h.stream(1).track.readyState, "live");
     assert.equal(h.errors().length, 0);
     assert.equal(
       h.events.some((event) => event.type === "provider-ready"),
@@ -478,10 +494,10 @@ test("a remote track already ended on arrival fails rather than reporting usable
     await h.start();
     const remote = new Track();
     remote.readyState = "ended";
-    h.peers[0].dispatch("track", { track: remote });
+    h.createdPeer().dispatch("track", { track: remote });
     assert.equal(h.errors().length, 1);
     assert.equal(h.media.playback().playback_audible, false);
-    assert.deepEqual(h.streams[0].releases, [true]);
+    assert.deepEqual(h.stream().releases, [true]);
   } finally {
     h.media.close();
   }
@@ -491,7 +507,7 @@ test("bounded stats emit sanitized levels and RTP counters without copying provi
   const h = harness();
   try {
     await h.start();
-    const peer = h.peers[0],
+    const peer = h.createdPeer(),
       remote = new Track();
     peer.dispatch("track", { track: remote });
     peer.connectionState = "connected";
@@ -546,10 +562,10 @@ test("overlapping or stale stats never produce cross-generation levels", async (
   const pending = deferred<Map<string, Record<string, unknown>>>();
   try {
     await h.start();
-    h.peers[0].statsResult = pending.promise;
+    h.createdPeer().statsResult = pending.promise;
     await h.sample();
     await h.sample();
-    assert.equal(h.peers[0].statsCalls, 1);
+    assert.equal(h.createdPeer().statsCalls, 1);
     h.media.close();
     await h.start();
     const count = h.events.length;
@@ -586,5 +602,5 @@ test("capture rejection, malformed offer and unsupported protocol never leak raw
   peer.offer.sdp = " ";
   invalid.peer(peer);
   await assert.rejects(invalid.start(), /could not be started/);
-  assert.deepEqual(invalid.streams[0].releases, [true]);
+  assert.deepEqual(invalid.stream().releases, [true]);
 });

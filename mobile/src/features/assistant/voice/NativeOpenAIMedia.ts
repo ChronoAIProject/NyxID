@@ -211,9 +211,10 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
       const stream = await this.wait(capture, generation, 20000);
       this.assertAlive(generation);
       const tracks = stream.getAudioTracks();
-      if (tracks.length !== 1 || tracks[0].readyState !== "live")
+      const track = tracks[0];
+      if (tracks.length !== 1 || !track || track.readyState !== "live")
         throw new Error(startupError);
-      this.listen(tracks[0], "ended", () => {
+      this.listen(track, "ended", () => {
         if (this.alive(generation))
           this.fail(
             "Microphone access ended. Start a new call when it is available.",
@@ -255,7 +256,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
         });
         this.applySpeaker();
       });
-      peer.addTrack(tracks[0], stream);
+      peer.addTrack(track, stream);
       const channel = peer.createDataChannel("oai-events");
       this.channel = channel;
       this.listen(channel, "message", ({ data }) => {
@@ -292,7 +293,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
       this.assertAlive(generation);
       await this.waitForICE(peer, generation);
       this.assertAlive(generation);
-      if (tracks[0].readyState !== "live") throw new Error(startupError);
+      if (track.readyState !== "live") throw new Error(startupError);
       const sdp = peer.localDescription?.sdp;
       if (typeof sdp !== "string" || !sdp.trim() || sdp.length > 131072)
         throw new Error(startupError);

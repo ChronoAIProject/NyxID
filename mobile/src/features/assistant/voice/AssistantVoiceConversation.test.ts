@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, URL } from "node:url";
 import test from "node:test";
 import { deferred, hookHarness } from "../assistantHookTestHarness";
 import type { VoiceMediaEvent } from "./AssistantVoiceClient";
@@ -1712,9 +1712,11 @@ test("task settlement updates activity without restarting media or retaining a r
   const original = bridge();
   f.button("Show agent tasks").props.onPress();
   assert.match(f.text(), /Tasks can continue after the call ends/);
+  const pendingTask = pending.tasks[0];
+  assert.ok(pendingTask);
   f.voice.snapshot = {
     ...pending,
-    tasks: [{ ...pending.tasks[0], state: "cancelled", outcome: "failed" }],
+    tasks: [{ ...pendingTask, state: "cancelled", outcome: "failed" }],
   };
   f.harness.render();
   assert.match(f.text(), /1 task failed/);
