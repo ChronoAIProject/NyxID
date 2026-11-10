@@ -35,7 +35,8 @@ use crate::{
         assistant_acknowledgement::{AssistantAcknowledgement, COLLECTION_NAME as ACKS},
         assistant_agent::COLLECTION_NAME as AGENTS,
         assistant_conversation::{
-            ActiveTurn, AssistantConversation, COLLECTION_NAME as CONVERSATIONS, TurnOrigin,
+            ActiveTurn, AssistantConversation, COLLECTION_NAME as CONVERSATIONS, PlatformThread,
+            TurnOrigin,
         },
         assistant_group::{
             AssistantGroup, COLLECTION_NAME as GROUPS, GroupMessage,
@@ -50,6 +51,7 @@ use crate::{
         nyxbot_channel::{COLLECTION_NAME as CHANNELS, THREADS_COLLECTION_NAME as CHANNEL_THREADS},
         org_channel::MESSAGES as ORG_CHANNEL_MESSAGES,
         org_membership::COLLECTION_NAME as ORG_MEMBERSHIPS,
+        platform_personal_binding::COLLECTION_NAME as PLATFORM_BINDINGS,
         trigger::COLLECTION_NAME as TRIGGERS,
         trigger_run::{COLLECTION_NAME as RUNS, RunOutcome, TriggerRun},
         trigger_schedule::DeliverTo,
@@ -129,6 +131,8 @@ pub mod fields {
     pub const SOURCE_RUN_ID: &str = "source.run_id";
     pub const SOURCE_CARD_ID: &str = "source.card_id";
     pub const SOURCE_API_KEY_ID: &str = "source.api_key_id";
+    /// Linked platform chats: unlink purges every row of the binding.
+    pub const SOURCE_PLATFORM_BINDING_ID: &str = "source.platform_binding_id";
 }
 
 // ---------------------------------------------------------------------------
@@ -191,12 +195,15 @@ pub fn cache_features(db: &Database, user_id: &str, features: &[String]) {
     cache.insert(key, (Instant::now(), enabled_in(features)));
 }
 
-/// Forget cached decisions (tests flip the flag mid-run).
-pub fn reset_flag_cache() {
+/// Forget this database's cached decisions (tests flip the flag mid-run;
+/// each test owns a database, so parallel tests never evict each other).
+#[cfg(test)]
+pub fn reset_flag_cache(db: &Database) {
+    let prefix = format!("{}\u{1f}", db.name());
     flag_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .clear();
+        .retain(|key, _| !key.starts_with(&prefix));
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +271,7 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         fields::SOURCE_RUN_ID,
         fields::SOURCE_CARD_ID,
         fields::SOURCE_API_KEY_ID,
+        fields::SOURCE_PLATFORM_BINDING_ID,
     ] {
         collection
             .create_index(
@@ -479,6 +487,27 @@ async fn fence_trigger(
         == 1)
 }
 
+/// Whether the thread's personal platform binding is still active for this
+/// exact owner, generation and conversation (projection read, no write).
+async fn platform_binding_live(
+    db: &Database,
+    session: &mut ClientSession,
+    thread: &PlatformThread,
+    conversation_id: &str,
+) -> AppResult<bool> {
+    Ok(db
+        .collection::<Document>(PLATFORM_BINDINGS)
+        .find_one(doc! {
+            "_id": &thread.binding_id, "user_id": &thread.user_id,
+            "generation": thread.binding_generation, "conversation_id": conversation_id,
+            "state": "active",
+        })
+        .projection(doc! {"_id": 1})
+        .session(&mut *session)
+        .await?
+        .is_some())
+}
+
 /// The live channel's owner (the route admin for organization bots), read
 /// with a projection and no write.
 async fn live_channel_owner(
@@ -578,11 +607,20 @@ pub async fn record_turn_settled_in_session(
     {
         return Ok(());
     }
+    // A linked platform chat (owner DMs through a manager bot) proves itself
+    // with the turn's server-authored origin on the thread's own binding.
+    let platform = row.platform_thread.as_ref().filter(|thread| {
+        turn.platform_origin
+            .as_ref()
+            .is_some_and(|origin| origin.thread == **thread)
+    });
     match turn.origin {
-        // The owner is in the app; a run's terminal transition covers trigger
-        // turns; hidden member threads are covered by the group transcript.
-        TurnOrigin::User | TurnOrigin::Trigger | TurnOrigin::Group => return Ok(()),
-        TurnOrigin::Orchestrator | TurnOrigin::Event | TurnOrigin::Channel => {}
+        // The owner is in the app for a web turn; a run's terminal transition
+        // covers trigger turns; hidden member threads are covered by the group
+        // transcript.
+        TurnOrigin::User if platform.is_none() => return Ok(()),
+        TurnOrigin::Trigger | TurnOrigin::Group => return Ok(()),
+        TurnOrigin::User | TurnOrigin::Orchestrator | TurnOrigin::Event | TurnOrigin::Channel => {}
     }
     let outcome = Some(
         match message.error_code.as_deref() {
@@ -657,6 +695,31 @@ pub async fn record_turn_settled_in_session(
                 },
             )
         }
+    } else if let Some(thread) = platform {
+        // The reply was read in the platform chat. The binding must still be
+        // live and bound to this exact thread (the saved-reply settlement in
+        // this transaction wrote it); unlink purges by binding id, so a
+        // settlement that lands after unlink records nothing (D7).
+        if thread.user_id != row.user_id
+            || !platform_binding_live(db, session, thread, &row.id).await?
+        {
+            return Ok(());
+        }
+        (
+            row.user_id.clone(),
+            NotificationKind::ChatUpdate,
+            NotificationSource {
+                source_type: SourceType::ChannelChat,
+                id: row.id.clone(),
+                conversation_id: Some(row.id.clone()),
+                agent_id: row.agent_id.clone(),
+                message_id: Some(message.id.clone()),
+                turn_id: Some(turn.turn_id.clone()),
+                platform_binding_id: Some(thread.binding_id.clone()),
+                platform_binding_generation: Some(thread.binding_generation),
+                ..Default::default()
+            },
+        )
     } else {
         if let Some(agent_id) = row.agent_id.as_deref()
             && !agent_live(db, session, agent_id).await?
@@ -843,6 +906,15 @@ pub async fn record_card_pending_in_session(
                         .as_ref()
                         .map(|binding| binding.group_id.clone())
                 }),
+                // Unlinking the platform chat purges its decisions too.
+                platform_binding_id: conversation
+                    .platform_thread
+                    .as_ref()
+                    .map(|thread| thread.binding_id.clone()),
+                platform_binding_generation: conversation
+                    .platform_thread
+                    .as_ref()
+                    .map(|thread| thread.binding_generation),
                 agent_id: conversation.agent_id.clone(),
                 card_id: Some(card.id.clone()),
                 api_key_id: Some(card.api_key_id.clone()),
@@ -874,7 +946,7 @@ fn card_visible_source(conversation: &AssistantConversation) -> (SourceType, Str
         (SourceType::Group, group.clone())
     } else if let Some(binding) = conversation.collaboration.as_ref() {
         (SourceType::CollaborationGroup, binding.group_id.clone())
-    } else if conversation.channel.is_some() {
+    } else if conversation.channel.is_some() || conversation.platform_thread.is_some() {
         (SourceType::ChannelChat, conversation.id.clone())
     } else {
         (SourceType::Conversation, conversation.id.clone())
@@ -1161,9 +1233,7 @@ pub fn preview_text(raw: &str) -> String {
         if in_fence || trimmed.is_empty() {
             continue;
         }
-        let trimmed = trimmed
-            .trim_start_matches(|c| c == '#' || c == '>')
-            .trim_start();
+        let trimmed = trimmed.trim_start_matches(['#', '>']).trim_start();
         let trimmed = trimmed
             .strip_prefix("- ")
             .or_else(|| trimmed.strip_prefix("* "))
@@ -1539,7 +1609,9 @@ async fn load_lookups(
                 doc! {"_id": {"$in": ids(&conversation_ids)}},
                 doc! {"_id": 1, "user_id": 1, "title": 1, "agent_id": 1, "agent_owner_id": 1,
                 "collaboration.original_requester_id": 1, "channel.nyxbot_channel_id": 1,
-                "channel.platform": 1, "group_id": 1},
+                "channel.platform": 1, "group_id": 1, "platform_thread.binding_id": 1,
+                "platform_thread.binding_generation": 1, "platform_thread.user_id": 1,
+                "platform_thread.platform": 1},
             )
             .await?,
         )
@@ -1830,19 +1902,52 @@ fn channel_label(channel: &Document) -> String {
         .unwrap_or_else(|| "Chat".into())
 }
 
+/// A row of a linked platform chat must still describe the thread's own
+/// binding (id, generation, owner); a relinked or foreign thread hides it.
+fn platform_thread_matches(
+    conversation: &Document,
+    source: &NotificationSource,
+    user_id: &str,
+) -> bool {
+    let Some(binding) = source.platform_binding_id.as_deref() else {
+        return true;
+    };
+    conversation
+        .get_document("platform_thread")
+        .ok()
+        .is_some_and(|thread| {
+            thread.get_str("binding_id").ok() == Some(binding)
+                && thread.get_i64("binding_generation").ok() == source.platform_binding_generation
+                && thread.get_str("user_id").ok() == Some(user_id)
+        })
+}
+
+fn platform_label(platform: &str) -> String {
+    match platform {
+        "telegram" => "Telegram".into(),
+        "slack" => "Slack".into(),
+        "discord" => "Discord".into(),
+        "whatsapp" => "WhatsApp".into(),
+        "lark" => "Lark".into(),
+        "feishu" => "Feishu".into(),
+        "x" => "X".into(),
+        other => label(other, 24),
+    }
+}
+
 fn message_preview(message: &Document) -> String {
     let text = message.get_str("text").unwrap_or_default();
-    if message.get_str("status").ok() == Some("failed") || text.trim().is_empty() {
-        if let Ok(code) = message.get_str("error_code") {
-            return preview_text(&TurnError::new(code).message);
-        }
+    if (message.get_str("status").ok() == Some("failed") || text.trim().is_empty())
+        && let Ok(code) = message.get_str("error_code")
+    {
+        return preview_text(&TurnError::new(code).message);
     }
     preview_text(text)
 }
 
 enum Built {
     Item {
-        item: NotificationItem,
+        item: Box<NotificationItem>,
         /// A decision row whose card settled without its hook: the label to
         /// record lazily.
         resolve: Option<&'static str>,
@@ -1923,7 +2028,7 @@ fn card_resolution(status: &str) -> &'static str {
 
 fn ready(item: NotificationItem) -> Built {
     Built::Item {
-        item,
+        item: Box::new(item),
         resolve: None,
     }
 }
@@ -2021,7 +2126,9 @@ fn build(
             else {
                 return Built::Purge;
             };
-            if !lookups.conversation_visible(user_id, conversation) {
+            if !lookups.conversation_visible(user_id, conversation)
+                || !platform_thread_matches(conversation, source, user_id)
+            {
                 return Built::Hidden;
             }
             let conversation_id = source.conversation_id.clone().unwrap_or_default();
@@ -2040,7 +2147,28 @@ fn build(
                 })
                 .unwrap_or_default();
             let agent = agent_title(&lookups.agents, source.agent_id.as_deref());
-            let (label_text, title) = if row.kind == NotificationKind::ChatUpdate {
+            let (label_text, title) = if row.kind == NotificationKind::ChatUpdate
+                && source.channel_id.is_none()
+                && source.platform_binding_id.is_some()
+            {
+                // A linked platform chat: labelled by platform and agent.
+                let platform = conversation
+                    .get_document("platform_thread")
+                    .ok()
+                    .and_then(|thread| thread.get_str("platform").ok())
+                    .map(platform_label)
+                    .unwrap_or_else(|| "Chat".into());
+                let who = agent
+                    .clone()
+                    .or_else(|| {
+                        conversation
+                            .get_str("title")
+                            .ok()
+                            .map(|value| label(value, 60))
+                    })
+                    .unwrap_or_else(|| "Agent".into());
+                (who.clone(), format!("{platform} · {who}"))
+            } else if row.kind == NotificationKind::ChatUpdate {
                 let channel = match channel_state(lookups, source) {
                     ChannelState::Absent => return Built::Purge,
                     ChannelState::Retired => return Built::Hidden,
@@ -2131,7 +2259,9 @@ fn build(
             else {
                 return Built::Purge;
             };
-            if !lookups.conversation_visible(user_id, conversation) {
+            if !lookups.conversation_visible(user_id, conversation)
+                || !platform_thread_matches(conversation, source, user_id)
+            {
                 return Built::Hidden;
             }
             // The card must be this thread's; anything else is hidden, never
@@ -2185,7 +2315,7 @@ fn build(
                 .url(frontend),
             };
             Built::Item {
-                item: item(row, title.clone(), title, preview, url, resolved),
+                item: Box::new(item(row, title.clone(), title, preview, url, resolved)),
                 resolve,
             }
         }
@@ -2284,7 +2414,7 @@ pub async fn resolve_items(
                 if let Some(label) = label {
                     resolve.entry(label).or_default().push(row.id.clone());
                 }
-                items.push(built);
+                items.push(*built);
             }
             Built::Purge => purge_ids.push(row.id.clone()),
             Built::Hidden => {}
@@ -2382,6 +2512,18 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
              "then": {"$and": [participant, org_active.clone(), member_ok.clone()]}},
         ], "default": {"$eq": ["$grp0.user_id", user_id]}}},
     ]};
+    // Linked platform chats: the thread still carries this exact binding.
+    let platform_ok = doc! {"$and": [
+        conv_ok.clone(),
+        {"$not": [missing_or_null("$source.platform_binding_id")]},
+        {"$eq": ["$conv0.platform_thread.binding_id", "$source.platform_binding_id"]},
+        {"$eq": ["$conv0.platform_thread.binding_generation", "$source.platform_binding_generation"]},
+        {"$eq": ["$conv0.platform_thread.user_id", user_id]},
+    ]};
+    let platform_bound = doc! {"$or": [
+        missing_or_null("$source.platform_binding_id"),
+        platform_ok.clone(),
+    ]};
     let thread_ok = doc! {"$or": [
         missing_or_null("$source.thread_id"),
         present("$thread"),
@@ -2411,6 +2553,7 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
     ]};
     let card_ok = doc! {"$and": [
         conv_ok.clone(),
+        platform_bound,
         {"$or": [missing_or_null("$source.group_id"), grp_ok.clone()]},
         {"$or": [missing_or_null("$source.channel_id"), chan_live]},
         present("$card"),
@@ -2424,7 +2567,8 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
             NotificationKind::AutomationResult.as_str(),
             NotificationKind::AutomationProblem.as_str(),
         ]]}, "then": trig_ok},
-        {"case": {"$eq": ["$kind", NotificationKind::ChatUpdate.as_str()]}, "then": chan_ok},
+        {"case": {"$eq": ["$kind", NotificationKind::ChatUpdate.as_str()]},
+         "then": {"$cond": [missing_or_null("$source.channel_id"), platform_ok, chan_ok]}},
         {"case": {"$eq": ["$kind", NotificationKind::GroupMention.as_str()]}, "then": grp_ok.clone()},
     ], "default": {"$cond": [missing_or_null("$source.group_id"), conv_ok, grp_ok]}}};
     let org_of = doc! {"$ifNull": [
@@ -2443,7 +2587,9 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
             CONVERSATIONS,
             fields::SOURCE_CONVERSATION_ID,
             "conv",
-            doc! {"user_id": 1, "agent_owner_id": 1, "collaboration.original_requester_id": 1},
+            doc! {"user_id": 1, "agent_owner_id": 1, "collaboration.original_requester_id": 1,
+            "platform_thread.binding_id": 1, "platform_thread.binding_generation": 1,
+            "platform_thread.user_id": 1},
         ),
         lookup_by_id(
             GROUPS,

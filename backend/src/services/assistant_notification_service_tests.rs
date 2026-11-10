@@ -2,9 +2,12 @@
 use super::*;
 use crate::{
     models::{
-        assistant_conversation::ChannelOrigin,
+        assistant_conversation::{
+            ChannelOrigin, PlatformOriginSource, PlatformThread, PlatformTurnOrigin,
+        },
         assistant_settings::{NotificationPreferences, NotificationPushPreferences},
         org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgRole},
+        platform_entry_projection::{StoredEntryIdentity, StoredSenderIdentity},
         trigger::{COLLECTION_NAME as TRIGGER_ROWS, Trigger, TriggerDelivery, TriggerVerification},
         trigger_schedule::{
             IntervalUnit, OverlapPolicy, ScheduleKind, ScheduleSpec, TriggerSource,
@@ -71,7 +74,7 @@ async fn set_flag(f: &Fixture, on: bool) {
     flags::set_platform_override(&f.state.db, FLAG_KEY, &FlagTarget::Global, on, &f.owner)
         .await
         .unwrap();
-    reset_flag_cache();
+    reset_flag_cache(&f.state.db);
 }
 
 fn request(conversation: Option<&str>, text: &str) -> TurnRequest {
@@ -736,6 +739,208 @@ async fn org_guest_lane_notifies_the_route_admin_from_the_public_transcript_only
             .is_empty()
     );
     assert_eq!(rows_of(&f, &admin).await.len(), 1);
+}
+
+/// Run the settlement producer for a turn whose origin is stamped in memory
+/// (the engine passes the settled turn and reply the same way).
+async fn settle_platform(
+    f: &Fixture,
+    row: &AssistantConversation,
+    turn: &ActiveTurn,
+    message: &AssistantMessage,
+) {
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    record_turn_settled_in_session(&f.state.db, &mut session, row, turn, message)
+        .await
+        .unwrap();
+    session.commit_transaction().await.unwrap();
+}
+
+#[tokio::test]
+async fn linked_platform_chat_replies_notify_the_owner_while_the_binding_is_live() {
+    let f = fixture("notif_platform").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    let nyxbot = team::ensure_nyxbot(db, &f.owner).await.unwrap();
+    let home = team::home_thread(db, &f.state.encryption_keys, &nyxbot)
+        .await
+        .unwrap();
+    let binding = Uuid::new_v4().to_string();
+    let thread = PlatformThread {
+        platform: "telegram".into(),
+        profile_id: "profile".into(),
+        manager_bot_id: "7".into(),
+        entry: StoredEntryIdentity::TelegramV1 { telegram_bot_id: 7 },
+        binding_id: binding.clone(),
+        binding_generation: 3,
+        user_id: f.owner.clone(),
+        nyxbot_agent_id: nyxbot.id.clone(),
+    };
+    // The saved thread keeps its platform identity; the binding is live.
+    db.collection::<Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &home.id},
+            doc! {"$set": {"platform_thread": bson::to_bson(&thread).unwrap()}},
+        )
+        .await
+        .unwrap();
+    db.collection::<Document>(PLATFORM_BINDINGS)
+        .insert_one(
+            doc! {"_id": &binding, "user_id": &f.owner, "generation": 3_i64,
+            "conversation_id": &home.id, "state": "active"},
+        )
+        .await
+        .unwrap();
+    // A web continuation of the thread is a user turn in the app: nothing.
+    let row = begin(
+        &f,
+        &f.owner,
+        &start(Some(&home.id), "continue on the web", TurnOrigin::User),
+    )
+    .await;
+    assert!(row.platform_thread.is_some());
+    let turn = row.active_turn.clone().expect("live turn");
+    let web_reply = settle(&f, &row, "Here you go", None).await;
+    assert!(rows_of(&f, &f.owner).await.is_empty());
+    // The same user turn arriving from the platform carries the
+    // server-authored origin on the thread's own binding.
+    let mut platform_turn = turn.clone();
+    platform_turn.platform_origin = Some(PlatformTurnOrigin {
+        thread: thread.clone(),
+        manager_authority_epoch: 1,
+        personal_control_revision: 1,
+        sender: StoredSenderIdentity::TelegramV1 {
+            telegram_sender_id: 5,
+            telegram_chat_id: 5,
+        },
+        source: PlatformOriginSource::ThreadEvent {
+            admission_id: turn.turn_id.clone(),
+        },
+    });
+    let reply: AssistantMessage = db
+        .collection(MESSAGES)
+        .find_one(doc! {"_id": &web_reply})
+        .await
+        .unwrap()
+        .unwrap();
+    settle_platform(&f, &row, &platform_turn, &reply).await;
+    let rows = rows_of(&f, &f.owner).await;
+    assert_eq!(rows.len(), 1);
+    let update = &rows[0];
+    assert_eq!(update.kind, NotificationKind::ChatUpdate);
+    assert_eq!(update.source.source_type, SourceType::ChannelChat);
+    assert_eq!(update.source.id, home.id);
+    assert_eq!(
+        update.source.conversation_id.as_deref(),
+        Some(home.id.as_str())
+    );
+    assert_eq!(
+        update.source.platform_binding_id.as_deref(),
+        Some(binding.as_str())
+    );
+    assert_eq!(update.source.platform_binding_generation, Some(3));
+    assert!(update.source.channel_id.is_none() && update.source.thread_id.is_none());
+    let listed = list(&f.state, &f.owner, &page(10)).await.unwrap();
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].title, "Telegram · NyxBot");
+    assert_eq!(listed.items[0].preview, "Here you go");
+    assert_eq!(listed.items[0].source.source_type, "channel_chat");
+    assert!(listed.items[0].url.contains(&format!("c={}", home.id)));
+    let counts = summary(db, &f.owner).await.unwrap();
+    assert_eq!(counts.unread_count, 1);
+    assert_eq!(counts.by_source[0].source_type, "channel_chat");
+    assert_eq!(counts.by_source[0].id, home.id);
+    // Relinked under a new generation: the old row hides, nothing is deleted.
+    db.collection::<Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &home.id},
+            doc! {"$set": {"platform_thread.binding_generation": 4_i64}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        list(&f.state, &f.owner, &page(10))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert_eq!(summary(db, &f.owner).await.unwrap().unread_count, 0);
+    assert_eq!(rows_of(&f, &f.owner).await.len(), 1);
+    db.collection::<Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &home.id},
+            doc! {"$set": {"platform_thread.binding_generation": 3_i64}},
+        )
+        .await
+        .unwrap();
+    // Opening the saved thread reads the chat row through its conversation id.
+    assert_eq!(
+        mark_read(
+            db,
+            &f.owner,
+            ReadScope::Source {
+                source_type: SourceType::Conversation,
+                id: home.id.clone(),
+            }
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    // A decision raised on the thread carries the binding reference and the
+    // chat as its visible source.
+    let row2 = begin(
+        &f,
+        &f.owner,
+        &start(Some(&home.id), "Send the file", TurnOrigin::User),
+    )
+    .await;
+    let card = action_card(&f, &row2, &nyxbot.id, "Send the file?").await;
+    let decision = rows_of(&f, &f.owner)
+        .await
+        .into_iter()
+        .find(|row| row.source.card_id.as_deref() == Some(card.id.as_str()))
+        .unwrap();
+    assert_eq!(decision.source.source_type, SourceType::ChannelChat);
+    assert_eq!(decision.source.id, home.id);
+    assert_eq!(
+        decision.source.platform_binding_id.as_deref(),
+        Some(binding.as_str())
+    );
+    let pending = list(
+        &f.state,
+        &f.owner,
+        &ListQuery {
+            pending_only: true,
+            ..page(10)
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(pending.items.len(), 1);
+    assert!(pending.items[0].url.contains(&format!("card={}", card.id)));
+    // Unlink revokes the binding and purges its rows (D7); a settlement that
+    // lands afterwards records nothing.
+    db.collection::<Document>(PLATFORM_BINDINGS)
+        .update_one(doc! {"_id": &binding}, doc! {"$set": {"state": "revoked"}})
+        .await
+        .unwrap();
+    purge(
+        db,
+        doc! {fields::SOURCE_PLATFORM_BINDING_ID: &binding},
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(rows_of(&f, &f.owner).await.is_empty());
+    let mut late = reply.clone();
+    late.id = Uuid::new_v4().to_string();
+    let mut late_turn = row2.active_turn.clone().expect("live turn");
+    late_turn.platform_origin = platform_turn.platform_origin.clone();
+    settle_platform(&f, &row2, &late_turn, &late).await;
+    assert!(rows_of(&f, &f.owner).await.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -2403,7 +2608,7 @@ async fn a_cached_feature_snapshot_makes_admission_read_free_and_authoritative()
         connect_transaction_test_database_with_command_handler("notif_flag_cache", handler).await;
     let f = fixture_with(db).await;
     let db = &f.state.db;
-    reset_flag_cache();
+    reset_flag_cache(db);
     // The cache remembers the flag as off.
     assert!(!enabled(db, &f.owner).await.unwrap());
     // The engine gate then resolves a newer snapshot with the flag on and

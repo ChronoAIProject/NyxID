@@ -137,6 +137,13 @@ pub struct NotificationSource {
     /// Group message sequence of the latest referenced message.
     #[serde(default)]
     pub seq: Option<i64>,
+    /// Linked platform chats (manager bots): the personal binding the thread
+    /// was linked through and its generation. Unlink purges by binding id;
+    /// list and summary require the thread to still carry this binding.
+    #[serde(default)]
+    pub platform_binding_id: Option<String>,
+    #[serde(default)]
+    pub platform_binding_generation: Option<i64>,
 }
 
 /// Durable push barrier. `pending -> sending -> sent | failed | unknown |

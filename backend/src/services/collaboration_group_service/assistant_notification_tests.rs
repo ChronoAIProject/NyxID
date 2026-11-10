@@ -56,7 +56,7 @@ async fn collaboration_mentions_notify_the_mentioned_person_in_the_post_transact
     flags::set_platform_override(db, feed::FLAG_KEY, &FlagTarget::Global, true, &f.admin)
         .await
         .unwrap();
-    feed::reset_flag_cache();
+    feed::reset_flag_cache(db);
     mention(db, &f.admin, &group, &f.member, "second").await;
     mention(db, &f.admin, &group, &f.member, "third").await;
     let rows = feed_rows(db, &f.member).await;
