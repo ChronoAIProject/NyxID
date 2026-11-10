@@ -1873,6 +1873,7 @@ async fn concurrent_producers_on_one_source_yield_one_unread_row_with_the_full_c
     let f = fixture("notif_concurrent").await;
     let db = &f.state.db;
     set_flag(&f, true).await;
+    let agent = specialist(&f, "coalescing").await;
     let group = crate::models::assistant_group::AssistantGroup {
         id: Uuid::new_v4().to_string(),
         user_id: f.owner.clone(),
@@ -1880,8 +1881,8 @@ async fn concurrent_producers_on_one_source_yield_one_unread_row_with_the_full_c
         participant_user_ids: Vec::new(),
         created_by_user_id: None,
         name: "Ops".into(),
-        member_agent_ids: Vec::new(),
-        lead_agent_id: String::new(),
+        member_agent_ids: vec![agent.id.clone()],
+        lead_agent_id: agent.id.clone(),
         last_recipient_ids: Vec::new(),
         last_recipient_ids_by_actor: Default::default(),
         created_by: "user".into(),
@@ -1907,7 +1908,7 @@ async fn concurrent_producers_on_one_source_yield_one_unread_row_with_the_full_c
         user_id: f.owner.clone(),
         seq,
         role: "agent".into(),
-        agent_id: None,
+        agent_id: Some(agent.id.clone()),
         agent_name: None,
         text: "reply".into(),
         recipient_agent_ids: Vec::new(),
