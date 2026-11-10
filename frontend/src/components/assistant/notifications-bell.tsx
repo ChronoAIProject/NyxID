@@ -12,23 +12,11 @@ import {
   useNotificationSummary,
   useNotificationsEnabled,
 } from "@/hooks/use-assistant-notifications";
+import {
+  notificationBadgeText,
+  notificationBellLabel,
+} from "@/lib/assistant/notification-presentation";
 import { cn } from "@/lib/utils";
-
-/** Counts above this read "9+": the badge stays one glyph wide. */
-export const NOTIFICATION_BADGE_CAP = 9;
-
-export function notificationBadgeText(unread: number): string {
-  return unread > NOTIFICATION_BADGE_CAP ? `${String(NOTIFICATION_BADGE_CAP)}+` : String(unread);
-}
-
-export function notificationBellLabel(unread: number, needsDecision: number): string {
-  if (unread <= 0) return "Notifications";
-  const parts = [`${String(unread)} unread`];
-  if (needsDecision > 0) {
-    parts.push(`${String(needsDecision)} ${needsDecision === 1 ? "needs" : "need"} you`);
-  }
-  return `Notifications, ${parts.join(", ")}`;
-}
 
 /**
  * The bell beside Search in the assistant header. Hidden entirely without

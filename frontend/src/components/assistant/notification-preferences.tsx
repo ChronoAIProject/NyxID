@@ -15,48 +15,12 @@ import { Switch } from "@/components/ui/switch";
 import { useNotificationsEnabled } from "@/hooks/use-assistant-notifications";
 import { useNyxBotSettings, useUpdateNyxBotSettings } from "@/hooks/use-nyxbot-agents";
 import { describeChanges } from "@/lib/grouped-form-changes";
+import { NOTIFICATION_PUSH_ROWS } from "@/lib/assistant/notification-presentation";
 import {
   DEFAULT_NOTIFICATION_PUSH,
   notificationPushFormSchema,
   type NotificationPushPreferences,
 } from "@/schemas/assistant-notifications";
-
-export const NOTIFICATION_PUSH_ROWS: readonly {
-  readonly name: keyof NotificationPushPreferences;
-  readonly label: string;
-  readonly description: string;
-}[] = [
-  {
-    name: "automation_result",
-    label: "Automation results",
-    description: "A scheduled or webhook automation finished its task.",
-  },
-  {
-    name: "automation_problem",
-    label: "Automation problems",
-    description: "A run failed, was skipped, could not deliver its result or paused the automation.",
-  },
-  {
-    name: "needs_decision",
-    label: "Decisions waiting for you",
-    description: "An agent is waiting on one of your action cards.",
-  },
-  {
-    name: "agent_update",
-    label: "Agent updates",
-    description: "A specialist reported back or an agent replied in the background.",
-  },
-  {
-    name: "chat_update",
-    label: "Chat updates",
-    description: "Replies in your Telegram, Lark, Discord and other channel chats.",
-  },
-  {
-    name: "group_mention",
-    label: "Group mentions",
-    description: "Someone mentioned you in a collaboration group.",
-  },
-];
 
 const onOff = (value: unknown) => (value ? "On" : "Off");
 

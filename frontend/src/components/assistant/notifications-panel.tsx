@@ -1,15 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import {
-  AlertTriangle,
-  AtSign,
-  Bot,
-  CircleCheck,
-  CircleHelp,
-  Loader2,
-  MessageSquare,
-  type LucideIcon,
-} from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { MobileNotificationIcon } from "@/components/icons/empty-state";
@@ -34,6 +25,10 @@ import {
   useNotificationsEnabled,
 } from "@/hooks/use-assistant-notifications";
 import { notificationTarget, openNotificationLink } from "@/lib/assistant/notification-navigation";
+import {
+  NOTIFICATION_KIND_PRESENTATION,
+  notificationRowLabel,
+} from "@/lib/assistant/notification-presentation";
 import { restorePanelFocus } from "@/lib/assistant/panel-focus";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import {
@@ -42,28 +37,7 @@ import {
   notificationFilter,
   type AssistantNotification,
   type NotificationFilter,
-  type NotificationKind,
 } from "@/schemas/assistant-notifications";
-
-interface KindPresentation {
-  readonly icon: LucideIcon;
-  readonly label: string;
-  readonly tone: string;
-}
-
-/** Semantic colour does the status work; neutral kinds stay quiet. */
-export const NOTIFICATION_KIND_PRESENTATION: Record<NotificationKind, KindPresentation> = {
-  automation_result: { icon: CircleCheck, label: "Automation finished", tone: "text-success" },
-  automation_problem: {
-    icon: AlertTriangle,
-    label: "Automation needs attention",
-    tone: "text-destructive",
-  },
-  needs_decision: { icon: CircleHelp, label: "Needs your decision", tone: "text-warning" },
-  agent_update: { icon: Bot, label: "Agent update", tone: "text-text-tertiary" },
-  chat_update: { icon: MessageSquare, label: "Chat update", tone: "text-text-tertiary" },
-  group_mention: { icon: AtSign, label: "Mentioned you", tone: "text-text-tertiary" },
-};
 
 const EMPTY_TITLE: Record<NotificationFilter, string> = {
   all: "Nothing new",
@@ -71,14 +45,6 @@ const EMPTY_TITLE: Record<NotificationFilter, string> = {
   automations: "No automation results yet",
   chats: "No chat updates yet",
 };
-
-export function notificationRowLabel(item: AssistantNotification): string {
-  const kind = NOTIFICATION_KIND_PRESENTATION[item.kind];
-  const parts = [item.title || kind.label];
-  if (!item.read) parts.push("unread");
-  if (item.kind === "needs_decision" && !item.resolved) parts.push("needs your decision");
-  return parts.join(", ");
-}
 
 function NotificationRow({
   item,

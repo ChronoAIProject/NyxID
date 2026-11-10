@@ -4,7 +4,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
-import { NotificationsBell, notificationBadgeText, notificationBellLabel } from "./notifications-bell";
+import { notificationBadgeText, notificationBellLabel } from "@/lib/assistant/notification-presentation";
+import { NotificationsBell } from "./notifications-bell";
 
 const panel = vi.hoisted(() => ({ open: vi.fn(), current: {} as { panel?: string } }));
 vi.mock("@/hooks/use-account-panel", () => ({
