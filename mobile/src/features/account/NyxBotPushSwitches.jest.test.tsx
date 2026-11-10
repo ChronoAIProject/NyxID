@@ -71,7 +71,8 @@ describe("NyxBotPushSwitches", () => {
     expect(pending.props.disabled).toBe(true);
     await fireEvent(pending, "valueChange", true);
     expect(onSave).not.toHaveBeenCalled();
-    loading.unmount();
+    // Unmount settles asynchronously in RNTL 14; wait so act scopes do not overlap.
+    await loading.unmount();
     await render(
       <NyxBotPushSwitches preferences={DEFAULT_NOTIFICATION_PUSH} saving pushReady onSave={onSave} />,
     );

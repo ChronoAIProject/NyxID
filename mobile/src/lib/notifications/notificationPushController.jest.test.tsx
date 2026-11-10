@@ -10,6 +10,12 @@ const ORIGINS = ["https://app.nyxid.test", "https://app.nyxid.dev"];
 const C = `nyxa-${"a".repeat(32)}`;
 const AGENT = "7c0f6a8e-2b2e-4a1a-9f1f-0d2c5a6b7c8d";
 const flushMicrotasks = () => new Promise((resolve) => setTimeout(resolve, 0));
+// Every cached query arms a garbage-collection timer; clearing the clients
+// after each test lets Jest exit as soon as the run ends.
+const clients: QueryClient[] = [];
+afterEach(() => {
+  for (const client of clients.splice(0)) client.clear();
+});
 
 function harness(options: { ready?: boolean; foreground?: boolean; online?: boolean } = {}) {
   const requests: { path: string; method?: string; body?: unknown }[] = [];
@@ -20,6 +26,7 @@ function harness(options: { ready?: boolean; foreground?: boolean; online?: bool
     return {};
   });
   const queryClient = new QueryClient();
+  clients.push(queryClient);
   const summaryKey = [...NOTIFICATIONS, "summary", 1];
   const feedKey = [...NOTIFICATIONS, "feed", 1, "all"];
   const otherKey = ["challenges"];
