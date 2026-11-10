@@ -10932,6 +10932,19 @@ mod tests {
     }
 
     #[test]
+    fn notification_digest_annotations_are_read_only_and_have_a_title() {
+        assert_eq!(
+            tool_annotations("nyxid__list_notifications", &[]).unwrap(),
+            serde_json::json!({
+                "title": "Read NyxBot notifications",
+                "readOnlyHint": true,
+                "destructiveHint": false,
+                "openWorldHint": false,
+            })
+        );
+    }
+
+    #[test]
     fn tool_annotations_follow_service_endpoint_method() {
         let mut delete = make_endpoint("remove_item", "Remove an item");
         delete.method = "DELETE".to_string();

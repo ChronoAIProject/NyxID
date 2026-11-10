@@ -16,6 +16,7 @@ use axum::{
     response::{IntoResponse, Sse, sse::Event},
     routing::post as route_post,
 };
+use futures::TryStreamExt;
 use mongodb::bson::doc;
 use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
