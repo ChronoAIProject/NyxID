@@ -138,6 +138,7 @@ export function WorkspaceDrawer({
         key={epoch}
         visible={visible}
         current={currentChat}
+        unread={notifications.markers}
         onSelect={onOpenChat}
         onCreateAgent={onCreateAgent}
         onCreateGroup={onCreateGroup}
@@ -304,6 +305,7 @@ export function WorkspaceDrawer({
         scrollFooter={
           <WorkspaceRecents
             visible={visible}
+            unread={notifications.markers}
             onSelect={onOpenChat}
             onSeeAll={() => onBrowse("WorkspaceRecents")}
           />

@@ -9,6 +9,7 @@ import { sidebarSectionTitle } from "./workspaceSidebarStyles";
 type E = { type: unknown; props: Record<string, any> };
 const nodes = (n: any): E[] =>
   n?.props ? [n, ...[n.props.children].flat(Infinity).flatMap(nodes)] : [];
+const MARKERS = { conversations: { [`nyxa-${"a".repeat(32)}`]: 2 }, groups: {} };
 function setup(
   notifications: {
     enabled: boolean;
@@ -29,6 +30,7 @@ function setup(
           unread,
           needsDecision: notifications.needsDecision ?? 0,
           badge: unread > 9 ? "9+" : unread > 0 ? String(unread) : "",
+          markers: MARKERS,
         };
       },
     },
@@ -133,6 +135,9 @@ test("the Notifications row appears only with the flag, counts unread capped at 
   );
   const count = nodes(row).find((n) => n.props.testID === "sidebar-notifications-count")!;
   assert.equal(count.props.children, "9+");
+  assert.equal(on.list().props.unread, MARKERS, "thread rows read the indicator's markers, one summary for the sidebar");
+  const recents = nodes(on.list().props.scrollFooter).find((n) => n.type === "Recents")!;
+  assert.equal(recents.props.unread, MARKERS);
   assert.equal(count.props.style[1].backgroundColor, lightColors.warningTone.bg);
   assert.equal(count.props.style[1].color, lightColors.warningTone.text);
   row.props.onPress();

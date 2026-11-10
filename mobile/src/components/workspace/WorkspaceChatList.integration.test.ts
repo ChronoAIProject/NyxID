@@ -86,8 +86,11 @@ function chatsFor(agentId: string) {
 
 /** Render the component's stateless rows while leaving its modal as a boundary. */
 function elements(root: Element): Element[] {
-  if (typeof root.type === "function")
-    return elements((root.type as (props: unknown) => Element)(root.props));
+  if (typeof root.type === "function") {
+    // A stateless row part may render nothing (an empty unread pill).
+    const rendered = (root.type as (props: unknown) => Element | null)(root.props);
+    return rendered ? elements(rendered) : [];
+  }
   return [
     root,
     ...[root.props.children]
@@ -124,6 +127,10 @@ type SetupOptions = {
   agentsPending?: boolean;
   groupsPending?: boolean;
   agentsFetching?: boolean;
+  unread?: {
+    conversations: Record<string, number>;
+    groups: Record<string, number>;
+  };
 };
 
 function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
@@ -160,6 +167,7 @@ function setup(current?: WorkspaceChatTarget, options: SetupOptions = {}) {
     mode: options.mode,
     visible: true,
     current,
+    unread: options.unread,
     onCreateAgent: () => creations.push("agent"),
     onCreateGroup: () => creations.push("group"),
     onSelect: (target: WorkspaceChatTarget) => {
@@ -1453,4 +1461,61 @@ test("background agent polling never shows the refresh spinner", () => {
   env.more("View all agents (9)");
   assert.equal(env.browser().refreshing, false);
   env.harness.unmount();
+});
+
+test("thread, crew and channel-bot rows show the unread counts the notification summary attributes to them", () => {
+  const channels = Array.from({ length: 3 }, (_, index) =>
+    conversationSchema.parse({
+      id: conversationId(900 + index),
+      title: `Customer ${index + 1}`,
+      model: "nyxagent/chat",
+      message_count: 2,
+      active_turn: null,
+      created_at: "2026-10-01T00:00:00Z",
+      last_message_at: `2026-10-${String(20 - index).padStart(2, "0")}T00:00:00Z`,
+      agent: { id: "agent-1", name: "helper-1", display_name: "Agent 1", kind: "specialist" },
+      channel: {
+        platform: "telegram",
+        channel_agent_id: "bot-1",
+        bot_label: "Support bot",
+        chat_id: `chat-${index}`,
+        chat_title: `Customer ${index + 1}`,
+        chat_kind: "private",
+      },
+    }),
+  );
+  const own = chatsFor("agent-1").slice(0, 2);
+  const current = { kind: "agent" as const, agentId: "agent-1", conversationId: own[0]!.id };
+  const env = setup(current, {
+    chats: [...own, ...channels],
+    unread: {
+      conversations: { [own[1]!.id]: 2, [channels[0]!.id]: 1, [channels[2]!.id]: 105 },
+      groups: { [groups[7]!.id]: 3 },
+    },
+  });
+  const unreadRow = env.label("Open chat Agent 1 chat 2 with Agent 1, 2 unread");
+  const pill = elements(unreadRow).find((row) => row.props.testID === "sidebar-unread-count");
+  assert.ok(pill, "an unread thread carries a count pill");
+  assert.equal(content(pill!), "2");
+  const titleColor = (row: Element, text: string) =>
+    Object.assign({}, ...[elements(row).find((node) => node.type === "Text" && content(node) === text)!.props.style].flat()).color;
+  assert.equal(titleColor(unreadRow, "Agent 1 chat 2"), lightColors.textPrimary, "unread titles read like the current thread");
+  const readRow = env.label("Open chat Agent 1 chat 1 with Agent 1, current thread");
+  assert.equal(elements(readRow).some((row) => row.props.testID === "sidebar-unread-count"), false, "a read thread has no pill");
+  const bot = env.label("Expand chats for Support bot, Telegram · 3 chats, 106 unread");
+  assert.equal(content(elements(bot).find((row) => row.props.testID === "sidebar-unread-count")!), "99+", "a bot folds its chats' counts, capped");
+  env.press("Expand chats for Support bot, Telegram · 3 chats, 106 unread");
+  assert.ok(env.label("Open chat Customer 3 with Agent 1, 105 unread"));
+  const plainChild = env.label("Open chat Customer 2 with Agent 1");
+  assert.ok(plainChild, "a chat without unread keeps its plain label");
+  assert.equal(titleColor(plainChild, "Customer 2"), lightColors.textSecondary, "read titles stay secondary");
+  env.press("Expand crews");
+  assert.ok(env.groupRows().length > 0, "the crew preview is open");
+  const crew = env.label("Open crew Group 8, 3 unread");
+  assert.equal(content(elements(crew).find((row) => row.props.testID === "sidebar-unread-count")!), "3");
+  assert.equal(elements(env.label("Open crew Group 7")).some((row) => row.props.testID === "sidebar-unread-count"), false);
+  env.harness.unmount();
+  const plain = setup(current, { chats: [...own, ...channels] });
+  assert.equal(plain.all().some((row) => row.props.testID === "sidebar-unread-count"), false, "without markers no row shows a pill");
+  plain.harness.unmount();
 });
