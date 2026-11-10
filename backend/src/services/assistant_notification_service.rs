@@ -72,8 +72,8 @@ pub const PUSH_BUDGETS: &str = "assistant_notification_push_budgets";
 /// Durable per-source push slots (`_id` = person + visible source,
 /// `user_id` for erasure), TTL one hour.
 pub const PUSH_SOURCES: &str = "assistant_notification_push_sources";
-/// Channel statuses that still own a feed; `failed` and `disconnected`
-/// retire the channel and purge its rows.
+/// Channel statuses whose feed is visible. Failed and disconnected channels
+/// hide their rows until repaired; actual retirement purges the rows.
 pub const LIVE_CHANNEL_STATUSES: [&str; 2] = ["pending", "active"];
 pub const LANE_ORG_GUEST: &str = "org_guest";
 pub const LANE_ORG_MEMBER: &str = "org_member";

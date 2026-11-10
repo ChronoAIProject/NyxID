@@ -603,3 +603,191 @@ async fn notification_routes_are_first_party_human_only_and_require_both_flags()
     }
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn notification_routes_preserve_settings_and_audit_only_explicit_mark_all() {
+    use crate::services::feature_flag_service as flags;
+    use mongodb::bson::{self, DateTime, Document};
+
+    let db = crate::test_utils::connect_transaction_test_database("notifications_http_state").await;
+    let state = crate::test_utils::test_app_state(db.clone());
+    let actor = Uuid::new_v4();
+    let owner = actor.to_string();
+    db.collection::<User>(USERS)
+        .insert_one(crate::test_utils::test_user(
+            &owner,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    flags::set_platform_override(
+        &db,
+        flags::ASSISTANT_NOTIFICATIONS_FLAG_KEY,
+        &flags::FlagTarget::User(owner.clone()),
+        true,
+        &owner,
+    )
+    .await
+    .unwrap();
+    let token = jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &actor,
+        "openid profile",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let (_, private) = crate::routes::build_router();
+    let app = private.with_state(state);
+    let request = |method: &str, path: &str, body: Value| {
+        Request::builder()
+            .method(method)
+            .uri(format!("/api/v1/assistant/nyxagent/{path}"))
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(if method == "GET" {
+                String::new()
+            } else {
+                body.to_string()
+            }))
+            .unwrap()
+    };
+    let off = json!({"push": {
+        "automation_result": false, "automation_problem": false, "needs_decision": false,
+        "agent_update": false, "chat_update": false, "group_mention": false,
+    }});
+    let response = app
+        .clone()
+        .oneshot(request("GET", "settings", Value::Null))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["notifications"], off);
+    let chosen = json!({"push": {
+        "automation_result": true, "automation_problem": false, "needs_decision": true,
+        "agent_update": false, "chat_update": true, "group_mention": false,
+    }});
+    for body in [
+        json!({"notifications": chosen}),
+        json!({"timezone": "Asia/Singapore"}),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request("PUT", "settings", body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["notifications"], chosen);
+    }
+    let settings = db.collection::<Document>(crate::models::assistant_settings::COLLECTION_NAME);
+    assert_eq!(
+        settings
+            .find_one(doc! {"_id": &owner})
+            .await
+            .unwrap()
+            .unwrap()["notifications"],
+        bson::to_bson(&chosen).unwrap()
+    );
+    // A pre-rollout document has no notifications field and still reads all switches off.
+    settings
+        .update_one(doc! {"_id": &owner}, doc! {"$unset": {"notifications": ""}})
+        .await
+        .unwrap();
+    let response = app
+        .clone()
+        .oneshot(request("GET", "settings", Value::Null))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["notifications"], off);
+
+    let before = chrono::Utc::now() - chrono::Duration::hours(1);
+    let old = DateTime::from_chrono(before - chrono::Duration::seconds(1));
+    let newer = DateTime::from_chrono(before + chrono::Duration::seconds(1));
+    let conversation = Uuid::new_v4().to_string();
+    let ids: Vec<String> = (0..5).map(|_| Uuid::new_v4().to_string()).collect();
+    let notifications = db.collection::<Document>("assistant_notifications");
+    notifications
+        .insert_many([
+            doc! {"_id": &ids[0], "user_id": &owner, "unread": true, "updated_at": old},
+            doc! {"_id": &ids[1], "user_id": &owner, "unread": true, "updated_at": old,
+                  "source": {"type": "channel_chat", "id": &conversation, "conversation_id": &conversation}},
+            doc! {"_id": &ids[2], "user_id": &owner, "unread": true, "updated_at": old},
+            doc! {"_id": &ids[3], "user_id": &owner, "unread": true, "updated_at": newer},
+            doc! {"_id": &ids[4], "user_id": Uuid::new_v4().to_string(), "unread": true, "updated_at": old},
+        ])
+        .await
+        .unwrap();
+    let audit = db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME);
+    let read_event = doc! {"user_id": &owner, "event_type": "assistant_notifications_read"};
+    for body in [
+        json!({"ids": [&ids[0], &ids[4]]}),
+        json!({"source": {"type": "conversation", "id": conversation}}),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request("POST", "notifications/read", body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(json_body(response).await["updated"], 1);
+        assert_eq!(audit.count_documents(read_event.clone()).await.unwrap(), 0);
+    }
+    for body in [
+        json!({"ids": [], "all": true, "before": before.to_rfc3339()}),
+        json!({"all": true}),
+        json!({"all": false, "before": before.to_rfc3339()}),
+        json!({"ids": [&ids[2]], "before": before.to_rfc3339()}),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request("POST", "notifications/read", body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(audit.count_documents(read_event.clone()).await.unwrap(), 0);
+    let response = app
+        .oneshot(request(
+            "POST",
+            "notifications/read",
+            json!({"all": true, "before": before.to_rfc3339()}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["updated"], 1);
+    assert_eq!(audit.count_documents(read_event.clone()).await.unwrap(), 1);
+    let event = audit.find_one(read_event).await.unwrap().unwrap();
+    assert_eq!(
+        event.get_document("event_data").unwrap(),
+        &doc! {"count": 1_i64, "scope": "all"}
+    );
+    for id in &ids[..3] {
+        assert!(
+            !notifications
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_bool("unread")
+                .unwrap()
+        );
+    }
+    for id in &ids[3..] {
+        assert!(
+            notifications
+                .find_one(doc! {"_id": id})
+                .await
+                .unwrap()
+                .unwrap()
+                .get_bool("unread")
+                .unwrap()
+        );
+    }
+    db.drop().await.unwrap();
+}
