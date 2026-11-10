@@ -3308,6 +3308,113 @@ async fn default_off_preferences_and_a_disabled_feed_skip_without_a_claim() {
     assert_eq!(reservations(&f, &f.owner).await, (0, 0));
 }
 
+#[tokio::test]
+async fn a_row_that_coalesces_after_preparation_gives_its_claim_back_and_sends_the_newer_preview_next()
+ {
+    let f = fixture("notif_push_requeue").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    push_prefs(&f, &f.owner, all_push()).await;
+    let thread_a = seed_conversation(&f, &f.owner, "First").await;
+    let thread_b = seed_conversation(&f, &f.owner, "Second").await;
+    let older = Uuid::new_v4().to_string();
+    let newer = Uuid::new_v4().to_string();
+    for (id, text) in [(&older, "Older text"), (&newer, "Newer text")] {
+        db.collection::<Document>(MESSAGES)
+            .insert_one(
+                doc! {"_id": id, "conversation_id": &thread_b, "user_id": &f.owner,
+                "role": "assistant", "text": text, "status": "completed", "turn_id": "t"},
+            )
+            .await
+            .unwrap();
+    }
+    let row_a = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&thread_a),
+    );
+    let mut row_b = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&thread_b),
+    );
+    row_b.source.message_id = Some(older.clone());
+    // The sweep works oldest first: A is sent before B is claimed.
+    row_b.created_at = row_a.created_at + Duration::seconds(1);
+    row_b.updated_at = row_b.created_at;
+    insert_row(&f, &row_a).await;
+    insert_row(&f, &row_b).await;
+    // While A is being sent, B coalesces a newer reply (its push barrier is
+    // untouched): B's prepared preview is now stale.
+    let sent: Sent = Default::default();
+    let mutated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (sender_db, sent_in, mutated_in, b_id, newer_id) = (
+        db.clone(),
+        sent.clone(),
+        mutated.clone(),
+        row_b.id.clone(),
+        newer.clone(),
+    );
+    sweep_with(&f.state, move |user, title, body, data| {
+        let db = sender_db.clone();
+        let sent = sent_in.clone();
+        let mutated = mutated_in.clone();
+        let (b_id, newer_id) = (b_id.clone(), newer_id.clone());
+        async move {
+            if !mutated.swap(true, Ordering::SeqCst) {
+                db.collection::<Document>(COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id": &b_id},
+                        doc! {"$set": {"source.message_id": &newer_id,
+                        "updated_at": bson_date(Utc::now())}, "$inc": {"count": 1_i64}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            sent.lock().unwrap().push((user, title, body, data));
+            Ok(automation::Outcome::Accepted)
+        }
+    })
+    .await
+    .unwrap();
+    {
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(
+            sent[0].3.get("notification_id").map(String::as_str),
+            Some(row_a.id.as_str())
+        );
+    }
+    // B's claim was given back exactly: nothing consumed, nothing reserved.
+    let push = push_of(&f, &row_b.id).await;
+    assert_eq!(
+        (
+            push.state.as_str(),
+            push.attempts,
+            push.attempt,
+            push.claimed_at
+        ),
+        ("pending", 0, None, None)
+    );
+    assert_eq!(reservations(&f, &f.owner).await, (1, 1));
+    // The next sweep prepares the newer references and sends B once.
+    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
+    {
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(
+            sent[1].3.get("notification_id").map(String::as_str),
+            Some(row_b.id.as_str())
+        );
+        assert_eq!(sent[1].2, "Newer text");
+    }
+    let push = push_of(&f, &row_b.id).await;
+    assert_eq!((push.state.as_str(), push.attempts), ("sent", 1));
+    assert_eq!(reservations(&f, &f.owner).await, (2, 2));
+    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
+    assert_eq!(sent.lock().unwrap().len(), 2);
+}
+
 // ---------------------------------------------------------------------------
 // Owner home thread heard through several bots
 // ---------------------------------------------------------------------------

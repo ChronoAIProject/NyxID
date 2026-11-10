@@ -3075,30 +3075,11 @@ async fn release_reservations(db: &Database, claimed: &ClaimedPush) -> AppResult
     Ok(())
 }
 
-/// Settle a claimed row without sending (definite skip): the barrier moves
-/// `sending -> skipped` under the attempt token. No provider call happened,
-/// so the reservations return even when the row was purged or aged out
-/// meanwhile (the release is keyed by attempt and idempotent).
-pub(crate) async fn skip_claimed(
-    db: &Database,
-    claimed: &ClaimedPush,
-    code: &'static str,
-) -> AppResult<()> {
-    push_transition(
-        db,
-        &claimed.row.id,
-        &["sending"],
-        Some(&claimed.attempt),
-        doc! {"push.state": "skipped", "push.code": code},
-    )
-    .await?;
-    release_reservations(db, claimed).await
-}
-
 /// Give an unsent claim back: no provider call happened, so the barrier
 /// returns to its exact pre-claim state under the attempt token (the attempt
-/// is not consumed) and the reservations are released. The next sweep
-/// retries.
+/// is not consumed) and the slot and hourly reservations are released in
+/// the same transaction, so no other sweep can claim or skip against the
+/// old slot in between. The next sweep retries.
 pub(crate) async fn requeue_claimed(db: &Database, claimed: &ClaimedPush) -> AppResult<()> {
     let prior = claimed
         .prior
@@ -3106,15 +3087,44 @@ pub(crate) async fn requeue_claimed(db: &Database, claimed: &ClaimedPush) -> App
         .unwrap_or_else(|| push_state(&PushPlan::Pending, push_kind(&claimed.row)));
     let prior = bson::to_bson(&prior)
         .map_err(|_| AppError::Internal("Notification serialization failed".into()))?;
-    push_transition(
-        db,
-        &claimed.row.id,
-        &["sending"],
-        Some(&claimed.attempt),
-        doc! {"push": prior},
-    )
-    .await?;
-    release_reservations(db, claimed).await
+    let mut session = db.client().start_session().await?;
+    let work_db = db.clone();
+    let claimed = claimed.clone();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let db = &work_db;
+            let operation: AppResult<()> = async {
+                let row = &claimed.row;
+                db.collection::<Document>(COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id": &row.id, "push.state": "sending",
+                        "push.attempt": &claimed.attempt},
+                        doc! {"$set": {"push": prior.clone()}},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                db.collection::<Document>(PUSH_SOURCES)
+                    .delete_one(doc! {
+                        "_id": push_source_slot(&row.user_id, row.source.source_type, &row.source.id),
+                        "attempt": &claimed.attempt,
+                    })
+                    .session(&mut *session)
+                    .await?;
+                db.collection::<Document>(PUSH_BUDGETS)
+                    .update_one(
+                        doc! {"_id": &row.user_id},
+                        doc! {"$pull": {"reservations": {"attempt": &claimed.attempt}}},
+                    )
+                    .session(&mut *session)
+                    .await?;
+                Ok(())
+            }
+            .await;
+            transactions::transaction_result(operation)
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
 }
 
 /// Settle the claimed row after the provider answered. Attempts and the retry
@@ -3342,9 +3352,10 @@ where
 }
 
 /// Prepare every due row of one person with one batched lookup, then claim
-/// and send each row in turn. Everything after a claim uses the claimed
-/// snapshot: a row whose latest references moved on since preparation is
-/// rebuilt from it, and an unsent claim that cannot proceed is given back.
+/// and send each row in turn. The prepared payload is sent only if the
+/// claimed snapshot is the prepared one: a row whose latest references moved
+/// on since preparation gives its claim back (no attempt consumed, no extra
+/// lookup) and the next sweep prepares the newer references in its batch.
 async fn deliver_for_person<F, Fut>(
     state: &AppState,
     send: &F,
@@ -3369,7 +3380,7 @@ where
             .map(|item| (item.id.clone(), item))
             .collect();
     for row in rows {
-        let Some(mut built) = prepared.remove(&row.id) else {
+        let Some(built) = prepared.remove(&row.id) else {
             // Purged or hidden; nothing was claimed.
             push_skip(db, &row.id, "source_unavailable").await?;
             continue;
@@ -3380,20 +3391,10 @@ where
             Claim::Skipped | Claim::NotClaimed => continue,
         };
         if claimed.row.updated_at != row.updated_at || claimed.row.count != row.count {
-            // Coalesced since preparation: rebuild from the claimed snapshot.
-            match resolve_items(state, user, vec![view_of(&claimed.row)]).await {
-                Ok(mut items) => match items.pop() {
-                    Some(item) => built = item,
-                    None => {
-                        skip_claimed(db, &claimed, "source_unavailable").await?;
-                        continue;
-                    }
-                },
-                Err(error) => {
-                    requeue_claimed(db, &claimed).await?;
-                    return Err(error);
-                }
-            }
+            // Coalesced since preparation: the prepared preview is stale.
+            // Give the claim back; the next sweep prepares the newer refs.
+            requeue_claimed(db, &claimed).await?;
+            continue;
         }
         let kind = push_kind(&claimed.row);
         // `type` is the closed kind: mobile refreshes the matching view on receipt.
