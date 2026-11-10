@@ -353,9 +353,10 @@ async fn pm_f6_list_and_summary_share_the_same_live_visibility_matrix() {
             } else {
                 OrgRole::Member
             };
-            let revoked = (case == "revoked_membership").then(Utc::now);
+            let mut membership = test_membership(&org, &f.owner, role, None);
+            membership.revoked_at = (case == "revoked_membership").then(Utc::now);
             db.collection(MEMBERSHIPS)
-                .insert_one(test_membership(&org, &f.owner, role, revoked))
+                .insert_one(membership)
                 .await
                 .unwrap();
             db.collection::<Document>(CONVERSATIONS)
