@@ -16,7 +16,6 @@ import {
   type VoiceStartRequest,
 } from "../../features/assistant/voice/voiceContracts";
 import type { RequestOptions } from "./authenticatedTransport";
-import { VoiceCallDiscoveryIncompleteError } from "../../features/assistant/voice/voiceActiveCall";
 
 const ROOT = "/assistant/nyxagent";
 const localId = z.string().uuid();
@@ -155,8 +154,8 @@ export function createAssistantVoiceApi(
             : undefined;
         if (status !== 404 && status !== 405) throw error;
       }
-      // Compatibility with deployed servers: metadata only, at most ten other
-      // recent conversations, with two reads in flight. Never read history.
+      // Compatibility with servers without GET /voice/active: metadata only, at
+      // most ten other recent conversations, two reads in flight. Never read history.
       const read = async (id: string) => {
         assertActive();
         return activeVoiceSessionSchema.parse(
@@ -188,8 +187,11 @@ export function createAssistantVoiceApi(
         const live = results.find((result) => result.session);
         if (live) return live;
       }
-      if (index.next_cursor || index.conversations.length > 10)
-        throw new VoiceCallDiscoveryIncompleteError();
+      // The server admits one live call per person, and a live call keeps its
+      // chat among the most recent (captions, receipt; calls are time-limited
+      // and idle out). An empty bounded scan therefore clears local recovery;
+      // a fresh Start is still fenced by server admission. An "unknown" that
+      // could never clear would block voice for anyone with more chats.
       return { session: null, conversation_id: null };
     },
     async status(

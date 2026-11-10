@@ -10,14 +10,6 @@ export type ActiveVoiceCall = {
   conversationId: string;
 };
 
-/** A bounded legacy scan cannot establish the state of older conversations. */
-export class VoiceCallDiscoveryIncompleteError extends Error {
-  constructor() {
-    super("The account call could not be found in recent conversations.");
-    this.name = "VoiceCallDiscoveryIncompleteError";
-  }
-}
-
 /** Preserve the verified chat binding; minimal injected adapters use the current chat. */
 export async function discoverActiveVoiceCall(
   api: Pick<AssistantVoiceApi, "active" | "accountActive">,

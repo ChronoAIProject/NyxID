@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import AbortControllerPolyfill from "abort-controller";
-import { VoiceCallDiscoveryIncompleteError } from "../../features/assistant/voice/voiceActiveCall";
 import {
   assistantVoiceSessionsPath,
   assistantVoiceStreamPath,
@@ -199,19 +198,26 @@ test("old-server discovery finds another chat through bounded metadata reads", a
   assert.ok(calls.every((path) => !path.endsWith("/history")));
 });
 
-test("an incomplete old-server scan remains unknown instead of claiming the account has no call", async () => {
+test("an old-server scan that finds no live call in recent chats clears recovery even with more chats", async () => {
+  // Accounts with more than ten chats always have a next page; treating that
+  // as permanently unknown blocked voice. Server admission still fences Start.
   let posts = 0;
   const api = createAssistantVoiceApi(async (path, options) => {
     if (options?.method === "POST") posts++;
     if (path === "/assistant/nyxagent/voice/active") throw { statusCode: 405 };
     if (path.endsWith("?limit=10"))
-      return { conversations: [], next_cursor: "more" };
+      return {
+        conversations: Array.from({ length: 10 }, (_, index) => ({
+          id: `nyxa-${String(index + 100).padStart(32, "0")}`,
+        })),
+        next_cursor: "more",
+      };
     return { session: null };
   }, origin);
-  await assert.rejects(
-    api.accountActive(thread),
-    VoiceCallDiscoveryIncompleteError,
-  );
+  assert.deepEqual(await api.accountActive(thread), {
+    session: null,
+    conversation_id: null,
+  });
   assert.equal(posts, 0);
 });
 

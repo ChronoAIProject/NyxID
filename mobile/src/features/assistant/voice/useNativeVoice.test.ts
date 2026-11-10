@@ -9,7 +9,6 @@ import type {
   VoiceSnapshot,
 } from "./voiceContracts";
 import type { VoiceStartRecovery } from "./voiceStartError";
-import { VoiceCallDiscoveryIncompleteError } from "./voiceActiveCall";
 
 type VoiceHook = ReturnType<typeof import("./useNativeVoice").useNativeVoice>;
 const firstThread = "nyxa-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1152,7 +1151,7 @@ test("a bounded legacy scan can release only a verified prior terminal target fo
   await e.start();
   Object.assign(e.api, {
     accountActive: async () => {
-      throw new VoiceCallDiscoveryIncompleteError();
+      throw new Error("Voice call discovery unavailable");
     },
   });
   e.responses.status = async () =>
@@ -1194,7 +1193,7 @@ for (const result of [
     await e.start();
     Object.assign(e.api, {
       accountActive: async () => {
-        throw new VoiceCallDiscoveryIncompleteError();
+        throw new Error("Voice call discovery unavailable");
       },
     });
     e.responses.status = async () => result;
@@ -1211,7 +1210,7 @@ test("legacy incomplete discovery without an owned target cannot use status to u
   const e = setup(context);
   Object.assign(e.api, {
     accountActive: async () => {
-      throw new VoiceCallDiscoveryIncompleteError();
+      throw new Error("Voice call discovery unavailable");
     },
   });
   await e.harness.value().checkConflict();
@@ -1572,7 +1571,7 @@ test("late terminal status after a scope change cannot clear another account's r
   await e.start();
   Object.assign(e.api, {
     accountActive: async () => {
-      throw new VoiceCallDiscoveryIncompleteError();
+      throw new Error("Voice call discovery unavailable");
     },
   });
   const waiting = deferred<unknown>();
