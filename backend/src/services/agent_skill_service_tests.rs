@@ -926,3 +926,131 @@ async fn full_access_failed_skill_attach_writes_no_receipt() {
     );
     f.state.db.drop().await.unwrap();
 }
+
+const OUTLINE_SKILL: &str = "---\nname: example\ndescription: Example.\nmetadata:\n  category: plain\n---\n# Example\n\n## Overview\nYou get one tidy summary.\n\n## Approach\n1. **Read.** I read the inputs.\n2. **Summarise.** I write the summary.\n   Asks you\n\n## Needs and produces\nNeeds: the inputs.\nProduces: one summary.\n\n## Details\nScripts are text only.\n";
+
+#[tokio::test]
+async fn preview_outline_is_bounded_untrusted_and_absent_without_template() {
+    let registry = Registry {
+        bytes: archive(&[("SKILL.md", OUTLINE_SKILL.as_bytes())]),
+        ..Registry::new()
+    };
+    let verified = preview(&registry, ID, "1.0").await.unwrap();
+    // The verified SKILL.md never appears in the preview response itself.
+    let value = json!(verified);
+    assert!(value.get("skill_md").is_none());
+    assert!(!value.to_string().contains("tidy summary"));
+    let outline = preview_outline(&verified, 0, wire_len(&value)).unwrap();
+    assert_eq!(outline["untrusted_guidance"], true);
+    assert_eq!(outline["complete"], true);
+    let content = outline["content"].as_str().unwrap();
+    assert!(content.starts_with("Overview:\nYou get one tidy summary."));
+    assert!(content.contains("2. Summarise: I write the summary.\n   Asks you"));
+
+    // A legacy skill keeps working; it simply has no outline.
+    let legacy = preview(&Registry::new(), ID, "1.0").await.unwrap();
+    let none = preview_outline(&legacy, 0, 0).unwrap();
+    assert_eq!(none["outline_available"], false);
+    assert!(none.get("content").is_none());
+}
+
+#[tokio::test]
+async fn max_size_cjk_outline_pages_instead_of_disappearing() {
+    let mut skill = format!(
+        "## Overview\n{}\n\n## Approach\n",
+        "概".repeat(crate::services::skill_outline::MAX_OVERVIEW)
+    );
+    for n in 1..=crate::services::skill_outline::MAX_STEPS {
+        skill.push_str(&format!(
+            "{n}. **{}** {}\n",
+            "题".repeat(crate::services::skill_outline::MAX_TITLE),
+            "步".repeat(crate::services::skill_outline::MAX_STEP_TEXT)
+        ));
+    }
+    skill.push_str(&format!(
+        "\n## Needs and produces\nNeeds: {}\nProduces: {}\n",
+        "需".repeat(crate::services::skill_outline::MAX_NEEDS),
+        "产".repeat(crate::services::skill_outline::MAX_NEEDS)
+    ));
+    let expected = crate::services::skill_outline::render(
+        &crate::services::skill_outline::parse(&skill, &[]).expect("valid at the limits"),
+    );
+    let registry = Registry {
+        bytes: archive(&[("SKILL.md", skill.as_bytes())]),
+        ..Registry::new()
+    };
+    let verified = preview(&registry, ID, "1.0").await.unwrap();
+    let preview_wire = wire_len(&json!(verified));
+    let mut offset = 0;
+    let mut output = String::new();
+    loop {
+        let page = preview_outline(&verified, offset, preview_wire).unwrap();
+        assert!(preview_wire + wire_len(&page) < 10_000);
+        output.push_str(page["content"].as_str().unwrap());
+        match page["next_offset"].as_u64() {
+            Some(next) => {
+                assert!(
+                    page["continuation_hint"]
+                        .as_str()
+                        .unwrap()
+                        .contains("outline_offset")
+                );
+                offset = next as usize;
+            }
+            None => break,
+        }
+    }
+    assert!(
+        offset > 0,
+        "the maximum CJK outline needs more than one page"
+    );
+    assert_eq!(output, expected);
+}
+
+#[tokio::test]
+async fn outline_reads_only_attached_pins_and_resolves_uses_in_the_root_closure() {
+    let f = fixture("agent_skill_outline_reader").await;
+    let dependency_id = uuid::Uuid::new_v4().to_string();
+    let root_md = "---\nname: example\nmetadata:\n  depends-on:\n    - helper@1.0\n---\n## Overview\nOne result.\n\n## Approach\n1. **Prepare.** I get ready.\n   Uses: helper\n";
+    let registry = Registry {
+        bytes: archive(&[("SKILL.md", root_md.as_bytes())]),
+        ..Registry::new()
+    };
+    let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    assert!(read_outline(&registry, &agent, ID, None, 0).await.is_err());
+    assert!(registry.calls.lock().unwrap().is_empty());
+    let mut reference = registry.reference();
+    reference.dependencies.push(SkillPin {
+        source: "ornn".into(),
+        skill_id: dependency_id.clone(),
+        name: "helper".into(),
+        version: "1.0".into(),
+        sha256: reference.sha256.clone(),
+    });
+    agent.skills = vec![reference.clone()];
+    let page = read_outline(&registry, &agent, ID, None, 0).await.unwrap();
+    assert_eq!(page["path"], "outline");
+    assert_eq!(page["untrusted_guidance"], true);
+    assert!(page["content"].as_str().unwrap().contains(&format!(
+        "Uses: helper (skill {dependency_id}, version 1.0)"
+    )));
+    // A pinned dependency is readable through its root; same package here.
+    assert!(
+        read_outline(&registry, &agent, ID, Some("helper"), 0)
+            .await
+            .is_ok()
+    );
+    // Disabled pins and tampered packages are refused like ordinary reads.
+    let tampered = Registry {
+        bytes: archive(&[("SKILL.md", b"changed after pinning")]),
+        ..Registry::new()
+    };
+    assert!(
+        matches!(read_outline(&tampered, &agent, ID, None, 0).await, Err(AppError::ValidationError(message)) if message.contains("SHA-256"))
+    );
+    agent.skills[0].disabled = true;
+    assert!(read_outline(&registry, &agent, ID, None, 0).await.is_err());
+    f.state.db.drop().await.unwrap();
+}

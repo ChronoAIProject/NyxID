@@ -1,0 +1,152 @@
+# NYX skill template
+
+Status: Part 1 of #2331. Off by default behind the per-person feature flag
+`assistant:skill-runs`.
+
+The NYX skill template gives every skill a short, plain-language outline that
+NyxBot can show to a person before doing the work, and later track while the
+work runs. The outline is written by the skill's author and lives in the skill's
+own `SKILL.md`, so no Ornn format change is needed.
+
+## Format
+
+After the YAML frontmatter, `SKILL.md` has these level-2 sections, in this order:
+
+| Section | Required | Content |
+| --- | --- | --- |
+| `## Overview` | Yes | 2–3 short plain paragraphs: what the person ends up with, who it suits and who it doesn't, what it needs and what it changes. |
+| `## Approach` | Yes | Numbered steps, one per line: `N. **Title.** One or two plain sentences.` |
+| `## Needs and produces` | No | One `Needs:` line and one `Produces:` line. |
+| `## Details` | No | Everything an agent needs to do the work. Any later sections are details too. |
+
+A step may continue on indented lines. An indented line made only of tags is a
+tag line, with tags separated by `·`:
+
+- `Uses: <dependency>`: this step follows the named dependency's guidance.
+- `Asks you`: this step needs the person's input.
+
+Tags are display hints only. They never change approvals: action cards and the
+access mode still decide what needs confirmation.
+
+```markdown
+## Overview
+Give me a topic and a repository. I research the topic on the web, summarise
+what I find with sources, and open one GitHub issue with that summary.
+
+It suits turning a question into a tracked task. It is not for long reports
+or for editing existing issues.
+
+You need Firecrawl and GitHub connected. The only change is one new issue.
+
+## Approach
+1. **Agree the question.** I restate the topic and the repository so we aim at the same thing.
+   Asks you
+2. **Research it.** I search the web and read the most relevant pages.
+   Uses: firecrawl-via-nyxid
+3. **Draft the issue.** I write a title and a short body with sources, and show it to you.
+   Asks you
+4. **Open the issue.** I create it in the repository and send you the link.
+   Uses: github-via-nyxid
+
+## Needs and produces
+Needs: Firecrawl, GitHub (write to issues).
+Produces: one GitHub issue link.
+```
+
+A starter file is in [`skills/TEMPLATE.md`](../skills/TEMPLATE.md), and
+[`skills/research-to-github-issue`](../skills/research-to-github-issue/SKILL.md)
+is a complete combined example.
+
+## Limits
+
+Recommended (NyxBot's drafts get warnings, never refusals, when they miss these):
+
+- 3–7 steps.
+- Overview and Approach together under 2,000 characters.
+- No tables or code in the Overview; put them under Details.
+- Include Needs and produces.
+
+Hard limits (enforced when reading). They count Unicode characters, not bytes:
+
+| Field | Limit |
+| --- | --- |
+| Overview | 1,200 |
+| Steps | 1–10 |
+| Step title | 80 |
+| Step text | 300 |
+| `Needs` / `Produces` | 200 each |
+
+The reader returns **no outline**, never a cut-down one, when a required section
+is missing; a section appears twice or out of order; a heading is malformed; the
+Approach contains anything other than numbered steps, indented continuation lines
+and tag lines (including a code fence); a hard limit is exceeded; or a `Uses` tag
+does not resolve (below). Headings inside code fences don't count. A skill
+without an outline keeps working as an ordinary skill.
+
+## Combining skills
+
+1. Every skill, large or small, has its own Overview and Approach, so it makes
+   sense on its own.
+2. `Uses` must identify exactly one declared dependency, by name or GUID. Ornn
+   declares dependencies in frontmatter `metadata.depends-on` as
+   `<name-or-GUID>@<major.minor>` or `<name>@<dist-tag>`.
+3. NyxID resolves each declared dependency to an exact GUID, version and
+   SHA-256 when the skill is previewed and pinned (at most 16 resolved
+   dependencies per skill; Ornn itself allows 50 declared). A `Uses` tag matches
+   a pin in that verified closure; it is never re-resolved by name at run time,
+   so a dist-tag that moves later changes nothing until an explicit re-pin. If a
+   `Uses` tag matches no pin, more than one pin, or a pin the frontmatter does
+   not declare, the skill has no outline.
+4. Combining means following the smaller skill's guidance inside the same run,
+   with the same agent, authority and approvals. It never hands work to another
+   agent or adds grants.
+5. The parent step says in plain words what it passes to the smaller skill and
+   what it expects back, matching the smaller skill's Needs and Produces. The
+   parent step is done when that work is done; if it fails or is skipped, the
+   parent step fails or is skipped too.
+6. Display is one level deep: the parent's steps are shown, and a smaller
+   skill's own steps are read when that step starts. Nested reads stay inside the
+   set pinned with the original skill.
+
+## How NyxID uses it
+
+Everything below requires `assistant:skill-runs` for the acting person and
+applies to owner turns only; guests never see outlines. With the flag off,
+NyxBot's instructions, tool list and tool results are unchanged.
+
+- **Reading.** `skill_read` accepts `section: "outline"` for an attached skill or
+  one of its pinned dependencies. The result is a page of the rendered outline,
+  marked `untrusted_guidance`, within the usual tool-response budget; long
+  outlines continue with `next_offset`. A skill without an outline returns
+  `outline_available: false`.
+- **Previewing.** `preview_agent_skill` adds an `outline` page for the verified
+  root package, so NyxBot can explain a skill before it is attached; long
+  outlines continue with `outline_offset`. The HTTP preview used by the app is
+  unchanged.
+- **Explaining.** NyxBot's instructions ask it to read the outline before
+  multi-step or changing work a skill covers, explain it in plain words, and ask
+  whether to go ahead. Agreeing is not an approval.
+- **Drafting.** When `assistant:agent-learning` is also on, NyxBot drafts follow
+  the template, and `draft_agent_skill` results may include `outline_warnings`
+  with fixed codes (`missing_overview`, `missing_approach`, `step_count`,
+  `outline_length`, `overview_table_or_code`, `missing_needs_produces`,
+  `uses_unresolved`, ...). Warnings never refuse a draft; existing validation
+  keeps its refusals. Drafts can't declare dependencies yet, so combined skills
+  are written and published by maintainers through the existing Ornn flow.
+
+Outline text is untrusted reference data, like every other skill read: a
+matching hash proves which package it came from, not that its text is safe. It
+never grants permissions, approves actions or changes the access mode. Nothing
+is stored on the agent; the outline is read from the hash-verified package each
+time, and no audit or log entry contains outline text.
+
+## Rollout
+
+`assistant:skill-runs` is off by default for everyone. Upgrade every backend
+replica before enabling any override, then pilot with a personal override.
+Turning the flag off restores the previous behavior on the next tool listing and
+turn; it changes no stored data. Changing the flag changes NyxBot's stable
+instructions, so an existing conversation's upstream context resets once.
+
+Later parts of #2331 add skill cards (suggest or start a skill) and a live step
+checklist under the same flag.

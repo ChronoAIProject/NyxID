@@ -361,6 +361,10 @@ pub struct Preview {
     pub reference: SkillReference,
     pub description: String,
     pub size_bytes: usize,
+    /// The verified root `SKILL.md`, kept only for flag-gated outline reads;
+    /// never part of the preview response.
+    #[serde(skip)]
+    pub(crate) skill_md: Option<String>,
 }
 
 fn invalid(message: &str) -> AppError {
@@ -558,7 +562,10 @@ pub async fn preview_checked(
     })
     .map_err(Mismatch)?;
     let bytes = download_checked(reader, id, version, &reference.sha256).await?;
-    package(&bytes).map_err(Mismatch)?;
+    let skill_md = package(&bytes)
+        .map_err(Mismatch)?
+        .remove("SKILL.md")
+        .and_then(|content| String::from_utf8(content).ok());
     for d in &reference.dependencies {
         package(&download_checked(reader, &d.skill_id, &d.version, &d.sha256).await?)
             .map_err(Mismatch)?;
@@ -567,6 +574,7 @@ pub async fn preview_checked(
         reference,
         description: line(meta["description"].as_str().unwrap_or_default(), 200),
         size_bytes: bytes.len(),
+        skill_md,
     })
 }
 
@@ -692,14 +700,13 @@ fn package(bytes: &[u8]) -> AppResult<BTreeMap<String, Vec<u8>>> {
     Ok(files)
 }
 
-pub async fn read(
-    reader: &impl OrnnReader,
-    agent: &AssistantAgent,
+/// The live, enabled attached root (and optionally one of its pinned
+/// dependencies) a read may use: `(root, id, version, hash)`.
+fn attached_pin<'a>(
+    agent: &'a AssistantAgent,
     skill: &str,
     dependency: Option<&str>,
-    path: &str,
-    offset: usize,
-) -> AppResult<Value> {
+) -> AppResult<(&'a SkillReference, &'a str, &'a str, &'a str)> {
     let root = agent
         .skills
         .iter()
@@ -716,6 +723,18 @@ pub async fn read(
         (&root.skill_id, &root.version, &root.sha256)
     };
     literal(id, version)?;
+    Ok((root, id, version, hash))
+}
+
+pub async fn read(
+    reader: &impl OrnnReader,
+    agent: &AssistantAgent,
+    skill: &str,
+    dependency: Option<&str>,
+    path: &str,
+    offset: usize,
+) -> AppResult<Value> {
+    let (_, id, version, hash) = attached_pin(agent, skill, dependency)?;
     if path != "/" && !safe_path(path) {
         return Err(invalid("Use a package-relative file path"));
     }
@@ -734,6 +753,73 @@ pub async fn read(
     page(&content, id, version, path, offset)
 }
 
+/// The NYX template outline of an attached root or pinned dependency
+/// (`assistant:skill-runs`). `Uses` resolves only within the root's pinned
+/// closure, so nested reads never leave the set pinned with the root.
+pub async fn read_outline(
+    reader: &impl OrnnReader,
+    agent: &AssistantAgent,
+    skill: &str,
+    dependency: Option<&str>,
+    offset: usize,
+) -> AppResult<Value> {
+    let (root, id, version, hash) = attached_pin(agent, skill, dependency)?;
+    let files = package(&download(reader, id, version, hash).await?)?;
+    let skill_md = files
+        .get("SKILL.md")
+        .and_then(|content| std::str::from_utf8(content).ok());
+    outline_page(
+        skill_md,
+        &root.dependencies,
+        id,
+        version,
+        offset,
+        PAGE_BUDGET,
+        CONTINUE_READ,
+    )
+}
+
+/// The outline of a verified preview, bounded so the preview and its first
+/// outline page fit one tool result together.
+pub fn preview_outline(preview: &Preview, offset: usize, preview_wire: usize) -> AppResult<Value> {
+    outline_page(
+        preview.skill_md.as_deref(),
+        &preview.reference.dependencies,
+        &preview.reference.skill_id,
+        &preview.reference.version,
+        offset,
+        PAGE_BUDGET
+            .saturating_sub(preview_wire)
+            .max(MIN_OUTLINE_BUDGET),
+        "Call preview_agent_skill again with outline_offset=next_offset to continue.",
+    )
+}
+
+fn outline_page(
+    skill_md: Option<&str>,
+    closure: &[SkillPin],
+    id: &str,
+    version: &str,
+    offset: usize,
+    budget: usize,
+    hint: &str,
+) -> AppResult<Value> {
+    match skill_md.and_then(|md| super::skill_outline::parse(md, closure)) {
+        Some(outline) => page_with(
+            &super::skill_outline::render(&outline),
+            id,
+            version,
+            "outline",
+            offset,
+            budget,
+            hint,
+        ),
+        None => Ok(
+            json!({"skill_id":id,"version":version,"path":"outline","untrusted_guidance":true,"outline_available":false,"complete":true,"hint":super::skill_outline::NO_OUTLINE_HINT}),
+        ),
+    }
+}
+
 /// Every file of an attached pin's exact package (hash-checked), by
 /// package-relative path. Reads regardless of the pin's disabled state.
 pub(crate) async fn pinned_files(
@@ -744,7 +830,41 @@ pub(crate) async fn pinned_files(
     package(&download(reader, &pin.skill_id, &pin.version, &pin.sha256).await?)
 }
 
+/// Serialized MCP tool-result budget for one page, leaving room for the
+/// JSON-RPC envelope and NyxAgent's own result decoration.
+const PAGE_BUDGET: usize = 9200;
+/// Smallest outline page budget; always leaves room for some content.
+const MIN_OUTLINE_BUDGET: usize = 2500;
+const CONTINUE_READ: &str = "Read again with next_offset to continue.";
+
+/// Size of `value` as an MCP text result, including its second JSON escape layer.
+pub fn wire_len(value: &Value) -> usize {
+    json!({"content":[{"type":"text","text":value.to_string()}],"isError":false})
+        .to_string()
+        .len()
+}
+
 fn page(content: &str, id: &str, version: &str, path: &str, offset: usize) -> AppResult<Value> {
+    page_with(
+        content,
+        id,
+        version,
+        path,
+        offset,
+        PAGE_BUDGET,
+        CONTINUE_READ,
+    )
+}
+
+fn page_with(
+    content: &str,
+    id: &str,
+    version: &str,
+    path: &str,
+    offset: usize,
+    budget: usize,
+    hint: &str,
+) -> AppResult<Value> {
     if offset > content.len() || !content.is_char_boundary(offset) {
         return Err(invalid("Offset must be a UTF-8 byte boundary in the file"));
     }
@@ -754,12 +874,12 @@ fn page(content: &str, id: &str, version: &str, path: &str, offset: usize) -> Ap
             end -= 1;
         }
         let complete = end >= content.len();
-        let result = json!({"skill_id":id,"version":version,"path":path,"offset":offset,"next_offset":(!complete).then_some(end),"total_bytes":content.len(),"untrusted_guidance":true,"content":&content[offset..end],"complete":complete,"continuation_hint":(!complete).then_some("Read again with next_offset to continue.")});
-        // Include the second JSON escape layer used by MCP text results. Leave
-        // room for the JSON-RPC envelope and NyxAgent's own result decoration.
-        let wire = json!({"content":[{"type":"text","text":result.to_string()}],"isError":false});
-        if wire.to_string().len() <= 9200 {
+        let result = json!({"skill_id":id,"version":version,"path":path,"offset":offset,"next_offset":(!complete).then_some(end),"total_bytes":content.len(),"untrusted_guidance":true,"content":&content[offset..end],"complete":complete,"continuation_hint":(!complete).then_some(hint)});
+        if wire_len(&result) <= budget {
             return Ok(result);
+        }
+        if end == offset {
+            return Err(invalid("Skill page does not fit the response budget"));
         }
         end = offset + (end - offset) * 3 / 4;
     }

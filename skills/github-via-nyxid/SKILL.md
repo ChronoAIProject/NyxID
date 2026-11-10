@@ -1,7 +1,7 @@
 ---
 name: github-via-nyxid
 description: Operate a user's GitHub account through NyxID's credential-brokering proxy (service slug api-github) — read and write repositories, files, issues, pull requests, commits, branches, Actions, gists and anything else the GitHub REST API exposes, all on the user's behalf and without ever handling a raw token. NyxID injects the user's GitHub credential server-side. Use when an agent needs to read from or act on GitHub for a user who has connected their GitHub account in NyxID.
-version: "1.1"
+version: "1.2"
 license: MIT
 metadata:
   category: plain
@@ -19,6 +19,28 @@ metadata:
 # Operate GitHub via NyxID
 
 ## Overview
+I read and change things in your GitHub account through NyxID: repositories,
+files, issues, pull requests and more, without ever handling your GitHub token.
+
+It suits everyday GitHub work you would otherwise do by hand. What I can do is
+limited to the permissions your GitHub connection was granted.
+
+You need GitHub connected in NyxID. Reads change nothing; writes change only
+what you asked for.
+
+## Approach
+1. **Check the connection.** I confirm your GitHub account is connected in NyxID and what it may do.
+2. **Find what to work on.** I read the repositories, issues, pull requests or files involved.
+3. **Make the change.** I create or update what you asked for, such as an issue, comment, branch or file.
+4. **Report back.** I send links to what I read or changed, and anything I could not do.
+
+## Needs and produces
+Needs: a GitHub connection in NyxID with the permissions the task needs.
+Produces: links to the GitHub items read or changed.
+
+## Details
+
+### How it works
 
 This skill lets an AI agent act on a user's **GitHub** account using the GitHub REST
 API — read repos, open issues and pull requests, commit files, trigger Actions, etc. —
