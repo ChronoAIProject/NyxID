@@ -672,7 +672,318 @@ test("closing voice releases push-to-talk and ends the call", async () => {
   f.harness.unmount();
 });
 
-test("voice leaves approval details and task receipts in the chat", () => {
+test("an approval review and task Stop remain separate from ending voice", () => {
+  const f = setup({
+    active: true,
+    snapshot: {
+      ...snapshot,
+      tasks: [
+        {
+          id: serviceId,
+          turn_id: "turn-1",
+          state: "claimed",
+          pending_acknowledgement_ids: [],
+          title: "Read messages",
+        },
+        {
+          id: sessionId,
+          turn_id: "turn-2",
+          state: "awaiting_confirmation",
+          pending_acknowledgement_ids: ["ack-1"],
+          title: "Send reply",
+        },
+        {
+          id: "33333333-3333-4333-8333-333333333333",
+          turn_id: "turn-3",
+          state: "cancelled",
+          outcome: "failed",
+          pending_acknowledgement_ids: [],
+          title: "Earlier failed request",
+        },
+      ],
+    },
+  });
+  assert.match(f.text(), /Needs your OK/);
+  assert.equal(f.find("Stop task"), undefined);
+  f.button("Show agent tasks").props.onPress();
+  assert.match(f.text(), /Tasks can continue after the call ends/);
+  assert.equal(
+    f.all().filter((row) => row.props.label === "Stop task").length,
+    1,
+  );
+  assert.doesNotMatch(f.text(), /Earlier failed request/);
+  f.voice.holding = true;
+  f.button("Review in chat").props.onPress();
+  f.button("Stop task").props.onPress();
+  assert.deepEqual(f.events, [
+    ["hold", false],
+    ["review", "ack-1"],
+    ["stopTask", serviceId],
+  ]);
+  assert.equal(
+    f.events.some(([event]) => event === "end"),
+    false,
+  );
+  f.harness.unmount();
+});
+
+test("failed task activity keeps request text and partial-effect warnings behind Details", () => {
+  const request = "根据可用能力回答用户关于语音字幕的问题。";
+  const warning =
+    "The task failed before returning an answer. Some actions may already have finished; check them before retrying.";
+  const f = setup({
+    active: true,
+    snapshot: {
+      ...snapshot,
+      tasks: [
+        {
+          id: serviceId,
+          turn_id: "turn-1",
+          state: "cancelled",
+          outcome: "failed",
+          pending_acknowledgement_ids: [],
+          title: request,
+          progress: {
+            stage: "ended",
+            detail: warning,
+            last_completed_step: null,
+            completed_steps: 0,
+            updated_at: "2026-10-16T04:00:01Z",
+          },
+        },
+      ],
+    },
+  });
+  assert.match(f.text(), /1 task failed/);
+  assert.doesNotMatch(f.text(), new RegExp(request));
+  assert.doesNotMatch(f.text(), /Some actions may already have finished/);
+  f.button("Show agent tasks").props.onPress();
+  assert.match(f.text(), /Task 1 · Failed/);
+  assert.doesNotMatch(
+    f.text(),
+    /Cancelled|Tasks can continue after the call ends/,
+  );
+  assert.doesNotMatch(f.text(), new RegExp(request));
+  assert.doesNotMatch(f.text(), /Some actions may already have finished/);
+
+  f.button("Show details for task 1").props.onPress();
+  assert.match(f.text(), /Request/);
+  assert.ok(f.text().includes(request));
+  assert.ok(f.text().includes(warning));
+  assert.ok(f.find("Hide details for task 1"));
+  assert.deepEqual(f.events, []);
+  f.button("Hide details for task 1").props.onPress();
+  assert.doesNotMatch(f.text(), new RegExp(request));
+  assert.doesNotMatch(f.text(), /Some actions may already have finished/);
+  assert.deepEqual(f.events, []);
+  f.harness.unmount();
+});
+
+test("terminal task activity distinguishes failure, Stop and an unknown legacy ending", () => {
+  const f = setup({
+    active: true,
+    snapshot: {
+      ...snapshot,
+      tasks: [
+        {
+          id: serviceId,
+          turn_id: "turn-1",
+          state: "cancelled",
+          outcome: "failed",
+          pending_acknowledgement_ids: [],
+        },
+        {
+          id: sessionId,
+          turn_id: "turn-2",
+          state: "cancelled",
+          outcome: "cancelled",
+          pending_acknowledgement_ids: [],
+        },
+        {
+          id: "33333333-3333-4333-8333-333333333333",
+          turn_id: "turn-3",
+          state: "cancelled",
+          pending_acknowledgement_ids: [],
+        },
+        {
+          id: "44444444-4444-4444-8444-444444444444",
+          turn_id: "turn-4",
+          state: "completed",
+          pending_acknowledgement_ids: [],
+        },
+      ],
+    },
+  });
+  assert.match(f.text(), /1 task failed/);
+  assert.doesNotMatch(f.text(), /in progress/);
+  f.button("Show agent tasks").props.onPress();
+  assert.match(f.text(), /Task 1 · Failed/);
+  assert.match(f.text(), /Task 2 · Stopped/);
+  assert.match(f.text(), /Task 3 · Ended/);
+  assert.match(f.text(), /Task 4 · Done/);
+  assert.doesNotMatch(
+    f.text(),
+    /Cancelled|Tasks can continue after the call ends/,
+  );
+  assert.equal(f.find("Stop task"), undefined);
+  assert.equal(f.find("Review in chat"), undefined);
+  assert.deepEqual(f.events, []);
+  f.harness.unmount();
+});
+
+test("only active work contributes to the in-progress task count and stays stoppable", () => {
+  for (const state of ["queued", "claimed"] as const) {
+    const f = setup({
+      active: true,
+      snapshot: {
+        ...snapshot,
+        tasks: [
+          {
+            id: serviceId,
+            turn_id: "turn-1",
+            state,
+            pending_acknowledgement_ids: [],
+            title: "Current request",
+          },
+          {
+            id: sessionId,
+            turn_id: "turn-2",
+            state: "cancelled",
+            outcome: "failed",
+            pending_acknowledgement_ids: [],
+          },
+          {
+            id: "33333333-3333-4333-8333-333333333333",
+            turn_id: "turn-3",
+            state: "completed",
+            pending_acknowledgement_ids: [],
+          },
+        ],
+      },
+    });
+    assert.match(f.text(), /1 task in progress/);
+    assert.doesNotMatch(f.text(), /3 tasks in progress/);
+    f.button("Show agent tasks").props.onPress();
+    assert.match(f.text(), /Tasks can continue after the call ends/);
+    f.button("Stop task").props.onPress();
+    assert.deepEqual(f.events, [["stopTask", serviceId]]);
+    assert.ok(f.find("End voice and close"));
+    f.harness.unmount();
+  }
+});
+
+test("details reveal only the selected request and never perform a task operation", () => {
+  const f = setup({
+    active: true,
+    snapshot: {
+      ...snapshot,
+      tasks: [
+        {
+          id: serviceId,
+          turn_id: "turn-1",
+          state: "completed",
+          pending_acknowledgement_ids: [],
+          title: "First private request",
+        },
+        {
+          id: sessionId,
+          turn_id: "turn-2",
+          state: "cancelled",
+          outcome: "cancelled",
+          pending_acknowledgement_ids: [],
+          title: "Second private request",
+        },
+      ],
+    },
+  });
+  assert.match(f.text(), /Task activity/);
+  assert.doesNotMatch(f.text(), /in progress|task failed/);
+  f.button("Show agent tasks").props.onPress();
+  f.button("Show details for task 1").props.onPress();
+  assert.match(f.text(), /First private request/);
+  assert.doesNotMatch(f.text(), /Second private request/);
+  f.button("Hide details for task 1").props.onPress();
+  f.button("Show details for task 2").props.onPress();
+  assert.match(f.text(), /Second private request/);
+  assert.doesNotMatch(f.text(), /First private request/);
+  assert.deepEqual(f.events, []);
+  f.harness.unmount();
+});
+
+test("opening task activity and its details releases held PTT without ending the call", () => {
+  const f = setup({
+    active: true,
+    saved: { ...saved, input_mode: "push_to_talk" },
+    snapshot: {
+      ...snapshot,
+      tasks: [
+        {
+          id: serviceId,
+          turn_id: "turn-1",
+          state: "claimed",
+          pending_acknowledgement_ids: [],
+          title: "Current request",
+        },
+      ],
+    },
+  });
+  const bridge = () => f.all().find((row) => row.type === "VoiceMediaBridge")!;
+  const original = bridge();
+  f.voice.holding = true;
+  f.button("Show agent tasks").props.onPress();
+  assert.equal(f.voice.holding, false);
+  f.voice.holding = true;
+  f.button("Show details for task 1").props.onPress();
+  assert.equal(f.voice.holding, false);
+  assert.deepEqual(f.events, [
+    ["hold", false],
+    ["hold", false],
+  ]);
+  assert.equal(bridge().key, original.key);
+  assert.equal(bridge().props.media, original.props.media);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("task settlement updates activity without restarting media or retaining a running disclaimer", () => {
+  const pending: VoiceSnapshot = {
+    ...snapshot,
+    tasks: [
+      {
+        id: serviceId,
+        turn_id: "turn-1",
+        state: "claimed",
+        pending_acknowledgement_ids: [],
+        title: "A request",
+      },
+    ],
+  };
+  const f = setup({ active: true, snapshot: pending });
+  const bridge = () => f.all().find((row) => row.type === "VoiceMediaBridge")!;
+  const original = bridge();
+  f.button("Show agent tasks").props.onPress();
+  assert.match(f.text(), /Tasks can continue after the call ends/);
+  const pendingTask = pending.tasks[0];
+  assert.ok(pendingTask);
+  f.voice.snapshot = {
+    ...pending,
+    tasks: [{ ...pendingTask, state: "cancelled", outcome: "failed" }],
+  };
+  f.harness.render();
+  assert.match(f.text(), /1 task failed/);
+  assert.match(f.text(), /Task 1 · Failed/);
+  assert.doesNotMatch(
+    f.text(),
+    /in progress|Tasks can continue after the call ends/,
+  );
+  assert.equal(f.find("Stop task"), undefined);
+  assert.equal(bridge().key, original.key);
+  assert.equal(bridge().props.media, original.props.media);
+  assert.deepEqual(f.events, []);
+  f.harness.unmount();
+});
+
+test("approval-only task activity asks for card review without offering Stop or a running disclaimer", () => {
   const f = setup({
     active: true,
     snapshot: {
@@ -683,19 +994,54 @@ test("voice leaves approval details and task receipts in the chat", () => {
           turn_id: "turn-1",
           state: "awaiting_confirmation",
           pending_acknowledgement_ids: ["ack-1"],
-          title: "Private task receipt",
         },
       ],
     },
   });
-  assert.doesNotMatch(
-    f.text(),
-    /Private task receipt|Agent tasks|Needs your OK/,
-  );
-  assert.equal(
-    f.all().some((row) => row.props.label === "Stop task"),
-    false,
-  );
+  f.button("Show agent tasks").props.onPress();
+  assert.match(f.text(), /Review the pending request in chat to continue/);
+  assert.doesNotMatch(f.text(), /Tasks can continue after the call ends/);
+  assert.equal(f.find("Stop task"), undefined);
+  f.button("Review in chat").props.onPress();
+  assert.deepEqual(f.events, [["review", "ack-1"]]);
+  f.harness.unmount();
+});
+
+test("task details stay attached to the request when snapshots reorder or remove it", () => {
+  const first: VoiceSnapshot["tasks"][number] = {
+    id: serviceId,
+    turn_id: "turn-1",
+    state: "completed",
+    pending_acknowledgement_ids: [],
+    title: "First request text",
+  };
+  const second: VoiceSnapshot["tasks"][number] = {
+    id: sessionId,
+    turn_id: "turn-2",
+    state: "completed",
+    pending_acknowledgement_ids: [],
+    title: "Second request text",
+  };
+  const f = setup({
+    active: true,
+    snapshot: { ...snapshot, tasks: [first, second] },
+  });
+  f.button("Show agent tasks").props.onPress();
+  f.button("Show details for task 1").props.onPress();
+  f.voice.snapshot = { ...snapshot, tasks: [second, first] };
+  f.harness.render();
+  assert.match(f.text(), /First request text/);
+  assert.doesNotMatch(f.text(), /Second request text/);
+  assert.ok(f.find("Hide details for task 2"));
+  f.voice.snapshot = { ...snapshot, tasks: [second] };
+  f.harness.render();
+  assert.doesNotMatch(f.text(), /First request text|Second request text/);
+  f.voice.snapshot = { ...snapshot, tasks: [] };
+  f.harness.render();
+  assert.equal(f.find("Agent tasks"), undefined);
+  assert.equal(f.find("Show agent tasks"), undefined);
+  assert.equal(f.find("Hide agent tasks"), undefined);
+  assert.deepEqual(f.events, []);
   f.harness.unmount();
 });
 

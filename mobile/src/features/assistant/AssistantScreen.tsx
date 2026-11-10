@@ -1561,6 +1561,14 @@ export function AssistantScreen({
             preferencesOpen={voicePreferencesOpen}
             onPreferencesClose={() => setVoicePreferencesOpen(false)}
             onUpdate={() => void assistant.recover()}
+            onReview={(acknowledgementId) => {
+              assistant.openConversation(voiceThread, acknowledgementId);
+              navigation.setParams({
+                conversationId: voiceThread,
+                acknowledgementId,
+                openLatest: false,
+              });
+            }}
           />
         ) : (
           <ChatComposerFrame>

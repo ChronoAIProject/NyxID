@@ -76,12 +76,30 @@ type Props = {
   minimized?: boolean;
   onExpand?: () => void;
   onUpdate: () => void;
+  /** Scrolls the main chat to the approval; it does not stop the call or task. */
+  onReview?: (acknowledgementId?: string) => void;
   /** The main chat shows the call's finished words; this composer shows unsent ones. */
   onSnapshot?: (snapshot: VoiceSnapshot | undefined) => void;
   /** Controlled by the chat's Chat options › Voice preferences action. */
   preferencesOpen?: boolean;
   onPreferencesClose?: () => void;
 };
+type Task = VoiceSnapshot["tasks"][number];
+
+const TASK_STATE: Record<Task["state"], string> = {
+  queued: "Queued",
+  claimed: "Running",
+  awaiting_confirmation: "Needs your OK",
+  completed: "Done",
+  cancelled: "Ended",
+};
+
+function taskState(task: Task) {
+  if (task.state !== "cancelled") return TASK_STATE[task.state];
+  if (task.outcome === "failed") return "Failed";
+  if (task.outcome === "cancelled") return "Stopped";
+  return TASK_STATE.cancelled;
+}
 type CallSelection = { option: VoiceOption; preferences: VoicePreferences };
 
 /**
@@ -123,6 +141,7 @@ function VoiceConversation({
   agentName,
   onClose,
   onUpdate,
+  onReview,
   minimized = false,
   onExpand,
   onSnapshot,
@@ -143,6 +162,8 @@ function VoiceConversation({
   const [rise] = useState(() => new Animated.Value(reducedMotion ? 0 : 1));
   const transcriptEdges = useScrollEdges();
   const [helpOpen, setHelpOpen] = useState(false);
+  const [tasksOpen, setTasksOpen] = useState(false);
+  const [taskDetailsId, setTaskDetailsId] = useState<string>();
   const helpAnchor = useRef<View>(null);
   const [anchor, setAnchor] = useState({ x: 0, y: 0, height: 44 });
   const [helpHeight, setHelpHeight] = useState(240);
@@ -268,6 +289,21 @@ function VoiceConversation({
       caption.speaker === "user" && !caption.sealed && !!caption.text.trim(),
   );
   const tasks = voice.snapshot?.tasks ?? [];
+  const needsOk = tasks.some((task) => task.state === "awaiting_confirmation");
+  const pendingTasks = tasks.filter(
+    (task) => task.state === "queued" || task.state === "claimed",
+  ).length;
+  const running = pendingTasks > 0;
+  const failedTasks = tasks.filter(
+    (task) => task.state === "cancelled" && task.outcome === "failed",
+  ).length;
+  const taskActivity = needsOk
+    ? "Needs your OK"
+    : pendingTasks
+      ? `${pendingTasks} ${pendingTasks === 1 ? "task" : "tasks"} in progress`
+      : failedTasks
+        ? `${failedTasks} ${failedTasks === 1 ? "task" : "tasks"} failed`
+        : "Task activity";
   // Listening follows the client's actual input gate and Speaking follows
   // playback; a stale partial caption never invents audio activity.
   const phase = voiceAuraPhase({
@@ -616,6 +652,72 @@ function VoiceConversation({
     } catch {
       setBillingOpenError(true);
     }
+  }
+  function review(acknowledgementId?: string) {
+    if (voice.holding) voice.hold(false);
+    onReview?.(acknowledgementId);
+  }
+  function taskRow(task: Task, index: number) {
+    const detailsOpen = taskDetailsId === task.id;
+    const hasDetails = !!(task.title?.trim() || task.progress?.detail.trim());
+    return (
+      <View key={task.id} style={styles.taskRow}>
+        <View style={styles.taskHeader}>
+          <Label style={styles.fill}>
+            {`Task ${index + 1} · ${taskState(task)}`}
+          </Label>
+          <View style={styles.taskActions}>
+            {hasDetails ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`${detailsOpen ? "Hide" : "Show"} details for task ${index + 1}`}
+                accessibilityState={{ expanded: detailsOpen }}
+                onPress={() => {
+                  if (voice.holding) voice.hold(false);
+                  setTaskDetailsId(detailsOpen ? undefined : task.id);
+                }}
+                style={styles.taskDetailsButton}
+              >
+                <Label muted>{detailsOpen ? "Hide details" : "Details"}</Label>
+              </Pressable>
+            ) : null}
+            {task.state === "awaiting_confirmation" && onReview ? (
+              <ActionButton
+                label="Review in chat"
+                variant="secondary"
+                compact
+                onPress={() => review(task.pending_acknowledgement_ids[0])}
+              />
+            ) : null}
+            {task.state === "queued" || task.state === "claimed" ? (
+              <ActionButton
+                label="Stop task"
+                variant="secondary"
+                compact
+                onPress={() => void voice.stopTask(task.id)}
+              />
+            ) : null}
+          </View>
+        </View>
+        {detailsOpen ? (
+          <View style={styles.taskDetails}>
+            {task.title?.trim() ? (
+              <>
+                <Label muted style={styles.taskState}>
+                  Request from voice assistant
+                </Label>
+                <Label selectable>{task.title}</Label>
+              </>
+            ) : null}
+            {task.progress?.detail.trim() ? (
+              <Label muted selectable style={styles.taskState}>
+                {task.progress.detail}
+              </Label>
+            ) : null}
+          </View>
+        ) : null}
+      </View>
+    );
   }
   function closePreferences() {
     pickerContext.current.allowed = false;
@@ -1224,7 +1326,72 @@ function VoiceConversation({
                   </View>
                 </View>
               ) : null}
-              {/* Agent tasks and their approvals are receipts in the chat above. */}
+              {/* One compact chip while the call has agent tasks; the list
+                  (outcome, Details, Review in chat, Stop task) opens on tap. */}
+              {tasks.length ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    tasksOpen ? "Hide agent tasks" : "Show agent tasks"
+                  }
+                  accessibilityState={{ expanded: tasksOpen }}
+                  onPress={() => {
+                    if (voice.holding) voice.hold(false);
+                    setTaskDetailsId(undefined);
+                    setTasksOpen((value) => !value);
+                  }}
+                  style={[
+                    styles.taskChip,
+                    {
+                      backgroundColor: needsOk
+                        ? colors.warningTone.bg
+                        : !running && failedTasks
+                          ? colors.dangerTone.bg
+                          : colors.segmentTrack,
+                    },
+                  ]}
+                >
+                  {running ? (
+                    <ActivityIndicator
+                      size="small"
+                      color={colors.textSecondary}
+                    />
+                  ) : null}
+                  <Text
+                    style={[
+                      styles.taskChipText,
+                      {
+                        color: needsOk
+                          ? colors.warningTone.text
+                          : !running && failedTasks
+                            ? colors.dangerTone.text
+                            : colors.textPrimary,
+                      },
+                    ]}
+                  >
+                    {taskActivity}
+                  </Text>
+                </Pressable>
+              ) : null}
+              {tasksOpen && tasks.length ? (
+                <ScrollView
+                  accessibilityLabel="Agent tasks"
+                  style={[
+                    styles.taskTray,
+                    { backgroundColor: colors.segmentTrack },
+                  ]}
+                  contentContainerStyle={styles.taskTrayContent}
+                >
+                  {tasks.map(taskRow)}
+                  {running || needsOk ? (
+                    <Label muted style={styles.footnote}>
+                      {running
+                        ? "Tasks can continue after the call ends. Stop a task to cancel it."
+                        : "Review the pending request in chat to continue."}
+                    </Label>
+                  ) : null}
+                </ScrollView>
+              ) : null}
               <VoiceComposerControls>
                 <View style={styles.sideControls}>
                   {active ? (
@@ -1467,6 +1634,34 @@ const styles = StyleSheet.create({
   transcriptContent: { gap: 10, paddingHorizontal: 2, paddingBottom: 2 },
   textButton: { minHeight: 32, justifyContent: "center", alignSelf: "center" },
   footnote: { fontFamily: fonts.body, fontSize: 12, lineHeight: 17 },
+  fill: { flex: 1 },
+  taskChip: {
+    alignSelf: "flex-start",
+    minHeight: 44,
+    borderRadius: 16,
+    paddingHorizontal: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+  },
+  taskChipText: { fontFamily: fonts.bodySemi, fontSize: 12, lineHeight: 17 },
+  taskTray: { maxHeight: 200, borderRadius: 14 },
+  taskTrayContent: { gap: 10, padding: 8 },
+  taskRow: { gap: 6 },
+  taskHeader: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 8,
+  },
+  taskActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  taskDetailsButton: {
+    minHeight: 44,
+    paddingHorizontal: 8,
+    justifyContent: "center",
+  },
+  taskDetails: { gap: 4 },
+  taskState: { fontSize: 12 },
   modes: {
     flexDirection: "row",
     flexShrink: 1,

@@ -1148,6 +1148,26 @@ test("unmount aborts pending draft creation and late success cannot navigate", a
   );
 });
 
+test("voice task review returns to its exact saved chat without closing voice", async () => {
+  const x = setup(A);
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  x.voice()!.props.onReview("ack-123");
+  assert.deepEqual(
+    x.events.find(([name]) => name === "open"),
+    ["open", A, "ack-123"],
+  );
+  assert.deepEqual(
+    x.events.find(([name]) => name === "params"),
+    [
+      "params",
+      { conversationId: A, acknowledgementId: "ack-123", openLatest: false },
+    ],
+  );
+  assert.ok(x.voice());
+  x.harness.unmount();
+});
+
 test("transcript interaction minimizes voice in place, tapping expands it and closing restores the entry", async () => {
   const x = setup(A);
   x.input().props.onChangeText(" ");
