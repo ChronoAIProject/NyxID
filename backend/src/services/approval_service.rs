@@ -723,6 +723,8 @@ pub async fn create_approval_request(
         let expires_at = now + Duration::seconds(i64::from(timeout_secs));
 
         let request = ApprovalRequest {
+            activity_outcome: None,
+            activity_execution: None,
             execution_proposal: None,
             assistant_group: operation.assistant_group.clone(),
             id: uuid::Uuid::new_v4().to_string(),
@@ -962,6 +964,8 @@ pub async fn create_tool_approval_request(
     let action_description = tool_arguments.map(|args| format!("{tool_name}({args})"));
 
     let request = ApprovalRequest {
+        activity_outcome: None,
+        activity_execution: None,
         execution_proposal: None,
         assistant_group: None,
         id: uuid::Uuid::new_v4().to_string(),
@@ -3161,6 +3165,8 @@ mod tests {
     fn make_request(id: &str, status: &str) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
+            activity_outcome: None,
+            activity_execution: None,
             execution_proposal: None,
             assistant_group: None,
             id: id.to_string(),
@@ -4334,6 +4340,8 @@ mod tests {
     ) -> ApprovalRequest {
         let now = Utc::now();
         ApprovalRequest {
+            activity_outcome: None,
+            activity_execution: None,
             execution_proposal: None,
             assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),

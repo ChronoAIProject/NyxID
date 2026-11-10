@@ -79,6 +79,7 @@ enum ToolOutcome {
     Completed,
     Error,
     PolicyRefusal,
+    DecisionRequired,
 }
 
 #[derive(Clone)]
@@ -107,7 +108,7 @@ fn tool_failure(response: &Response) -> Option<crate::models::assistant_conversa
         || (response.status().is_success()
             && matches!(
                 response.extensions().get::<ToolOutcome>(),
-                Some(ToolOutcome::PolicyRefusal)
+                Some(ToolOutcome::PolicyRefusal | ToolOutcome::DecisionRequired)
             ))
     {
         return None;
@@ -2736,19 +2737,28 @@ async fn handle_tools_call_inner(
     };
     // Keep native dispatch out of the progress-tracking wrapper's frame.
     // Universal calls add another dispatch layer before transactional cards.
-    let response = crate::services::machine_activity_service::ACTIVITY_ID
+    let pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut response = crate::services::assistant_activity_decision::DECISION_PENDING
         .scope(
-            activity.as_ref().map(|(_, id)| id.clone()),
-            Box::pin(dispatch_tools_call(
-                state,
-                auth,
-                session_id,
-                request,
-                client_accepts_sse,
-                billing_egress_permit,
-            )),
+            pending.clone(),
+            crate::services::machine_activity_service::ACTIVITY_ID.scope(
+                activity.as_ref().map(|(_, id)| id.clone()),
+                Box::pin(dispatch_tools_call(
+                    state,
+                    auth,
+                    session_id,
+                    request,
+                    client_accepts_sse,
+                    billing_egress_permit,
+                )),
+            ),
         )
         .await;
+    if pending.load(std::sync::atomic::Ordering::Relaxed) && !tool_succeeded(&response) {
+        response
+            .extensions_mut()
+            .insert(ToolOutcome::DecisionRequired);
+    }
     if let (Some(chat), Some(window), Some(params), Some(digest)) = (
         auth.chat.as_ref(),
         window.as_ref(),
@@ -3925,6 +3935,16 @@ async fn authorize_mcp_operation(
         )
     })?;
 
+    if let Some(chat) = auth.chat.as_ref() {
+        crate::services::assistant_activity_decision::approval(
+            &state.db,
+            chat,
+            &approval_request.id,
+            false,
+        )
+        .await
+        .map_err(|_| tool_result(request_id.clone(), ACTIVITY_RECORDING_RETRY, true))?;
+    }
     let req_id = approval_request.id.clone();
     approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
         .await
@@ -3934,6 +3954,14 @@ async fn authorize_mcp_operation(
             tool_result(request_id.clone(), &outcome.to_string(), true)
         })?;
     if let Some(chat) = auth.chat.as_ref() {
+        crate::services::assistant_activity_decision::approval(
+            &state.db,
+            chat,
+            &approval_request.id,
+            true,
+        )
+        .await
+        .map_err(|_| tool_result(request_id.clone(), ACTIVITY_RECORDING_RETRY, true))?;
         crate::services::assistant_invocation_service::revalidate_after_approval(&state.db, chat)
             .await
             .map_err(|_| {
@@ -12158,3 +12186,40 @@ mod turn_trace_parity_tests {
 #[cfg(test)]
 #[path = "mcp_lark_wiki_tests.rs"]
 mod lark_wiki_tests;
+
+#[cfg(test)]
+mod decision_result_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn trusted_decision_outcome_leaves_result_bytes_and_loop_guard_digest_unchanged() {
+        let result =
+            json!({"isError":true,"content":[{"type":"text","text":"acknowledgement_required"}]});
+        let original = rpc_success(None, result.clone());
+        let mut gated = rpc_success(None, result);
+        let digest = gated
+            .extensions()
+            .get::<ToolResultDigest>()
+            .unwrap()
+            .0
+            .clone();
+        gated.extensions_mut().insert(ToolOutcome::DecisionRequired);
+        assert!(!tool_succeeded(&gated));
+        assert!(tool_failure(&gated).is_none());
+        assert_eq!(
+            original.extensions().get::<ToolResultDigest>().unwrap().0,
+            digest
+        );
+        assert_eq!(
+            gated.extensions().get::<ToolResultDigest>().unwrap().0,
+            digest
+        );
+        assert_eq!(
+            axum::body::to_bytes(original.into_body(), 4096)
+                .await
+                .unwrap(),
+            axum::body::to_bytes(gated.into_body(), 4096).await.unwrap()
+        );
+    }
+}

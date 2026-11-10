@@ -4453,9 +4453,80 @@ async fn authored_review_links_self_id_listing_and_cross_turn_reuse() {
         .await
         .unwrap();
     f.chat.turn_id = Some(turn);
-    let (again, same_card) = make(&f, input(&f.chat.agent_id)).await;
+    let activity = super::super::assistant_nyxagent::activity_started_for_turn(
+        &f.state.db,
+        &f.owner,
+        &f.chat.conversation_id,
+        f.chat.turn_id.as_deref().unwrap(),
+        "nyxid__draft_agent_skill",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (again, same_card) = super::super::machine_activity_service::ACTIVITY_ID
+        .scope(Some(activity.clone()), make(&f, input(&f.chat.agent_id)))
+        .await;
     assert_eq!(again.id, proposal.id);
     assert_eq!(same_card.id, card.id);
+    let mut activities = super::super::assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap()
+        .active_turn
+        .unwrap()
+        .activities;
+    super::super::assistant_activity_decision::refresh(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        activities.iter_mut().collect(),
+    )
+    .await
+    .unwrap();
+    assert!(activities.iter().any(|a| {
+        a.id == activity
+            && a.decision
+                .as_ref()
+                .is_some_and(|d| d.id == card.id && d.state == "waiting")
+    }));
+    // Recovery from another thread retains the review origin, but links the
+    // caller's own activity and exposes only that trusted card's state.
+    let other = another_authoring_chat(&f).await;
+    let other_activity = super::super::assistant_nyxagent::activity_started_for_turn(
+        &f.state.db,
+        &f.owner,
+        &other.conversation_id,
+        other.turn_id.as_deref().unwrap(),
+        "nyxid__draft_agent_skill",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let result = super::super::machine_activity_service::ACTIVITY_ID
+        .scope(Some(other_activity.clone()), draft_in_chat(&f, &other))
+        .await
+        .unwrap();
+    assert_eq!(result["acknowledgement_id"], card.id);
+    let mut activities =
+        super::super::assistant_nyxagent::get(&f.state.db, &f.owner, &other.conversation_id)
+            .await
+            .unwrap()
+            .active_turn
+            .unwrap()
+            .activities;
+    super::super::assistant_activity_decision::refresh(
+        &f.state.db,
+        &f.owner,
+        &other.conversation_id,
+        activities.iter_mut().collect(),
+    )
+    .await
+    .unwrap();
+    assert!(activities.iter().any(|a| {
+        a.id == other_activity
+            && a.decision
+                .as_ref()
+                .is_some_and(|d| d.id == card.id && d.state == "waiting")
+    }));
     f.state.db.collection::<bson::Document>(ACKNOWLEDGEMENTS_COLLECTION_NAME)
         .update_one(doc! {"_id":&card.id},doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::minutes(1))}}).await.unwrap();
     let reader = crate::handlers::agent_skills::Reader {

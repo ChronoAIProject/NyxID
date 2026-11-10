@@ -87,6 +87,7 @@ function toolCalls(
       startedAt: Date.parse(activity.started_at),
       finishedAt: activity.ended_at ? Date.parse(activity.ended_at) : undefined,
       failure: activity.failure,
+      decision: activity.decision,
     })),
   };
 }

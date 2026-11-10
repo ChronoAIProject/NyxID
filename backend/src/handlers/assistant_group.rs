@@ -1284,6 +1284,10 @@ pub async fn list_messages(
         rows.remove(0);
     }
     let before_seq = more.then(|| rows[0].seq);
+    Box::pin(crate::services::assistant_activity_decision::refresh_group(
+        &state.db, &mut rows,
+    ))
+    .await?;
     Box::pin(crate::services::machine_activity_service::refresh_group_jobs(&state.db, &mut rows))
         .await?;
     let agents = team::agents(&state.db, &group_owner, true).await?;
