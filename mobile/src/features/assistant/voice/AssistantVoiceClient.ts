@@ -1,5 +1,4 @@
 import {
-  activeVoiceSessionSchema,
   voicePreferencesSchema,
   voiceSessionSchema,
   voiceSnapshotSchema,
@@ -13,6 +12,8 @@ import {
   type VoiceStartRequest,
 } from "./voiceContracts";
 import { ApiError } from "../../../lib/api/ApiError";
+import { discoverActiveVoiceCall } from "./voiceActiveCall";
+import { withVoiceRequestDeadline } from "./voiceRequestDeadline";
 import {
   voiceStartError,
   voiceStartRecovery,
@@ -22,6 +23,7 @@ import {
 
 export type VoiceMediaEvent =
   | { type: "provider-ready" }
+  | { type: "playback-blocked" }
   | { type: "pcm"; bytes: ArrayBuffer }
   /** Mic and playback loudness, 0..1, about 20 Hz while either changes. */
   | { type: "level"; input: number; output: number }
@@ -38,6 +40,8 @@ export interface VoiceMediaAdapter {
   enqueue(bytes: ArrayBuffer, endMs: number): void;
   flush(): void;
   playback(): { playback_ms: number; playback_audible: boolean };
+  /** Transfer quiet native transport to this call's bounded End cleanup owner. */
+  beginEndDrain?(): void;
   close(): void;
   subscribe(listener: (event: VoiceMediaEvent) => void): () => void;
 }
@@ -61,6 +65,10 @@ export interface AssistantVoiceApi {
     signal?: AbortSignal,
   ): Promise<unknown>;
   active(conversationId: string, signal?: AbortSignal): Promise<unknown>;
+  accountActive?(
+    conversationId: string,
+    signal?: AbortSignal,
+  ): Promise<unknown>;
   control(
     conversationId: string,
     sessionId: string,
@@ -87,9 +95,23 @@ export interface AssistantVoiceClientOptions {
   api: AssistantVoiceApi;
   createSocket(path: string, signal: AbortSignal): Promise<VoiceControlSocket>;
   onSnapshot(snapshot: VoiceSnapshot): void;
+  /** Provider and authoritative controls are ready, independently of mic mode. */
+  onReady?(): void;
+  /** Mirrors the capture gate applied to the media adapter, independently of readiness. */
+  onInputChanged?(enabled: boolean): void;
   onError(message: string, recovery?: VoiceStartRecovery): void;
   onClosed?(): void;
-  onConflict?(session: VoiceSession | null): void;
+  /** Durable cleanup ownership; may settle after this view has unmounted. */
+  onCleanup?(
+    session: VoiceSession | null,
+    unknown: boolean,
+    conversationId?: string,
+  ): void;
+  onConflict?(
+    session: VoiceSession | null,
+    conversationId?: string,
+    unknown?: boolean,
+  ): void;
   randomId?(): string;
   clock?: VoiceClientClock;
 }
@@ -103,6 +125,9 @@ const defaultClock: VoiceClientClock = {
     clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
+const simulatorMicrophoneMessage =
+  "A test microphone is active. Select a real microphone and try again.";
+
 /** One explicit call attempt. It never retries a POST or silently restarts audio. */
 export class AssistantVoiceClient {
   private readonly abort = new AbortController();
@@ -110,9 +135,12 @@ export class AssistantVoiceClient {
   private readonly randomId: () => string;
   private readonly unsubscribe: () => void;
   private closed = false;
+  private disposed = false;
+  private onDrainSnapshot?: (snapshot: VoiceSnapshot) => void;
   private attempted = false;
   private started = false;
   private ready = false;
+  private readyNotified = false;
   private held = false;
   private inputEnabled = false;
   private speakerMuted = false;
@@ -120,6 +148,7 @@ export class AssistantVoiceClient {
   private protocol: VoiceProtocol = "openai_live";
   private preferences?: VoicePreferences;
   private session?: VoiceSession;
+  private snapshot?: VoiceSnapshot;
   private socket?: VoiceControlSocket;
   private heartbeat?: unknown;
   private readinessTimeout?: unknown;
@@ -127,6 +156,8 @@ export class AssistantVoiceClient {
   private controlPending = false;
   private readonly endingSessions = new Set<string>();
   private endPromise?: Promise<void>;
+  private outstandingEnd?: VoiceSession;
+  private startInFlight = false;
 
   constructor(private readonly options: AssistantVoiceClientOptions) {
     this.clock = options.clock ?? defaultClock;
@@ -137,6 +168,14 @@ export class AssistantVoiceClient {
 
   get isClosed() {
     return this.closed;
+  }
+
+  get pendingEnd() {
+    return this.outstandingEnd;
+  }
+
+  get pendingStart() {
+    return this.startInFlight;
   }
 
   private path() {
@@ -172,6 +211,7 @@ export class AssistantVoiceClient {
         return;
       }
       requested = true;
+      this.startInFlight = true;
       step = "server";
       const raw = await this.options.api.start(
         this.options.conversationId,
@@ -182,6 +222,7 @@ export class AssistantVoiceClient {
         },
         this.abort.signal,
       );
+      this.startInFlight = false;
       step = "response";
       if (raw && typeof raw === "object" && "session" in raw) {
         const ownSession = voiceSessionSchema.safeParse(raw.session);
@@ -205,6 +246,7 @@ export class AssistantVoiceClient {
       step = "transport";
       await this.openControls();
     } catch (error) {
+      this.startInFlight = false;
       // A cancelled attempt can still return an owned session with a malformed
       // answer. Its validated identity remains enough to end that call, even
       // though the closed client must not publish errors or observe another one.
@@ -214,7 +256,8 @@ export class AssistantVoiceClient {
       }
       // A lost response does not establish whether the POST committed. Observe once;
       // never repeat creation, or end an unrelated pre-existing session on a 409.
-      if (requested && !this.session) await this.observeUncertainStart();
+      const active =
+        requested && !this.session ? await this.observeUncertainStart() : null;
       if (!this.closed) {
         const conflict =
           typeof error === "object" &&
@@ -223,22 +266,59 @@ export class AssistantVoiceClient {
             ("status" in error && error.status === 409));
         this.fail(
           conflict
-            ? "Another voice call is active. End it before starting a new call."
-            : voiceStartError(error, step),
+            ? active
+              ? active.session.end_requested ||
+                active.session.state === "closing"
+                ? "The previous voice call is finishing. You can continue with text."
+                : "Another voice call is active. End it before starting a new call."
+              : "Voice state changed before the call could start. Check call status and try again."
+            : step === "microphone" &&
+                error instanceof Error &&
+                error.message === simulatorMicrophoneMessage
+              ? simulatorMicrophoneMessage
+              : voiceStartError(error, step),
           conflict ? undefined : voiceStartRecovery(error, step),
         );
       }
+    } finally {
+      this.startInFlight = false;
     }
   }
 
   private async observeUncertainStart() {
+    const controller = new AbortController();
+    const interrupted = () => controller.abort();
+    // A late POST may settle after local End. Its bounded metadata recovery
+    // still belongs to onCleanup, while an in-view lookup follows local cancel.
+    if (!this.closed)
+      this.abort.signal.addEventListener("abort", interrupted, { once: true });
     try {
-      const active = activeVoiceSessionSchema.parse(
-        await this.options.api.active(this.options.conversationId),
+      const active = await withVoiceRequestDeadline(controller, () =>
+        discoverActiveVoiceCall(
+          this.options.api,
+          this.options.conversationId,
+          controller.signal,
+        ),
       );
-      if (!this.closed) this.options.onConflict?.(active.session);
+      if (!this.closed)
+        this.options.onConflict?.(
+          active?.session ?? null,
+          active?.conversationId,
+        );
+      else
+        this.options.onCleanup?.(
+          active?.session ?? null,
+          false,
+          active?.conversationId,
+        );
+      return active;
     } catch {
-      if (!this.closed) this.options.onConflict?.(null);
+      if (!this.closed) this.options.onConflict?.(null, undefined, true);
+      else this.options.onCleanup?.(null, true);
+      return null;
+    } finally {
+      this.abort.signal.removeEventListener("abort", interrupted);
+      controller.abort();
     }
   }
 
@@ -254,8 +334,25 @@ export class AssistantVoiceClient {
     }
     this.socket = socket;
     socket.binaryType = "arraybuffer";
-    socket.onmessage = ({ data }) => {
+    socket.onopen = () => {
       if (this.closed || this.socket !== socket) return;
+      this.updateInput();
+      this.notifyReady();
+    };
+    socket.onmessage = ({ data }) => {
+      if (this.socket !== socket) return;
+      if (this.closed) {
+        // Only authoritative snapshots can settle an explicit End. Audio and
+        // provider readiness never regain authority during this quiet drain.
+        if (this.onDrainSnapshot && typeof data === "string") {
+          try {
+            this.onDrainSnapshot(voiceSnapshotSchema.parse(JSON.parse(data)));
+          } catch {
+            /* Keep the last verified cleanup target until the deadline. */
+          }
+        }
+        return;
+      }
       this.onMessage(data);
     };
     const disconnected = () => {
@@ -275,13 +372,16 @@ export class AssistantVoiceClient {
     if (this.closed) return;
     if (event.type === "provider-ready") {
       this.started = true;
-      if (this.ready && this.session?.state === "active")
-        this.clearReadinessTimeout();
       this.updateInput();
+      this.notifyReady();
+    } else if (event.type === "playback-blocked") {
+      this.options.onError("Tap Resume audio to hear the assistant.");
     } else if (event.type === "error") {
       // Media exception strings may include device/provider details. Keep UI bounded.
       this.fail(
-        "Voice media stopped. Check microphone permission and start a new call.",
+        event.message === simulatorMicrophoneMessage
+          ? simulatorMicrophoneMessage
+          : "Voice media stopped. Check microphone permission and start a new call.",
       );
     } else if (
       event.type === "pcm" &&
@@ -384,11 +484,11 @@ export class AssistantVoiceClient {
       if (generationChanged || this.inputBlocked(snapshot.session))
         this.releaseHeldInput();
       this.session = snapshot.session;
+      this.snapshot = snapshot;
       this.ready = true;
-      if (this.started && snapshot.session.state === "active")
-        this.clearReadinessTimeout();
       this.updateInput();
       this.options.onSnapshot(snapshot);
+      this.notifyReady();
       if (
         snapshot.session.state === "closed" ||
         snapshot.session.state === "failed"
@@ -414,26 +514,52 @@ export class AssistantVoiceClient {
     );
   }
 
+  private notifyReady() {
+    if (
+      this.closed ||
+      this.readyNotified ||
+      !this.started ||
+      !this.ready ||
+      this.session?.state !== "active" ||
+      this.session.end_requested ||
+      this.socket?.readyState !== 1
+    )
+      return;
+    this.readyNotified = true;
+    this.clearReadinessTimeout();
+    this.options.onReady?.();
+  }
+
   /** Revoked input permission cannot keep a previous physical press latched. */
   private releaseHeldInput() {
     if (!this.held) return;
     this.held = false;
-    this.inputEnabled = false;
-    this.options.media.setInput(false);
+    this.applyInput(false);
     this.options.media.hold(false);
   }
 
+  private applyInput(enabled: boolean) {
+    const previous = this.inputEnabled;
+    this.inputEnabled = enabled;
+    this.options.media.setInput(enabled);
+    // Media can synchronously fail and close while applying its gate. Never
+    // report the older enable decision after that cleanup has disabled input.
+    if (this.inputEnabled === enabled && previous !== enabled)
+      this.options.onInputChanged?.(enabled);
+  }
+
   private updateInput() {
-    this.inputEnabled = Boolean(
-      !this.closed &&
-      this.started &&
-      this.ready &&
-      this.socket?.readyState === 1 &&
-      !this.inputBlocked(this.session) &&
-      !this.controlPending &&
-      (this.preferences?.input_mode === "automatic" || this.held),
+    this.applyInput(
+      Boolean(
+        !this.closed &&
+        this.started &&
+        this.ready &&
+        this.socket?.readyState === 1 &&
+        !this.inputBlocked(this.session) &&
+        !this.controlPending &&
+        (this.preferences?.input_mode === "automatic" || this.held),
+      ),
     );
-    this.options.media.setInput(this.inputEnabled);
   }
 
   private send(data: string | ArrayBuffer) {
@@ -589,32 +715,138 @@ export class AssistantVoiceClient {
   }
 
   end(): Promise<void> {
+    return this.endCall(true);
+  }
+
+  private endCall(graceful: boolean): Promise<void> {
     if (this.endPromise) return this.endPromise;
     if (this.closed) return Promise.resolve();
     const session = this.session;
-    this.dispose();
-    this.endPromise = session ? this.endRemote(session) : Promise.resolve();
+    this.outstandingEnd = session;
+    if (!session && this.startInFlight) this.options.onCleanup?.(null, true);
+    const drain =
+      graceful &&
+      !!session &&
+      this.protocol === "openai_live" &&
+      this.socket?.readyState === 1;
+    if (drain) {
+      // Lock every input/output path synchronously, keeping only transport
+      // alive so NyxID can obtain the provider's final close acknowledgement.
+      this.closed = true;
+      this.ready = false;
+      this.clearReadinessTimeout();
+      if (this.heartbeat !== undefined)
+        this.clock.clearInterval(this.heartbeat);
+      this.heartbeat = undefined;
+      this.releaseHeldInput();
+      this.applyInput(false);
+      this.speakerMuted = true;
+      this.options.media.muteSpeaker(true);
+      this.options.media.flush();
+      this.pendingAudio = undefined;
+      this.options.media.beginEndDrain?.();
+    } else this.dispose();
+    this.endPromise = session
+      ? this.endRemote(session, drain)
+      : Promise.resolve();
     return this.endPromise;
   }
 
-  private async endRemote(session: VoiceSession) {
+  private async endRemote(session: VoiceSession, drain = false) {
     if (this.endingSessions.has(session.id)) return;
     this.endingSessions.add(session.id);
-    try {
-      await this.options.api.control(this.options.conversationId, session.id, {
-        command_id: this.randomId(),
-        expected_revision: session.control_revision,
-        action: "end",
-      });
-    } catch {
-      // No creation retry. The server's heartbeat expiry is the final backstop.
-    }
+    this.outstandingEnd = session;
+    this.options.onCleanup?.(session, false, this.options.conversationId);
+    const controller = new AbortController();
+    let accepting = true;
+    let terminalAccepted = false;
+    let complete!: () => void;
+    const finished = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    const accept = (next: VoiceSession, snapshot?: VoiceSnapshot) => {
+      if (!accepting || terminalAccepted) return false;
+      const observed = this.outstandingEnd ?? this.session ?? session;
+      if (
+        next.id !== session.id ||
+        next.generation < observed.generation ||
+        (next.generation === observed.generation &&
+          next.control_revision < observed.control_revision)
+      )
+        return false;
+      const terminal = next.state === "closed" || next.state === "failed";
+      this.session = next;
+      if (snapshot) this.snapshot = snapshot;
+      this.outstandingEnd = terminal ? undefined : next;
+      if (terminal) {
+        terminalAccepted = true;
+        this.options.onSnapshot({
+          type: "snapshot",
+          ...this.snapshot,
+          session: next,
+          captions: this.snapshot?.captions ?? [],
+          tasks: this.snapshot?.tasks ?? [],
+        });
+        complete();
+      }
+      return true;
+    };
+    if (drain)
+      this.onDrainSnapshot = (snapshot) => {
+        accept(snapshot.session, snapshot);
+      };
+    // Absolute budget includes the POST itself. Abort is paired with a race so
+    // even an adapter that ignores cancellation cannot strand local resources.
+    const deadline = this.clock.setTimeout(() => {
+      accepting = false;
+      controller.abort();
+      complete();
+    }, 7_000);
+    void (async () => {
+      try {
+        const next = voiceSessionSchema.parse(
+          await this.options.api.control(
+            this.options.conversationId,
+            session.id,
+            {
+              command_id: this.randomId(),
+              expected_revision: session.control_revision,
+              action: "end",
+            },
+            controller.signal,
+          ),
+        );
+        accept(next);
+      } catch {
+        // Retain the verified identity. A draining control socket can still
+        // prove termination after a lost or invalid HTTP response.
+      } finally {
+        if (!drain) complete();
+      }
+    })();
+    await finished;
+    accepting = false;
+    this.onDrainSnapshot = undefined;
+    this.clock.clearTimeout(deadline);
+    controller.abort();
+    if (drain) this.dispose();
+    this.options.onConflict?.(
+      this.outstandingEnd ?? null,
+      this.outstandingEnd ? this.options.conversationId : undefined,
+    );
+    this.options.onCleanup?.(
+      this.outstandingEnd ?? null,
+      false,
+      this.options.conversationId,
+    );
   }
 
   private fail(message: string, recovery?: VoiceStartRecovery) {
     if (this.closed) return;
     this.options.onError(message, recovery);
-    void this.end();
+    // Device/transport faults require immediate local teardown. A human End
+    // preserves quiet transport briefly; a failed transport cannot drain it.
+    void this.endCall(false);
   }
 
   private clearReadinessTimeout() {
@@ -624,20 +856,21 @@ export class AssistantVoiceClient {
   }
 
   private dispose() {
-    if (this.closed) return;
+    if (this.disposed) return;
+    this.disposed = true;
     this.closed = true;
     this.ready = false;
     this.releaseHeldInput();
-    this.inputEnabled = false;
     this.abort.abort();
     this.clearReadinessTimeout();
     if (this.heartbeat !== undefined) this.clock.clearInterval(this.heartbeat);
     this.heartbeat = undefined;
     this.pendingAudio = undefined;
     this.unsubscribe();
-    this.options.media.setInput(false);
+    this.applyInput(false);
     this.options.media.close();
     if (this.socket) {
+      this.socket.onopen = null;
       this.socket.onmessage = null;
       this.socket.onclose = null;
       this.socket.onerror = null;

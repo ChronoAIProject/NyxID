@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { conversationIdSchema } from "../assistantTypes";
 
 const providerId = z
   .string()
@@ -168,6 +169,17 @@ export const voiceSessionSchema = z.object({
 export const activeVoiceSessionSchema = z.object({
   session: voiceSessionSchema.nullable(),
 });
+export const accountActiveVoiceSessionSchema = z
+  .object({
+    session: voiceSessionSchema.nullable(),
+    conversation_id: conversationIdSchema.nullable(),
+  })
+  .refine(
+    (value) => (value.session === null) === (value.conversation_id === null),
+    {
+      message: "An active voice call must identify its conversation",
+    },
+  );
 export const voiceTaskSchema = z.object({
   id: z.string().uuid(),
   turn_id: z.string(),
@@ -178,6 +190,8 @@ export const voiceTaskSchema = z.object({
     "completed",
     "cancelled",
   ]),
+  /** Additive terminal detail; unknown values must not break the live call. */
+  outcome: z.enum(["failed", "cancelled"]).nullish().catch(undefined),
   pending_acknowledgement_ids: z.array(z.string()),
   title: z.string().max(120).nullable().optional(),
   result_message_id: z.string().nullable().optional(),

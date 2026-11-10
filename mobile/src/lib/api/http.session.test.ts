@@ -5,8 +5,11 @@ import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
+import { createAssistantVoiceApi } from "./assistantVoiceTransport";
 
-function setup() {
+function setup(
+  respond?: (url: string, init?: RequestInit) => Promise<Response>,
+) {
   let generation = 1;
   let invalidations = 0;
   let sends = 0;
@@ -58,8 +61,9 @@ function setup() {
         name in mocks ? mocks[name] : localRequire(name),
       process: { env: {} },
       __DEV__: false,
-      fetch: async () => {
+      fetch: async (url: string, init?: RequestInit) => {
         sends++;
+        if (respond) return respond(url, init);
         return {
           status: 401,
           ok: false,
@@ -153,3 +157,87 @@ test("JSON authority guard cancels queued writes after the screen leaves and ret
   assert.equal(env.sends(), 0, "the password body must never reach fetch");
   assert.equal(env.invalidations(), 0);
 });
+
+for (const [status, body] of [
+  [404, null],
+  [405, "Method Not Allowed: synthetic upstream diagnostic"],
+  [404, "<html>synthetic proxy diagnostic</html>"],
+] as const) {
+  test(`raw HTTP ${status} keeps status and sanitizes ${body ? "non-JSON" : "empty"} failures`, async () => {
+    const env = setup(async () => new Response(body, { status }));
+    await assert.rejects(
+      env.request("/optional-route", {}),
+      (cause: unknown) => {
+        const error = cause as {
+          name: string;
+          statusCode: number;
+          errorKey: string;
+          errorCode: number;
+          message: string;
+        };
+        assert.equal(error.name, "ApiError");
+        assert.equal(error.statusCode, status);
+        assert.equal(error.errorKey, `request_failed_${status}`);
+        assert.equal(error.errorCode, 0);
+        assert.equal(error.message, `request_failed_${status}`);
+        assert.doesNotMatch(error.message, /synthetic|html|upstream/);
+        return true;
+      },
+    );
+    assert.equal(env.sends(), 1);
+    assert.equal(env.invalidations(), 0);
+  });
+
+  test(`raw HTTP ${status} from an undeployed account route reaches bounded voice fallback`, async () => {
+    const thread = `nyxa-${"a".repeat(32)}`;
+    const paths: string[] = [];
+    const env = setup(async (url, init) => {
+      const path =
+        new URL(url).pathname.replace("/api/v1", "") + new URL(url).search;
+      paths.push(path);
+      assert.equal(init?.method, "GET");
+      if (path === "/assistant/nyxagent/voice/active")
+        return new Response(body, { status });
+      if (path.endsWith("/voice-sessions/active"))
+        return Response.json({ session: null });
+      assert.equal(path, "/assistant/nyxagent/conversations?limit=10");
+      return Response.json({ conversations: [], next_cursor: null });
+    });
+    const api = createAssistantVoiceApi(
+      (path, options) => env.request(path, { ...options }),
+      "https://nyx.example",
+    );
+    assert.deepEqual(await api.accountActive(thread), {
+      session: null,
+      conversation_id: null,
+    });
+    assert.deepEqual(paths, [
+      "/assistant/nyxagent/voice/active",
+      `/assistant/nyxagent/conversations/${thread}/voice-sessions/active`,
+      "/assistant/nyxagent/conversations?limit=10",
+    ]);
+    assert.equal(env.sends(), 3);
+    assert.equal(env.invalidations(), 0);
+  });
+}
+
+for (const status of [401, 403, 503]) {
+  test(`raw HTTP ${status} must not trigger account voice fallback`, async () => {
+    const paths: string[] = [];
+    const env = setup(async (url) => {
+      paths.push(new URL(url).pathname);
+      return new Response(null, { status });
+    });
+    const api = createAssistantVoiceApi(
+      (path, options) => env.request(path, { ...options }),
+      "https://nyx.example",
+    );
+    await assert.rejects(
+      api.accountActive(`nyxa-${"a".repeat(32)}`),
+      (error: unknown) =>
+        (error as { statusCode: number }).statusCode === status,
+    );
+    assert.deepEqual(paths, ["/api/v1/assistant/nyxagent/voice/active"]);
+    assert.equal(env.invalidations(), status === 401 ? 1 : 0);
+  });
+}
