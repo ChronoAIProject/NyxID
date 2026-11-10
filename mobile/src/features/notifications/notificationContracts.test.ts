@@ -35,10 +35,15 @@ test("feed pages apply additive defaults and keep the mark-all fence", () => {
   assert.equal(row.url, null);
   assert.equal(row.source.conversation_id, null);
   assert.equal(row.source.channel_id, "ch");
-  assert.throws(() =>
-    notificationPageSchema.parse({ items: [{ ...item, kind: "surprise" }], as_of: "2026-11-10T08:06:00Z" }),
-  );
+  // A newer server's kind or a reshaped row is dropped, not the whole page,
+  // so a rolling upgrade never blanks the feed (web does the same).
+  const skewed = notificationPageSchema.parse({
+    items: [{ ...item, kind: "surprise" }, item, { ...item, id: "", kind: "chat_update" }],
+    as_of: "2026-11-10T08:06:00Z",
+  });
+  assert.deepEqual(skewed.items.map((entry) => entry.id), [item.id]);
   assert.throws(() => notificationPageSchema.parse({ items: [item] }));
+  assert.throws(() => notificationPageSchema.parse({ items: "rows", as_of: "2026-11-10T08:06:00Z" }));
 });
 
 test("summary entries carry their thread and the truncation flag", () => {

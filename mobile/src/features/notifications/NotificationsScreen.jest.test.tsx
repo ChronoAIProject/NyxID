@@ -3,6 +3,7 @@ import { NotificationsScreen } from "./NotificationsScreen";
 import { notificationSchema } from "./notificationContracts";
 
 const MOCK_C = `nyxa-${"a".repeat(32)}`;
+const MOCK_AGENT = "7c0f6a8e-2b2e-4a1a-9f1f-0d2c5a6b7c8d";
 const MOCK_AS_OF = "2026-11-10T08:06:00Z";
 const mockReads: unknown[] = [];
 const mockOpened: unknown[] = [];
@@ -29,12 +30,24 @@ const mockRows = [
     created_at: "2026-11-10T08:00:00Z",
     updated_at: "2026-11-10T08:04:00Z",
   }),
+  notificationSchema.parse({
+    id: "n3",
+    kind: "chat_update",
+    title: "Sales room",
+    source: { type: "channel_chat", id: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", channel_id: "ch", agent_id: MOCK_AGENT },
+    url: `https://app.nyxid.test/assistant?agent=${MOCK_AGENT}&details=channels`,
+    created_at: "2026-11-10T08:00:00Z",
+    updated_at: "2026-11-10T08:03:00Z",
+  }),
 ];
 
 jest.mock("../../theme/ThemeContext", () => {
   const { lightColors } = jest.requireActual("../../theme/mobileTheme");
   return { useTheme: () => ({ colors: lightColors, mode: "light" }) };
 });
+jest.mock("../../lib/env", () => ({
+  firstPartyFrontendUrls: () => ["https://app.nyxid.test"],
+}));
 jest.mock("../../app/WorkspaceHeader", () => ({
   useWorkspaceBack: () => {},
   useOpenWorkspaceChat: () => (params: unknown) => mockOpened.push(params),
@@ -93,6 +106,7 @@ describe("NotificationsScreen", () => {
     mockOpened.length = 0;
     mockFilters.length = 0;
     mockFetched.length = 0;
+    (navigation as { push: jest.Mock }).push.mockClear();
   });
 
   it("renders rows with previews, counts and unread state, and tapping marks read then opens the thread", async () => {
@@ -102,7 +116,7 @@ describe("NotificationsScreen", () => {
     expect(screen.getByText("3 new")).toBeTruthy();
     // The filter tab and the pending card's chip both read "Needs you".
     expect(screen.getAllByText("Needs you").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getAllByTestId("notification-unread-dot")).toHaveLength(1);
+    expect(screen.getAllByTestId("notification-unread-dot")).toHaveLength(2);
     await fireEvent.press(screen.getByTestId("notification-n1"));
     expect(mockReads).toEqual([{ ids: ["n1"] }]);
     expect(mockOpened).toEqual([
@@ -111,6 +125,14 @@ describe("NotificationsScreen", () => {
     await fireEvent.press(screen.getByTestId("notification-n2"));
     expect(mockReads).toHaveLength(1);
     expect(mockOpened).toHaveLength(2);
+  });
+
+  it("opens an organization bot's public transcript on the agent's details page from its canonical link", async () => {
+    await render(<NotificationsScreen navigation={navigation} route={{ key: "r", name: "Notifications", params: undefined }} />);
+    await fireEvent.press(screen.getByTestId("notification-n3"));
+    expect(mockReads).toEqual([{ ids: ["n3"] }]);
+    expect(mockOpened).toEqual([]);
+    expect((navigation as { push: jest.Mock }).push).toHaveBeenCalledWith("AgentDetail", { agentId: MOCK_AGENT });
   });
 
   it("marks everything read behind the server fence and switches mockFilters", async () => {

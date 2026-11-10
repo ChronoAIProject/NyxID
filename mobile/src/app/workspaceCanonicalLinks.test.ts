@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getStateFromPath } from "@react-navigation/core";
 import { navigationLinkingConfig } from "./navigationLinking";
-import { workspaceStateFromPath } from "./workspaceCanonicalLinks";
+import {
+  canonicalLinkNavigation,
+  workspaceStateFromPath,
+} from "./workspaceCanonicalLinks";
 import { dismissWorkspaceSheetAction } from "./navigationHierarchy";
 import { hydratedTestRouter } from "./routerTestHarness";
 import { StackRouter } from "@react-navigation/routers";
@@ -148,4 +151,48 @@ test("web chat links and the push deeplink open their thread; the notifications 
   assert.equal(parse("/assistant?c=not-a-thread&panel=notifications"), undefined, "malformed ids fall back to the ordinary parser");
   assert.equal(parse("/assistant?c=nyxa-short"), undefined);
   assert.equal(parse(`/assistant?c=${C}&panel=notifications&panel=billing`), undefined, "repeated panels are not a destination");
+});
+
+test("server links name a crew with ?c=, focus a decision card and open an agent's details on its Agents stack", () => {
+  const crew = parse(`/assistant?c=${G}`)!.routes[0]!.state!;
+  assert.deepEqual(crew.routes.map((route) => route.name), ["Assistant", "GroupChat"]);
+  assert.deepEqual(crew.routes[1]!.params, { groupId: G });
+  assert.equal(crew.index, 1);
+  const crewWithAgent = parse(`/assistant?c=${G}&agent=agent-one`)!.routes[0]!.state!;
+  assert.deepEqual(crewWithAgent.routes.map((route) => route.name), ["Assistant", "GroupChat"]);
+  const card = parse(`https://app.nyxid.test/assistant?c=${C}&card=card-7`)!.routes[0]!.state!.routes[0]!;
+  assert.deepEqual(card.params, { home: false, conversationId: C, acknowledgementId: "card-7", draft: false, openLatest: false });
+  assert.equal(parse(`/assistant?c=${C}&card=bad%20card`), undefined, "a malformed card id is not a destination");
+  const details = parse("/assistant?agent=agent-two&details=channels")!.routes[0]!.state!;
+  assert.deepEqual(details.routes.map((route) => route.name), ["Assistant", "Agents", "AgentDetail"]);
+  assert.deepEqual(details.routes[2]!.params, { agentId: "agent-two" });
+  assert.deepEqual(details.routes[0]!.params, assistantHomeParams());
+  assert.equal(details.index, 2);
+  const grants = parse("/assistant?agent=agent-two&details=grants&panel=notifications")!.routes[0]!.state!;
+  assert.deepEqual(grants.routes.map((route) => route.name), ["Assistant", "Agents", "AgentDetail", "Notifications"]);
+  const chatWins = parse(`/assistant?c=${C}&agent=agent-two&details=channels`)!.routes[0]!.state!;
+  assert.deepEqual(chatWins.routes.map((route) => route.name), ["Assistant"], "a thread link stays a thread even with details");
+});
+
+test("in-app link navigation dispatches the same workspace state a tapped universal link resolves", () => {
+  const details = canonicalLinkNavigation("/assistant?agent=agent-two&details=channels");
+  assert.equal(details?.type, "action");
+  const action = (details as { action: any }).action;
+  assert.equal(action.type, "NAVIGATE");
+  assert.equal(action.payload.name, "Workspace");
+  // A stacked destination arrives as the Workspace's nested state.
+  const stack = action.payload.params.state;
+  assert.deepEqual(stack.routes.map((route: { name: string }) => route.name), ["Assistant", "Agents", "AgentDetail"]);
+  assert.equal(stack.index, 2);
+  assert.deepEqual(stack.routes[2].params, { agentId: "agent-two" });
+  const chat = canonicalLinkNavigation(`/assistant?c=${C}`) as { action: any };
+  assert.equal(chat.action.payload.params.screen, "Assistant");
+  assert.deepEqual(chat.action.payload.params.params, { home: false, conversationId: C, draft: false, openLatest: false });
+  const crew = canonicalLinkNavigation(`/assistant?c=${G}`) as { action: any };
+  assert.equal(crew.action.payload.params.screen, "GroupChat");
+  assert.deepEqual(crew.action.payload.params.params, { groupId: G });
+  const automations = canonicalLinkNavigation("/assistant/automations?agent=agent-one") as { action: any };
+  assert.equal(automations.action.payload.params.screen, "Automations");
+  assert.deepEqual(automations.action.payload.params.params, { agentId: "agent-one" });
+  assert.equal(canonicalLinkNavigation("/nowhere/at/all"), undefined);
 });

@@ -28,6 +28,7 @@ import {
 } from "../../components/settings/SettingsList";
 import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
 import { usePullRefresh } from "../../hooks/usePullRefresh";
+import { firstPartyFrontendUrls } from "../../lib/env";
 import { fonts, radius, spacing, typeScale } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
@@ -252,25 +253,32 @@ export function NotificationsScreen({
   const open = useCallback(
     (item: AssistantNotification) => {
       if (!item.read) markRead.mutate({ ids: [item.id] });
-      const target = notificationTarget(item);
+      const target = notificationTarget(item, firstPartyFrontendUrls());
       switch (target.kind) {
         case "chat":
           openChat({
             conversationId: target.conversationId,
             agentId: target.agentId,
+            acknowledgementId: target.acknowledgementId,
             home: false,
             draft: false,
-            openLatest: false,
+            openLatest: target.openLatest ?? false,
           });
           return;
         case "group":
           navigation.push("GroupChat", { groupId: target.groupId });
           return;
+        case "agent":
+          navigation.push("AgentDetail", { agentId: target.agentId });
+          return;
         case "automation":
           navigation.push("AutomationDetail", { id: target.triggerId });
           return;
         case "automations":
-          navigation.push("Automations");
+          navigation.push(
+            "Automations",
+            target.agentId ? { agentId: target.agentId } : undefined,
+          );
           return;
         default:
           return;

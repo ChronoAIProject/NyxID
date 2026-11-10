@@ -63,7 +63,14 @@ export const notificationSchema = z.object({
 export type AssistantNotification = z.infer<typeof notificationSchema>;
 
 export const notificationPageSchema = z.object({
-  items: notificationSchema.array(),
+  /** Rows parse one by one: a row an older app cannot read (a kind added
+   * later, a reshaped source) is dropped, never the whole page. */
+  items: z.array(z.unknown()).transform((rows) =>
+    rows.flatMap((row) => {
+      const parsed = notificationSchema.safeParse(row);
+      return parsed.success ? [parsed.data] : [];
+    }),
+  ),
   next_cursor: z.string().nullable().default(null),
   /** Server list-start time: the fence for "mark all as read". */
   as_of: instantSchema,

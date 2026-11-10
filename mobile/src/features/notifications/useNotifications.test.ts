@@ -24,14 +24,14 @@ function setup(options: {
   live?: boolean;
 } = {}) {
   const state = {
-    features: options.features ?? ["assistant:notifications"],
+    features: options.features ?? ["assistant:notifications", "assistant:nyxagent-engine"],
     summary: options.summary as unknown,
     dataUpdatedAt: options.dataUpdatedAt ?? 1,
     focused: options.focused ?? true,
     live: options.live ?? false,
   };
   const reads: unknown[] = [];
-  const feeds: { queryKey: unknown[]; queryFn: (context: { pageParam?: string; signal?: AbortSignal }) => unknown }[] = [];
+  const feeds: { queryKey: unknown[]; enabled?: boolean; queryFn: (context: { pageParam?: string; signal?: AbortSignal }) => unknown }[] = [];
   const lists: unknown[] = [];
   const invalidations: unknown[] = [];
   const queries: { key: unknown; enabled: unknown; refetchInterval: unknown }[] = [];
@@ -48,7 +48,7 @@ function setup(options: {
           return { data: { capabilities: { enabled_features: state.features } } };
         return { data: state.summary, dataUpdatedAt: state.dataUpdatedAt };
       },
-      useInfiniteQuery: (options: { queryKey: unknown[]; queryFn: (context: { pageParam?: string; signal?: AbortSignal }) => unknown }) => {
+      useInfiniteQuery: (options: { queryKey: unknown[]; enabled?: boolean; queryFn: (context: { pageParam?: string; signal?: AbortSignal }) => unknown }) => {
         feeds.push(options);
         return { data: undefined };
       },
@@ -77,6 +77,7 @@ function setup(options: {
     useNotificationIndicator: typeof useNotificationIndicator;
     useNotificationsLive: typeof useNotificationsLive;
     useNotificationFeed: (filter: string, enabled: boolean, active: boolean, live?: boolean) => unknown;
+    useNotificationsEnabled: (active?: boolean) => boolean;
     NOTIFICATIONS: readonly string[];
     VISIBLE_THREAD_READ_DELAY_MS: number;
   };
@@ -164,6 +165,34 @@ test("the indicator follows the profile flag, caps its badge and polls the summa
   assert.equal(bg.enabled, false);
   assert.equal(bg.refetchInterval, false);
   background.h.unmount();
+});
+
+test("with the notifications flag on but the NyxAgent engine off nothing is enabled and no feed or summary is requested", () => {
+  const x = setup({ features: ["assistant:notifications"], summary: { unread_count: 9, needs_decision_count: 2, by_source: [], by_source_truncated: false } });
+  const value = x.h.mount(() => ({
+    indicator: x.module.useNotificationIndicator(true),
+    feed: x.module.useNotificationFeed("all", x.module.useNotificationsEnabled(true), true),
+  })) as { indicator: ReturnType<typeof useNotificationIndicator> };
+  assert.equal(value.indicator.enabled, false);
+  assert.deepEqual({ unread: value.indicator.unread, badge: value.indicator.badge }, { unread: 9, badge: "9" }, "the harness summary is still reported; production never fetches it");
+  const summary = x.queries.find((query) => JSON.stringify(query.key) === JSON.stringify([...NOTIFICATIONS, "summary", 7]))!;
+  assert.equal(summary.enabled, false, "no summary request without the engine");
+  assert.equal(summary.refetchInterval, false);
+  assert.equal((x.feeds.at(-1) as { enabled?: boolean }).enabled, false, "no feed request without the engine");
+  assert.deepEqual(x.lists, []);
+  x.h.unmount();
+  const engineOnly = setup({ features: ["assistant:nyxagent-engine"] });
+  const hidden = engineOnly.h.mount(() => engineOnly.module.useNotificationIndicator(true)) as ReturnType<typeof useNotificationIndicator>;
+  assert.equal(hidden.enabled, false, "the engine alone does not enable notifications");
+  engineOnly.h.unmount();
+});
+
+test("the indicator derives sidebar markers once per summary", () => {
+  const x = setup({ summary: { unread_count: 3, needs_decision_count: 0, by_source_truncated: false,
+    by_source: [{ source_type: "channel_chat", id: C, conversation_id: C, unread: 2 }, { source_type: "group", id: `nyxg-${"d".repeat(32)}`, conversation_id: null, unread: 1 }] } });
+  const value = x.h.mount(() => x.module.useNotificationIndicator(true)) as ReturnType<typeof useNotificationIndicator>;
+  assert.deepEqual(JSON.parse(JSON.stringify(value.markers)), { conversations: { [C]: 2 }, groups: { [`nyxg-${"d".repeat(32)}`]: 1 } });
+  x.h.unmount();
 });
 
 test("notification and resync frames invalidate every notification query once per burst; other frames do not", async () => {

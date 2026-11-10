@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import {
@@ -19,10 +19,18 @@ import {
   type NotificationPushPreferences,
   type NotificationReadScope,
 } from "./notificationContracts";
-import { notificationBadge, unreadForSource } from "./notificationPresentation";
+import {
+  notificationBadge,
+  notificationMarkers,
+  unreadForSource,
+} from "./notificationPresentation";
 
-export const NOTIFICATIONS = ["workspace", "notifications"] as const;
+import { NOTIFICATIONS, notificationKeys } from "./notificationKeys";
+
+export { NOTIFICATIONS, notificationKeys };
 export const NOTIFICATIONS_FLAG = "assistant:notifications";
+/** Notifications only exist for NyxAgent accounts; the API gates on both. */
+export const NYXAGENT_ENGINE_FLAG = "assistant:nyxagent-engine";
 /** Backstop while the live stream is down; live events refresh at once. */
 export const NOTIFICATION_POLL_MS = 30_000;
 /** A thread must stay in front this long before it counts as seen. */
@@ -30,16 +38,10 @@ export const VISIBLE_THREAD_READ_DELAY_MS = 1_500;
 const LIVE_COALESCE_MS = 150;
 const PROFILE_KEY = ["account", "profile"] as const;
 
-export const notificationKeys = {
-  summary: (epoch: number) => [...NOTIFICATIONS, "summary", epoch] as const,
-  feed: (epoch: number, filter: NotificationFilter) =>
-    [...NOTIFICATIONS, "feed", epoch, filter] as const,
-  preferences: (epoch: number) =>
-    [...NOTIFICATIONS, "preferences", epoch] as const,
-};
-
-/** The per-person `assistant:notifications` flag, read from the profile the
- * rest of the workspace already caches; no extra request when it is fresh. */
+/** The per-person `assistant:notifications` flag together with the NyxAgent
+ * engine flag, read from the profile the rest of the workspace already
+ * caches; no extra request when it is fresh. With either flag off the bell,
+ * feed, settings switches and their requests stay away, as on the web. */
 export function useNotificationsEnabled(active = true): boolean {
   const profile = useQuery({
     queryKey: PROFILE_KEY,
@@ -48,9 +50,11 @@ export function useNotificationsEnabled(active = true): boolean {
     staleTime: 60_000,
     retry: false,
   });
+  const features = profile.data?.capabilities?.enabled_features;
   return (
-    profile.data?.capabilities?.enabled_features?.includes(NOTIFICATIONS_FLAG) ??
-    false
+    !!features &&
+    features.includes(NOTIFICATIONS_FLAG) &&
+    features.includes(NYXAGENT_ENGINE_FLAG)
   );
 }
 
@@ -115,7 +119,10 @@ export function useNotificationSummary(
     queryKey: notificationKeys.summary(epoch),
     queryFn: ({ signal }) => notificationsApi.summary(signal),
     enabled: enabled && active,
-    refetchInterval: livePollInterval(active ? NOTIFICATION_POLL_MS : false, live),
+    refetchInterval: livePollInterval(
+      enabled && active ? NOTIFICATION_POLL_MS : false,
+      live,
+    ),
     retry: false,
   });
 }
@@ -143,7 +150,10 @@ export function useNotificationFeed(
       ),
     getNextPageParam: (page) => page.next_cursor ?? undefined,
     enabled: enabled && active,
-    refetchInterval: livePollInterval(active ? NOTIFICATION_POLL_MS : false, live),
+    refetchInterval: livePollInterval(
+      enabled && active ? NOTIFICATION_POLL_MS : false,
+      live,
+    ),
     retry: false,
   });
 }
@@ -179,14 +189,26 @@ export function useUpdateNotificationPushPreferences() {
   });
 }
 
-/** Bell state for the sidebar and chat header: flag, counts and badge text. */
+/** Bell state for the sidebar and chat header: flag, counts, badge text and
+ * the per-thread markers the sidebar rows draw from this one summary. */
 export function useNotificationIndicator(active: boolean) {
   const enabled = useNotificationsEnabled(active);
   const live = useNotificationsLive(enabled && active);
   const summary = useNotificationSummary(enabled, active, live);
   const unread = summary.data?.unread_count ?? 0;
   const needsDecision = summary.data?.needs_decision_count ?? 0;
-  return { enabled, live, unread, needsDecision, badge: notificationBadge(unread) };
+  const markers = useMemo(
+    () => notificationMarkers(summary.data),
+    [summary.data],
+  );
+  return {
+    enabled,
+    live,
+    unread,
+    needsDecision,
+    badge: notificationBadge(unread),
+    markers,
+  };
 }
 
 export type VisibleNotificationSource = {

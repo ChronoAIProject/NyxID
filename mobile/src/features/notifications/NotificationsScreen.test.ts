@@ -75,6 +75,7 @@ function setup(options: {
     "../../hooks/usePullRefresh": {
       usePullRefresh: (refetch: () => unknown) => ({ refreshing: false, onRefresh: refetch }),
     },
+    "../../lib/env": { firstPartyFrontendUrls: () => ["https://app.nyxid.test"] },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
     "./useNotifications": {
       useNotificationRuntime: () => ({ active: true, online: true }),
@@ -160,6 +161,45 @@ test("rows show title, preview, counts and unread state; tapping marks read and 
   rows[3].props.onPress();
   assert.deepEqual(JSON.parse(JSON.stringify(x.pushed)), [["GroupChat", { groupId: G }], ["AutomationDetail", { id: T }]]);
   assert.deepEqual(JSON.parse(JSON.stringify(x.reads.at(-1))), { ids: ["n4"] });
+  x.h.unmount();
+});
+
+test("rows follow their canonical link: an organization bot's public transcript opens the agent's details, never a hidden thread", () => {
+  const AGENT = "7c0f6a8e-2b2e-4a1a-9f1f-0d2c5a6b7c8d";
+  const x = setup({
+    pages: [
+      {
+        as_of: AS_OF,
+        next_cursor: null,
+        items: [
+          row("n1", { kind: "chat_update", title: "Sales room",
+            source: { type: "channel_chat", id: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", channel_id: "ch", agent_id: AGENT },
+            url: `https://app.nyxid.test/assistant?agent=${AGENT}&details=channels` }),
+          row("n2", { kind: "chat_update", title: "Elsewhere",
+            source: { type: "channel_chat", id: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", channel_id: "ch", agent_id: AGENT },
+            url: `https://evil.example/assistant?agent=${AGENT}&details=channels` }),
+          row("n3", { kind: "needs_decision", source: { type: "conversation", id: C }, url: `https://app.nyxid.test/assistant?c=${C}&card=card-2` }),
+          row("n4", { kind: "automation_problem", source: { type: "trigger", id: "legacy", agent_id: AGENT }, url: `https://app.nyxid.test/assistant/automations?agent=${AGENT}` }),
+          row("n5", { kind: "group_mention", source: { type: "group", id: G }, url: `https://app.nyxid.test/assistant?c=${G}` }),
+        ],
+      },
+    ],
+    summary: { unread_count: 5, needs_decision_count: 1, by_source: [], by_source_truncated: false },
+  });
+  const rows = x.renderedRows();
+  rows[0].props.onPress();
+  assert.deepEqual(JSON.parse(JSON.stringify(x.pushed)), [["AgentDetail", { agentId: AGENT }]]);
+  rows[1].props.onPress();
+  assert.equal(x.pushed.length, 1, "a link on another origin opens nothing");
+  assert.equal(x.opened.length, 0, "and the hidden thread id never becomes a chat target");
+  assert.deepEqual(JSON.parse(JSON.stringify(x.reads)), [{ ids: ["n1"] }, { ids: ["n2"] }], "both taps still mark their row read");
+  rows[2].props.onPress();
+  assert.deepEqual(JSON.parse(JSON.stringify(x.opened)), [
+    { conversationId: C, acknowledgementId: "card-2", home: false, draft: false, openLatest: false },
+  ]);
+  rows[3].props.onPress();
+  rows[4].props.onPress();
+  assert.deepEqual(JSON.parse(JSON.stringify(x.pushed.slice(1))), [["Automations", { agentId: AGENT }], ["GroupChat", { groupId: G }]]);
   x.h.unmount();
 });
 
