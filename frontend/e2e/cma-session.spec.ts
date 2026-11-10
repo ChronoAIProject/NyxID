@@ -542,7 +542,7 @@ for (const width of [1440, 390]) {
     const requests = live.getByRole("region", { name: "CMA requests", exact: true });
     await expect(requests.locator('[data-cma-request="linked-request-0"]').getByRole("status")).toHaveText("Queued");
     await expect(requests.locator('[data-cma-request="linked-request-1"]').getByRole("status")).toHaveText("Taking longer than usual");
-    await expect(live.getByRole("status", { name: "CMA agent status" })).toHaveText("Working");
+    await expect(live.getByRole("status", { name: "CMA agent status: Working" })).toHaveText("Working");
     await expect(requests.getByRole("heading", { name: "Request status" })).toBeVisible();
     const controls = live.getByRole("group", { name: "CMA session controls" });
     const execution = controls.getByRole("button", { name: "View execution", exact: true });

@@ -466,7 +466,7 @@ function SessionStatus({ state }: { readonly state: CmaSessionState }) {
       <span className="text-13 text-muted-foreground">Agent:</span>
       <span
         role="status"
-        aria-label="CMA agent status"
+        aria-label={`CMA agent status: ${STATUS_LABELS[state.status]}`}
         className="flex items-center gap-1.5 text-13 text-foreground"
       >
         {state.status === "working" || state.status === "starting" ? (
