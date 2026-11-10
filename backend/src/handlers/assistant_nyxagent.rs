@@ -1008,6 +1008,7 @@ pub struct HistoryResponse {
 pub struct CmaOperationResponse {
     id: String,
     turn_id: String,
+    service_id: String,
     kind: crate::models::async_service_operation::CmaOperationKind,
     operation_id: Option<String>,
     agent_id: Option<String>,
@@ -1155,6 +1156,7 @@ pub async fn history(
                 cma_url: crate::services::cma_operation::card_url(&cma),
                 id: row.id,
                 turn_id: row.turn_id,
+                service_id: row.service_id,
                 kind: cma.kind,
                 operation_id: row.operation_id,
                 agent_id: cma.agent_id,

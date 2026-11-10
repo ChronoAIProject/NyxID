@@ -424,6 +424,7 @@ export class NyxAgentTransport {
     if (request < (this.historyApplied.get(id) ?? 0) && existing) {
       if (!beforeSeq) return existing;
       page.conversation = existing.conversation;
+      page.cma_operations = existing.cma_operations;
     } else {
       this.historyApplied.set(id, request);
     }
@@ -821,19 +822,7 @@ export class NyxAgentTransport {
       });
     }
     // Rows rebuilt above with identical fields keep their previous object.
-    // Card state belongs to the external operation, independently of the turn
-    // and its cached text. Attach after both live and stored views are built.
     const previousViews = this.views.get(id ?? "draft");
-    if (history?.cma_operations.length) {
-      messages = messages.map((message) => {
-        if (message.role !== "assistant") return message;
-        const turnId = message.turnId ?? (message.status === "streaming" ? liveTurnId : undefined);
-        const operations = history.cma_operations.filter((operation) => operation.turn_id === turnId);
-        if (!operations.length) return message;
-        const previous = previousViews?.get(message.id)?.cmaOperations;
-        return { ...message, cmaOperations: previous && JSON.stringify(previous) === JSON.stringify(operations) ? previous : operations };
-      });
-    }
     const views = new Map<string, ChatMessage>();
     messages = messages.map((message) => {
       const previous = previousViews?.get(message.id);
@@ -848,6 +837,7 @@ export class NyxAgentTransport {
       conversationId: id,
       title: conversation?.title ?? "New chat",
       messages,
+      cmaOperations: history?.cma_operations,
       expectedTurnCount: messages.filter((message) => message.role === "user" && !message.steering).length,
       status: running
         ? "streaming"

@@ -23,6 +23,7 @@ import { AssistantSearchButton, AssistantSearchDialog } from "./assistant-search
 import { useAssistantSearchShortcut } from "@/hooks/use-assistant-search-shortcut";
 import { CmaSessionObserver } from "./cma-session-card";
 import { useMachinePaneStore } from "@/stores/machine-pane-store";
+import type { CmaOperation } from "@/schemas/cma-operation";
 
 interface AssistantShellProps {
   readonly title: string;
@@ -35,6 +36,7 @@ interface AssistantShellProps {
   readonly resizableContent?: boolean;
   /** Preview cards docked beside chat on wide screens. */
   readonly aside?: ReactNode;
+  readonly cmaOperations?: readonly CmaOperation[];
   /** Share of the content area `aside` takes, in percent. */
   readonly asidePercent?: number;
   /** Set by dragging (or keying) the divider between the content and `aside`. */
@@ -44,7 +46,7 @@ interface AssistantShellProps {
 
 export function AssistantShell(props: AssistantShellProps) {
   return (
-    <CmaSessionObserver>
+    <CmaSessionObserver operations={props.cmaOperations}>
       {(cmaCards) => <AssistantShellLayout {...props} cmaCards={cmaCards} />}
     </CmaSessionObserver>
   );

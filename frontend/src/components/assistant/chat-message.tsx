@@ -50,7 +50,6 @@ import {
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 import { MachineToolCard } from "./machine-tool-card";
 import { MessageCopyAction } from "./message-copy-action";
-import { CmaOperationCard } from "./cma-operation-card";
 import { MessageTime } from "./message-time";
 import { useReplyFeedback } from "@/hooks/use-assistant-feedback";
 import { ReplyFeedbackFollowUp, ReplyFeedbackVotes } from "./reply-feedback";
@@ -743,7 +742,6 @@ export function ChatMessageBubble({
         {capacityNote ? (
           <p role="note" className="text-14 text-foreground">{CAPACITY_ACKNOWLEDGEMENT}</p>
         ) : content ? <TextBlock text={content} streaming={streaming} /> : null}
-        {message.cmaOperations?.map((operation) => <CmaOperationCard key={operation.id} operation={operation} />)}
         {message.status === "error" && errorMessage ? (
           <div role={billing ? "alert" : undefined} className={cn("mt-2", STATUS_CARD_MAX_W, BANNER_FRAME, BANNER_DESTRUCTIVE)}>
             <div className={BANNER_ROW}>

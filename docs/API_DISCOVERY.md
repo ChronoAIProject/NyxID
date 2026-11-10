@@ -805,6 +805,9 @@ callback; explicit null or invalid values clear it. History never constructs a
 link from an agent ID or catalog homepage. Old producers and old stored rows
 without a callback show status without a link. Rendering history reads only
 stored metadata, without credentials, catalog lookups, or calls to CMA.
+Each history operation also includes its `service_id`, so the browser can
+replace a receipt with the live assets-column card only for the exact same
+connection and agent. Older responses without this field retain their receipt.
 
 The callback is a browser link, not a webhook or polling target. It must be at
 most 2,048 UTF-8 bytes and contain no userinfo, query, fragment, literal
@@ -839,7 +842,7 @@ response without registering a CMA watch. Card metadata allows only bounded
 identifiers, validated browser links, and known status/phase values; history
 excludes encrypted results. CMA watch metadata has a 30-day TTL; result encryption
 and the four-hour payload deadline remain the same as other watches. The
-[frontend contract](chat/05-frontend-ui.md#cma-delegation-cards) describes card
+[frontend contract](chat/05-frontend-ui.md#cma-submission-cards) describes card
 placement and refresh behavior.
 
 

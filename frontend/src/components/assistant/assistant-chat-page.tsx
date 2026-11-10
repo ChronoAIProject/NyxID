@@ -1056,6 +1056,7 @@ function NyxAgentThreadPage() {
           turnActive={chat.isStreaming}
         />
       ) : undefined}
+      cmaOperations={chat.session.cmaOperations}
       asidePercent={machinePercent}
       onAsidePercentChange={setMachinePercent}
       title={showHome ? "Home" : chat.session.title}
