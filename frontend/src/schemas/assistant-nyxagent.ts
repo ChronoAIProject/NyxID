@@ -5,6 +5,7 @@ import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
 import { machineReceiptSchema } from "./machine-activity";
 import { cmaOperationSchema } from "./cma-operation";
+import { notificationSettingsSchema } from "./assistant-notifications";
 
 const conversationId = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 
@@ -405,6 +406,8 @@ export const nyxAgentSettingsSchema = z.object({
     .nonnegative()
     .default(600),
   specialist_access_requests: z.enum(["denied", "routed_to_nyxbot"]).default("denied"),
+  /** Additive: per-kind push switches for the Notifications feed; absent on older servers. */
+  notifications: notificationSettingsSchema.optional(),
 });
 export type NyxAgentSettings = z.infer<typeof nyxAgentSettingsSchema>;
 export type NyxAgentSettingsUpdate = Partial<
@@ -423,6 +426,7 @@ export type NyxAgentSettingsUpdate = Partial<
     | "max_group_handoffs"
     | "max_group_handoffs_per_hour"
     | "specialist_access_requests"
+    | "notifications"
   >
 >;
 
