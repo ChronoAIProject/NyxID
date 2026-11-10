@@ -53,13 +53,11 @@ async fn notification_stream_projects_content_and_routes_visible_changes_only_to
     assert_eq!(recipient.events.try_recv().unwrap(), expected);
     assert!(unrelated.events.try_recv().is_err());
 
-    // Coalescing does not create another row, but still refreshes clients.
-    rows.update_one(
-        doc! {"_id":&id},
-        doc! {"$inc":{"count":1_i64},"$set":{"updated_at":bson::DateTime::from_millis(1)}},
-    )
-    .await
-    .unwrap();
+    // Coalescing still refreshes clients when two activities share the same
+    // BSON millisecond and MongoDB reports only the increment as changed.
+    rows.update_one(doc! {"_id":&id}, doc! {"$inc":{"count":1_i64}})
+        .await
+        .unwrap();
     assert_eq!(next_notification(&mut stream).await, expected);
 
     // Reading on one device and resolving a card both refresh other devices.

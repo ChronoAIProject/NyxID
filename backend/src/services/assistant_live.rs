@@ -481,6 +481,7 @@ fn pipeline() -> Vec<Document> {
                 {"ns.coll": NOTIFICATIONS, "$or": [
                     {"operationType": "insert"},
                     {"updateDescription.updatedFields.updated_at": {"$exists": true}},
+                    {"updateDescription.updatedFields.count": {"$exists": true}},
                     {"updateDescription.updatedFields.unread": {"$exists": true}},
                     {"updateDescription.updatedFields.resolved_at": {"$exists": true}},
                 ]},
