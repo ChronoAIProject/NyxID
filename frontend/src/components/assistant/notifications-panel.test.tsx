@@ -57,7 +57,15 @@ beforeEach(() => {
       next_cursor: "page-2",
       as_of: "2026-11-10T08:10:00Z",
     },
-    "page-2": { items: [row("n-4", { kind: "chat_update", source: { type: "channel_chat", id: "thread-1", label: "Family group", conversation_id: "nyxa-7" }, url: "" })], next_cursor: null, as_of: "2026-11-10T08:10:00Z" },
+    "page-2": {
+      items: [
+        row("n-4", { kind: "chat_update", source: { type: "channel_chat", id: "thread-1", label: "Family group", conversation_id: "nyxa-7" }, url: "" }),
+        row("n-5", { kind: "automation_result", title: "Partner report", url: "https://partner.example/report", source: { type: "trigger", id: "trg-2", label: "Partner digest" } }),
+        row("n-6", { kind: "agent_update", title: "Scripted link", url: "javascript:alert(1)" }),
+      ],
+      next_cursor: null,
+      as_of: "2026-11-10T08:10:00Z",
+    },
   };
   useAuthStore.getState().setUser({
     id: "owner", email: "owner@example.com", display_name: "Owner", avatar_url: null,
@@ -140,7 +148,7 @@ describe("NotificationsPanel", () => {
     renderPanel();
     await screen.findByRole("list", { name: "Notifications" });
     await user.click(screen.getByRole("button", { name: "Load more" }));
-    await waitFor(() => expect(within(screen.getByRole("list", { name: "Notifications" })).getAllByRole("button")).toHaveLength(4));
+    await waitFor(() => expect(within(screen.getByRole("list", { name: "Notifications" })).getAllByRole("button")).toHaveLength(6));
     expect(listRequests().at(-1)?.endpoint).toContain("cursor=page-2");
     expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
   });
@@ -167,6 +175,23 @@ describe("NotificationsPanel", () => {
     await user.click(within(list).getByRole("button", { name: "Row n-3" }));
     expect(mocks.navigate).toHaveBeenLastCalledWith({ to: "/assistant/automations", search: { agent: "agent-1" } });
     expect(readRequests()).toHaveLength(1);
+  });
+
+  it("opens a foreign link in a new page that cannot reach the app, and never runs a scripted one", async () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    const user = userEvent.setup();
+    renderPanel();
+    await screen.findByRole("list", { name: "Notifications" });
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    await user.click(await screen.findByRole("button", { name: "Partner report, unread" }));
+    expect(open).toHaveBeenCalledWith("https://partner.example/report", "_blank", "noopener,noreferrer");
+    expect(mocks.navigate).not.toHaveBeenCalled();
+    await waitFor(() => expect(readRequests().map((request) => request.body)).toEqual([{ ids: ["n-5"] }]));
+    // A `javascript:` link is refused; the row still leads to its own source in the app.
+    await user.click(screen.getByRole("button", { name: "Scripted link, unread" }));
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(mocks.navigate).toHaveBeenLastCalledWith({ to: "/assistant", search: { c: "nyxa-1" } });
+    open.mockRestore();
   });
 
   it("follows a channel chat row to its thread when the server sent no link", async () => {

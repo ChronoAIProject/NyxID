@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
-import { notificationTarget, notificationTargetFromUrl } from "./notification-navigation";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  NOTIFICATION_LINK_FEATURES,
+  notificationTarget,
+  notificationTargetFromUrl,
+  openNotificationLink,
+} from "./notification-navigation";
 
 const ORIGIN = "https://nyxid.example";
 const source = { type: "conversation" as const, id: "nyxa-1", label: "", conversation_id: null, group_id: null, channel_id: null, trigger_id: null, agent_id: null };
@@ -22,6 +27,32 @@ describe("notificationTargetFromUrl", () => {
     expect(notificationTargetFromUrl("https://user:pw@nyxid.example/assistant?c=nyxa-1", ORIGIN)).toBeNull();
     expect(notificationTargetFromUrl("http://[", ORIGIN)).toBeNull();
   });
+
+  it("refuses every non-web scheme, even one that names the assistant", () => {
+    for (const href of [
+      "javascript:alert(1)",
+      "JavaScript:void(0)",
+      "data:text/html,<script>alert(1)</script>",
+      "vbscript:msgbox(1)",
+      "mailto:owner@example.com",
+      "ftp://nyxid.example/assistant?c=nyxa-1",
+      "file:///etc/passwd",
+      "blob:https://nyxid.example/abc",
+    ]) {
+      expect(notificationTargetFromUrl(href, ORIGIN)).toBeNull();
+    }
+  });
+});
+
+describe("openNotificationLink", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("opens a new page that cannot reach the app", () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    openNotificationLink("https://docs.example/page");
+    expect(open).toHaveBeenCalledWith("https://docs.example/page", "_blank", NOTIFICATION_LINK_FEATURES);
+    expect(NOTIFICATION_LINK_FEATURES).toBe("noopener,noreferrer");
+  });
 });
 
 describe("notificationTarget", () => {
@@ -35,5 +66,8 @@ describe("notificationTarget", () => {
     });
     expect(notificationTarget({ url: "", source: { ...source, type: "channel_chat", id: "nyxa-4" } }, ORIGIN)).toEqual({ kind: "route", to: "/assistant", search: { c: "nyxa-4" } });
     expect(notificationTarget({ url: "", source: { ...source, type: "group", id: "" } }, ORIGIN)).toEqual({ kind: "route", to: "/assistant", search: { g: "" } });
+    // An unsafe link falls back to the row's own source instead of being opened.
+    expect(notificationTarget({ url: "javascript:alert(1)", source }, ORIGIN)).toEqual({ kind: "route", to: "/assistant", search: { c: "nyxa-1" } });
+    expect(notificationTarget({ url: "https://partner.example/report", source }, ORIGIN)).toEqual({ kind: "link", href: "https://partner.example/report" });
   });
 });

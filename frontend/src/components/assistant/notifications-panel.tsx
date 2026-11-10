@@ -33,7 +33,7 @@ import {
   useNotificationList,
   useNotificationsEnabled,
 } from "@/hooks/use-assistant-notifications";
-import { notificationTarget } from "@/lib/assistant/notification-navigation";
+import { notificationTarget, openNotificationLink } from "@/lib/assistant/notification-navigation";
 import { restorePanelFocus } from "@/lib/assistant/panel-focus";
 import { cn, formatRelativeTime } from "@/lib/utils";
 import {
@@ -201,7 +201,7 @@ export function NotificationsPanel({
     const target = notificationTarget(item, window.location.origin);
     if (!target) return;
     if (target.kind === "link") {
-      window.location.assign(target.href);
+      openNotificationLink(target.href);
       return;
     }
     void navigate({ to: target.to as never, search: target.search as never });

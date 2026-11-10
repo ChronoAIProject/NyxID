@@ -5,7 +5,8 @@ import type { AssistantNotification } from "@/schemas/assistant-notifications";
  * Where a notification row leads. Server URLs are `AssistantPage` links
  * (`/assistant?c=…`, `/assistant?g=…`, `/assistant/automations?agent=…`);
  * only same-origin assistant routes become in-app navigation, with the
- * query keys those routes own. Anything else stays a plain link.
+ * query keys those routes own. Any other http(s) page is a plain link that
+ * opens in a new page (never replacing the app); other schemes are refused.
  */
 export type NotificationTarget =
   | {
@@ -14,6 +15,14 @@ export type NotificationTarget =
       readonly search: Readonly<Record<string, string>>;
     }
   | { readonly kind: "link"; readonly href: string };
+
+/** Window features for link targets: a new page that cannot reach this one. */
+export const NOTIFICATION_LINK_FEATURES = "noopener,noreferrer";
+
+/** Open a link target in a new page; the app stays where it is. */
+export function openNotificationLink(href: string): void {
+  window.open(href, "_blank", NOTIFICATION_LINK_FEATURES);
+}
 
 const ROUTE_SEARCH_KEYS: Record<AssistantShellRoute, readonly string[]> = {
   "/assistant": ["c", "g", "agent", "card", "details"],
@@ -33,6 +42,8 @@ export function notificationTargetFromUrl(href: string, origin: string): Notific
     return null;
   }
   if (url.username || url.password) return null;
+  // Only web pages: `javascript:`, `data:` and the like never become a link.
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
   if (url.origin !== origin) return { kind: "link", href: url.href };
   const path = url.pathname.replace(/\/+$/, "") || "/";
   if (!isAssistantShellRoute(path)) return { kind: "link", href: url.href };
