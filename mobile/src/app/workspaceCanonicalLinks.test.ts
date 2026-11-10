@@ -107,3 +107,45 @@ test("canonical /assistant without a thread explicitly selects NyxBot home", () 
   assert.equal(draft.draft, true);
   assert.ok(draft.draftId);
 });
+
+test("web chat links and the push deeplink open their thread; the notifications panel stacks the feed above it", () => {
+  const chat = parse(`/assistant?c=${C}`)!;
+  assert.deepEqual(
+    chat.routes.map((route) => route.name),
+    ["Workspace"],
+  );
+  assert.deepEqual(chat.routes[0]!.state!.routes.map((route) => route.name), ["Assistant"]);
+  assert.deepEqual(chat.routes[0]!.state!.routes[0]!.params, {
+    home: false,
+    conversationId: C,
+    draft: false,
+    openLatest: false,
+  });
+  const panel = parse(`https://app.nyxid.test/assistant?c=${C}&agent=agent-one&panel=notifications`)!;
+  const pages = panel.routes[0]!.state!;
+  assert.deepEqual(pages.routes.map((route) => route.name), ["Assistant", "Notifications"]);
+  assert.equal(pages.index, 1);
+  assert.deepEqual(pages.routes[0]!.params, {
+    home: false,
+    conversationId: C,
+    agentId: "agent-one",
+    draft: false,
+    openLatest: false,
+  });
+  const crew = parse(`/assistant?g=${G}&panel=notifications`)!.routes[0]!.state!;
+  assert.deepEqual(crew.routes.map((route) => route.name), ["Assistant", "GroupChat", "Notifications"]);
+  assert.deepEqual(crew.routes[1]!.params, { groupId: G });
+  const cold = parse("/assistant?panel=notifications")!.routes[0]!.state!;
+  assert.deepEqual(cold.routes.map((route) => route.name), ["Assistant", "Notifications"]);
+  assert.deepEqual(cold.routes[0]!.params, assistantHomeParams());
+  const agent = parse("/assistant?agent=agent-two")!.routes[0]!.state!.routes[0]!;
+  assert.deepEqual(agent.params, { home: false, agentId: "agent-two", draft: false, openLatest: true });
+  for (const path of ["/assistant/notifications", "notifications"]) {
+    const direct = parse(path)!.routes[0]!.state!;
+    assert.equal(direct.routes.at(-1)!.name, "Notifications", path);
+    assert.equal(direct.routes[0]!.name, "Assistant", path);
+  }
+  assert.equal(parse("/assistant?c=not-a-thread&panel=notifications"), undefined, "malformed ids fall back to the ordinary parser");
+  assert.equal(parse("/assistant?c=nyxa-short"), undefined);
+  assert.equal(parse(`/assistant?c=${C}&panel=notifications&panel=billing`), undefined, "repeated panels are not a destination");
+});

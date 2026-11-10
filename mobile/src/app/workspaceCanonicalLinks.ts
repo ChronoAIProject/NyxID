@@ -73,7 +73,27 @@ export function workspaceStateFromPath(
       ),
     };
   }
-  if (search.getAll("panel").length !== 1 || search.get("panel") !== "billing")
+  const panels = search.getAll("panel");
+  // Web chat links (`?c=`, `?g=`, `?agent=`), also the push deeplink shape,
+  // and the notifications panel open their thread in the content slab.
+  if (
+    panels.length === 0 ||
+    (panels.length === 1 && panels[0] === "notifications")
+  ) {
+    const pages = assistantPagesFromSearch(search);
+    if (!pages) return withWorkspaceFallback(parse(path));
+    if (panels.length === 1) pages.push({ name: "Notifications" });
+    return withWorkspaceFallback({
+      index: 0,
+      routes: [
+        {
+          name: "Workspace",
+          state: { index: pages.length - 1, routes: pages },
+        },
+      ],
+    });
+  }
+  if (panels.length !== 1 || panels[0] !== "billing")
     return withWorkspaceFallback(parse(path));
 
   const period = search.get("panelPeriod");
@@ -115,4 +135,39 @@ export function workspaceStateFromPath(
       };
   }
   return { ...state, index: routes.length - 1, routes };
+}
+
+const CONVERSATION_ID = /^nyxa-[a-f0-9]{32}$/;
+const GROUP_ID = /^nyxg-[a-fA-F0-9]{32}$/;
+
+/** The content pages a canonical `/assistant` query selects, or undefined
+ * when its identifiers are malformed and the ordinary parser should decide. */
+function assistantPagesFromSearch(
+  search: URLSearchParams,
+): { name: string; params?: object }[] | undefined {
+  const conversationId = search.get("c");
+  const agentId = search.get("agent");
+  const groupId = search.get("g");
+  const draft = search.get("draft") === "true";
+  const validConversation =
+    !!conversationId && CONVERSATION_ID.test(conversationId);
+  const validGroup = !!groupId && GROUP_ID.test(groupId);
+  if (conversationId && !validConversation) return undefined;
+  if (groupId && !validGroup) return undefined;
+  if (validConversation || agentId || draft) {
+    const params: AssistantParams = {
+      home: false,
+      ...(validConversation ? { conversationId } : {}),
+      ...(agentId ? { agentId } : {}),
+      draft: !validConversation && draft,
+      openLatest: !validConversation && !draft && !!agentId,
+    };
+    return [{ name: "Assistant", params }];
+  }
+  if (validGroup)
+    return [
+      { name: "Assistant", params: assistantHomeParams() },
+      { name: "GroupChat", params: { groupId } },
+    ];
+  return [{ name: "Assistant", params: assistantHomeParams() }];
 }

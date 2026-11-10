@@ -104,6 +104,11 @@ import {
   useGroupAvailability,
   useGroupChat,
 } from "./useGroupRuntime";
+import {
+  useNotificationRuntime,
+  useNotificationsEnabled,
+  useVisibleThreadRead,
+} from "../notifications/useNotifications";
 
 export type GroupConversationTarget = {
   conversationId: string;
@@ -135,6 +140,15 @@ function GroupChat({
   const chatColumn = useChatColumn();
   const transcriptEdges = useScrollEdges();
   const chat = useGroupChat(groupId);
+  const notificationRuntime = useNotificationRuntime();
+  const notificationsEnabled = useNotificationsEnabled(
+    notificationRuntime.active,
+  );
+  useVisibleThreadRead(
+    { type: "group", id: groupId },
+    notificationsEnabled,
+    notificationRuntime.active,
+  );
   const draftKey = `crew:${groupId}`;
   const [draft, setDraft] = useState(
     () => assistantDraftStore.get<string>(`text:${draftKey}`) ?? "",

@@ -22,6 +22,7 @@ export const contentNames = [
   "Services",
   "Machines",
   "Activity",
+  "Notifications",
   "WorkspaceSearch",
   "WorkspaceRecents",
   "AgentCreate",
