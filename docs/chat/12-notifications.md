@@ -259,14 +259,20 @@ pending → sending → sent | failed | unknown | skipped
 A sweep checks flags and preferences, then prepares previews in one batch per
 person before claiming any sends. Each row takes its sending claim immediately
 before its own provider call, which has a ten-second timeout; unsent rows do not
-wait in `sending` behind other deliveries. A row that changes after preparation
-returns atomically to its prior pending or retry state, with its reservations
-released and no attempt consumed, for preparation in the next sweep. A lookup
+wait in `sending` behind other deliveries. During its first two minutes, a row
+that changes after preparation returns atomically to its prior pending or retry
+state, with its reservations released and no attempt consumed, for preparation
+in the next sweep. After that grace period, a busy source uses its batch-prepared
+preview even if another update arrived meanwhile. The push represents activity
+at preparation, when access was checked; the feed continues to show the latest
+activity. This bounds delay without adding individual preview lookups. A lookup
 failure leaves unclaimed rows due, and one person's failure does not strand
-another person's rows.
+another person's rows. A source that is absent or inaccessible during preparation
+skips this push; restoring access does not replay an earlier notification's push.
 
 A claim left in `sending` for ten minutes becomes `unknown` and is never resent.
-A conclusive receipt may be settled without sending again. Only an explicit retryable refusal permits a bounded
+A conclusive receipt may be settled without sending again. Only an explicit
+retryable refusal permits a bounded
 retry under the same rules as [automation notification delivery](../NYXBOT_SCHEDULES.md#notification-result-delivery).
 Retries wait at least sixty seconds, permit at most three attempts and stop
 thirty minutes after the first attempt. The claim transaction checks the current
