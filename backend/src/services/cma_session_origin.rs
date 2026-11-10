@@ -49,10 +49,7 @@ pub fn personal_binding<'a>(
         else {
             return Ok(None);
         };
-        if row.node_id.is_some()
-            || row.service_type != "http"
-            || crate::services::platform_key_service::binding(&row) == "platform"
-        {
+        if row.node_id.is_some() || row.service_type != "http" {
             return Ok(None);
         }
         if let Some(key) = key
@@ -88,12 +85,18 @@ pub fn personal_binding<'a>(
             "_id":1,"auth_method":1,"auth_key_name":1,"auth_scheme":1,"default_request_headers":1,"token_exchange_config":1,
             "requires_user_credential":1,"provider_config_id":1,"platform_key":1,"base_url":1,"service_category":1,"destination_targets":1,
         }).await? else { return Ok(None) };
-        // No-auth catalog platform bindings may select a catalog destination even
-        // when the saved UserService says BYOK. Exclude that shared-principal lane.
-        if catalog
+        let platform_key_configured = catalog
             .get("platform_key")
-            .is_some_and(|v| v != &bson::Bson::Null)
-            && catalog.get_str("auth_method").ok() == Some("none")
+            .is_some_and(|v| v != &bson::Bson::Null);
+        // Match the proxy's platform-route selection. Legacy auto-provisioned
+        // no-auth connections have a "platform" label but still use the owner's
+        // default route when no platform key is configured (e.g. signed CMA identity).
+        // Explicit platform selections and configured catalog keys remain excluded.
+        if (super::platform_key_service::binding(&row) == "platform"
+            && (row.auth_method != "none"
+                || row.credential_binding.as_deref() == Some("platform")
+                || platform_key_configured))
+            || (platform_key_configured && catalog.get_str("auth_method").ok() == Some("none"))
         {
             return Ok(None);
         }

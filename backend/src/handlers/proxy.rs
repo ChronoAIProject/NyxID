@@ -916,7 +916,7 @@ pub(crate) async fn proxy_request_inner(
                 state.platform_user_rate_limit,
             )
             .await?;
-            let slug = target.service.slug.clone();
+            let catalog_service_slug = target.catalog_slug.clone();
             return Box::pin(execute_proxy_inner(
                 state,
                 auth_user,
@@ -925,7 +925,7 @@ pub(crate) async fn proxy_request_inner(
                 request,
                 Some(PreResolved {
                     target,
-                    catalog_service_slug: Some(slug),
+                    catalog_service_slug,
                     node_id: None,
                     user_service_id: None,
                     has_server_credential: true,
@@ -3639,7 +3639,7 @@ async fn resolve_proxy_execution_inner(
             service_id,
         )
         .await?;
-        let catalog_service_slug = Some(target.service.slug.clone());
+        let catalog_service_slug = target.catalog_slug.clone();
         let has_server_credential = true;
         (
             None,
@@ -3700,7 +3700,7 @@ async fn resolve_proxy_execution_inner(
             service_id,
         ))
         .await?;
-        let catalog_service_slug = Some(target.service.slug.clone());
+        let catalog_service_slug = target.catalog_slug.clone();
         // Legacy path resolution succeeded — this is still personal
         // routing (caller's own DownstreamService + provider token), so
         // attribute it the same way the UserService path is attributed.
@@ -5358,6 +5358,49 @@ async fn execute_resolved_proxy_inner<'a>(
             }
         }
     }
+
+    let dispatch_admission = {
+        let dispatch_caller = crate::services::service_dispatch_registry::DispatchCaller {
+            actor_user_id: &user_id_str,
+            resource_owner_id: service_owner_for_approval,
+            user_service_id: resolved_user_service_id.as_deref(),
+        };
+        crate::services::service_dispatch_registry::admit(
+            &state.db,
+            &state.encryption_keys,
+            &state.jwt_keys,
+            &state.config,
+            &dispatch_caller,
+            auth_user.auth_method != AuthMethod::ServiceAccount
+                && !operation_guest
+                && auth_user.org_agent_access.is_none()
+                && auth_user
+                    .assistant_agent_owner_id
+                    .as_deref()
+                    .is_none_or(|owner| owner == user_id_str)
+                && effective_owner_for_approval
+                    .as_deref()
+                    .is_none_or(|owner| owner == user_id_str),
+            &target,
+            method.as_str(),
+            path,
+            query.as_deref(),
+            body.as_deref().unwrap_or_default(),
+            || {
+                let prepared =
+                    proxy_service::prepare_delegated_request(path, query.as_deref(), &delegated)?;
+                Ok(proxy_service::build_effective_outbound_headers(
+                    &target,
+                    node_forward_headers.clone(),
+                    &identity_headers,
+                    &prepared.delegated_headers,
+                    &extra_outbound_headers,
+                ))
+            },
+            node_route.is_some() || is_ws || streaming_body.is_some() || shared_connect,
+        )
+        .await?
+    };
 
     let mut billing_ctx = billing_ctx.with_request_body(body.as_deref());
     billing_ctx.pool_attempt = pool_accounting.as_ref().map(|ctx| ctx.metadata.clone());
@@ -7102,6 +7145,11 @@ async fn execute_resolved_proxy_inner<'a>(
             if shared_connect {
                 require_shared_stream_guard(auth_user, egress_guard.as_ref())?;
             }
+            let dispatch_caller = crate::services::service_dispatch_registry::DispatchCaller {
+                actor_user_id: &user_id_str,
+                resource_owner_id: service_owner_for_approval,
+                user_service_id: resolved_user_service_id.as_deref(),
+            };
             let downstream_result = until_client_disconnect(
                 &downstream_cancellation,
                 box_proxy_future(|| {
@@ -7135,6 +7183,8 @@ async fn execute_resolved_proxy_inner<'a>(
                         billing_egress_permit,
                         egress_guard.as_ref(),
                         resource_proof.as_ref(),
+                        Some(&dispatch_admission),
+                        Some(&dispatch_caller),
                     )
                 }),
             )
@@ -10215,6 +10265,7 @@ mod tests {
 
     pub(super) fn make_target(base_url: &str) -> proxy_service::ProxyTarget {
         proxy_service::ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,

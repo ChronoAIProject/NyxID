@@ -34,6 +34,10 @@ import { parseAssistantSearch } from "@/lib/assistant/search";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type { Conversation } from "@/types/assistant";
 
+const AssistantCmaSandboxesPage = lazy(() => import("./assistant-cma-sandboxes").then((module) => ({ default: module.AssistantCmaSandboxesPage })));
+const AssistantCmaSandboxDetailPage = lazy(() => import("./assistant-cma-sandbox-detail").then((module) => ({ default: module.AssistantCmaSandboxDetailPage })));
+const AssistantCmaAgentPage = lazy(() => import("./assistant-cma-agent").then((module) => ({ default: module.AssistantCmaAgentPage })));
+
 const MockScenariosAction = import.meta.env.DEV
   ? lazy(() =>
       import("@/components/assistant/mock-scenarios-action").then((module) => ({
@@ -112,6 +116,9 @@ type WorkspaceView =
   | "approvals"
   | "automations"
   | "machines"
+  | "sandboxes"
+  | "sandbox-detail"
+  | "cma-agent"
   | "machine-setup"
   | "machine-pair";
 
@@ -120,11 +127,15 @@ const workspaceTitles: Record<WorkspaceView, string> = {
   approvals: "Approvals",
   automations: "Automations",
   machines: "Machines",
+  sandboxes: "Sandboxes",
+  "sandbox-detail": "Sandbox",
+  "cma-agent": "Cloud assistant",
   "machine-setup": "Add a machine",
   "machine-pair": "Pair a machine",
 };
 
 function workspaceActiveView(view: WorkspaceView) {
+  if (view === "sandbox-detail" || view === "cma-agent") return "sandboxes";
   return view === "machine-setup" || view === "machine-pair"
     ? "machines"
     : view;
@@ -133,7 +144,7 @@ function workspaceActiveView(view: WorkspaceView) {
 function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
   return (
     <div
-      className="h-full overflow-y-auto shell-page-content"
+      className={`h-full shell-page-content ${view === "cma-agent" ? "overflow-hidden" : "overflow-y-auto"}`}
       style={{ paddingBottom: "max(2rem, var(--sab))" }}
     >
       <Suspense
@@ -151,6 +162,12 @@ function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
           <AutomationsPage />
         ) : view === "machines" ? (
           <MachinesPage />
+        ) : view === "sandboxes" ? (
+          <AssistantCmaSandboxesPage />
+        ) : view === "sandbox-detail" ? (
+          <AssistantCmaSandboxDetailPage />
+        ) : view === "cma-agent" ? (
+          <AssistantCmaAgentPage />
         ) : view === "machine-setup" ? (
           <MachineSetupPage />
         ) : (

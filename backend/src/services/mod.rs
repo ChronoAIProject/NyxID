@@ -22,6 +22,9 @@ pub mod assistant_action_execution_service;
 pub mod assistant_action_receipts;
 pub mod assistant_agent_learning;
 pub mod assistant_agent_learning_review;
+pub mod assistant_cma_agent_service;
+pub mod assistant_cma_gateway;
+pub mod assistant_cma_sandbox_service;
 pub mod assistant_direct;
 pub mod assistant_engine_policy;
 pub mod assistant_engine_worker;
@@ -242,6 +245,8 @@ pub mod scope_catalog;
 pub mod security_readiness_service;
 pub mod service_account_key_read_service;
 pub mod service_account_service;
+pub(crate) mod service_dispatch_guard;
+pub(crate) mod service_dispatch_registry;
 pub mod service_endpoint_service;
 pub mod service_pool_health_service;
 pub mod service_pool_service;
@@ -558,6 +563,9 @@ pub mod monitoring_service;
 
 pub mod assistant_delegated_images;
 
+pub mod assistant_cma_admission;
+
+pub mod assistant_cma_tools;
 pub mod cma_session_origin;
 pub mod org_channel_service;
 

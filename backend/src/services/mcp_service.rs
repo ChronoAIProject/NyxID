@@ -5338,12 +5338,13 @@ fn resolve_tool_target(
                 // fallback for binding-based routes. Keep the same semantic
                 // here: a transient node failure on a platform service can
                 // fall back to direct HTTP if a server credential exists.
+                let catalog_service_slug = t.catalog_slug.clone();
                 (
                     t,
                     nr,
                     has_cred,
                     McpBillingRouteContextBuilder::for_platform_service(billing_principal_user_id),
-                    None,
+                    catalog_service_slug,
                 )
             }
         };
@@ -5394,6 +5395,52 @@ pub fn execute_tool_response<'a>(
     exec_ctx: &'a McpExecContext<'a>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> futures::future::BoxFuture<'a, AppResult<ToolResponse>> {
+    Box::pin(async move {
+        execute_tool_response_with_outcome(
+            http_client,
+            db,
+            encryption_keys,
+            node_ws_manager,
+            billing,
+            user_id,
+            billing_principal_user_id,
+            service,
+            endpoint,
+            prepared,
+            jwt_keys,
+            config,
+            connection_expiry_notifier,
+            token_exchange_cache,
+            cloud_response_cache,
+            exec_ctx,
+            billing_egress_permit,
+        )
+        .await?
+        .into_response()
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_tool_response_with_outcome<'a>(
+    http_client: &'a reqwest::Client,
+    db: &'a mongodb::Database,
+    encryption_keys: &'a std::sync::Arc<EncryptionKeys>,
+    node_ws_manager: &'a std::sync::Arc<NodeWsManager>,
+    billing: &'a std::sync::Arc<crate::services::billing::BillingService>,
+    user_id: &'a str,
+    billing_principal_user_id: &'a str,
+    service: &'a McpToolService,
+    endpoint: &'a McpToolEndpoint,
+    prepared: PreparedProxyCall,
+    jwt_keys: &'a crate::crypto::jwt::JwtKeys,
+    config: &'a crate::config::AppConfig,
+    connection_expiry_notifier:
+        &'a crate::services::connection_expiry_service::ConnectionExpiryNotifier,
+    token_exchange_cache: &'a crate::services::provider_token_exchange_service::TokenExchangeCache,
+    cloud_response_cache: &'a crate::services::cloud_response_cache::CloudResponseCache,
+    exec_ctx: &'a McpExecContext<'a>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> futures::future::BoxFuture<'a, AppResult<McpToolExecutionOutcome>> {
     Box::pin(async move {
         super::org_agent_service::authorize_service_with_access(
             db,
@@ -5469,10 +5516,9 @@ pub fn execute_tool_response<'a>(
                         &response.text,
                     )?;
                 }
-                Ok(response)
+                Ok(McpToolExecutionOutcome::Response(response))
             }
-            McpToolExecutionOutcome::ProviderOutcomeUnknown(error) => Err(error),
-            McpToolExecutionOutcome::ProviderUnreachable(error) => Err(error),
+            outcome => Ok(outcome),
         }
     })
 }
@@ -5660,6 +5706,15 @@ pub enum McpToolExecutionOutcome {
     Response(ToolResponse),
     ProviderOutcomeUnknown(AppError),
     ProviderUnreachable(AppError),
+}
+
+impl McpToolExecutionOutcome {
+    pub(crate) fn into_response(self) -> AppResult<ToolResponse> {
+        match self {
+            Self::Response(response) => Ok(response),
+            Self::ProviderOutcomeUnknown(error) | Self::ProviderUnreachable(error) => Err(error),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6116,6 +6171,24 @@ async fn execute_tool_resolved_inner(
         let effects = operation_effects(prepared.method(), metadata);
         let read = effects.reads && !prepared.carries_method_override();
         let destructive = effects.destructive || prepared.carries_method_override();
+        let summary = super::cma_operation::control_confirmation(
+            catalog_service_slug,
+            prepared.method.as_str(),
+            &endpoint.path,
+            prepared
+                .body
+                .as_deref()
+                .and_then(|body| std::str::from_utf8(body).ok()),
+        )
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            format!(
+                "{} {} on {}",
+                prepared.method(),
+                endpoint.name,
+                service.service_slug
+            )
+        });
         let decision = if let Some(authority) = prepared.async_continuation.as_ref() {
             authority
                 .admit(db, chat, user_service_id, &target, &operation)
@@ -6135,12 +6208,7 @@ async fn execute_tool_resolved_inner(
                     ),
                 ),
                 prepared.acknowledgement_id.as_deref(),
-                &format!(
-                    "{} {} on {}",
-                    prepared.method(),
-                    endpoint.name,
-                    service.service_slug
-                ),
+                &summary,
                 &target,
                 Some((
                     prepared.body.as_deref().unwrap_or_default(),
@@ -6167,12 +6235,7 @@ async fn execute_tool_resolved_inner(
                     ),
                 ),
                 prepared.acknowledgement_id.as_deref(),
-                &format!(
-                    "{} {} on {}",
-                    prepared.method(),
-                    endpoint.name,
-                    service.service_slug
-                ),
+                &summary,
                 false,
                 Some(&target),
                 false,
@@ -6233,7 +6296,7 @@ async fn execute_tool_resolved_inner(
             attachment_binding,
             resource_source: _,
             automatic_receipt,
-            async_submission: _,
+            async_submission,
             async_continuation: _,
             acknowledgement_id: _,
             endpoint_target: _,
@@ -6247,6 +6310,18 @@ async fn execute_tool_resolved_inner(
             is_generic_proxy_endpoint,
             approval_metadata: _,
         } = prepared;
+
+        // Only a persisted CMA task watch can detach after the durable receipt.
+        // Ordinary proxy/streaming calls keep their existing full-body behavior.
+        let cma_receipt_agent = (catalog_service_slug == Some("cma")
+            && async_submission.is_some()
+            && endpoint.method == "POST"
+            && endpoint.path == "/api/v2/agents/{agent_id}/responses"
+            && method == reqwest::Method::POST
+            && endpoint.async_operation.as_ref().is_some_and(|contract|
+                contract.presentation == Some(crate::models::async_service_operation::CmaOperationKind::Response)))
+            .then(|| super::cma_operation::submission::agent_from_path(&path))
+            .flatten();
 
         if let Some(kind) = super::lark_im_tool::kind(endpoint) {
             super::lark_attachment_tool::validate_contract(db, service, endpoint).await?;
@@ -6464,6 +6539,29 @@ async fn execute_tool_resolved_inner(
                 body_content_type.as_deref().ok_or_else(super::lark_attachment_tool::refused)?.parse()
                 .map_err(|_|super::lark_attachment_tool::refused())?);
         }
+        let dispatch_caller = super::service_dispatch_registry::DispatchCaller {
+            actor_user_id: exec_ctx.actor_user_id.unwrap_or(user_id),
+            resource_owner_id: match &service.source {
+                McpToolSource::UserManaged { effective_owner_id, .. } => effective_owner_id,
+                _ => user_id,
+            },
+            user_service_id: match &service.source {
+                McpToolSource::UserManaged { user_service_id, .. } => Some(user_service_id),
+                _ => None,
+            },
+        };
+        let dispatch_admission = {
+            super::service_dispatch_registry::admit(db,encryption_keys,jwt_keys,config,&dispatch_caller,
+                exec_ctx.org_agent_access.is_none()
+                    && exec_ctx.actor_user_id.is_none_or(|actor| actor == user_id)
+                    && exec_ctx.assistant_chat.is_none_or(|chat| !chat.guest && !super::assistant_service_execution::is_shared_chat(chat))
+                    && match &service.source { McpToolSource::UserManaged { effective_owner_id, .. } => effective_owner_id == user_id, _ => true },
+                &target,method.as_str(),&path,query.as_deref(),body.as_deref().unwrap_or_default(),|| {
+                    let prepared_headers = proxy_service::prepare_delegated_request(&path, query.as_deref(), &delegated)?;
+                    let initial = proxy_service::collect_forward_headers_with_defaults(&req_headers, &[target.catalog_default_headers.as_slice(), target.user_service_default_headers.as_slice()]);
+                    Ok(proxy_service::build_effective_outbound_headers(&target, initial, &identity_headers, &prepared_headers.delegated_headers, &server_owned_headers))
+                },node_route.is_some()).await?
+        };
         let auto_connected = billing_context_builder.auto_connected;
         let resource_owner_id = billing_context_builder.effective_owner_id.clone();
         let billing_ctx = billing_context_builder
@@ -6913,7 +7011,7 @@ async fn execute_tool_resolved_inner(
         let response = match proxy_service::forward_request_with_resource_proof(
             http_client,
             &target,
-            method,
+            method.clone(),
             &path,
             query.as_deref(),
             req_headers,
@@ -6927,6 +7025,8 @@ async fn execute_tool_resolved_inner(
             billing_egress_permit,
             egress_guard.as_ref(),
             resource_proof.as_ref(),
+            Some(&dispatch_admission),
+            Some(&dispatch_caller),
         )
         .await
         {
@@ -6988,7 +7088,26 @@ async fn execute_tool_resolved_inner(
                 .get(reqwest::header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok()),
         );
-        let read = if let Some(limit) = exec_ctx.response_body_limit {
+        let is_sse = response.headers().get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.split(';').next().is_some_and(|mime|
+                mime.trim().eq_ignore_ascii_case("text/event-stream")));
+        let read = if let Some(agent) = cma_receipt_agent.filter(|_| (200..300).contains(&status) && is_sse) {
+            match super::cma_operation::submission::read_receipt(
+                response.bytes_stream(), &agent, exec_ctx.response_body_limit.unwrap_or(64 * 1024),
+            ).await {
+                Ok(receipt) => Ok((owned_tool_response(
+                    status, None, receipt.into_bytes(), exec_ctx.response_body_limit,
+                    exec_ctx.strict_response_utf8,
+                ), None)),
+                Err(reason) => {
+                    tracing::warn!(reason, "CMA submission receipt could not be observed");
+                    return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
+                        AppError::Internal("CMA submission receipt unavailable".into()),
+                    ));
+                }
+            }
+        } else if let Some(limit) = exec_ctx.response_body_limit {
             let result: Result<_, reqwest::Error> = async {
                 let (bytes, received) = read_bounded_tool_body(response, limit).await?;
                 // Preserve received-byte accounting before strict decoding consumes
@@ -7018,7 +7137,7 @@ async fn execute_tool_resolved_inner(
                 body_error: None,
             }, None))
         };
-        let (response, raw_usage) = match read {
+        let (mut response, raw_usage) = match read {
             Ok(read) => read,
             Err(error) => {
                 tracing::error!(
@@ -7056,6 +7175,18 @@ async fn execute_tool_resolved_inner(
                 receipt.record(db, chat).await;
             } else {
                 admission.receipt(db, chat, assistant_auto).await;
+            }
+        }
+        if response.body_error.is_none() {
+            if let Some(receipt) = super::cma_operation::agent_lifecycle_receipt(
+                catalog_service_slug, method.as_str(), &path, status, &response.text,
+            ) {
+                response.text = receipt;
+            }
+            if let Some(setup) = super::assistant_service_execution::cma::credential_setup_result(
+                catalog_service_slug, &target.service, status, &response.text,
+            ) {
+                response.text = setup;
             }
         }
         Ok(McpToolExecutionOutcome::Response(response))
@@ -10564,6 +10695,100 @@ mod tests {
         assert_eq!(edited["ep-chat_update"].changes_existing, Some(true));
         // Stored rows are catalog contracts; only theirs may widen reads.
         assert!(edited["ep-chat_update"].catalog_contract);
+    }
+
+    #[test]
+    fn cma_remote_discovery_keeps_async_contracts_and_generic_http_effects() {
+        for names in [
+            [
+                "create_agent",
+                "get_provisioning",
+                "run_task",
+                "get_task",
+                "control_task",
+                "delete_agent",
+            ],
+            [
+                "post_api_v1_agents",
+                "get_api_v1_agent_lifecycle_id",
+                "post_api_v2_agents_agent_id_responses",
+                "get_api_v2_responses_response_id",
+                "post_api_v2_agents_agent_id_responses_response_id_controls",
+                "delete_api_v1_agents_id",
+            ],
+        ] {
+            let mut spec = serde_json::json!({
+                "openapi": "3.1.0",
+                "info": {"title": "CMA discovery fixture", "version": "1"},
+                "paths": {}
+            });
+            for (method, path, name) in [
+                ("post", "/api/v1/agents", names[0]),
+                ("get", "/api/v1/agent-lifecycle/{id}", names[1]),
+                ("post", "/api/v2/agents/{agent_id}/responses", names[2]),
+                ("get", "/api/v2/responses/{response_id}", names[3]),
+                (
+                    "post",
+                    "/api/v2/agents/{agent_id}/responses/{response_id}/controls",
+                    names[4],
+                ),
+                ("delete", "/api/v1/agents/{id}", names[5]),
+            ] {
+                spec["paths"][path][method] = serde_json::json!({
+                    "operationId": name,
+                    "responses": {"200": {"description": "Observed result"}}
+                });
+            }
+            let mut published =
+                parsed_endpoints_to_mcp(openapi_parser::parse_openapi_spec_value(&spec).unwrap());
+            assert_eq!(published.endpoints.len(), names.len());
+            assert!(
+                published
+                    .endpoints
+                    .iter()
+                    .all(|endpoint| endpoint.async_operation.is_none())
+            );
+
+            mark_catalog_operations(&mut published, "cma");
+
+            for (submit, status, presentation) in [
+                (
+                    names[0],
+                    names[1],
+                    crate::models::async_service_operation::CmaOperationKind::Provisioning,
+                ),
+                (
+                    names[2],
+                    names[3],
+                    crate::models::async_service_operation::CmaOperationKind::Response,
+                ),
+            ] {
+                let contract = published
+                    .endpoints
+                    .iter()
+                    .find(|endpoint| endpoint.name == submit)
+                    .unwrap()
+                    .async_operation
+                    .as_ref()
+                    .unwrap();
+                assert_eq!(contract.presentation, Some(presentation));
+                assert_eq!(contract.status_operation, status);
+                assert_eq!(contract.result_operation, status);
+            }
+            for endpoint in &published.endpoints {
+                let metadata = published.durable_metadata[&endpoint.endpoint_id];
+                assert!(!metadata.catalog_contract);
+                assert!(!metadata.destructive, "{}", endpoint.name);
+                assert_eq!(metadata.changes_existing, None, "{}", endpoint.name);
+                let effects = operation_effects(&endpoint.method.parse().unwrap(), metadata);
+                match endpoint.method.as_str() {
+                    "GET" => assert!(effects.reads && effects.uses && !effects.destructive),
+                    "POST" => assert!(!effects.reads && effects.uses && !effects.destructive),
+                    "DELETE" => assert!(!effects.reads && !effects.uses && effects.destructive),
+                    method => panic!("unexpected test method {method}"),
+                }
+            }
+        }
     }
 
     #[test]
@@ -14999,6 +15224,7 @@ mod tests {
         let service = crate::models::downstream_service::test_helpers::dummy_service();
         proxy_service::UserServiceResolution {
             target: proxy_service::ProxyTarget {
+                catalog_slug: None,
                 execution_request: None,
                 execution_permission: None,
                 credential_deferred: false,

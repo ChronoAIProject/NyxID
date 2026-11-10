@@ -9105,6 +9105,102 @@ request/response schema, lifecycle, limits, and rollout contract, and the
 NyxBot channel link and chat override targets follow the organization-agent
 boundary and recovery contract in [ORG_AGENTS.md](ORG_AGENTS.md).
 
+## NyxBot CMA Sandbox management scope
+
+`GET /api/v1/assistant/nyxagent/sandboxes` lists only Sandboxes with a
+server-written creation record in this NyxID database. It requires a first-party
+human owner and the CMA feature flag. The response includes `sandboxes`,
+`next_cursor`, `occupied`, `limit`, `conflict`, and `inventory_complete`.
+`occupied` counts the owner's allocation across all pages, chats, roles, keys,
+and connection aliases; `limit` is `1`. Creating or logging into a Sandbox
+directly in CMA does not make it a NyxID-created resource.
+
+The same scope applies to Sandbox detail, label, lifecycle and event routes,
+Agent parent bindings, `nyxid__list_cma_resources`, and cached assistant context.
+External `discovered`, `claimed`, or `conflict` references are hidden and cannot
+be used to manage an external Sandbox. There are no Sandbox `claim` or
+`unregistered` management endpoints. Raw CMA catalog proxy reads retain CMA's
+own response and may list other resources in the upstream account.
+
+The Agent summaries in `nyxid__list_cma_resources` and the cached CMA context
+include nullable `last_known_response_id`, taken from an existing observed
+submission. This lets another NyxBot chat locate that work without copying the
+source chat's transcript. It is a historical lookup hint, not the current task
+or permission to control it. Read the live Response and verify its conversation,
+then check the controls' `target_active` and revision before proposing a control.
+An absent or completed hint must not be replaced with a guessed Response ID.
+
+Pending, unknown, paused, failed-but-not-cleaned-up and retiring creations keep
+the NyxID allocation. An exact idempotent retry resumes the original intent;
+confirmed retirement or confirmation that no resource was created releases it.
+NyxID enforces this allocation locally. CMA retains its independent upstream
+limits; origin-aware CMA quota support is not required.
+
+`GET /api/v1/assistant/nyxagent/cma-agents/{id}/transcript` preserves CMA's
+authoritative `turns` alongside the legacy deduplicated `messages` list. Each
+turn contains `turn_sequence`, nullable `started_at`, `status`, and `messages`.
+Statuses are `active`, `completed`, `failed`, `interrupted`, or `unknown` for an
+absent/unrecognized upstream outcome. A retried turn may reuse the same admitted
+owner message; it remains present in each turn but only once in the flat list.
+Duplicate or non-increasing turn identities and conflicting message identities
+are rejected. There are at most 10,000 turns and message occurrences per read.
+
+The cloud assistant detail page presents one Conversation view beside Desktop.
+An exact response link is checked against the requested Agent and resolved only
+through a consistent V2 `turn_started.response_binding`; message text or the
+Agent's latest status cannot select a turn. Missing bindings remain explicitly
+unresolved. Execution details use the authoritative turn boundaries and exclude
+conflicting explicit bindings. Terminal transcript outcomes remain terminal;
+an active turn can show its own observed approval wait. The Agent-level status
+is displayed separately. Main-chat cards retain their existing contract.
+
+For the current CMA desktop creation flow, `create_agent` must explicitly send
+`desktop=true` and an `initial_message` containing the user's exact first task.
+CMA retains that task during preparation and executes it afterward. The retained
+`machine_included` option alone does not enable this flow. Normal setup requests
+may still omit both new fields. Recovery preserves the exact original body
+bytes and Idempotency-Key, including JSON field order and whitespace.
+
+The final dispatch boundary recognizes only the exact missing-first-message
+desktop refusal and typed `desktop_unsupported` response from the Agent lifecycle
+creation endpoint as additional authoritative no-resource results. It releases
+the matching creation and allocation transactionally, provided no operation or
+resource receipt is already recorded. Other validation errors, 403 permission
+failures, transport failures, empty inventories and failed lifecycle observations
+do not prove that an earlier submission created nothing and retain the allocation.
+
+CMA provisioning observations preserve the known `sandbox_ready` phase as
+preparation progress. A `running` operation in that phase remains Starting
+(Preparing sandbox in the card); the phase name alone does not prove that the
+Agent or Sandbox is ready. `desktop_preparation` is likewise preparation progress,
+displayed as Preparing desktop without treating it as a ready environment or an
+observed desktop frame.
+
+Sandbox responses include a `capacity` object with `cpu_millis`, `memory_mib`,
+and nullable `source`. `profile_revision` means capacity read from the exact
+pinned Profile revision; `runtime_allocation` means a verified owner allocation
+read from CMA's Sandbox usage API. NyxID saves the first complete positive pair
+and its source as the resource specification for that creation identity. Once
+saved, ordinary observations read only lifecycle/ownership and skip additional
+profile or allocation requests. Pause, revive, retirement and unavailable
+observations preserve the saved capacity; clients display it independently of
+lifecycle state. This is not live utilization or a promise that a paused resource
+is currently running. Capacity is looked up only while no verified pair is
+stored; failures leave it unconfirmed without making the inventory unavailable.
+Legacy numbers without a source do not establish verified capacity. Each initial
+enrichment call has a two-second budget and at most eight reads; this is not an
+overall management-request timeout. A new Sandbox creation has its own capacity;
+resource resizing and automatic capacity refresh are outside this contract.
+
+The native `nyxid__cma_save_attachment` tool accepts a `path` relative to CMA's
+filesystem API root, `/home/`. A successful receipt returns `path`,
+`absolute_path`, `size`, and `sha256`; subsequent Agent commands should use
+`absolute_path` because an Agent's working directory can be its own Worktree.
+For example, `acceptance/input.txt` returns `/home/acceptance/input.txt`.
+An identical existing file is an idempotent success; different content is not
+overwritten. Attachment access remains restricted to the originating
+conversation and its current owner, grant, turn, and created Sandbox binding.
+
 ## Assistant voice and dictation
 
 The [voice contract](chat/11-voice.md) specifies the existing call lifecycle,

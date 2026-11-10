@@ -43,7 +43,8 @@ jobs:
       - name: Prepare backend memory reserve
         run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
-        timeout-minutes: 5
+        # A healthy but slow Ubuntu mirror can take over five minutes for indexes.
+        timeout-minutes: 10
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
         with:
@@ -120,7 +121,8 @@ jobs:
       - name: Prepare backend memory reserve
         run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
-        timeout-minutes: 5
+        # A healthy but slow Ubuntu mirror can take over five minutes for indexes.
+        timeout-minutes: 10
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
       - uses: taiki-e/install-action@v2
@@ -164,7 +166,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install system dependencies
-        timeout-minutes: 5
+        # A healthy but slow Ubuntu mirror can take over five minutes for indexes.
+        timeout-minutes: 10
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@1.98.1
         with:

@@ -3615,7 +3615,7 @@ fn dispatch_service_tool<'a>(
         )
         .await;
 
-        let execution = mcp_service::execute_tool_response(
+        let execution = mcp_service::execute_tool_response_with_outcome(
             &state.http_client,
             &state.db,
             &state.encryption_keys,
@@ -3636,15 +3636,12 @@ fn dispatch_service_tool<'a>(
         )
         .await;
         if let Some(watch) = &async_watch
-            && let Err(error) = crate::services::async_service_operation::submitted(
-                &state.db,
-                watch,
-                execution.as_ref().ok(),
-            )
-            .await
+            && let Err(error) =
+                crate::services::async_service_operation::submitted(state, watch, &execution).await
         {
             tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
         }
+        let execution = execution.and_then(mcp_service::McpToolExecutionOutcome::into_response);
         let diagnostic = service_failure_handle(state, auth, service, &execution).await;
         let mut response = match execution {
             Ok(r) => r,
@@ -4638,6 +4635,7 @@ async fn handle_account_tool(
         keys: &state.encryption_keys,
         http: &state.http_client,
         config: &state.config,
+        jwt_keys: &state.jwt_keys,
         token_exchange_cache: &state.token_exchange_cache,
         node_manager: &state.node_ws_manager,
     };
@@ -5343,7 +5341,7 @@ async fn handle_meta_call_tool(
     )
     .await;
 
-    let execution = mcp_service::execute_tool_response(
+    let execution = mcp_service::execute_tool_response_with_outcome(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -5364,15 +5362,12 @@ async fn handle_meta_call_tool(
     )
     .await;
     if let Some(watch) = &async_watch
-        && let Err(error) = crate::services::async_service_operation::submitted(
-            &state.db,
-            watch,
-            execution.as_ref().ok(),
-        )
-        .await
+        && let Err(error) =
+            crate::services::async_service_operation::submitted(state, watch, &execution).await
     {
         tracing::warn!(watch_id = %watch.id, code = error.error_code(), "Async submission tracking deferred");
     }
+    let execution = execution.and_then(mcp_service::McpToolExecutionOutcome::into_response);
     let diagnostic = service_failure_handle(state, auth, service, &execution).await;
     let mut response = match execution {
         Ok(r) => r,

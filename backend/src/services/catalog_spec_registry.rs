@@ -827,6 +827,31 @@ mod tests {
     }
 
     #[test]
+    fn cma_uses_remote_discovery_without_a_hosted_overlay() {
+        assert!(spec_for_slug("cma").is_none());
+        assert!(spec_path_for_slug("cma").is_none());
+        for (method, path, name) in [
+            ("POST", "/api/v1/agents", "create_agent"),
+            ("POST", "/api/v1/agents", "post_api_v1_agents"),
+            (
+                "POST",
+                "/api/v2/agents/{agent_id}/responses/{response_id}/controls",
+                "control_task",
+            ),
+            (
+                "POST",
+                "/api/v2/agents/{agent_id}/responses/{response_id}/controls",
+                "post_api_v2_agents_agent_id_responses_response_id_controls",
+            ),
+        ] {
+            assert_eq!(
+                operation_marks("cma", method, path, name),
+                OperationMarks::default()
+            );
+        }
+    }
+
+    #[test]
     fn every_embedded_spec_parses_as_openapi_with_operations() {
         for key in PARSED_SPECS.keys() {
             let spec = spec_for_key(key).expect("registered spec");

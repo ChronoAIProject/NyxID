@@ -206,7 +206,7 @@ fn event_turn(conversation_id: &str) -> TurnStart {
 
 /// Start an event turn draining a thread's queue when it is idle. Loop
 /// guards: a NyxBot thread stops after `MAX_EVENT_STREAK` consecutive event
-/// turns without a user message, and an owner runs at most
+/// turns without a user message or bound desktop decision, and an owner runs at most
 /// `EVENT_TURNS_PER_HOUR` event turns per hour. Events stay queued otherwise
 /// and reach the agent with its next turn.
 pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
@@ -927,11 +927,12 @@ fn skill_request_allowed_note(
         Attach it now: resolve names with search_agent_skills and agent_skill_versions, \
         then preview each root with preview_agent_skill to obtain complete pins. \
         Call nyxid__set_agent_skills for this agent at its current revision. \
-        Respect the effective permission mode; Full access bypasses all confirmations with receipts. Do not ask for another permission decision. Then tell the user in one or two plain sentences what you did and the result.",
+        Respect the effective permission mode; Full access bypasses all confirmations with receipts. Do not ask for another permission decision. {}",
         excerpt(&agent.name, 80),
         agent.id,
         request.id,
         excerpt(&request.summary, 2000),
+        acks::DECISION_NARRATION,
     )
 }
 
