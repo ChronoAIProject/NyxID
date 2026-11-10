@@ -198,7 +198,7 @@ fn seeded(user: &str, kind: NotificationKind, source: NotificationSource) -> Ass
         count: 1,
         outcome: Some("completed".into()),
         reason: None,
-        push: Some(push_state(&PushPlan::Pending)),
+        push: Some(push_state(&PushPlan::Pending, kind)),
         created_at: now,
         updated_at: now,
         expires_at: now + Duration::days(RETENTION_DAYS),
@@ -570,6 +570,51 @@ async fn channel_guest_turns_notify_the_owner_and_unlink_or_chat_removal_fence_l
         .await
         .unwrap();
     settle(&f, &row2, "late reply", None).await;
+    let retained = rows_of(&f, &f.owner).await;
+    assert_eq!(retained.len(), 1);
+    // Reopen the retained row so the summary has something to omit.
+    db.collection::<Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &retained[0].id},
+            doc! {"$set": {"unread": true, "read_at": bson::Bson::Null}},
+        )
+        .await
+        .unwrap();
+    // A present channel in a non-live status is repairable: list and summary
+    // hide its rows instead of deleting them (the transactional retirement
+    // hook owns real deletion).
+    for status in ["disconnected", "failed"] {
+        db.collection::<Document>(CHANNELS)
+            .update_one(doc! {"_id": &channel}, doc! {"$set": {"status": status}})
+            .await
+            .unwrap();
+        assert!(
+            list(&f.state, &f.owner, &page(10))
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert_eq!(summary(db, &f.owner).await.unwrap().unread_count, 0);
+        assert_eq!(rows_of(&f, &f.owner).await.len(), 1);
+    }
+    // Repaired: the retained row is back.
+    db.collection::<Document>(CHANNELS)
+        .update_one(doc! {"_id": &channel}, doc! {"$set": {"status": "active"}})
+        .await
+        .unwrap();
+    let repaired = list(&f.state, &f.owner, &page(10)).await.unwrap();
+    assert_eq!(repaired.items.len(), 1);
+    assert_eq!(repaired.items[0].title, "Support bot · Alice");
+    assert_eq!(summary(db, &f.owner).await.unwrap().unread_count, 1);
+    // Chat removal is final: a settlement without a live thread records
+    // nothing and the retained row is purged at the next read.
+    db.collection::<Document>(CHANNEL_THREADS)
+        .delete_one(doc! {"_id": &thread})
+        .await
+        .unwrap();
+    let row3 = begin(&f, &f.owner, &again).await;
+    settle(&f, &row3, "after removal", None).await;
     assert_eq!(rows_of(&f, &f.owner).await.len(), 1);
     assert!(
         list(&f.state, &f.owner, &page(10))
@@ -578,18 +623,6 @@ async fn channel_guest_turns_notify_the_owner_and_unlink_or_chat_removal_fence_l
             .items
             .is_empty()
     );
-    assert!(rows_of(&f, &f.owner).await.is_empty());
-    // Chat removal before settlement: no live thread, no row.
-    db.collection::<Document>(CHANNELS)
-        .update_one(doc! {"_id": &channel}, doc! {"$set": {"status": "active"}})
-        .await
-        .unwrap();
-    db.collection::<Document>(CHANNEL_THREADS)
-        .delete_one(doc! {"_id": &thread})
-        .await
-        .unwrap();
-    let row3 = begin(&f, &f.owner, &again).await;
-    settle(&f, &row3, "after removal", None).await;
     assert!(rows_of(&f, &f.owner).await.is_empty());
 }
 
@@ -634,7 +667,32 @@ async fn org_guest_lane_notifies_the_route_admin_from_the_public_transcript_only
         )
         .await
         .unwrap();
+    // With the admin's feed off, a guest settlement reads the channel owner
+    // and stops: no channel write (no fence), no row.
+    set_flag(&f, false).await;
+    settle(&f, &row, "while the feed is off", None).await;
+    let untouched = db
+        .collection::<Document>(CHANNELS)
+        .find_one(doc! {"_id": &channel})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!untouched.contains_key("notification_fence"));
+    assert!(rows_of(&f, &admin).await.is_empty());
+    set_flag(&f, true).await;
+    let mut more = start(Some(&row.id), "visitor question again", TurnOrigin::Channel);
+    more.channel = Some(channel_origin(&channel));
+    more.guest = true;
+    let row = begin(&f, &f.owner, &more).await;
     let reply = settle(&f, &row, "private lane text", None).await;
+    assert!(
+        db.collection::<Document>(CHANNELS)
+            .find_one(doc! {"_id": &channel})
+            .await
+            .unwrap()
+            .unwrap()
+            .contains_key("notification_fence")
+    );
     // The sanitized public transcript entry the settlement would publish.
     db.collection::<Document>(ORG_CHANNEL_MESSAGES)
         .insert_one(
@@ -1108,6 +1166,23 @@ async fn pending_cards_create_decision_rows_that_resolve_on_decide_expire_sweep_
         .find(|row| row.source.card_id.as_deref() == Some(third.id.as_str()))
         .unwrap();
     assert_eq!(swept.resolution.as_deref(), Some("expired"));
+    // A card decided on another replica before its hook ran reconciles as
+    // decided, not expired.
+    let elsewhere = action_card(&f, &row, &nyxbot.id, "Delete service v?").await;
+    db.collection::<Document>(ACKS)
+        .update_one(
+            doc! {"_id": &elsewhere.id},
+            doc! {"$set": {"status": "allowed"}},
+        )
+        .await
+        .unwrap();
+    list(&f.state, &f.owner, &page(10)).await.unwrap();
+    let reconciled = rows_of(&f, &f.owner)
+        .await
+        .into_iter()
+        .find(|row| row.source.card_id.as_deref() == Some(elsewhere.id.as_str()))
+        .unwrap();
+    assert_eq!(reconciled.resolution.as_deref(), Some("decided"));
     // Full access retires ordinary asks: superseded.
     let fourth = action_card(&f, &row, &nyxbot.id, "Delete service w?").await;
     settings::update(
@@ -1127,6 +1202,140 @@ async fn pending_cards_create_decision_rows_that_resolve_on_decide_expire_sweep_
         .unwrap();
     assert_eq!(superseded.resolution.as_deref(), Some("superseded"));
     settle(&f, &row, "done", None).await;
+}
+
+#[tokio::test]
+async fn collaboration_cards_render_for_the_requester_and_ownership_mismatches_hide_not_purge() {
+    let f = fixture("notif_card_owner").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    let requester = person(&f).await;
+    // The hidden slot belongs to the agent owner; the acknowledgement stores
+    // that owner, while the row is the requester's.
+    let conversation = Uuid::new_v4().to_string();
+    db.collection::<Document>(CONVERSATIONS)
+        .insert_one(
+            doc! {"_id": &conversation, "user_id": &f.owner, "title": "Shared research",
+            "collaboration": {"original_requester_id": &requester, "group_id": "grp"}},
+        )
+        .await
+        .unwrap();
+    let expires = Utc::now() + Duration::minutes(10);
+    let card = Uuid::new_v4().to_string();
+    db.collection::<Document>(ACKS)
+        .insert_one(
+            doc! {"_id": &card, "user_id": &f.owner, "conversation_id": &conversation,
+            "status": "pending", "expires_at": bson_date(expires), "summary": "Export the sheet?"},
+        )
+        .await
+        .unwrap();
+    let mut row = seeded(
+        &requester,
+        NotificationKind::NeedsDecision,
+        NotificationSource {
+            source_type: SourceType::CollaborationGroup,
+            id: "grp".into(),
+            conversation_id: Some(conversation.clone()),
+            card_id: Some(card.clone()),
+            ..Default::default()
+        },
+    );
+    row.card_expires_at = Some(expires);
+    row.outcome = None;
+    insert_row(&f, &row).await;
+    let listed = list(&f.state, &requester, &page(10)).await.unwrap();
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].preview, "Export the sheet?");
+    assert!(!listed.items[0].resolved);
+    let counts = summary(db, &requester).await.unwrap();
+    assert_eq!((counts.unread_count, counts.needs_decision_count), (1, 1));
+    assert_eq!(rows_of(&f, &requester).await.len(), 1);
+    // A card that belongs to another thread is hidden, never deleted.
+    let foreign = Uuid::new_v4().to_string();
+    db.collection::<Document>(ACKS)
+        .insert_one(
+            doc! {"_id": &foreign, "user_id": &f.owner, "conversation_id": "elsewhere",
+            "status": "pending", "expires_at": bson_date(expires), "summary": "Other"},
+        )
+        .await
+        .unwrap();
+    let mut mismatched = seeded(
+        &requester,
+        NotificationKind::NeedsDecision,
+        NotificationSource {
+            source_type: SourceType::Conversation,
+            id: conversation.clone(),
+            conversation_id: Some(conversation.clone()),
+            card_id: Some(foreign.clone()),
+            ..Default::default()
+        },
+    );
+    mismatched.card_expires_at = Some(expires);
+    mismatched.outcome = None;
+    insert_row(&f, &mismatched).await;
+    assert_eq!(
+        list(&f.state, &requester, &page(10))
+            .await
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert_eq!(rows_of(&f, &requester).await.len(), 2);
+    // An automation whose trigger and run belong to someone else is hidden too.
+    let trigger = Uuid::new_v4().to_string();
+    db.collection::<Document>(TRIGGER_ROWS)
+        .insert_one(
+            doc! {"_id": &trigger, "user_id": &f.owner, "label": "Nightly", "status": "active"},
+        )
+        .await
+        .unwrap();
+    let run = Uuid::new_v4().to_string();
+    db.collection::<Document>(RUNS)
+        .insert_one(
+            doc! {"_id": &run, "user_id": &f.owner, "trigger_id": &trigger,
+            "label": "Nightly", "outcome": "completed"},
+        )
+        .await
+        .unwrap();
+    insert_row(
+        &f,
+        &seeded(
+            &requester,
+            NotificationKind::AutomationResult,
+            NotificationSource {
+                source_type: SourceType::Trigger,
+                id: trigger.clone(),
+                trigger_id: Some(trigger.clone()),
+                run_id: Some(run.clone()),
+                ..Default::default()
+            },
+        ),
+    )
+    .await;
+    assert_eq!(
+        list(&f.state, &requester, &page(10))
+            .await
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert_eq!(summary(db, &requester).await.unwrap().unread_count, 1);
+    assert_eq!(rows_of(&f, &requester).await.len(), 3);
+    // Only a genuinely missing card deletes its row.
+    db.collection::<Document>(ACKS)
+        .delete_one(doc! {"_id": &card})
+        .await
+        .unwrap();
+    assert!(
+        list(&f.state, &requester, &page(10))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert_eq!(rows_of(&f, &requester).await.len(), 2);
 }
 
 #[tokio::test]
@@ -2331,6 +2540,7 @@ async fn claim_enforces_attempt_limit_and_retry_window_from_the_persisted_row() 
     );
     row.push = Some(PushState {
         state: "retrying".into(),
+        kind: None,
         attempt: Some("spent".into()),
         code: Some("push_temporarily_refused".into()),
         attempts: PUSH_MAX_ATTEMPTS,
@@ -2356,6 +2566,7 @@ async fn claim_enforces_attempt_limit_and_retry_window_from_the_persisted_row() 
     );
     row.push = Some(PushState {
         state: "retrying".into(),
+        kind: None,
         attempt: Some("spent".into()),
         code: None,
         attempts: 1,
@@ -2404,11 +2615,15 @@ async fn claim_enforces_attempt_limit_and_retry_window_from_the_persisted_row() 
 }
 
 #[tokio::test]
-async fn claimed_snapshot_drives_preference_preview_and_payload_after_coalescing() {
+async fn the_creating_kind_drives_push_preference_and_payload_after_coalescing() {
     let f = fixture("notif_push_coalesced").await;
     let db = &f.state.db;
     set_flag(&f, true).await;
-    // Only mentions push; agent updates do not.
+    let researcher = specialist(&f, "researcher").await;
+    let research = groups::create(db, &f.owner, "Research", &[researcher.id.clone()], "user")
+        .await
+        .unwrap();
+    // Only mentions push.
     push_prefs(
         &f,
         &f.owner,
@@ -2418,77 +2633,104 @@ async fn claimed_snapshot_drives_preference_preview_and_payload_after_coalescing
         },
     )
     .await;
-    let group_id = Uuid::new_v4().to_string();
-    db.collection::<Document>(GROUPS)
+    let mention = Uuid::new_v4().to_string();
+    db.collection::<Document>(GROUP_MESSAGES)
         .insert_one(
-            doc! {"_id": &group_id, "user_id": &f.owner, "name": "Research",
-            "collaboration": {"version": 1, "creator_user_id": &f.owner, "membership_revision": 1},
-            "participant_user_ids": [&f.owner], "member_agent_ids": [], "lead_agent_id": "",
-            "last_recipient_ids": [], "created_by": "user", "message_count": 0,
-            "pending_agent_ids": [], "hops_remaining": 0, "followers": [],
-            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()},
+            doc! {"_id": &mention, "group_id": &research.id, "user_id": &f.owner,
+            "seq": 7_i64, "role": "user", "text": "@researcher please look"},
         )
         .await
         .unwrap();
-    let message_id = Uuid::new_v4().to_string();
-    db.collection::<Document>(GROUP_MESSAGES)
-        .insert_one(doc! {"_id": &message_id, "group_id": &group_id, "user_id": &f.owner,
-            "seq": 7_i64, "role": "user", "text": "@bob please look", "created_at": bson::DateTime::now()})
-        .await
-        .unwrap();
-    let mut row = seeded(
+    let row = seeded(
         &f.owner,
         NotificationKind::GroupMention,
         NotificationSource {
-            source_type: SourceType::CollaborationGroup,
-            id: group_id.clone(),
-            group_id: Some(group_id.clone()),
-            message_id: Some(message_id.clone()),
+            source_type: SourceType::Group,
+            id: research.id.clone(),
+            group_id: Some(research.id.clone()),
+            message_id: Some(mention.clone()),
             ..Default::default()
         },
     );
-    row.outcome = None;
     insert_row(&f, &row).await;
-    // The sweep's snapshot says mention, but by claim time the same unread
-    // row coalesced an agent reply (kind flipped, latest message changed).
-    let reply_id = Uuid::new_v4().to_string();
+    // Before the sweep, the agent's reply coalesces onto the unread row: the
+    // row is relabelled, the latest message moves on.
+    let reply = Uuid::new_v4().to_string();
     db.collection::<Document>(GROUP_MESSAGES)
-        .insert_one(doc! {"_id": &reply_id, "group_id": &group_id, "user_id": &f.owner,
-            "seq": 8_i64, "role": "agent", "text": "Looked, all good.", "created_at": bson::DateTime::now()})
+        .insert_one(
+            doc! {"_id": &reply, "group_id": &research.id, "user_id": &f.owner,
+            "seq": 8_i64, "role": "agent", "agent_id": &researcher.id, "text": "Looked, all good."},
+        )
         .await
         .unwrap();
     db.collection::<Document>(COLLECTION_NAME)
         .update_one(
             doc! {"_id": &row.id},
-            doc! {"$set": {"kind": "agent_update", "source.message_id": &reply_id,
-            "updated_at": bson_date(Utc::now())}, "$inc": {"count": 1_i64}},
+            doc! {"$set": {"kind": "agent_update", "source.message_id": &reply,
+            "source.agent_id": &researcher.id, "updated_at": bson_date(Utc::now())},
+            "$inc": {"count": 1_i64}},
         )
         .await
         .unwrap();
+    // The opted-in mention push goes out, labelled and titled as a mention,
+    // with the latest content.
     let sent: Sent = Default::default();
     sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
-    assert!(sent.lock().unwrap().is_empty());
+    {
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        let (_, title, body, data) = &sent[0];
+        assert_eq!(data.get("type").map(String::as_str), Some("group_mention"));
+        assert_eq!(data.get("kind").map(String::as_str), Some("group_mention"));
+        assert_eq!(title, "Mention in Research");
+        assert_eq!(body, "Looked, all good.");
+    }
     let push = push_of(&f, &row.id).await;
+    assert_eq!(
+        (push.state.as_str(), push.kind),
+        ("sent", Some(NotificationKind::GroupMention))
+    );
+    assert_eq!(reservations(&f, &f.owner).await, (1, 1));
+    // The reverse never sends an un-opted push: a row created as a mention
+    // and relabelled to an agent update is not pushed to someone who opted
+    // into agent updates only.
+    push_prefs(
+        &f,
+        &f.owner,
+        NotificationPushPreferences {
+            agent_update: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let design = groups::create(db, &f.owner, "Design", &[researcher.id.clone()], "user")
+        .await
+        .unwrap();
+    let second = seeded(
+        &f.owner,
+        NotificationKind::GroupMention,
+        NotificationSource {
+            source_type: SourceType::Group,
+            id: design.id.clone(),
+            group_id: Some(design.id.clone()),
+            message_id: Some(mention.clone()),
+            ..Default::default()
+        },
+    );
+    insert_row(&f, &second).await;
+    db.collection::<Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &second.id},
+            doc! {"$set": {"kind": "agent_update"}, "$inc": {"count": 1_i64}},
+        )
+        .await
+        .unwrap();
+    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
+    assert_eq!(sent.lock().unwrap().len(), 1);
+    let push = push_of(&f, &second.id).await;
     assert_eq!(
         (push.state.as_str(), push.code.as_deref()),
         ("skipped", Some("preference_off"))
     );
-    assert_eq!(reservations(&f, &f.owner).await, (0, 0));
-    // With the current kind preferred, the payload reflects the claimed row.
-    push_prefs(&f, &f.owner, all_push()).await;
-    db.collection::<Document>(COLLECTION_NAME)
-        .update_one(
-            doc! {"_id": &row.id},
-            doc! {"$set": {"push.state": "pending"}},
-        )
-        .await
-        .unwrap();
-    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
-    let sent = sent.lock().unwrap();
-    assert_eq!(sent.len(), 1);
-    let (_, title, body, data) = &sent[0];
-    assert_eq!(data.get("type").map(String::as_str), Some("agent_update"));
-    assert_eq!(body, "Looked, all good.");
-    assert_eq!(title, "Research");
     assert_eq!(reservations(&f, &f.owner).await, (1, 1));
 }

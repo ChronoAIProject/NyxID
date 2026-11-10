@@ -348,13 +348,17 @@ struct NewRow<'a> {
     push: PushPlan,
 }
 
-fn push_state(plan: &PushPlan) -> PushState {
+/// The push barrier at creation. `kind` freezes the creating kind: a later
+/// coalesce may relabel the row, but the person is pushed for what they
+/// opted into, and the payload is built for that kind.
+fn push_state(plan: &PushPlan, kind: NotificationKind) -> PushState {
     let (state, code) = match plan {
         PushPlan::Pending => ("pending", None),
         PushPlan::Skipped(code) => ("skipped", Some((*code).to_owned())),
     };
     PushState {
         state: state.into(),
+        kind: Some(kind),
         attempt: None,
         code,
         attempts: 0,
@@ -398,7 +402,7 @@ async fn record_in_session(
         count: 1,
         outcome: new.outcome,
         reason: new.reason,
-        push: Some(push_state(&new.push)),
+        push: Some(push_state(&new.push, new.kind)),
         created_at: now,
         updated_at: now,
         expires_at,
@@ -475,6 +479,22 @@ async fn fence_trigger(
         == 1)
 }
 
+/// The live channel's owner (the route admin for organization bots), read
+/// with a projection and no write.
+async fn live_channel_owner(
+    db: &Database,
+    session: &mut ClientSession,
+    channel_id: &str,
+) -> AppResult<Option<String>> {
+    Ok(db
+        .collection::<Document>(CHANNELS)
+        .find_one(doc! {"_id": channel_id, "status": {"$in": LIVE_CHANNEL_STATUSES.to_vec()}})
+        .projection(doc! {"user_id": 1})
+        .session(&mut *session)
+        .await?
+        .and_then(|channel| channel.get_str("user_id").ok().map(str::to_owned)))
+}
+
 /// Parent write fence for channel chats: the channel row is written so the
 /// transactional unlink (`retire_connection`, which sets `status`) and the
 /// transactional chat removal (`remove_thread`, which increments the channel's
@@ -540,9 +560,14 @@ pub async fn record_turn_settled_in_session(
     turn: &ActiveTurn,
     message: &AssistantMessage,
 ) -> AppResult<()> {
-    let org_guest = row
-        .channel
-        .as_ref()
+    // A channel chat: the thread's own channel, or, for a Channel-origin turn
+    // on the agent's home thread, the chat the owner wrote from (owner DMs).
+    // Event and orchestrator turns keep a stale delivery preference out of it.
+    let channel = row.channel.as_ref().or(match turn.origin {
+        TurnOrigin::Channel => row.reply_channel.as_ref(),
+        _ => None,
+    });
+    let org_guest = channel
         .and_then(|channel| channel.org_execution.as_ref())
         .is_some_and(|execution| execution.guest);
     if (!turn.notifications_enabled && !org_guest)
@@ -567,7 +592,18 @@ pub async fn record_turn_settled_in_session(
         }
         .to_owned(),
     );
-    let (audience, kind, source) = if let Some(channel) = row.channel.as_ref() {
+    let (audience, kind, source) = if let Some(channel) = channel {
+        if org_guest {
+            // The linking admin's flag decides before the channel is fenced:
+            // a disabled feed costs one projection read and no write (D8).
+            let Some(admin) = live_channel_owner(db, session, &channel.nyxbot_channel_id).await?
+            else {
+                return Ok(());
+            };
+            if !enabled(db, &admin).await? {
+                return Ok(());
+            }
+        }
         let Some(channel_owner) = fence_channel(db, session, &channel.nyxbot_channel_id).await?
         else {
             return Ok(());
@@ -588,9 +624,6 @@ pub async fn record_turn_settled_in_session(
             } else {
                 (row.user_id.clone(), LANE_ORG_MEMBER, Some(row.id.clone()))
             };
-            if execution.guest && !enabled(db, &audience).await? {
-                return Ok(());
-            }
             (
                 audience,
                 NotificationKind::ChatUpdate,
@@ -1530,9 +1563,10 @@ async fn load_lookups(
             load_documents(
                 db,
                 RUNS,
-                doc! {"_id": {"$in": ids(&run_ids)}, "user_id": user_id},
-                doc! {"_id": 1, "label": 1, "outcome": 1, "reason": 1, "thread_id": 1,
-                "turn_id": 1, "agent_id": 1, "trigger_id": 1, "notification_delivery.reason": 1},
+                doc! {"_id": {"$in": ids(&run_ids)}},
+                doc! {"_id": 1, "user_id": 1, "label": 1, "outcome": 1, "reason": 1,
+                "thread_id": 1, "turn_id": 1, "agent_id": 1, "trigger_id": 1,
+                "notification_delivery.reason": 1},
             )
             .await?,
         )
@@ -1544,8 +1578,8 @@ async fn load_lookups(
             load_documents(
                 db,
                 TRIGGERS,
-                doc! {"_id": {"$in": ids(&trigger_ids)}, "user_id": user_id},
-                doc! {"_id": 1, "label": 1, "status": 1},
+                doc! {"_id": {"$in": ids(&trigger_ids)}},
+                doc! {"_id": 1, "user_id": 1, "label": 1, "status": 1},
             )
             .await?,
         )
@@ -1557,8 +1591,9 @@ async fn load_lookups(
             load_documents(
                 db,
                 ACKS,
-                doc! {"_id": {"$in": ids(&card_ids)}, "user_id": user_id},
-                doc! {"_id": 1, "summary": 1, "status": 1, "expires_at": 1, "conversation_id": 1},
+                doc! {"_id": {"$in": ids(&card_ids)}},
+                doc! {"_id": 1, "user_id": 1, "summary": 1, "status": 1, "expires_at": 1,
+                "conversation_id": 1},
             )
             .await?,
         )
@@ -1623,7 +1658,7 @@ async fn load_lookups(
                 db,
                 ORG_CHANNEL_MESSAGES,
                 doc! {"_id": {"$in": ids(&org_message_ids)}},
-                doc! {"_id": 1, "text": 1, "role": 1},
+                doc! {"_id": 1, "text": 1, "role": 1, "channel_id": 1},
             )
             .await?,
         )
@@ -1806,7 +1841,12 @@ fn message_preview(message: &Document) -> String {
 }
 
 enum Built {
-    Item(NotificationItem),
+    Item {
+        item: NotificationItem,
+        /// A decision row whose card settled without its hook: the label to
+        /// record lazily.
+        resolve: Option<&'static str>,
+    },
     /// The source no longer exists: delete the row.
     Purge,
     /// The person can no longer see the source: hide the row.
@@ -1845,16 +1885,47 @@ fn item(
     }
 }
 
-fn live_channel<'a>(lookups: &'a Lookups, source: &NotificationSource) -> Option<&'a Document> {
-    source
+enum ChannelState<'a> {
+    /// The channel document is gone: real retirement, the row goes.
+    Absent,
+    /// Present but not live (`failed` is repairable): the row hides.
+    Retired,
+    Live(&'a Document),
+}
+
+fn channel_state<'a>(lookups: &'a Lookups, source: &NotificationSource) -> ChannelState<'a> {
+    match source
         .channel_id
         .as_deref()
         .and_then(|id| lookups.channels.get(id))
-        .filter(|channel| {
-            channel
+    {
+        None => ChannelState::Absent,
+        Some(channel)
+            if channel
                 .get_str("status")
-                .is_ok_and(|status| LIVE_CHANNEL_STATUSES.contains(&status))
-        })
+                .is_ok_and(|status| LIVE_CHANNEL_STATUSES.contains(&status)) =>
+        {
+            ChannelState::Live(channel)
+        }
+        Some(_) => ChannelState::Retired,
+    }
+}
+
+/// How a decision row settles when its card is no longer pending and no
+/// hook recorded it (decided on another replica, timed out, or withdrawn).
+fn card_resolution(status: &str) -> &'static str {
+    match status {
+        "pending" | "expired" => "expired",
+        "allowed" | "allowed_pending_attachment" | "denied" | "used" | "completed" => "decided",
+        _ => "superseded",
+    }
+}
+
+fn ready(item: NotificationItem) -> Built {
+    Built::Item {
+        item,
+        resolve: None,
+    }
 }
 
 fn build(
@@ -1877,8 +1948,10 @@ fn build(
             else {
                 return Built::Purge;
             };
-            let Some(channel) = live_channel(lookups, source) else {
-                return Built::Purge;
+            let channel = match channel_state(lookups, source) {
+                ChannelState::Absent => return Built::Purge,
+                ChannelState::Retired => return Built::Hidden,
+                ChannelState::Live(channel) => channel,
             };
             let visible = match source.lane.as_deref() {
                 // The route admin must still administer the channel's organization.
@@ -1903,6 +1976,9 @@ fn build(
                 .message_id
                 .as_deref()
                 .and_then(|id| lookups.org_messages.get(id))
+                .filter(|message| {
+                    message.get_str("channel_id").ok() == source.channel_id.as_deref()
+                })
                 .map(|message| preview_text(message.get_str("text").unwrap_or_default()))
                 .filter(|text| !text.is_empty())
                 .or_else(|| {
@@ -1926,7 +2002,7 @@ fn build(
                 .url(frontend),
                 None => AssistantPage::Agent { agent: None }.url(frontend),
             };
-            Built::Item(item(
+            ready(item(
                 row,
                 chat.clone(),
                 format!("{bot} · {chat}"),
@@ -1953,6 +2029,9 @@ fn build(
                 .message_id
                 .as_deref()
                 .and_then(|id| lookups.messages.get(id))
+                .filter(|message| {
+                    message.get_str("conversation_id").ok() == source.conversation_id.as_deref()
+                })
                 .map(message_preview)
                 .or_else(|| {
                     row.reason
@@ -1962,8 +2041,10 @@ fn build(
                 .unwrap_or_default();
             let agent = agent_title(&lookups.agents, source.agent_id.as_deref());
             let (label_text, title) = if row.kind == NotificationKind::ChatUpdate {
-                let Some(channel) = live_channel(lookups, source) else {
-                    return Built::Purge;
+                let channel = match channel_state(lookups, source) {
+                    ChannelState::Absent => return Built::Purge,
+                    ChannelState::Retired => return Built::Hidden,
+                    ChannelState::Live(channel) => channel,
                 };
                 let thread = match source.thread_id.as_deref() {
                     Some(id) => match lookups.threads.get(id) {
@@ -2002,7 +2083,7 @@ fn build(
                 conversation: &conversation_id,
             }
             .url(frontend);
-            Built::Item(item(row, label_text, title, preview, url, resolved))
+            ready(item(row, label_text, title, preview, url, resolved))
         }
         NotificationKind::AgentUpdate
         | NotificationKind::ChatUpdate
@@ -2021,6 +2102,7 @@ fn build(
                 .message_id
                 .as_deref()
                 .and_then(|id| lookups.group_messages.get(id))
+                .filter(|message| message.get_str("group_id").ok() == source.group_id.as_deref())
                 .map(|message| preview_text(message.get_str("text").unwrap_or_default()))
                 .unwrap_or_default();
             let name = label(&group.name, 80);
@@ -2032,7 +2114,7 @@ fn build(
                     .unwrap_or_else(|| name.clone())
             };
             let url = AssistantPage::Group { group: &group.id }.url(frontend);
-            Built::Item(item(row, name, title, preview, url, resolved))
+            ready(item(row, name, title, preview, url, resolved))
         }
         NotificationKind::NeedsDecision => {
             let Some(conversation) = source
@@ -2052,6 +2134,11 @@ fn build(
             if !lookups.conversation_visible(user_id, conversation) {
                 return Built::Hidden;
             }
+            // The card must be this thread's; anything else is hidden, never
+            // deleted (only a missing card document is).
+            if card.get_str("conversation_id").ok() != source.conversation_id.as_deref() {
+                return Built::Hidden;
+            }
             // A card raised in a group or channel chat also requires that
             // room's live access; a retained hidden lane never leaks it.
             let group = match source.group_id.as_deref() {
@@ -2062,13 +2149,19 @@ fn build(
                 },
                 None => None,
             };
-            if source.channel_id.is_some() && live_channel(lookups, source).is_none() {
-                return Built::Purge;
+            if source.channel_id.is_some() {
+                match channel_state(lookups, source) {
+                    ChannelState::Absent => return Built::Purge,
+                    ChannelState::Retired => return Built::Hidden,
+                    ChannelState::Live(_) => {}
+                }
             }
-            let pending = card.get_str("status").ok() == Some("pending")
+            let status = card.get_str("status").unwrap_or_default();
+            let pending = status == "pending"
                 && card
                     .get_datetime("expires_at")
                     .is_ok_and(|at| at.to_chrono() > now);
+            let resolve = (!resolved && !pending).then(|| card_resolution(status));
             let resolved = resolved || !pending;
             let preview = preview_text(card.get_str("summary").unwrap_or_default());
             let title = agent_title(&lookups.agents, source.agent_id.as_deref())
@@ -2091,7 +2184,10 @@ fn build(
                 }
                 .url(frontend),
             };
-            Built::Item(item(row, title.clone(), title, preview, url, resolved))
+            Built::Item {
+                item: item(row, title.clone(), title, preview, url, resolved),
+                resolve,
+            }
         }
         NotificationKind::AutomationResult | NotificationKind::AutomationProblem => {
             let Some(trigger) = source
@@ -2101,9 +2197,20 @@ fn build(
             else {
                 return Built::Purge;
             };
+            // Ownership is evaluated here, never by a lookup filter: a
+            // mismatch hides the row, only a missing document deletes it.
+            if trigger.get_str("user_id").ok() != Some(user_id) {
+                return Built::Hidden;
+            }
             let run = source.run_id.as_deref().and_then(|id| lookups.runs.get(id));
             if run.is_none() && row.outcome.as_deref() != Some("paused") {
                 return Built::Purge;
+            }
+            if let Some(run) = run
+                && (run.get_str("user_id").ok() != Some(user_id)
+                    || run.get_str("trigger_id").ok() != source.trigger_id.as_deref())
+            {
+                return Built::Hidden;
             }
             let title = run
                 .and_then(|run| run.get_str("label").ok())
@@ -2140,7 +2247,7 @@ fn build(
                 }
                 .url(frontend),
             };
-            Built::Item(item(
+            ready(item(
                 row,
                 title.clone(),
                 title,
@@ -2167,12 +2274,15 @@ pub async fn resolve_items(
     let now = Utc::now();
     let mut items = Vec::with_capacity(rows.len());
     let mut purge_ids = Vec::new();
-    let mut resolve_ids = Vec::new();
+    let mut resolve: HashMap<&'static str, Vec<String>> = HashMap::new();
     for row in &rows {
         match build(user_id, &state.config.frontend_url, row, &lookups, now) {
-            Built::Item(built) => {
-                if built.resolved && row.resolved_at.is_none() {
-                    resolve_ids.push(row.id.clone());
+            Built::Item {
+                item: built,
+                resolve: label,
+            } => {
+                if let Some(label) = label {
+                    resolve.entry(label).or_default().push(row.id.clone());
                 }
                 items.push(built);
             }
@@ -2185,13 +2295,14 @@ pub async fn resolve_items(
             .delete_many(doc! {"_id": {"$in": purge_ids}, fields::USER_ID: user_id})
             .await?;
     }
-    if !resolve_ids.is_empty() {
-        // The card is no longer pending (decided elsewhere, expired or superseded).
+    for (label, ids) in resolve {
+        // The card is no longer pending (decided elsewhere, timed out or
+        // withdrawn) and no hook recorded it.
         db.collection::<Document>(COLLECTION_NAME)
             .update_many(
-                doc! {"_id": {"$in": resolve_ids}, fields::USER_ID: user_id,
+                doc! {"_id": {"$in": ids}, fields::USER_ID: user_id,
                 "resolved_at": bson::Bson::Null},
-                resolution_update(now, "expired"),
+                resolution_update(now, label),
             )
             .await?;
     }
@@ -2284,10 +2395,15 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
              "then": {"$and": [{"$eq": ["$chan0.user_id", user_id]}, org_active.clone(), admin_ok]}},
         ], "default": conv_ok.clone()}},
     ]};
+    let run_ok = doc! {"$and": [
+        present("$run"),
+        {"$eq": ["$run0.user_id", user_id]},
+        {"$eq": ["$run0.trigger_id", "$source.trigger_id"]},
+    ]};
     let trig_ok = doc! {"$and": [
         present("$trig"),
         {"$eq": ["$trig0.user_id", user_id]},
-        {"$or": [present("$run"), {"$eq": ["$outcome", "paused"]}]},
+        {"$or": [run_ok, {"$eq": ["$outcome", "paused"]}]},
     ]};
     let chan_live = doc! {"$and": [
         present("$chan"),
@@ -2298,6 +2414,7 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
         {"$or": [missing_or_null("$source.group_id"), grp_ok.clone()]},
         {"$or": [missing_or_null("$source.channel_id"), chan_live]},
         present("$card"),
+        {"$eq": ["$card0.conversation_id", "$source.conversation_id"]},
         {"$eq": ["$card0.status", "pending"]},
         {"$gt": ["$card0.expires_at", now]},
     ]};
@@ -2353,18 +2470,24 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
             "trig",
             doc! {"user_id": 1},
         ),
-        lookup_by_id(RUNS, fields::SOURCE_RUN_ID, "run", doc! {"_id": 1}),
+        lookup_by_id(
+            RUNS,
+            fields::SOURCE_RUN_ID,
+            "run",
+            doc! {"user_id": 1, "trigger_id": 1},
+        ),
         lookup_by_id(
             ACKS,
             fields::SOURCE_CARD_ID,
             "card",
-            doc! {"status": 1, "expires_at": 1},
+            doc! {"status": 1, "expires_at": 1, "conversation_id": 1},
         ),
         doc! {"$addFields": {
             "conv0": {"$arrayElemAt": ["$conv", 0]},
             "grp0": {"$arrayElemAt": ["$grp", 0]},
             "chan0": {"$arrayElemAt": ["$chan", 0]},
             "trig0": {"$arrayElemAt": ["$trig", 0]},
+            "run0": {"$arrayElemAt": ["$run", 0]},
             "card0": {"$arrayElemAt": ["$card", 0]},
         }},
         doc! {"$addFields": {"org_of": org_of}},
@@ -2646,7 +2769,7 @@ pub(crate) async fn claim_push(db: &Database, row: &AssistantNotification) -> Ap
                 let push = current
                     .push
                     .clone()
-                    .unwrap_or_else(|| push_state(&PushPlan::Pending));
+                    .unwrap_or_else(|| push_state(&PushPlan::Pending, current.kind));
                 let first_attempt_at = push.first_attempt_at.unwrap_or(now);
                 if push.attempts >= PUSH_MAX_ATTEMPTS || now >= push_retry_window(first_attempt_at)
                 {
@@ -2741,6 +2864,7 @@ pub(crate) async fn claim_push(db: &Database, row: &AssistantNotification) -> Ap
                 let mut claimed = current;
                 claimed.push = Some(PushState {
                     state: "sending".into(),
+                    kind: push.kind,
                     attempt: Some(attempt.clone()),
                     code: push.code,
                     attempts,
@@ -2905,9 +3029,19 @@ async fn send_push(
     .await)
 }
 
+/// The kind a row is pushed as: the creating kind frozen on the barrier,
+/// whatever a later coalesce relabelled the row to.
+fn push_kind(row: &AssistantNotification) -> NotificationKind {
+    row.push
+        .as_ref()
+        .and_then(|push| push.kind)
+        .unwrap_or(row.kind)
+}
+
 /// The sweep with an injectable sender: `Err(code)` is a definite
-/// availability failure before any send. Every decision after the claim
-/// (flag, preference, access, preview, payload) uses the claimed snapshot.
+/// availability failure before any send. Rows are claimed one at a time;
+/// everything after the claim (flag, preference, access, preview, payload)
+/// uses the claimed snapshot, resolved once per person.
 pub async fn sweep_with<F, Fut>(state: &AppState, send: F) -> AppResult<()>
 where
     F: Fn(String, String, String, HashMap<String, String>) -> Fut,
@@ -2941,8 +3075,7 @@ where
         .await?
         .try_collect()
         .await?;
-    let mut preferences: HashMap<String, NotificationPushPreferences> = HashMap::new();
-    let mut flags: HashMap<String, bool> = HashMap::new();
+    let mut claims: Vec<(String, Vec<ClaimedPush>)> = Vec::new();
     for row in pending {
         // Cheap pre-check on the snapshot; the claim re-reads and decides.
         if row.resolved_at.is_some() || !row.unread {
@@ -2953,71 +3086,88 @@ where
             Claim::Claimed(claimed) => *claimed,
             Claim::Skipped | Claim::NotClaimed => continue,
         };
-        let row = &claimed.row;
-        let user = row.user_id.clone();
-        let enabled = match flags.get(&user) {
-            Some(value) => *value,
-            None => {
-                let value = self::enabled(db, &user).await?;
-                flags.insert(user.clone(), value);
-                value
-            }
-        };
-        if !enabled {
-            skip_claimed(db, &claimed, "flag_off").await?;
-            continue;
-        }
-        let preference = match preferences.get(&user) {
-            Some(value) => *value,
-            None => {
-                let value = crate::services::assistant_settings_service::get(db, &user)
-                    .await?
-                    .notifications
-                    .push;
-                preferences.insert(user.clone(), value);
-                value
-            }
-        };
-        if !push_preferred(&preference, row.kind) {
-            skip_claimed(db, &claimed, "preference_off").await?;
-            continue;
-        }
-        let Some(built) = resolve_items(state, &user, vec![row.clone()]).await?.pop() else {
-            // Purged or hidden while queued.
-            skip_claimed(db, &claimed, "source_unavailable").await?;
-            continue;
-        };
-        // `type` is the closed kind: mobile refreshes the matching view on receipt.
-        let mut data = HashMap::from([
-            ("type".to_owned(), row.kind.as_str().to_owned()),
-            ("kind".to_owned(), row.kind.as_str().to_owned()),
-            ("notification_id".to_owned(), row.id.clone()),
-            ("deeplink".to_owned(), built.url.clone()),
-        ]);
-        if let Some(conversation) = row.source.conversation_id.as_ref() {
-            data.insert("conversation_id".to_owned(), conversation.clone());
-        }
-        let body = if built.preview.is_empty() {
-            built.title.clone()
-        } else {
-            built.preview.clone()
-        };
-        let outcome = match tokio::time::timeout(
-            PUSH_SEND_TIMEOUT,
-            send(user.clone(), built.title.clone(), body, data),
-        )
-        .await
+        match claims
+            .iter()
+            .position(|(user, _)| *user == claimed.row.user_id)
         {
-            Ok(Ok(automation::Outcome::Accepted)) => PushOutcome::Accepted,
-            Ok(Ok(automation::Outcome::Refused(failure))) => PushOutcome::Refused(failure),
-            Ok(Err(code)) => PushOutcome::Unavailable(code),
-            Ok(Ok(automation::Outcome::Unknown)) | Err(_) => PushOutcome::Unknown,
-        };
-        settle_push(db, &claimed, outcome).await?;
-        tracing::debug!(
-            target: "nyxid::assistant_notifications",
-            notification_id = %row.id, kind = row.kind.as_str(), "Notification push settled"
-        );
+            Some(index) => claims[index].1.push(claimed),
+            None => claims.push((claimed.row.user_id.clone(), vec![claimed])),
+        }
+    }
+    for (user, claims) in claims {
+        if !self::enabled(db, &user).await? {
+            for claimed in &claims {
+                skip_claimed(db, claimed, "flag_off").await?;
+            }
+            continue;
+        }
+        let preference = crate::services::assistant_settings_service::get(db, &user)
+            .await?
+            .notifications
+            .push;
+        let mut wanted = Vec::with_capacity(claims.len());
+        let mut views = Vec::with_capacity(claims.len());
+        for claimed in claims {
+            let kind = push_kind(&claimed.row);
+            if !push_preferred(&preference, kind) {
+                skip_claimed(db, &claimed, "preference_off").await?;
+                continue;
+            }
+            // Title and preview follow the pushed kind with the latest refs.
+            let mut view = claimed.row.clone();
+            view.kind = kind;
+            views.push(view);
+            wanted.push(claimed);
+        }
+        if wanted.is_empty() {
+            continue;
+        }
+        // One batched lookup for everything this person is owed.
+        let built: HashMap<String, NotificationItem> = resolve_items(state, &user, views)
+            .await?
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect();
+        for claimed in wanted {
+            let row = &claimed.row;
+            let Some(built) = built.get(&row.id) else {
+                // Purged or hidden while queued.
+                skip_claimed(db, &claimed, "source_unavailable").await?;
+                continue;
+            };
+            let kind = push_kind(row);
+            // `type` is the closed kind: mobile refreshes the matching view on receipt.
+            let mut data = HashMap::from([
+                ("type".to_owned(), kind.as_str().to_owned()),
+                ("kind".to_owned(), kind.as_str().to_owned()),
+                ("notification_id".to_owned(), row.id.clone()),
+                ("deeplink".to_owned(), built.url.clone()),
+            ]);
+            if let Some(conversation) = row.source.conversation_id.as_ref() {
+                data.insert("conversation_id".to_owned(), conversation.clone());
+            }
+            let body = if built.preview.is_empty() {
+                built.title.clone()
+            } else {
+                built.preview.clone()
+            };
+            let outcome = match tokio::time::timeout(
+                PUSH_SEND_TIMEOUT,
+                send(user.clone(), built.title.clone(), body, data),
+            )
+            .await
+            {
+                Ok(Ok(automation::Outcome::Accepted)) => PushOutcome::Accepted,
+                Ok(Ok(automation::Outcome::Refused(failure))) => PushOutcome::Refused(failure),
+                Ok(Err(code)) => PushOutcome::Unavailable(code),
+                Ok(Ok(automation::Outcome::Unknown)) | Err(_) => PushOutcome::Unknown,
+            };
+            settle_push(db, &claimed, outcome).await?;
+            tracing::debug!(
+                target: "nyxid::assistant_notifications",
+                notification_id = %row.id, kind = kind.as_str(), "Notification push settled"
+            );
+        }
     }
     Ok(())
 }

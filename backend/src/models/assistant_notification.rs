@@ -145,6 +145,11 @@ pub struct NotificationSource {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PushState {
     pub state: String,
+    /// The kind the row had when the push was queued. Preferences and the
+    /// payload follow it even after coalescing relabels the row (D9).
+    /// Absent on rows written before this field existed.
+    #[serde(default)]
+    pub kind: Option<NotificationKind>,
     #[serde(default)]
     pub attempt: Option<String>,
     /// Stable code only, never provider prose.
