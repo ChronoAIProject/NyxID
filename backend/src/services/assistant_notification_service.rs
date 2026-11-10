@@ -436,9 +436,18 @@ async fn record_in_session(
         .unwrap_or_default();
     for (field, value) in source {
         let path = format!("source.{field}");
+        // Latest references: an owner's home thread hears from whichever bot
+        // they wrote from last, so labels and purge follow the current bot.
         if matches!(
             field.as_str(),
-            "message_id" | "turn_id" | "seq" | "agent_id"
+            "message_id"
+                | "turn_id"
+                | "seq"
+                | "agent_id"
+                | "channel_id"
+                | "thread_id"
+                | "platform_binding_id"
+                | "platform_binding_generation"
         ) {
             set.insert(path, value);
         } else {
@@ -2859,6 +2868,8 @@ async fn push_skip(db: &Database, id: &str, code: &str) -> AppResult<()> {
 pub(crate) struct ClaimedPush {
     pub(crate) row: AssistantNotification,
     pub(crate) attempt: String,
+    /// The barrier before the claim; an unsent claim returns to it exactly.
+    pub(crate) prior: Option<PushState>,
 }
 
 pub(crate) enum Claim {
@@ -3019,6 +3030,7 @@ pub(crate) async fn claim_push(db: &Database, row: &AssistantNotification) -> Ap
                 .session(&mut *session)
                 .await?;
                 let mut claimed = current;
+                let prior = claimed.push.clone();
                 claimed.push = Some(PushState {
                     state: "sending".into(),
                     kind: push.kind,
@@ -3033,6 +3045,7 @@ pub(crate) async fn claim_push(db: &Database, row: &AssistantNotification) -> Ap
                 Ok(Claim::Claimed(Box::new(ClaimedPush {
                     row: claimed,
                     attempt,
+                    prior,
                 })))
             }
             .await;
@@ -3063,13 +3076,15 @@ async fn release_reservations(db: &Database, claimed: &ClaimedPush) -> AppResult
 }
 
 /// Settle a claimed row without sending (definite skip): the barrier moves
-/// `sending -> skipped` under the attempt token and the reservations return.
+/// `sending -> skipped` under the attempt token. No provider call happened,
+/// so the reservations return even when the row was purged or aged out
+/// meanwhile (the release is keyed by attempt and idempotent).
 pub(crate) async fn skip_claimed(
     db: &Database,
     claimed: &ClaimedPush,
     code: &'static str,
 ) -> AppResult<()> {
-    let settled = push_transition(
+    push_transition(
         db,
         &claimed.row.id,
         &["sending"],
@@ -3077,10 +3092,29 @@ pub(crate) async fn skip_claimed(
         doc! {"push.state": "skipped", "push.code": code},
     )
     .await?;
-    if settled {
-        release_reservations(db, claimed).await?;
-    }
-    Ok(())
+    release_reservations(db, claimed).await
+}
+
+/// Give an unsent claim back: no provider call happened, so the barrier
+/// returns to its exact pre-claim state under the attempt token (the attempt
+/// is not consumed) and the reservations are released. The next sweep
+/// retries.
+pub(crate) async fn requeue_claimed(db: &Database, claimed: &ClaimedPush) -> AppResult<()> {
+    let prior = claimed
+        .prior
+        .clone()
+        .unwrap_or_else(|| push_state(&PushPlan::Pending, push_kind(&claimed.row)));
+    let prior = bson::to_bson(&prior)
+        .map_err(|_| AppError::Internal("Notification serialization failed".into()))?;
+    push_transition(
+        db,
+        &claimed.row.id,
+        &["sending"],
+        Some(&claimed.attempt),
+        doc! {"push": prior},
+    )
+    .await?;
+    release_reservations(db, claimed).await
 }
 
 /// Settle the claimed row after the provider answered. Attempts and the retry
@@ -3130,7 +3164,7 @@ pub(crate) async fn settle_push(
             false,
         ),
     };
-    let settled = push_transition(
+    push_transition(
         db,
         &claimed.row.id,
         &["sending"],
@@ -3138,7 +3172,9 @@ pub(crate) async fn settle_push(
         set,
     )
     .await?;
-    if settled && release {
+    // A refusal or unavailability is a definite non-send: the reservations
+    // return whether or not the barrier CAS still matched.
+    if release {
         release_reservations(db, claimed).await?;
     }
     Ok(())
@@ -3196,9 +3232,15 @@ fn push_kind(row: &AssistantNotification) -> NotificationKind {
 }
 
 /// The sweep with an injectable sender: `Err(code)` is a definite
-/// availability failure before any send. Rows are claimed one at a time;
-/// everything after the claim (flag, preference, access, preview, payload)
-/// uses the claimed snapshot, resolved once per person.
+/// availability failure before any send.
+///
+/// Order per sweep: cheap snapshot checks settle rows that need no claim
+/// (seen, feed off, preference off: the frozen push kind never changes);
+/// then, per person, one batched lookup prepares every due row; then each
+/// row takes its `sending` barrier immediately before its provider call, so
+/// a claim never waits behind other sends and an unsent row can never age
+/// into the ambiguity window. A failure before a claim leaves the row due
+/// for the next sweep; one person's failure never blocks another's rows.
 pub async fn sweep_with<F, Fut>(state: &AppState, send: F) -> AppResult<()>
 where
     F: Fn(String, String, String, HashMap<String, String>) -> Fut,
@@ -3213,7 +3255,7 @@ where
             resolution_update(now, "expired"),
         )
         .await?;
-    // An ambiguous claim is never resent.
+    // A claim older than the window is ambiguous and never resent.
     db.collection::<Document>(COLLECTION_NAME)
         .update_many(
             doc! {"push.state": "sending",
@@ -3232,99 +3274,159 @@ where
         .await?
         .try_collect()
         .await?;
-    let mut claims: Vec<(String, Vec<ClaimedPush>)> = Vec::new();
+    let mut flags: HashMap<String, bool> = HashMap::new();
+    let mut preferences: HashMap<String, NotificationPushPreferences> = HashMap::new();
+    let mut due: Vec<(String, Vec<AssistantNotification>)> = Vec::new();
+    let mut first_error: Option<AppError> = None;
     for row in pending {
-        // Cheap pre-check on the snapshot; the claim re-reads and decides.
+        // Snapshot checks that need no claim; the claim re-reads the row
+        // and enforces seen/limit/cap gates authoritatively.
         if row.resolved_at.is_some() || !row.unread {
             push_skip(db, &row.id, "already_seen").await?;
             continue;
         }
-        let claimed = match claim_push(db, &row).await? {
-            Claim::Claimed(claimed) => *claimed,
-            Claim::Skipped | Claim::NotClaimed => continue,
+        let user = row.user_id.clone();
+        let enabled = match flags.get(&user) {
+            Some(value) => *value,
+            None => {
+                let value = self::enabled(db, &user).await?;
+                flags.insert(user.clone(), value);
+                value
+            }
         };
-        match claims
-            .iter()
-            .position(|(user, _)| *user == claimed.row.user_id)
-        {
-            Some(index) => claims[index].1.push(claimed),
-            None => claims.push((claimed.row.user_id.clone(), vec![claimed])),
+        if !enabled {
+            push_skip(db, &row.id, "flag_off").await?;
+            continue;
+        }
+        let preference = match preferences.get(&user) {
+            Some(value) => *value,
+            None => match crate::services::assistant_settings_service::get(db, &user).await {
+                Ok(settings) => {
+                    let value = settings.notifications.push;
+                    preferences.insert(user.clone(), value);
+                    value
+                }
+                Err(error) => {
+                    // Nothing is claimed: this person's rows stay due.
+                    tracing::warn!(
+                        target: "nyxid::assistant_notifications",
+                        user_id = %user, "Notification push preferences unavailable"
+                    );
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            },
+        };
+        if !push_preferred(&preference, push_kind(&row)) {
+            push_skip(db, &row.id, "preference_off").await?;
+            continue;
+        }
+        match due.iter().position(|(owner, _)| *owner == user) {
+            Some(index) => due[index].1.push(row),
+            None => due.push((user, vec![row])),
         }
     }
-    for (user, claims) in claims {
-        if !self::enabled(db, &user).await? {
-            for claimed in &claims {
-                skip_claimed(db, claimed, "flag_off").await?;
-            }
-            continue;
+    for (user, rows) in due {
+        if let Err(error) = deliver_for_person(state, &send, &user, rows).await {
+            tracing::warn!(
+                target: "nyxid::assistant_notifications",
+                user_id = %user, "Notification push delivery interrupted"
+            );
+            first_error.get_or_insert(error);
         }
-        let preference = crate::services::assistant_settings_service::get(db, &user)
-            .await?
-            .notifications
-            .push;
-        let mut wanted = Vec::with_capacity(claims.len());
-        let mut views = Vec::with_capacity(claims.len());
-        for claimed in claims {
-            let kind = push_kind(&claimed.row);
-            if !push_preferred(&preference, kind) {
-                skip_claimed(db, &claimed, "preference_off").await?;
-                continue;
-            }
-            // Title and preview follow the pushed kind with the latest refs.
-            let mut view = claimed.row.clone();
-            view.kind = kind;
-            views.push(view);
-            wanted.push(claimed);
-        }
-        if wanted.is_empty() {
-            continue;
-        }
-        // One batched lookup for everything this person is owed.
-        let built: HashMap<String, NotificationItem> = resolve_items(state, &user, views)
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Prepare every due row of one person with one batched lookup, then claim
+/// and send each row in turn. Everything after a claim uses the claimed
+/// snapshot: a row whose latest references moved on since preparation is
+/// rebuilt from it, and an unsent claim that cannot proceed is given back.
+async fn deliver_for_person<F, Fut>(
+    state: &AppState,
+    send: &F,
+    user: &str,
+    rows: Vec<AssistantNotification>,
+) -> AppResult<()>
+where
+    F: Fn(String, String, String, HashMap<String, String>) -> Fut,
+    Fut: std::future::Future<Output = Result<automation::Outcome, &'static str>>,
+{
+    let db = &state.db;
+    let view_of = |row: &AssistantNotification| {
+        // Title and preview follow the pushed kind with the latest refs.
+        let mut view = row.clone();
+        view.kind = push_kind(row);
+        view
+    };
+    let mut prepared: HashMap<String, NotificationItem> =
+        resolve_items(state, user, rows.iter().map(view_of).collect())
             .await?
             .into_iter()
             .map(|item| (item.id.clone(), item))
             .collect();
-        for claimed in wanted {
-            let row = &claimed.row;
-            let Some(built) = built.get(&row.id) else {
-                // Purged or hidden while queued.
-                skip_claimed(db, &claimed, "source_unavailable").await?;
-                continue;
-            };
-            let kind = push_kind(row);
-            // `type` is the closed kind: mobile refreshes the matching view on receipt.
-            let mut data = HashMap::from([
-                ("type".to_owned(), kind.as_str().to_owned()),
-                ("kind".to_owned(), kind.as_str().to_owned()),
-                ("notification_id".to_owned(), row.id.clone()),
-                ("deeplink".to_owned(), built.url.clone()),
-            ]);
-            if let Some(conversation) = row.source.conversation_id.as_ref() {
-                data.insert("conversation_id".to_owned(), conversation.clone());
+    for row in rows {
+        let Some(mut built) = prepared.remove(&row.id) else {
+            // Purged or hidden; nothing was claimed.
+            push_skip(db, &row.id, "source_unavailable").await?;
+            continue;
+        };
+        // The barrier is taken immediately before the provider call.
+        let claimed = match claim_push(db, &row).await? {
+            Claim::Claimed(claimed) => *claimed,
+            Claim::Skipped | Claim::NotClaimed => continue,
+        };
+        if claimed.row.updated_at != row.updated_at || claimed.row.count != row.count {
+            // Coalesced since preparation: rebuild from the claimed snapshot.
+            match resolve_items(state, user, vec![view_of(&claimed.row)]).await {
+                Ok(mut items) => match items.pop() {
+                    Some(item) => built = item,
+                    None => {
+                        skip_claimed(db, &claimed, "source_unavailable").await?;
+                        continue;
+                    }
+                },
+                Err(error) => {
+                    requeue_claimed(db, &claimed).await?;
+                    return Err(error);
+                }
             }
-            let body = if built.preview.is_empty() {
-                built.title.clone()
-            } else {
-                built.preview.clone()
-            };
-            let outcome = match tokio::time::timeout(
-                PUSH_SEND_TIMEOUT,
-                send(user.clone(), built.title.clone(), body, data),
-            )
-            .await
-            {
-                Ok(Ok(automation::Outcome::Accepted)) => PushOutcome::Accepted,
-                Ok(Ok(automation::Outcome::Refused(failure))) => PushOutcome::Refused(failure),
-                Ok(Err(code)) => PushOutcome::Unavailable(code),
-                Ok(Ok(automation::Outcome::Unknown)) | Err(_) => PushOutcome::Unknown,
-            };
-            settle_push(db, &claimed, outcome).await?;
-            tracing::debug!(
-                target: "nyxid::assistant_notifications",
-                notification_id = %row.id, kind = kind.as_str(), "Notification push settled"
-            );
         }
+        let kind = push_kind(&claimed.row);
+        // `type` is the closed kind: mobile refreshes the matching view on receipt.
+        let mut data = HashMap::from([
+            ("type".to_owned(), kind.as_str().to_owned()),
+            ("kind".to_owned(), kind.as_str().to_owned()),
+            ("notification_id".to_owned(), claimed.row.id.clone()),
+            ("deeplink".to_owned(), built.url.clone()),
+        ]);
+        if let Some(conversation) = claimed.row.source.conversation_id.as_ref() {
+            data.insert("conversation_id".to_owned(), conversation.clone());
+        }
+        let body = if built.preview.is_empty() {
+            built.title.clone()
+        } else {
+            built.preview.clone()
+        };
+        let outcome = match tokio::time::timeout(
+            PUSH_SEND_TIMEOUT,
+            send(user.to_owned(), built.title.clone(), body, data),
+        )
+        .await
+        {
+            Ok(Ok(automation::Outcome::Accepted)) => PushOutcome::Accepted,
+            Ok(Ok(automation::Outcome::Refused(failure))) => PushOutcome::Refused(failure),
+            Ok(Err(code)) => PushOutcome::Unavailable(code),
+            Ok(Ok(automation::Outcome::Unknown)) | Err(_) => PushOutcome::Unknown,
+        };
+        settle_push(db, &claimed, outcome).await?;
+        tracing::debug!(
+            target: "nyxid::assistant_notifications",
+            notification_id = %claimed.row.id, kind = kind.as_str(), "Notification push settled"
+        );
     }
     Ok(())
 }

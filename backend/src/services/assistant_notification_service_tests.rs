@@ -2218,11 +2218,11 @@ async fn organization_access_is_batched_and_revocation_hides_rows_before_anythin
 
 type Sent = Arc<std::sync::Mutex<Vec<(String, String, String, HashMap<String, String>)>>>;
 
-async fn sweep_capturing(
+async fn try_sweep_capturing(
     f: &Fixture,
     sent: &Sent,
     outcome: impl Fn() -> Result<automation::Outcome, &'static str> + Clone,
-) {
+) -> AppResult<()> {
     let sent = sent.clone();
     sweep_with(&f.state, move |user, title, body, data| {
         let sent = sent.clone();
@@ -2233,7 +2233,14 @@ async fn sweep_capturing(
         }
     })
     .await
-    .unwrap();
+}
+
+async fn sweep_capturing(
+    f: &Fixture,
+    sent: &Sent,
+    outcome: impl Fn() -> Result<automation::Outcome, &'static str> + Clone,
+) {
+    try_sweep_capturing(f, sent, outcome).await.unwrap();
 }
 
 async fn push_of(f: &Fixture, id: &str) -> PushState {
@@ -3039,4 +3046,337 @@ async fn the_creating_kind_drives_push_preference_and_payload_after_coalescing()
         ("skipped", Some("preference_off"))
     );
     assert_eq!(reservations(&f, &f.owner).await, (1, 1));
+}
+
+// ---------------------------------------------------------------------------
+// Push sweep shape: claims right before each send, nothing stranded
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn claims_are_taken_immediately_before_each_send_and_stale_claims_are_never_sent() {
+    let f = fixture("notif_push_claim_timing").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    push_prefs(&f, &f.owner, all_push()).await;
+    let mut due = Vec::new();
+    for title in ["One", "Two", "Three"] {
+        let thread = seed_conversation(&f, &f.owner, title).await;
+        let row = seeded(
+            &f.owner,
+            NotificationKind::AgentUpdate,
+            conversation_source(&thread),
+        );
+        insert_row(&f, &row).await;
+        due.push(row.id);
+    }
+    // A claim left behind by a crashed worker, older than the window.
+    let stale_thread = seed_conversation(&f, &f.owner, "Stale").await;
+    let mut stale = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&stale_thread),
+    );
+    stale.push = Some(PushState {
+        state: "sending".into(),
+        kind: Some(NotificationKind::AgentUpdate),
+        attempt: Some("stale".into()),
+        code: None,
+        attempts: 1,
+        claimed_at: Some(Utc::now() - Duration::minutes(PUSH_SENDING_STALE_MINUTES + 1)),
+        first_attempt_at: Some(Utc::now() - Duration::minutes(PUSH_SENDING_STALE_MINUTES + 1)),
+        retry_at: None,
+        sent_at: None,
+    });
+    insert_row(&f, &stale).await;
+    // Every provider call observes its own row claimed moments ago: the
+    // barrier is taken right before the call, never for the whole batch.
+    let observed: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let (sender_db, seen) = (db.clone(), observed.clone());
+    sweep_with(&f.state, move |_, _, _, data| {
+        let db = sender_db.clone();
+        let seen = seen.clone();
+        async move {
+            let id = data["notification_id"].clone();
+            let row: AssistantNotification = db
+                .collection(COLLECTION_NAME)
+                .find_one(doc! {"_id": &id})
+                .await
+                .unwrap()
+                .unwrap();
+            let push = row.push.expect("claimed");
+            assert_eq!(push.state, "sending");
+            assert!(push.attempt.is_some());
+            assert!(Utc::now() - push.claimed_at.expect("claimed_at") < Duration::seconds(5));
+            // Rows still waiting their turn are not claimed yet.
+            let waiting = db
+                .collection::<Document>(COLLECTION_NAME)
+                .count_documents(doc! {"user_id": &row.user_id, "push.state": "sending",
+                "push.claimed_at": {"$gt": bson_date(Utc::now() - Duration::minutes(1))}})
+                .await
+                .unwrap();
+            assert_eq!(waiting, 1);
+            seen.lock().unwrap().push(id);
+            Ok(automation::Outcome::Accepted)
+        }
+    })
+    .await
+    .unwrap();
+    let mut observed = observed.lock().unwrap().clone();
+    observed.sort();
+    due.sort();
+    assert_eq!(observed, due);
+    for id in &due {
+        let push = push_of(&f, id).await;
+        assert_eq!((push.state.as_str(), push.attempts), ("sent", 1));
+    }
+    let aged = push_of(&f, &stale.id).await;
+    assert_eq!(
+        (aged.state.as_str(), aged.code.as_deref(), aged.sent_at),
+        ("unknown", Some("push_delivery_unknown"), None)
+    );
+    // A second sweep finds nothing due and sends nothing more.
+    let sent: Sent = Default::default();
+    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
+    assert!(sent.lock().unwrap().is_empty());
+    assert_eq!(reservations(&f, &f.owner).await, (3, 3));
+}
+
+#[tokio::test]
+async fn pre_claim_failures_strand_nothing_and_the_next_sweep_delivers() {
+    let f = fixture("notif_push_recover").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    let other = person(&f).await;
+    push_prefs(&f, &f.owner, all_push()).await;
+    push_prefs(&f, &other, all_push()).await;
+    let mine = seed_conversation(&f, &f.owner, "Mine").await;
+    let theirs = seed_conversation(&f, &other, "Theirs").await;
+    let my_row = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&mine),
+    );
+    insert_row(&f, &my_row).await;
+    insert_row(
+        &f,
+        &seeded(
+            &other,
+            NotificationKind::AgentUpdate,
+            conversation_source(&theirs),
+        ),
+    )
+    .await;
+    // The owner's preferences cannot be read (a real lookup that fails to
+    // decode): nothing of theirs is claimed, everyone else is delivered.
+    let settings = db.collection::<Document>(crate::models::assistant_settings::COLLECTION_NAME);
+    settings
+        .update_one(
+            doc! {"_id": &f.owner},
+            doc! {"$set": {"access_mode": "nonsense"}},
+        )
+        .await
+        .unwrap();
+    let sent: Sent = Default::default();
+    assert!(
+        try_sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted))
+            .await
+            .is_err()
+    );
+    {
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, other);
+    }
+    let push = push_of(&f, &my_row.id).await;
+    assert_eq!(
+        (
+            push.state.as_str(),
+            push.attempts,
+            push.attempt,
+            push.claimed_at
+        ),
+        ("pending", 0, None, None)
+    );
+    assert_eq!(reservations(&f, &f.owner).await, (0, 0));
+    settings
+        .update_one(
+            doc! {"_id": &f.owner},
+            doc! {"$set": {"access_mode": "nyxmode"}},
+        )
+        .await
+        .unwrap();
+    // Now a source lookup fails during the owner's batched preparation: both
+    // of their due rows stay queued, unclaimed.
+    let researcher = specialist(&f, "researcher").await;
+    let group = groups::create(db, &f.owner, "Ops", &[researcher.id.clone()], "user")
+        .await
+        .unwrap();
+    let mention = Uuid::new_v4().to_string();
+    db.collection::<Document>(GROUP_MESSAGES)
+        .insert_one(
+            doc! {"_id": &mention, "group_id": &group.id, "user_id": &f.owner,
+            "seq": 3_i64, "role": "user", "text": "@researcher look"},
+        )
+        .await
+        .unwrap();
+    insert_row(
+        &f,
+        &seeded(
+            &f.owner,
+            NotificationKind::GroupMention,
+            NotificationSource {
+                source_type: SourceType::Group,
+                id: group.id.clone(),
+                group_id: Some(group.id.clone()),
+                message_id: Some(mention),
+                ..Default::default()
+            },
+        ),
+    )
+    .await;
+    let groups_collection = db.collection::<Document>(GROUPS);
+    groups_collection
+        .update_one(doc! {"_id": &group.id}, doc! {"$set": {"name": 5_i64}})
+        .await
+        .unwrap();
+    assert!(
+        try_sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted))
+            .await
+            .is_err()
+    );
+    assert_eq!(sent.lock().unwrap().len(), 1);
+    let mine_rows = rows_of(&f, &f.owner).await;
+    assert_eq!(mine_rows.len(), 2);
+    for row in &mine_rows {
+        let push = row.push.as_ref().expect("push");
+        assert_eq!((push.state.as_str(), push.attempts), ("pending", 0));
+    }
+    assert_eq!(reservations(&f, &f.owner).await, (0, 0));
+    // Repaired: the next sweep delivers both.
+    groups_collection
+        .update_one(doc! {"_id": &group.id}, doc! {"$set": {"name": "Ops"}})
+        .await
+        .unwrap();
+    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
+    assert_eq!(sent.lock().unwrap().len(), 3);
+    for row in rows_of(&f, &f.owner).await {
+        let push = row.push.expect("push");
+        assert_eq!((push.state.as_str(), push.attempts), ("sent", 1));
+    }
+    assert_eq!(reservations(&f, &f.owner).await, (2, 2));
+}
+
+#[tokio::test]
+async fn default_off_preferences_and_a_disabled_feed_skip_without_a_claim() {
+    let f = fixture("notif_push_precheck").await;
+    set_flag(&f, true).await;
+    let thread = seed_conversation(&f, &f.owner, "Thread").await;
+    let row = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&thread),
+    );
+    insert_row(&f, &row).await;
+    let sent: Sent = Default::default();
+    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
+    let push = push_of(&f, &row.id).await;
+    assert_eq!(
+        (
+            push.state.as_str(),
+            push.code.as_deref(),
+            push.attempts,
+            push.attempt
+        ),
+        ("skipped", Some("preference_off"), 0, None)
+    );
+    assert_eq!(reservations(&f, &f.owner).await, (0, 0));
+    set_flag(&f, false).await;
+    let other = seed_conversation(&f, &f.owner, "Other").await;
+    let row = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&other),
+    );
+    insert_row(&f, &row).await;
+    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
+    let push = push_of(&f, &row.id).await;
+    assert_eq!(
+        (push.state.as_str(), push.code.as_deref(), push.attempts),
+        ("skipped", Some("flag_off"), 0)
+    );
+    assert!(sent.lock().unwrap().is_empty());
+    assert_eq!(reservations(&f, &f.owner).await, (0, 0));
+}
+
+// ---------------------------------------------------------------------------
+// Owner home thread heard through several bots
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn owner_home_thread_rows_follow_the_bot_the_owner_wrote_from_last() {
+    let f = fixture("notif_home_bots").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    let nyxbot = team::ensure_nyxbot(db, &f.owner).await.unwrap();
+    let home = team::home_thread(db, &f.state.encryption_keys, &nyxbot)
+        .await
+        .unwrap();
+    let (bot_a, thread_a) = seed_channel(&f, &f.owner, None).await;
+    let (bot_b, thread_b) = seed_channel(&f, &f.owner, None).await;
+    db.collection::<Document>(CHANNELS)
+        .update_one(
+            doc! {"_id": &bot_b},
+            doc! {"$set": {"bot_label": "Sales bot"}},
+        )
+        .await
+        .unwrap();
+    db.collection::<Document>(CHANNEL_THREADS)
+        .update_one(doc! {"_id": &thread_b}, doc! {"$set": {"title": "Bob"}})
+        .await
+        .unwrap();
+    // The owner writes to NyxBot from bot A: the reply is read there.
+    let mut via_a = start(Some(&home.id), "hi via A", TurnOrigin::Channel);
+    via_a.reply_channel = Some(channel_origin(&bot_a));
+    let row = begin(&f, &f.owner, &via_a).await;
+    engine::set_reply_channel(db, &f.owner, &home.id, &channel_origin(&bot_a))
+        .await
+        .unwrap();
+    settle(&f, &row, "Reply via A", None).await;
+    let rows = rows_of(&f, &f.owner).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, NotificationKind::ChatUpdate);
+    assert_eq!(rows[0].source.source_type, SourceType::ChannelChat);
+    assert_eq!(rows[0].source.id, home.id);
+    assert_eq!(rows[0].source.channel_id.as_deref(), Some(bot_a.as_str()));
+    assert_eq!(rows[0].source.thread_id.as_deref(), Some(thread_a.as_str()));
+    assert_eq!(
+        list(&f.state, &f.owner, &page(10)).await.unwrap().items[0].title,
+        "Support bot · Alice"
+    );
+    // Then from bot B: the same unread row now names bot B and its chat.
+    let mut via_b = start(Some(&home.id), "hi via B", TurnOrigin::Channel);
+    via_b.reply_channel = Some(channel_origin(&bot_b));
+    let row = begin(&f, &f.owner, &via_b).await;
+    engine::set_reply_channel(db, &f.owner, &home.id, &channel_origin(&bot_b))
+        .await
+        .unwrap();
+    let reply_b = settle(&f, &row, "Reply via B", None).await;
+    let rows = rows_of(&f, &f.owner).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].count, 2);
+    assert_eq!(rows[0].source.channel_id.as_deref(), Some(bot_b.as_str()));
+    assert_eq!(rows[0].source.thread_id.as_deref(), Some(thread_b.as_str()));
+    assert_eq!(rows[0].source.message_id.as_deref(), Some(reply_b.as_str()));
+    let listed = list(&f.state, &f.owner, &page(10)).await.unwrap();
+    assert_eq!(listed.items[0].title, "Sales bot · Bob");
+    assert_eq!(listed.items[0].preview, "Reply via B");
+    // Retiring bot A purges nothing of bot B's; retiring bot B does.
+    purge(db, doc! {fields::SOURCE_CHANNEL_ID: &bot_a}, None)
+        .await
+        .unwrap();
+    assert_eq!(rows_of(&f, &f.owner).await.len(), 1);
+    purge(db, doc! {fields::SOURCE_CHANNEL_ID: &bot_b}, None)
+        .await
+        .unwrap();
+    assert!(rows_of(&f, &f.owner).await.is_empty());
 }
