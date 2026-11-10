@@ -824,6 +824,9 @@ function VoiceConversation({
   const onMain = colors.bg;
   const showRecovery =
     !ending && (confirmingEnd || !!conflict || uncertain || checking);
+  // Pre-call guidance and the welcome belong only before a call; never while
+  // an End drains or a retained call is being recovered.
+  const showPreCall = !active && !showRecovery && !ending && !confirmingEnd;
   return (
     <>
       {helpOpen && !minimized ? (
@@ -1234,7 +1237,7 @@ function VoiceConversation({
                           }
                         />
                       ) : null}
-                      {!active && !showRecovery ? (
+                      {showPreCall ? (
                         <>
                           {options.isPending || settings.isPending ? (
                             <ActivityIndicator
@@ -1284,7 +1287,7 @@ function VoiceConversation({
                           ) : null}
                         </>
                       ) : null}
-                      {!active && !showRecovery && !captions.length ? (
+                      {showPreCall && !captions.length ? (
                         <View style={styles.idle}>
                           <Text
                             style={[

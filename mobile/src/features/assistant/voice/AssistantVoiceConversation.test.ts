@@ -2283,6 +2283,23 @@ test("End silences input and retains its media owner until bounded cleanup finis
   f.harness.unmount();
 });
 
+test("an End that drains after the call disconnects never shows the pre-call welcome", async () => {
+  const pending = deferred<boolean>();
+  const f = setup({ active: true });
+  f.setEnd(pending.promise);
+  f.button("End voice and close").props.onPress();
+  // The engine disconnects before the bounded drain settles.
+  f.voice.connected = false;
+  f.harness.flush();
+  assert.match(f.text(), /Ending/);
+  assert.doesNotMatch(f.text(), /Hey, what can I do for you today/);
+  assert.equal(f.find("Retry voice options"), undefined);
+  pending.resolve(true);
+  await f.harness.settle();
+  assert.deepEqual(f.events.at(-1), ["close"]);
+  f.harness.unmount();
+});
+
 test("a verified terminal End also returns to the text composer once", async () => {
   const f = setup({ active: true });
   f.setEnd(Promise.resolve(true));
