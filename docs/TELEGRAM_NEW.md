@@ -619,12 +619,18 @@ Gateway `nyxid_relay` text is still rendered by CMA before returning to NyxID.
 CMA must send original unescaped CommonMark to the explicit
 `/api/v1/channel-relay/reply/commonmark`, `/thread-reply/commonmark`, or
 `/reply/update/commonmark` endpoint. Authentication and receipt semantics match
-the corresponding ordinary endpoint. Keep routing/keyboard metadata; do not
+the corresponding ordinary endpoint. Keep routing metadata; do not
 supply `entities` or `parse_mode` with CommonMark. Old replicas return 404 at
 these paths, with no send; never retry on the old path after an uncertain send.
 Legacy relay text is not heuristically unescaped. Legacy public wire payloads remain unchanged, including the historical
 Markdown default: this base ignores metadata.parse_mode. The new contract does
-not silently reinterpret an external caller's syntax.
+not silently reinterpret an external caller's syntax. Formatting opt-in changes
+only rendered text and entities, not the existing request controls: manager
+sends keep numeric chat IDs, protected content and disabled previews; relay and
+proactive sends keep string chat IDs and their existing thread/reply fields.
+Edits keep only chat/message IDs and text or caption plus formatting. The legacy
+adapter's ignored `reply_markup`, `reply_parameters` and preview metadata remain
+ignored; CommonMark does not add new keyboard or preview behavior.
 Until CMA adopts this contract, its escaped gateway output can still show raw
 Markdown/backslashes; this NyxID change alone does not close that production case.
 

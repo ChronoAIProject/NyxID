@@ -2154,26 +2154,18 @@ async fn telegram_part(
     chat: &str,
     part: &super::channel_platform::OutboundReply,
 ) -> PartResult {
-    use super::channel_platform::PlatformAdapter;
-    if chat.parse::<i64>().is_err() {
+    let Ok(chat) = chat.parse::<i64>() else {
         return PartResult::Refused;
+    };
+    // Keep the manager's numeric chat ID and authored privacy controls. The
+    // relay adapter's string IDs and Markdown default are a different contract.
+    let mut payload = serde_json::json!({"chat_id":chat,"text":part.text,
+        "protect_content":true,"link_preview_options":{"is_disabled":true}});
+    if let Some(entities) = part.metadata.as_ref().and_then(|m| m.get("entities")) {
+        payload["entities"] = entities.clone();
     }
-    let mut part = part.clone();
-    let metadata = part.metadata.get_or_insert_with(|| serde_json::json!({}));
-    metadata["protect_content"] = true.into();
-    metadata["link_preview_options"] = serde_json::json!({"is_disabled":true});
     match super::channel_adapters::telegram::TelegramAdapter::for_api_base(api.base_url)
-        .send_reply(
-            api.http,
-            &super::channel_platform::BotCredentials {
-                token,
-                platform_bot_id: None,
-                platform_secrets: None,
-                billing: None,
-            },
-            chat,
-            &part,
-        )
+        .send_text_body(api.http, token, payload)
         .await
     {
         Ok(Some(id)) => PartResult::Sent(id),
@@ -3401,6 +3393,62 @@ mod telegram_formatting_tests {
     };
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 
+    /// Frozen sendMessage JSON from b3367c63c: numeric chat IDs, no default
+    /// parse mode, and manager-authored privacy controls, regardless of metadata.
+    #[tokio::test]
+    async fn manager_legacy_and_planned_plain_sends_match_pre_pr_wire_json() {
+        for chat in ["700", "-100700", "+00700"] {
+            for planned in [false, true] {
+                let server = MockServer::start().await;
+                Mock::given(path("/botfixture/sendMessage"))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_json(
+                            serde_json::json!({"ok":true,"result":{"message_id":42}}),
+                        ),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let mut part = if planned {
+                    channel_reply_plan::assistant_parts("plain reply", "telegram", "").remove(0)
+                } else {
+                    super::super::channel_platform::OutboundReply {
+                        text: Some("plain reply".into()),
+                        attachments: vec![],
+                        reply_to_platform_message_id: None,
+                        metadata: None,
+                    }
+                };
+                part.reply_to_platform_message_id = Some("42".into());
+                let metadata = part.metadata.get_or_insert_with(|| serde_json::json!({}));
+                for (key, value) in serde_json::json!({"message_thread_id":7,"reply_to_message_id":999,
+                    "reply_parameters":{"message_id":888},"parse_mode":"HTML","protect_content":false,
+                    "link_preview_options":{"is_disabled":false},"reply_markup":{"remove_keyboard":true}}).as_object().unwrap() {
+                    metadata[key] = value.clone();
+                }
+                let http = reqwest::Client::new();
+                let base = server.uri();
+                let api = super::super::telegram_new_api::TelegramApi {
+                    http: &http,
+                    base_url: &base,
+                };
+                assert!(matches!(
+                    telegram_part(&api, "fixture", chat, &part).await,
+                    PartResult::Sent(_)
+                ));
+                let mut before = serde_json::json!({"chat_id":chat.parse::<i64>().unwrap(),"text":"plain reply",
+                    "protect_content":true,"link_preview_options":{"is_disabled":true}});
+                if planned {
+                    before["entities"] = serde_json::json!([]);
+                }
+                assert_eq!(
+                    server.received_requests().await.unwrap()[0].body,
+                    serde_json::to_vec(&before).unwrap()
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn revoked_authority_blocks_plain_fallback_after_confirmed_parse_refusal() {
         let server = MockServer::start().await;
@@ -3556,6 +3604,17 @@ mod telegram_formatting_tests {
         assert_eq!(bodies[0]["text"], bodies[1]["text"]);
         assert!(bodies[1].get("entities").is_none());
         assert_eq!(bodies[1]["protect_content"], true);
+        assert_eq!(bodies[0]["chat_id"], 123);
+        assert_eq!(
+            bodies[0]["link_preview_options"],
+            serde_json::json!({"is_disabled":true})
+        );
+        let mut expected_fallback = bodies[0].clone();
+        expected_fallback
+            .as_object_mut()
+            .unwrap()
+            .remove("entities");
+        assert_eq!(bodies[1], expected_fallback);
         db.drop().await.unwrap();
     }
 }

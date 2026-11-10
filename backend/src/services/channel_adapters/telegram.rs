@@ -54,6 +54,81 @@ impl TelegramAdapter {
     }
 }
 
+impl TelegramAdapter {
+    /// Send an already-built payload without changing its route or controls.
+    /// Manager sends and relay sends intentionally use different wire shapes.
+    pub(crate) fn send_text_body<'a>(
+        &'a self,
+        http: &'a reqwest::Client,
+        bot_token: &'a str,
+        mut body: serde_json::Value,
+    ) -> futures::future::BoxFuture<'a, AppResult<Option<String>>> {
+        // Preserve the old async-trait boxing boundary for manager callers.
+        Box::pin(async move {
+            let url = format!("{}{bot_token}/sendMessage", self.base_url);
+            let mut fallback = crate::services::telegram_formatting::already_fell_back();
+            if fallback {
+                body.as_object_mut().unwrap().remove("entities");
+                body.as_object_mut().unwrap().remove("parse_mode");
+            }
+            loop {
+                let (status, resp) =
+                    crate::services::channel_media_service::platform_json_value_with_timeout(
+                        http.post(&url).json(&body),
+                        std::time::Duration::from_secs(20),
+                    )
+                    .await?;
+                if status.is_server_error() || resp.get("ok").and_then(|v| v.as_bool()).is_none() {
+                    return Err(crate::services::channel_media_service::upload_failed());
+                }
+                if resp["ok"] != true {
+                    if !fallback
+                        && body.get("entities").is_some()
+                        && crate::services::telegram_formatting::parse_refusal(status, &resp)
+                    {
+                        crate::services::telegram_formatting::record_fallback().await?;
+                        body.as_object_mut().unwrap().remove("entities");
+                        body.as_object_mut().unwrap().remove("parse_mode");
+                        fallback = true;
+                        continue;
+                    }
+                    if let Some(error) = retry_refusal(status, &resp) {
+                        return Err(error);
+                    }
+                    // Never retain provider descriptions, which can contain user text.
+                    let description = resp["description"].as_str().unwrap_or_default();
+                    if status.is_client_error() {
+                        if UNREACHABLE_TARGET_MARKERS
+                            .iter()
+                            .any(|marker| description.contains(marker))
+                        {
+                            return Err(
+                                crate::services::channel_platform::classify_upstream_refusal(
+                                    "Telegram",
+                                    description,
+                                    UNREACHABLE_TARGET_MARKERS,
+                                ),
+                            );
+                        }
+                        return Err(AppError::ChannelPlatformError(
+                            crate::services::telegram_formatting::REJECTED.into(),
+                        ));
+                    }
+                    return Err(crate::services::channel_media_service::upload_failed());
+                }
+                if !status.is_success() {
+                    return Err(crate::services::channel_media_service::upload_failed());
+                }
+                let message_id = resp["result"]["message_id"]
+                    .as_i64()
+                    .filter(|id| *id > 0)
+                    .ok_or_else(crate::services::channel_media_service::upload_failed)?;
+                return Ok(Some(message_id.to_string()));
+            }
+        })
+    }
+}
+
 impl Default for TelegramAdapter {
     fn default() -> Self {
         Self::new()
@@ -376,19 +451,6 @@ fn build_message_body(conversation_id: &str, reply: &OutboundReply) -> serde_jso
         "parse_mode": "Markdown",
     });
 
-    // Preserve the legacy public relay wire contract (including its default
-    // Markdown mode). Only opted-in rendering carries additional controls.
-    if reply
-        .metadata
-        .as_ref()
-        .is_some_and(|m| m["text_format"] == "telegram_entities")
-    {
-        for key in ["reply_markup", "link_preview_options"] {
-            if let Some(value) = reply.metadata.as_ref().and_then(|m| m.get(key)) {
-                body[key] = value.clone();
-            }
-        }
-    }
     if let Some(entities) = reply.metadata.as_ref().and_then(|m| m.get("entities")) {
         body.as_object_mut().unwrap().remove("parse_mode");
         body["entities"] = entities.clone();
@@ -450,8 +512,14 @@ fn build_edit_message_body(
             "A Telegram edit must fit one message".into(),
         ));
     }
-    let mut body = build_message_body(conversation_id, &parts[0]);
-    body["message_id"] = message_id.into();
+    // Edits historically send only chat/message identity, text and formatting.
+    // Send-only context must not leak into an edit when CommonMark is selected.
+    let mut body = serde_json::json!({"chat_id":conversation_id,"message_id":message_id,
+        "text":parts[0].text.as_deref().unwrap_or(""),"parse_mode":"Markdown"});
+    if let Some(entities) = parts[0].metadata.as_ref().and_then(|m| m.get("entities")) {
+        body.as_object_mut().unwrap().remove("parse_mode");
+        body["entities"] = entities.clone();
+    }
     Ok(body)
 }
 
@@ -808,68 +876,12 @@ impl PlatformAdapter for TelegramAdapter {
             }
             return Ok(sent.last().map(|(_, id)| id.clone()));
         }
-        let bot_token = credentials.token;
-        let mut body = build_message_body(conversation_id, reply);
-        let url = format!("{}{bot_token}/sendMessage", self.base_url);
-        let mut fallback = crate::services::telegram_formatting::already_fell_back();
-        if fallback {
-            body.as_object_mut().unwrap().remove("entities");
-            body.as_object_mut().unwrap().remove("parse_mode");
-        }
-        loop {
-            let (status, resp) =
-                crate::services::channel_media_service::platform_json_value_with_timeout(
-                    http.post(&url).json(&body),
-                    std::time::Duration::from_secs(20),
-                )
-                .await?;
-            if status.is_server_error() || resp.get("ok").and_then(|v| v.as_bool()).is_none() {
-                return Err(crate::services::channel_media_service::upload_failed());
-            }
-            if resp["ok"] != true {
-                if !fallback
-                    && body.get("entities").is_some()
-                    && crate::services::telegram_formatting::parse_refusal(status, &resp)
-                {
-                    crate::services::telegram_formatting::record_fallback().await?;
-                    body.as_object_mut().unwrap().remove("entities");
-                    body.as_object_mut().unwrap().remove("parse_mode");
-                    fallback = true;
-                    continue;
-                }
-                if let Some(error) = retry_refusal(status, &resp) {
-                    return Err(error);
-                }
-                // Never retain provider descriptions, which can contain user text.
-                let description = resp["description"].as_str().unwrap_or_default();
-                if status.is_client_error() {
-                    if UNREACHABLE_TARGET_MARKERS
-                        .iter()
-                        .any(|marker| description.contains(marker))
-                    {
-                        return Err(
-                            crate::services::channel_platform::classify_upstream_refusal(
-                                "Telegram",
-                                description,
-                                UNREACHABLE_TARGET_MARKERS,
-                            ),
-                        );
-                    }
-                    return Err(AppError::ChannelPlatformError(
-                        crate::services::telegram_formatting::REJECTED.into(),
-                    ));
-                }
-                return Err(crate::services::channel_media_service::upload_failed());
-            }
-            if !status.is_success() {
-                return Err(crate::services::channel_media_service::upload_failed());
-            }
-            let message_id = resp["result"]["message_id"]
-                .as_i64()
-                .filter(|id| *id > 0)
-                .ok_or_else(crate::services::channel_media_service::upload_failed)?;
-            return Ok(Some(message_id.to_string()));
-        }
+        self.send_text_body(
+            http,
+            credentials.token,
+            build_message_body(conversation_id, reply),
+        )
+        .await
     }
 
     async fn edit_reply(
@@ -914,12 +926,16 @@ impl PlatformAdapter for TelegramAdapter {
                 && description == "Bad Request: there is no text in the message to edit"
             {
                 method = "editMessageCaption";
-                let fields = body.as_object_mut().unwrap();
-                let text = fields.remove("text").unwrap();
-                fields.insert("caption".into(), text);
-                if let Some(entities) = fields.remove("entities") {
-                    fields.insert("caption_entities".into(), entities);
+                let mut caption = serde_json::json!({
+                    "chat_id":body["chat_id"],"message_id":body["message_id"],"caption":body["text"]
+                });
+                if let Some(parse_mode) = body.get("parse_mode") {
+                    caption["parse_mode"] = parse_mode.clone();
                 }
+                if let Some(entities) = body.get("entities") {
+                    caption["caption_entities"] = entities.clone();
+                }
+                body = caption;
                 continue;
             }
             if description.starts_with("Bad Request: message is not modified") {
@@ -2321,3 +2337,7 @@ mod typing_tests {
 #[cfg(test)]
 #[path = "telegram_formatting_tests.rs"]
 mod formatting_tests;
+
+#[cfg(test)]
+#[path = "telegram_wire_compatibility_tests.rs"]
+mod wire_compatibility_tests;

@@ -45,11 +45,14 @@ async fn formatting_rejection_falls_back_once_with_identical_display_text_and_co
         assert!(bodies[0].get("entities").is_some());
         assert_eq!(bodies[0]["message_thread_id"], 9);
         assert_eq!(bodies[0]["reply_to_message_id"], 7);
-        assert!(bodies[0]["reply_markup"]["inline_keyboard"].is_array());
+        assert!(bodies[0].get("reply_markup").is_none());
         assert!(bodies[1].get("entities").is_none() && bodies[1].get("parse_mode").is_none());
-        for key in ["reply_to_message_id", "message_thread_id", "reply_markup"] {
-            assert_eq!(bodies[0][key], bodies[1][key]);
-        }
+        let mut expected_fallback = bodies[0].clone();
+        expected_fallback
+            .as_object_mut()
+            .unwrap()
+            .remove("entities");
+        assert_eq!(bodies[1], expected_fallback);
     }
 }
 
