@@ -656,7 +656,7 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Schedule owner-requested work for NyxBot or a specialist. Use the owner's timezone from settings; ask if unknown. Confirm the returned next runs in plain words. Prefer deliver_to for requested pushed results."
         }
         "list_notifications" => {
-            "Read the owner's Notifications with bounded previews and links. When the owner asks what they missed, or a NyxBot automation asks for a digest, call this tool. Defaults to unread activity; optional kinds, since and limit narrow the results. Reading never marks notifications as seen. Available only in the owner's NyxBot threads, including scheduled NyxBot turns."
+            "Read the owner's Notifications with bounded previews and links. When the owner asks what they missed, or a NyxBot automation asks for a digest, call this tool. Defaults to unread activity; optional kinds, since and limit narrow the results. Since selects rows by their latest update; a coalesced count covers its entire unread window, starting at created_at, and may include older activity. Reading never marks notifications as seen. Available only in the owner's NyxBot threads, including scheduled NyxBot turns."
         }
         "list_schedules" => {
             "List the owner's schedules and assistant webhook automations, including confirmation policy, timezone and next runs."
