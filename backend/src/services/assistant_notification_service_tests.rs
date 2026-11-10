@@ -15,8 +15,7 @@ use crate::{
         user::{COLLECTION_NAME as USER_ROWS, UserType},
     },
     services::{
-        assistant_acknowledgement_service as acks,
-        assistant_agent_credential_service as credentials, assistant_group_service as groups,
+        assistant_acknowledgement_service as acks, assistant_group_service as groups,
         assistant_nyxagent::{self as engine, TurnRequest, TurnStart},
         assistant_settings_service as settings,
         assistant_team_service::{self as team, CreateRequest},
@@ -109,20 +108,24 @@ async fn settle(
     text: &str,
     error: Option<TurnError>,
 ) -> String {
-    let credential = credentials::load_for_conversation(
-        &f.state.db,
-        &f.state.encryption_keys,
-        &row.user_id,
-        &row.id,
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let (message_id, result) = try_settle(f, row, text, error).await;
+    result.unwrap();
+    message_id
+}
+
+/// Settle with the thread's own key id and return the engine's verdict (a
+/// destroyed agent's late settlement may be refused).
+async fn try_settle(
+    f: &Fixture,
+    row: &AssistantConversation,
+    text: &str,
+    error: Option<TurnError>,
+) -> (String, AppResult<Option<TurnError>>) {
     let message_id = Uuid::new_v4().to_string();
-    engine::finish_turn(
+    let result = engine::finish_turn(
         &f.state.db,
         row,
-        &credential.api_key_id,
+        &row.credential_api_key_id,
         &message_id,
         &engine::TurnResult {
             text: text.into(),
@@ -131,9 +134,8 @@ async fn settle(
             error,
         },
     )
-    .await
-    .unwrap();
-    message_id
+    .await;
+    (message_id, result)
 }
 
 async fn rows_of(f: &Fixture, user: &str) -> Vec<AssistantNotification> {
@@ -470,7 +472,9 @@ async fn turn_lost_reclaim_records_a_failed_update_and_destroyed_agents_stop_upd
     )
     .await;
     team::destroy(db, &f.owner, &researcher.id).await.unwrap();
-    settle(&f, &row, "late", Some(TurnError::new("cancelled"))).await;
+    // Destroy revoked the thread's key and asked the turn to stop: whether the
+    // late settlement is refused or recorded as stopped, no update appears.
+    let _ = try_settle(&f, &row, "late", Some(TurnError::new("cancelled"))).await;
     assert_eq!(rows_of(&f, &f.owner).await.len(), 1);
 }
 
@@ -481,8 +485,10 @@ async fn turn_lost_reclaim_records_a_failed_update_and_destroyed_agents_stop_upd
 async fn seed_channel(f: &Fixture, owner: &str, org: Option<&str>) -> (String, String) {
     let channel = Uuid::new_v4().to_string();
     let thread = Uuid::new_v4().to_string();
+    let now = bson::DateTime::now();
     let mut doc = doc! {"_id": &channel, "user_id": owner, "channel_bot_id": "bot",
-    "platform": "telegram", "status": "active", "bot_label": "Support bot", "transport": "gateway"};
+    "platform": "telegram", "status": "active", "bot_label": "Support bot", "transport": "gateway",
+    "route_api_key_id": "route-key", "created_at": now, "updated_at": now};
     if let Some(org) = org {
         doc.insert("org_specialist", doc! {"org_id": org, "version": 1});
     }
@@ -497,7 +503,8 @@ async fn seed_channel(f: &Fixture, owner: &str, org: Option<&str>) -> (String, S
         .collection::<Document>(CHANNEL_THREADS)
         .insert_one(
             doc! {"_id": &thread, "channel_id": &channel, "user_id": owner,
-            "partition": "chat-1", "title": "Alice", "kind": "private"},
+            "partition": "chat-1", "title": "Alice", "kind": "private",
+            "created_at": now, "updated_at": now},
         )
         .await
         .unwrap();
@@ -683,10 +690,19 @@ async fn org_guest_lane_notifies_the_route_admin_from_the_public_transcript_only
     assert!(!untouched.contains_key("notification_fence"));
     assert!(rows_of(&f, &admin).await.is_empty());
     set_flag(&f, true).await;
-    let mut more = start(Some(&row.id), "visitor question again", TurnOrigin::Channel);
+    // A fresh guest lane turn on the same channel and chat (an admitted lane
+    // row cannot be re-entered here without the real organization binding).
+    let mut more = start(None, "visitor question again", TurnOrigin::Channel);
     more.channel = Some(channel_origin(&channel));
     more.guest = true;
     let row = begin(&f, &f.owner, &more).await;
+    db.collection::<Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &row.id},
+            doc! {"$set": {"channel.org_execution": bson::to_bson(&execution).unwrap()}},
+        )
+        .await
+        .unwrap();
     let reply = settle(&f, &row, "private lane text", None).await;
     assert!(
         db.collection::<Document>(CHANNELS)
@@ -919,8 +935,13 @@ async fn linked_platform_chat_replies_notify_the_owner_while_the_binding_is_live
     )
     .await
     .unwrap();
-    assert_eq!(pending.items.len(), 1);
-    assert!(pending.items[0].url.contains(&format!("card={}", card.id)));
+    assert_eq!(pending.items.len(), 2);
+    let decision_item = pending
+        .items
+        .iter()
+        .find(|item| item.kind == "needs_decision")
+        .expect("decision listed");
+    assert!(decision_item.url.contains(&format!("card={}", card.id)));
     // Unlink revokes the binding and purges its rows (D7); a settlement that
     // lands afterwards records nothing.
     db.collection::<Document>(PLATFORM_BINDINGS)
@@ -986,7 +1007,17 @@ async fn automation(f: &Fixture, agent_id: &str, deliver_to: DeliverTo) -> Trigg
 
 async fn run_for(f: &Fixture, trigger: &Trigger) -> TriggerRun {
     let at = Utc::now();
-    let run = schedules::new_run(trigger, at, at + Duration::hours(1));
+    let mut run = schedules::new_run(trigger, at, at + Duration::hours(1));
+    // Admission copies the trigger's delivery onto the run.
+    if let TriggerDelivery::Assistant {
+        agent_id,
+        deliver_to,
+        ..
+    } = &trigger.delivery
+    {
+        run.agent_id = Some(agent_id.clone());
+        run.deliver_to = deliver_to.clone();
+    }
     f.state
         .db
         .collection::<TriggerRun>(RUNS)
@@ -3349,11 +3380,15 @@ async fn a_row_that_coalesces_after_preparation_gives_its_claim_back_and_sends_t
     let thread_b = seed_conversation(&f, &f.owner, "Second").await;
     let older = Uuid::new_v4().to_string();
     let newer = Uuid::new_v4().to_string();
-    for (id, text) in [(&older, "Older text"), (&newer, "Newer text")] {
+    for (seq, (id, text)) in [(&older, "Older text"), (&newer, "Newer text")]
+        .into_iter()
+        .enumerate()
+    {
         db.collection::<Document>(MESSAGES)
             .insert_one(
                 doc! {"_id": id, "conversation_id": &thread_b, "user_id": &f.owner,
-                "role": "assistant", "text": text, "status": "completed", "turn_id": "t"},
+                "seq": seq as i64 + 1, "role": "assistant", "text": text,
+                "status": "completed", "turn_id": "t"},
             )
             .await
             .unwrap();
@@ -3471,12 +3506,13 @@ async fn a_continually_coalescing_row_is_pushed_with_its_prepared_preview_once_p
         ("newest", "Newest text"),
     ];
     let mut message_ids = HashMap::new();
-    for (key, text) in texts {
+    for (seq, (key, text)) in texts.into_iter().enumerate() {
         let id = Uuid::new_v4().to_string();
         db.collection::<Document>(MESSAGES)
             .insert_one(
                 doc! {"_id": &id, "conversation_id": &busy_thread, "user_id": &f.owner,
-                "role": "assistant", "text": text, "status": "completed", "turn_id": key},
+                "seq": seq as i64 + 1, "role": "assistant", "text": text,
+                "status": "completed", "turn_id": key},
             )
             .await
             .unwrap();

@@ -1071,7 +1071,13 @@ pub async fn record_group_reply_in_session(
     group: &AssistantGroup,
     message: &GroupMessage,
 ) -> AppResult<()> {
-    if group.collaboration.is_some() || !matches!(message.role.as_str(), "agent" | "notice") {
+    // Member replies and member notices ("researcher stopped."); the group's
+    // own lifecycle notices (creation, membership) carry no agent and are the
+    // owner's own doing, never an update.
+    if group.collaboration.is_some()
+        || !matches!(message.role.as_str(), "agent" | "notice")
+        || message.agent_id.is_none()
+    {
         return Ok(());
     }
     if !enabled(db, owner).await? {
@@ -1260,7 +1266,9 @@ pub fn preview_text(raw: &str) -> String {
     let cleaned: String = strip_links(&joined)
         .chars()
         .filter(|c| {
-            !c.is_control()
+            // Whitespace controls (tabs, newlines) separate words below;
+            // other controls and bidi overrides are dropped.
+            (!c.is_control() || c.is_whitespace())
                 && !matches!(c, '`' | '*' | '~' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
         })
         .collect();
