@@ -998,27 +998,26 @@ test("unattributed CMA inventory and old pin objects never appear as local activ
   expect(cma.requests).toEqual([]);
 });
 
-test("renders one pinned surface on shell, authenticated dashboard, standalone desktop and not-found routes", async ({
+for (const [group, paths] of [
+  ["assistant shell routes", [
+    "/assistant/plugins", "/assistant/approvals", "/assistant/automations",
+    "/assistant/machines", "/assistant/machines/new", "/assistant/machines/pair",
+  ]],
+  ["CMA shell routes", [
+    "/assistant/sandboxes", "/assistant/sandboxes/sandbox-1",
+    "/assistant/cma-agents/0dc85e4c-6aaf-47de-9df0-e07a69b8ee19",
+  ]],
+  ["dashboard and standalone routes", [
+    "/keys", "/assistant/machines/node-1/desktop",
+    "/assistant/machines/node-1/desktop/", "/assistant/not-a-route",
+  ]],
+] as const) {
+test(`renders one pinned surface on ${group} and restores source-only visibility`, async ({
   page,
 }) => {
   await mockCma(page);
   await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
   await card(page).getByRole("button", { name: "Pin CMA session" }).click();
-  const paths = [
-    "/assistant/plugins",
-    "/assistant/approvals",
-    "/assistant/automations",
-    "/assistant/machines",
-    "/assistant/machines/new",
-    "/assistant/machines/pair",
-    "/assistant/sandboxes",
-    "/assistant/sandboxes/sandbox-1",
-    "/assistant/cma-agents/0dc85e4c-6aaf-47de-9df0-e07a69b8ee19",
-    "/keys",
-    "/assistant/machines/node-1/desktop",
-    "/assistant/machines/node-1/desktop/",
-    "/assistant/not-a-route",
-  ];
   for (const path of paths) {
     await page.goto(`${path}?mock=1`);
     await expect(sessions(page)).toHaveCount(1);
@@ -1045,6 +1044,7 @@ test("renders one pinned surface on shell, authenticated dashboard, standalone d
   await expect(sessions(page)).toHaveCount(1);
   await expect(card(page).getByRole("button", { name: "Pin CMA session", exact: true })).toHaveAttribute("aria-pressed", "false");
 });
+}
 test("uses only supplied valid callbacks and clears missing, null, query, fragment and malformed links", async ({
   page,
 }) => {
