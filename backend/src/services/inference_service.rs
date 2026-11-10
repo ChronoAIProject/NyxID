@@ -1,7 +1,7 @@
 use crate::errors::AppResult;
 use crate::models::downstream_service::{
     COLLECTION_NAME, DownstreamService, InferenceWireProtocol, ServiceCapabilities,
-    ServiceInference, VoiceInference,
+    ServiceInference, VoiceChoice, VoiceInference,
 };
 use crate::models::service_billing::{BillingMetric, LanePricing, PricingSyncStatus};
 use mongodb::bson::{self, doc};
@@ -109,6 +109,23 @@ pub fn default_inference(slug: &str) -> Option<ServiceInference> {
     })
 }
 
+/// Frozen original seed, including its labels and order. Only that exact list
+/// may be repaired automatically; an edited catalog remains the admin's choice.
+fn legacy_openai_voice_choices() -> Vec<VoiceChoice> {
+    [
+        "marin", "alloy", "ash", "aube", "ballad", "beacon", "bossa", "brise", "cedar", "cinder",
+        "coral", "delta", "echo", "flitz", "gleam", "harema", "juni", "meridian", "nira", "noeul",
+        "nuri", "quartz", "ripple", "sage", "shimmer", "shitan", "sillage", "stone", "tempo",
+        "verse", "vesper", "willow",
+    ]
+    .into_iter()
+    .map(|id| VoiceChoice {
+        id: id.into(),
+        label: format!("{}{}", id[..1].to_uppercase(), &id[1..]),
+    })
+    .collect()
+}
+
 pub async fn backfill(db: &mongodb::Database) -> AppResult<()> {
     for slug in [
         "llm-openai",
@@ -125,6 +142,26 @@ pub async fn backfill(db: &mongodb::Database) -> AppResult<()> {
             doc! { "$set": { "inference": bson::to_bson(&default_inference(slug)).expect("inference serialization") } },
         ).await?;
         if let Some(voice) = super::inference_voice::default_voice(slug) {
+            if slug == "llm-openai" {
+                // Match the entire historical array atomically, including
+                // labels/order, so a concurrent admin edit invalidates the
+                // predicate. Preserve all sibling inference/voice metadata.
+                db.collection::<DownstreamService>(COLLECTION_NAME)
+                    .update_many(
+                        doc! {
+                            "slug": slug,
+                            "inference.voice.protocol": "openai_live",
+                            "inference_admin_modified": { "$ne": true },
+                            "inference.voice.voices": bson::to_bson(&legacy_openai_voice_choices())
+                                .expect("legacy voice choices serialization"),
+                        },
+                        doc! { "$set": {
+                            "inference.voice.voices": bson::to_bson(&voice.voices)
+                                .expect("voice choices serialization"),
+                        } },
+                    )
+                    .await?;
+            }
             // Do not replace an existing inference block or resurrect an admin clear.
             db.collection::<DownstreamService>(COLLECTION_NAME).update_many(
                 doc! { "slug": slug, "inference": { "$type": "object" }, "inference.voice": bson::Bson::Null, "inference_admin_modified": { "$ne": true } },
