@@ -1569,6 +1569,7 @@ mod tests {
             resource_request_proof_enabled: false,
             base_url: "http://localhost:3001".to_string(),
             chrono_probe_url: None,
+            invocation_diagnostics_enabled: false,
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
             csrf_trusted_origins: vec![],

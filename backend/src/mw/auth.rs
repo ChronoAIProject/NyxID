@@ -48,6 +48,10 @@ pub enum AuthMethod {
     Delegated,
 }
 
+/// Verified access token cannot be replayed from another sender (probe hop).
+#[derive(Clone, Copy)]
+pub struct SenderConstrainedToken;
+
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub(crate) execution_enrolled: bool,
@@ -1297,6 +1301,10 @@ impl FromRequestParts<AppState> for AuthUser {
                         claims.cnf.as_ref().and_then(|c| c.x5t_s256.as_deref())
                     {
                         validate_mtls_bound_access(parts, state, claims_x5t)?;
+                    }
+
+                    if claims.cnf.is_some() {
+                        parts.extensions.insert(SenderConstrainedToken);
                     }
 
                     // Check if this is a service account token

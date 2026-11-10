@@ -286,12 +286,18 @@ fn diagnosed_tool_result(
     content: Vec<serde_json::Value>,
     is_error: bool,
     diagnostic: Option<&crate::services::invocation_diagnostic_service::IssuedHandle>,
-) -> serde_json::Value {
+) -> (serde_json::Value, ToolResultDigest) {
     let mut result = serde_json::json!({"content":content,"isError":is_error});
+    // Progress tracks the business result, never random diagnostic metadata.
+    let digest = result_digest(&result);
     if is_error && let Some(diagnostic) = diagnostic {
+        result["content"]
+            .as_array_mut()
+            .expect("tool content array")
+            .push(diagnostic.content());
         result["structuredContent"] = serde_json::json!({"nyxid_invocation_diagnostic":diagnostic});
     }
-    result
+    (result, digest)
 }
 
 fn content_result_with_diagnostic(
@@ -303,10 +309,12 @@ fn content_result_with_diagnostic(
     if !is_error || diagnostic.is_none() {
         return content_result(id, content, is_error);
     }
-    let mut response = rpc_success(id, diagnosed_tool_result(content, is_error, diagnostic));
+    let (result, digest) = diagnosed_tool_result(content, is_error, diagnostic);
+    let mut response = rpc_success(id, result);
+    response.extensions_mut().insert(digest);
     response
         .headers_mut()
-        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        .append(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
 }
 
@@ -605,10 +613,11 @@ fn content_result_with_notifications_and_diagnostic(
     notifications: Vec<serde_json::Value>,
     diagnostic: Option<&crate::services::invocation_diagnostic_service::IssuedHandle>,
 ) -> Response {
+    let (result, digest) = diagnosed_tool_result(content, is_error, diagnostic);
     let result = JsonRpcResponse {
         jsonrpc: JSONRPC_VERSION.into(),
         id,
-        result: Some(diagnosed_tool_result(content, is_error, diagnostic)),
+        result: Some(result),
         error: None,
     };
 
@@ -624,12 +633,11 @@ fn content_result_with_notifications_and_diagnostic(
             .data(serde_json::to_string(&notification).unwrap_or_default())));
     }
 
-    let digest = result_digest(result.result.as_ref().expect("tool result"));
     let mut response = Sse::new(tokio_stream::iter(events)).into_response();
     if diagnostic.is_some() {
         response
             .headers_mut()
-            .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            .append(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
     response.extensions_mut().insert(digest);
     response.extensions_mut().insert(if is_error {
@@ -741,6 +749,7 @@ struct McpAuthContext {
     /// No source lookup occurs for unrelated tools; Machine admission is live.
     machine_source: Option<crate::services::machine_external_grant_service::VerifiedExternalSource>,
     caller_token: Option<proxy_service::CallerToken>,
+    sender_constrained: bool,
     chat: Option<crate::services::assistant_acknowledgement_service::ChatAuthority>,
     account_acknowledged: bool,
     parent_session_id: Option<String>,
@@ -806,6 +815,7 @@ impl McpAuthContext {
             oauth_lineage: None,
             machine_source: None,
             caller_token: None,
+            sender_constrained: false,
             chat: None,
             account_acknowledged: false,
             parent_session_id: None,
@@ -1097,6 +1107,7 @@ async fn authenticate_mcp_or_public(
                         None
                     },
                     caller_token: proxy_service::caller_bearer_token_for_downstream(headers, false),
+                    sender_constrained: false,
                     scope: api_key.scopes.clone(),
                     resource_uris: None,
                     chat,
@@ -1289,6 +1300,7 @@ async fn authenticate_mcp_or_public(
                 };
 
                 let mut ctx = McpAuthContext::user(user_id, auth_method.clone());
+                ctx.sender_constrained = claims.cnf.is_some();
                 if auth_method == AuthMethod::AccessToken && claims.client_id.is_none() {
                     ctx.parent_session_id = claims.sid.clone();
                 }
@@ -3677,7 +3689,7 @@ fn dispatch_service_tool<'a>(
 
         let concurrency = response.concurrency.take();
         let is_policy_refusal = response.is_policy_refusal();
-        let (mut content, is_error, failure) = if is_policy_refusal {
+        let (content, is_error, failure) = if is_policy_refusal {
             if let (Some((row, output)), Some(chat)) = (&resource, auth.chat.as_ref())
                 && let Ok(refusal) = serde_json::from_str::<serde_json::Value>(&response.text)
                 && refusal["error"] == "acknowledgement_required"
@@ -3731,9 +3743,6 @@ fn dispatch_service_tool<'a>(
             )
             .await;
         }
-        if is_error && let Some(diagnostic) = &diagnostic {
-            content.push(diagnostic.content());
-        }
         let mut result = content_result_with_diagnostic(
             request.id.clone(),
             content,
@@ -3755,11 +3764,18 @@ async fn service_failure_handle(
     execution: &crate::errors::AppResult<mcp_service::ToolResponse>,
 ) -> Option<crate::services::invocation_diagnostic_service::IssuedHandle> {
     use crate::services::invocation_diagnostic_service as diagnostics;
+    if !state.config.invocation_diagnostics_enabled
+        || !diagnostics::can_probe(&auth.auth_method, auth.acting_client_id.as_deref())
+        || auth.chat.is_some()
+        || auth.sender_constrained
+    {
+        return None;
+    }
     let eligible = match execution {
-        Ok(response) => response.status >= 400 && !response.is_policy_refusal(),
+        Ok(response) => (500..600).contains(&response.status) && !response.is_policy_refusal(),
         Err(error) => diagnostics::eligible_error(error),
     };
-    if !eligible || auth.acting_client_id.as_deref() == Some("chrono-probe") {
+    if !eligible {
         return None;
     }
     let mcp_service::McpToolSource::UserManaged {
@@ -3798,10 +3814,7 @@ fn tool_failure_with_diagnostic(
     original_error: &str,
     diagnostic: Option<&crate::services::invocation_diagnostic_service::IssuedHandle>,
 ) -> Response {
-    let mut content = vec![serde_json::json!({"type":"text","text":original_error})];
-    if let Some(diagnostic) = diagnostic {
-        content.push(diagnostic.content());
-    }
+    let content = vec![serde_json::json!({"type":"text","text":original_error})];
     content_result_with_diagnostic(id, content, true, diagnostic)
 }
 
@@ -5405,7 +5418,7 @@ async fn handle_meta_call_tool(
 
     let concurrency = response.concurrency.take();
     let is_policy_refusal = response.is_policy_refusal();
-    let (mut content, is_error, failure) =
+    let (content, is_error, failure) =
         box_tool_future(|| service_tool_content(state, auth, tool_name, response, result_query))
             .await;
     if !is_error
@@ -5426,9 +5439,6 @@ async fn handle_meta_call_tool(
         .await;
     }
 
-    if is_error && let Some(diagnostic) = &diagnostic {
-        content.push(diagnostic.content());
-    }
     // Embed tools/list_changed inline for SSE-capable clients
     let mut result = if changed && client_accepts_sse {
         content_result_with_notifications_and_diagnostic(
@@ -7556,6 +7566,7 @@ mod tests {
             oauth_lineage: None,
             machine_source: None,
             caller_token: None,
+            sender_constrained: false,
             chat: None,
             account_acknowledged: false,
             parent_session_id: None,

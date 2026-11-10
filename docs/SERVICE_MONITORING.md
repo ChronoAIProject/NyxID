@@ -138,21 +138,34 @@ actor, exact UserService ID, optional revision, and existing request metadata;
 never body substrings, response bodies, or tokens.
 
 ## Automatic failure diagnostics
+ Automatic handle issuance is disabled by default, even when `CHRONO_PROBE_URL`
+is configured. Operators must explicitly set
+`INVOCATION_DIAGNOSTICS_ENABLED=true` and restart the API process to enable it.
+Issuance reads only that startup configuration snapshot, with no feature-flag
+database lookup on the invocation path. Redemption separately revalidates the
+live `services:monitoring` flag for the acting person before probing.
 
-With `CHRONO_PROBE_URL` configured, eligible failed REST proxy, provider LLM,
-LLM gateway and MCP service-tool calls can carry a short-lived opaque diagnostic
-handle. The original request does not run a probe. It returns its original
-status and body after one bounded MongoDB insert, preserving application headers
-while enforcing `Cache-Control: no-store`; if handle issuance cannot finish
-within 250ms, the original error is returned without a handle. Local input,
-scope, approval, capacity, billing and cancellation errors do not issue handles.
-Transport or broker failures qualify only after execution resolved an exact
-UserService. Responses whose stream already started cannot be decorated.
-Within each server process, repeated eligible failures for the same caller
-identity and exact UserService are suppressed for ten seconds after the first
-handle is issued. Suppressed failures retain their original response without a
-handle and perform no diagnostic database write. The bounded in-memory table
-never stores paths, request data, response data, credentials or raw handles.
+When enabled and configured, downstream 5xx responses and eligible transport or
+broker failures from REST proxy, provider LLM, LLM gateway and MCP service-tool
+calls can carry a short-lived opaque diagnostic handle. Downstream 4xx
+responses, including authentication, validation, missing-resource and throttling
+responses, do not qualify. Only ordinary, unconstrained access-token callers
+receive handles. Agent Keys, NyxBot conversation keys, sessions, service
+accounts, delegated and relay callers receive no handle, make no diagnostic
+database write and add no MCP diagnostic content. Agent Key probing remains
+deferred to #2241. The original request does not run a probe. It returns its
+original status and body after one bounded MongoDB insert, preserving
+application headers and appending `Cache-Control: no-store` without replacing
+downstream cache directives; if handle issuance cannot finish within 250ms, the
+original error is returned without a handle. Local input, scope, approval,
+capacity, billing and cancellation errors do not issue handles. Transport or
+broker failures qualify only after execution resolved an exact UserService.
+Responses whose stream already started cannot be decorated. Within each server
+process, repeated eligible failures for the same caller identity and exact
+UserService are suppressed for ten seconds after the first handle is issued.
+Suppressed failures retain their original response without a handle and perform
+no diagnostic database write. The bounded in-memory table never stores paths,
+request data, response data, credentials or raw handles.
 
 REST and LLM failures use these NyxID-owned response headers:
 
@@ -167,11 +180,13 @@ even when NyxID does not issue a handle.
 
 MCP errors retain their original content first and add the same handle under
 `structuredContent.nyxid_invocation_diagnostic` and a separate text content
-block. The handle contains no UserService ID, path, token, request body or
-routing data. NyxID stores only its SHA-256 hash. The record expires after 60
-seconds and binds the original actor, authentication class, API-key identity,
-acting or OAuth client and exact execution-selected UserService, including a
-concrete pool member.
+block. The progress digest is computed from the original tool result before
+adding either diagnostic field, for both JSON and SSE responses, so random
+handles do not weaken the continuation loop guard. The handle contains no
+UserService ID, path, token, request body or routing data. NyxID stores only its
+SHA-256 hash. The record expires after 60 seconds and binds the original actor,
+authentication class, API-key identity, acting or OAuth client and exact
+execution-selected UserService, including a concrete pool member.
 
 Clients may explicitly redeem the handle once with the current NyxID identity:
 
@@ -191,10 +206,16 @@ mismatch, expiry or revoked access returns the same not-found result and does
 not reveal which check failed.
 
 An ordinary access token can run a caller-scoped probe using only the bearer on
-the redemption request. Agent Keys and bot/conversation keys, sessions, relay,
-delegated and service-account identities complete with `observation: unknown`
-and `outcome: non_delegable`; they never fall back to an owner, operator or
-system monitoring key. Agent Key-scoped probing requires a separate authority-
+the redemption request. chrono-probe receives that full bearer credential and
+must never log or persist it, including in request, error or tracing logs.
+Configure access-log and observability redaction at the probe and every
+intermediary hop. DPoP- and mTLS-bound tokens cannot be replayed by the probe:
+they receive no new handle, and redemption of an existing handle returns
+`observation: unknown` and `outcome: non_delegable` without forwarding the
+token. Historical handles for Agent Keys and bot/conversation keys, sessions,
+relay, delegated and service-account identities also complete as
+`unknown/non_delegable`; they never fall back to an owner, operator or system
+monitoring key. Agent Key-scoped probing requires a separate authority-
 preserving contract. There is no cached status fallback because the shared
 latest-status result is not bound to the current caller.
 

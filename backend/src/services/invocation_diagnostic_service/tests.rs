@@ -129,6 +129,45 @@ use wiremock::{
     matchers::{header, method, path},
 };
 
+/// Model a handle persisted before issuance was restricted to probeable callers.
+pub(crate) async fn legacy_handle(
+    db: &Database,
+    _config: &AppConfig,
+    actor: &str,
+    method: &AuthMethod,
+    key: Option<&str>,
+    client: Option<&str>,
+    service: &str,
+) -> AppResult<Option<IssuedHandle>> {
+    let raw = format!(
+        "{HANDLE_PREFIX}{}",
+        crate::crypto::token::generate_random_token()
+    );
+    let now = Utc::now();
+    db.collection::<InvocationDiagnostic>(COLLECTION_NAME)
+        .insert_one(InvocationDiagnostic {
+            id: Uuid::new_v4().to_string(),
+            handle_hash: crate::crypto::token::hash_token(&raw),
+            actor_user_id: actor.to_owned(),
+            original_auth_method: auth_method_name(method).into(),
+            original_api_key_id: key.map(str::to_owned),
+            original_client_id: client.map(str::to_owned),
+            exact_user_service_id: service.to_owned(),
+            state: InvocationDiagnosticState::Pending,
+            diagnostic: None,
+            claim_id: None,
+            claimed_at: None,
+            completed_at: None,
+            created_at: now,
+            expires_at: now + chrono::Duration::seconds(HANDLE_TTL_SECS),
+        })
+        .await?;
+    Ok(Some(IssuedHandle {
+        handle: raw,
+        expires_in: HANDLE_TTL_SECS,
+    }))
+}
+
 pub(crate) async fn fixture() -> (AppState, String, String, MockServer) {
     let db = connect_test_database("invocation_diagnostic")
         .await
@@ -136,6 +175,7 @@ pub(crate) async fn fixture() -> (AppState, String, String, MockServer) {
     let server = MockServer::start().await;
     let mut config = test_app_config();
     config.chrono_probe_url = Some(server.uri());
+    config.invocation_diagnostics_enabled = true;
     let state = test_app_state_with_config(db, config);
     let actor = Uuid::new_v4().to_string();
     let id = Uuid::new_v4().to_string();
@@ -564,7 +604,7 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
     .unwrap_err();
     assert!(matches!(error, AppError::NotFound(_)));
 
-    let issued = issue(
+    let issued = legacy_handle(
         &state.db,
         &state.config,
         &actor,
@@ -660,7 +700,7 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
 async fn service_account_redemption_revalidates_with_its_execution_owner() {
     let (state, owner, id, server) = fixture().await;
     let service_account_id = Uuid::new_v4().to_string();
-    let issued = issue(
+    let issued = legacy_handle(
         &state.db,
         &state.config,
         &service_account_id,
@@ -772,7 +812,7 @@ async fn shared_agent_redemption_preserves_owner_shared_connection_authority() {
 
     let mut config = test_app_config();
     config.chrono_probe_url = Some("http://diagnostic.invalid".into());
-    let issued = issue(
+    let issued = legacy_handle(
         &fixture.state.db,
         &config,
         &fixture.outsider,
@@ -852,7 +892,7 @@ async fn assistant_model_transport_redemption_preserves_the_proxy_scope_exceptio
     auth.api_key_purpose = ApiKeyPurpose::General;
     auth.allow_all_services = false;
     auth.allowed_service_ids.clear();
-    let issued = issue(
+    let issued = legacy_handle(
         &state.db,
         &state.config,
         &actor,
@@ -1161,4 +1201,59 @@ async fn issuance_does_not_read_the_feature_flag_but_redemption_respects_it() {
     assert_eq!(diagnostic.observation, Observation::Unknown);
     assert_eq!(diagnostic.outcome, Outcome::Unavailable);
     assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn invocation_diagnostic_issuance_guards_do_not_touch_unavailable_database() {
+    // A guard regression must fail, even when no MongoDB happens to be running.
+    let db = mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=20")
+        .await
+        .unwrap()
+        .database("diagnostic_no_io");
+    let mut config = test_app_config();
+    config.chrono_probe_url = Some("http://diagnostic.invalid".into());
+    assert!(!config.invocation_diagnostics_enabled);
+    assert!(
+        issue(
+            &db,
+            &config,
+            "actor",
+            &AuthMethod::AccessToken,
+            None,
+            None,
+            "service"
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    config.invocation_diagnostics_enabled = true;
+    for method in [
+        AuthMethod::ApiKey,
+        AuthMethod::Session,
+        AuthMethod::Delegated,
+        AuthMethod::ServiceAccount,
+        AuthMethod::Relay,
+    ] {
+        assert!(
+            issue(&db, &config, "actor", &method, None, None, "service")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+    assert!(
+        issue(
+            &db,
+            &config,
+            "actor",
+            &AuthMethod::AccessToken,
+            None,
+            Some("chrono-probe"),
+            "service"
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
 }
