@@ -24,7 +24,7 @@ preferences migrate; obsolete version-1 inventory pins are discarded.
 
 **Open source chat** links to the server-recorded conversation and specialist,
 including NyxBot's agent identity. **View in CMA** is available only when CMA
-supplies a valid `callback_url`. Both the inline operation card and preview card
+supplies a valid `callback_url`. Both the operation receipt and live session card
 use the same browser-link validation: absolute HTTP(S), a hostname, no userinfo,
 control characters, whitespace, backslashes, query, fragment, or cloud metadata
 endpoint. Valid supplied HTTP(S) scheme, host, port, and path are preserved
@@ -97,8 +97,13 @@ Only the exact personal default connection is supported by this observer.
 Shared-agent, group, guest, scheduled-invocation, organization-owned,
 node-routed (including catalog node bindings), platform-key, target-specific,
 and agent-credential-override paths
-remain outside automatic card discovery. They keep their existing inline
-operation behavior. Legacy receipts without the new server identity remain
+remain outside automatic session discovery. Thread operation receipts use the
+assets preview area and follow the dedicated card layout, minimise control and
+metadata disclosure independently of automatic session discovery. Unconfirmed
+submissions show recorded status without a live stream, actions or pin.
+Matching live cards retain request notices and the feature-gated execution
+panel from their consolidated receipts. The execution panel uses the verified
+local Agent reference, never the remote session ID. Legacy receipts without the new server identity remain
 unattributed; no migration guesses their origin. Unrelated sessions created
 outside NyxID do not appear automatically.
 

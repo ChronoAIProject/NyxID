@@ -1,6 +1,6 @@
 import { useRef, type ReactNode } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
@@ -9,6 +9,29 @@ import { AssistantShell } from "./assistant-shell";
 import { ThreadHeader } from "./nyxbot-agent-panels";
 import { AssistantWireLogAction } from "./assistant-wire-log-panel";
 import { MockScenariosAction } from "./mock-scenarios-action";
+import { useAuthStore } from "@/stores/auth-store";
+import { CmaSessionContext } from "./cma-session-context";
+import { cmaSession } from "@/lib/assistant/cma-session.test-fixtures";
+import { initialCmaSession } from "@/lib/assistant/cma-session-api";
+import type { CmaOperation } from "@/schemas/cma-operation";
+
+const initialAuth = useAuthStore.getState();
+const receipt: CmaOperation = {
+  id: "watch",
+  turn_id: "turn",
+  service_id: cmaSession.connection.id,
+  kind: "cma_provisioning",
+  operation_id: null,
+  agent_id: null,
+  idempotency_key: "request",
+  status: null,
+  phase: null,
+  state: "delivered",
+  reason: "submission_uncertain",
+  monitor_name: "NyxBot",
+  created_at: "2026-11-10T10:00:00Z",
+  checked_at: null,
+};
 
 const viewport = vi.hoisted(() => ({ desktop: true }));
 vi.mock("@/hooks/use-media-query", () => ({ useMediaQuery: () => viewport.desktop }));
@@ -27,6 +50,154 @@ vi.mock("@tanstack/react-router", () => ({
 beforeEach(() => {
   useAssistantLayoutStore.setState({ sidebarHidden: false });
   useAssistantWireLogStore.getState().setFeatureEnabled(false);
+});
+
+afterEach(() => useAuthStore.setState(initialAuth, true));
+
+function setOwner() {
+  useAuthStore.getState().setUser({
+    id: "owner",
+    email: "owner@example.com",
+    display_name: "Owner",
+    avatar_url: null,
+    is_active: true,
+    is_admin: false,
+    mfa_enabled: true,
+    email_verified: true,
+    created_at: "2026-01-01T00:00:00Z",
+  });
+}
+
+it.each([true, false])(
+  "docks an unconfirmed CMA submission outside the transcript (desktop: %s)",
+  (desktop) => {
+    viewport.desktop = desktop;
+    setOwner();
+    const view = render(
+      <TooltipProvider>
+        <AssistantShell title="Chat" sidebar={null} cmaOperations={[receipt]}>
+          <section aria-label="Transcript">Assistant reply</section>
+        </AssistantShell>
+      </TooltipProvider>,
+    );
+    const card = screen.getByRole("region", {
+      name: "CMA submission: CMA setup",
+    });
+    expect(card).toBeVisible();
+    expect(within(card).getByRole("status")).toHaveTextContent(
+      "Submission unconfirmed",
+    );
+    expect(
+      within(screen.getByRole("region", { name: "Transcript" })).queryByRole(
+        "region",
+        { name: "CMA submission: CMA setup" },
+      ),
+    ).not.toBeInTheDocument();
+    expect(card.closest('[aria-label="Preview"]') !== null).toBe(desktop);
+    view.rerender(
+      <TooltipProvider>
+        <AssistantShell title="Another chat" sidebar={null}>
+          <section aria-label="Transcript">Another reply</section>
+        </AssistantShell>
+      </TooltipProvider>,
+    );
+    expect(
+      screen.queryByRole("region", { name: "CMA submission: CMA setup" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("complementary", { name: "Preview" }),
+    ).not.toBeInTheDocument();
+  },
+);
+
+it.each([
+  [cmaSession.connection.id, null, false],
+  [cmaSession.connection.id, "completed", false],
+  [cmaSession.connection.id, "submission_uncertain", true],
+  ["another-connection", null, true],
+  [undefined, null, true],
+] as const)(
+  "consolidates only a verified matching live session (connection: %s, reason: %s)",
+  (serviceId, reason, showReceipt) => {
+    viewport.desktop = true;
+    setOwner();
+    render(
+      <TooltipProvider>
+        <CmaSessionContext
+          value={[
+            {
+              session: cmaSession,
+              state: initialCmaSession(cmaSession),
+              reconnect: () => undefined,
+            },
+          ]}
+        >
+          <AssistantShell
+            title="Chat"
+            sidebar={null}
+            cmaOperations={[
+              {
+                ...receipt,
+                service_id: serviceId,
+                agent_id: cmaSession.agentId,
+                reason,
+                state: "waiting",
+              },
+            ]}
+          >
+            <section aria-label="Transcript">Assistant reply</section>
+          </AssistantShell>
+        </CmaSessionContext>
+      </TooltipProvider>,
+    );
+    const preview = screen.getByRole("complementary", { name: "Preview" });
+    expect(
+      within(preview).getByRole("region", {
+        name: `CMA session: ${cmaSession.title}`,
+      }),
+    ).toBeVisible();
+    expect(
+      within(preview).queryByRole("region", {
+        name: "CMA submission: CMA setup",
+      }) !== null,
+    ).toBe(showReceipt);
+  },
+);
+
+it("keeps execution access and elapsed request notices when a live card replaces its receipt", () => {
+  viewport.desktop = true;
+  setOwner();
+  const operation: CmaOperation = {
+    ...receipt,
+    kind: "cma_response",
+    agent_id: cmaSession.agentId,
+    agent_ref_id: "0dc85e4c-6aaf-47de-9df0-e07a69b8ee19",
+    response_id: "rsp-linked",
+    operation_id: "rsp-linked",
+    reason: null,
+    status: "in_progress",
+    state: "waiting",
+    created_at: new Date(Date.now() - 11 * 60_000).toISOString(),
+  };
+  render(
+    <TooltipProvider>
+      <CmaSessionContext value={[{
+        session: cmaSession,
+        state: initialCmaSession(cmaSession),
+        reconnect: () => undefined,
+      }]}>
+        <AssistantShell title="Chat" sidebar={null} cmaOperations={[operation]}>
+          <section aria-label="Transcript">Assistant reply</section>
+        </AssistantShell>
+      </CmaSessionContext>
+    </TooltipProvider>,
+  );
+  const card = screen.getByRole("region", { name: `CMA session: ${cmaSession.title}` });
+  expect(within(card).getByRole("button", { name: "View execution" })).toBeVisible();
+  expect(within(card).getByText(/CMA still reports it as running/)).toBeVisible();
+  expect(within(card).getByRole("button", { name: "Pin CMA session" })).toBeVisible();
+  expect(within(card).getByText("Recent actions")).toBeVisible();
+  expect(screen.queryByRole("region", { name: "CMA submission: CMA task" })).not.toBeInTheDocument();
 });
 
 it.each([true, false])("has one title and Rename for legacy, workspace, loading and resolved threads (desktop: %s)", (desktop) => {

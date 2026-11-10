@@ -5,6 +5,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { CmaOperation } from "@/schemas/cma-operation";
@@ -157,14 +158,17 @@ function renderChat() {
         data-chat-transcript=""
       >
         <p>Original NyxBot reply</p>
-        <CmaOperationCard operation={operation} />
       </div>
+      <aside aria-label="Preview">
+        <CmaOperationCard operation={operation} />
+      </aside>
       <textarea
         data-composer-textbox=""
         aria-label="Message NyxBot"
         defaultValue="Keep my draft"
       />
     </main>,
+    { wrapper: TooltipProvider },
   );
 }
 

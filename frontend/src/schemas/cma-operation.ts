@@ -3,6 +3,7 @@ import { z } from "zod";
 export const cmaOperationSchema = z.object({
   id: z.string(),
   turn_id: z.string(),
+  service_id: z.string().optional(),
   kind: z.enum(["cma_provisioning", "cma_response", "cma_agent"]),
   operation_id: z.string().nullable(),
   agent_id: z.string().nullable(),

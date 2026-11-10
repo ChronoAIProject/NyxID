@@ -395,6 +395,113 @@ for (const theme of ["light", "dark"] as const) {
   }
 }
 
+
+for (const width of [1440, 390]) {
+  test(`shows an unconfirmed CMA submission in the shared assets area (${width}px)`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await mockCma(page, { idle: true });
+    await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
+    await page.evaluate(() => {
+      const state = JSON.parse(
+        sessionStorage.getItem("nyxagent-http-fixture-v4")!,
+      ) as {
+        rows: [string, { history: { cma_operations: unknown[] } }][];
+      };
+      const conversation = new URL(location.href).searchParams.get("c");
+      const row = state.rows.find(([id]) => id === conversation)![1];
+      row.history.cma_operations = [
+        {
+          id: "unconfirmed-submission",
+          turn_id: "older-unloaded-turn",
+          service_id: "22ec5c70-b8bb-4133-8824-031a1dc63945",
+          kind: "cma_provisioning",
+          operation_id: null,
+          agent_id: null,
+          idempotency_key: "cma-setup-preview-20261110-worker2",
+          status: null,
+          phase: null,
+          state: "delivered",
+          reason: "submission_uncertain",
+          monitor_name: "NyxBot",
+          created_at: "2026-11-10T10:00:00Z",
+          checked_at: null,
+        },
+      ];
+      sessionStorage.setItem("nyxagent-http-fixture-v4", JSON.stringify(state));
+    });
+    await page.reload();
+    const receipt = page.getByRole("region", {
+      name: "CMA submission: CMA setup",
+      exact: true,
+    });
+    await expect(receipt.getByRole("status")).toHaveText(
+      "Submission unconfirmed",
+    );
+    await expect(
+      receipt.getByRole("heading", { name: "CMA setup" }),
+    ).toBeVisible();
+    await expect(receipt.getByText("Delegated to CMA")).toHaveCount(0);
+    await expect(receipt.getByText("Recent actions")).toHaveCount(0);
+    await expect(receipt.getByRole("button", { name: /Pin CMA/ })).toHaveCount(
+      0,
+    );
+    await receipt.getByRole("button", { name: "Submission details" }).click();
+    await expect(
+      receipt.getByText("cma-setup-preview-20261110-worker2"),
+    ).toBeVisible();
+    await receipt.getByRole("button", { name: "Submission details" }).click();
+    await receipt
+      .getByRole("button", { name: "Minimise CMA submission" })
+      .click();
+    await expect(
+      receipt.getByRole("button", { name: "Submission details" }),
+    ).toHaveCount(0);
+    await expect(receipt.getByRole("status")).toHaveText(
+      "Submission unconfirmed",
+    );
+    await receipt
+      .getByRole("button", { name: "Maximise CMA submission" })
+      .click();
+    await expect(page.locator("article [data-cma-operation]")).toHaveCount(0);
+    const preview = page.getByRole("complementary", {
+      name: "Preview",
+      exact: true,
+    });
+    if (width === 1440) {
+      await expect(
+        preview.getByRole("region", { name: "CMA submission: CMA setup" }),
+      ).toBeVisible();
+      const bounds = (await preview.boundingBox())!;
+      const composer = (await composerInput(page).boundingBox())!;
+      expect(composer.x + composer.width).toBeLessThanOrEqual(bounds.x);
+    } else {
+      await expect(preview).toHaveCount(0);
+      await expect(receipt).toBeVisible();
+      await expect(composerInput(page)).toBeVisible();
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth,
+        ),
+      ).toBe(true);
+    }
+    await page.screenshot({
+      path: `/tmp/nyxid-cma-submission-assets-${width}.png`,
+    });
+    await page.reload();
+    await expect(receipt).toBeVisible();
+    const sourceUrl = page.url();
+    for (const path of ["/assistant?mock=1", "/keys?mock=1"]) {
+      await page.goto(path);
+      await expect(receipt).toHaveCount(0);
+    }
+    await page.goto(sourceUrl);
+    await expect(receipt).toBeVisible();
+    await expect(receipt.getByRole("button", { name: /Pin CMA/ })).toHaveCount(0);
+  });
+}
+
 test("automatically shows running CMA, streams while minimised, restores, and removes finished sessions", async ({
   page,
 }) => {
@@ -842,7 +949,7 @@ test("renders one pinned surface on shell, authenticated dashboard, standalone d
   await mockCma(page);
   await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
   await card(page).getByRole("button", { name: "Pin CMA session" }).click();
-  for (const path of [
+  const paths = [
     "/assistant/plugins",
     "/assistant/approvals",
     "/assistant/automations",
@@ -853,7 +960,8 @@ test("renders one pinned surface on shell, authenticated dashboard, standalone d
     "/assistant/machines/node-1/desktop",
     "/assistant/machines/node-1/desktop/",
     "/assistant/not-a-route",
-  ]) {
+  ];
+  for (const path of paths) {
     await page.goto(`${path}?mock=1`);
     await expect(sessions(page)).toHaveCount(1);
     await expect(
@@ -865,6 +973,18 @@ test("renders one pinned surface on shell, authenticated dashboard, standalone d
   await card(page).getByRole("link", { name: "Open source chat" }).click();
   await expect(composerInput(page)).toBeVisible();
   await expect(sessions(page)).toHaveCount(1);
+  const sourceUrl = page.url();
+  await card(page).getByRole("button", { name: "Unpin CMA session (Pinned)" }).click();
+  await expect(card(page).getByRole("button", { name: "Pin CMA session", exact: true })).toHaveAttribute("aria-pressed", "false");
+  for (const path of paths) {
+    await page.goto(`${path}?mock=1`);
+    await expect(sessions(page)).toHaveCount(0);
+  }
+  await page.reload();
+  await expect(sessions(page)).toHaveCount(0);
+  await page.goto(sourceUrl);
+  await expect(sessions(page)).toHaveCount(1);
+  await expect(card(page).getByRole("button", { name: "Pin CMA session", exact: true })).toHaveAttribute("aria-pressed", "false");
 });
 test("uses only supplied valid callbacks and clears missing, null, query, fragment and malformed links", async ({
   page,

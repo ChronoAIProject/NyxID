@@ -26,6 +26,8 @@ import {
   TooltipContent,
 } from "@/components/ui/tooltip";
 import { CmaGlyph } from "@/components/service-icons/cma";
+import { CmaOperationCard, CmaOperationProgress } from "./cma-operation-card";
+import type { CmaOperation } from "@/schemas/cma-operation";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { safeCmaUrl } from "@/lib/assistant/cma-url";
 import {
@@ -60,22 +62,36 @@ export function CmaSessionCards() {
 
 export function CmaSessionObserver({
   children,
+  operations = [],
 }: {
   readonly children: (cards: ReactNode) => ReactNode;
+  readonly operations?: readonly CmaOperation[];
 }) {
   const ownerId = useAuthStore((state) => state.user?.id);
   const sessions = useObservedCmaSessions();
+  const matchingSession = (operation: CmaOperation, session: CmaSessionReference) =>
+    operation.service_id === session.connection.id &&
+    operation.agent_id === session.agentId &&
+    (!operation.reason || operation.reason === "completed");
+  const receipts = operations.filter(
+    (operation) =>
+      !sessions.some(({ session }) => matchingSession(operation, session)),
+  );
   return children(
-    ownerId && sessions.length ? (
+    ownerId && (sessions.length || receipts.length) ? (
       <aside
         aria-label="CMA sessions"
         className="flex min-h-0 shrink-0 flex-col gap-3"
       >
+        {receipts.map((operation) => (
+          <CmaOperationCard key={operation.id} operation={operation} />
+        ))}
         {sessions.map((observation) => (
           <CmaSessionCard
             key={`${observation.session.connection.id}:${observation.session.agentId}`}
             ownerId={ownerId}
             observation={observation}
+            operations={operations.filter((operation) => matchingSession(operation, observation.session))}
           />
         ))}
       </aside>
@@ -159,7 +175,9 @@ export function CmaSessionIndicator({
 function CmaSessionCard({
   ownerId,
   observation,
+  operations,
 }: {
+  readonly operations: readonly CmaOperation[];
   readonly ownerId: string;
   readonly observation: ObservedCmaSession;
 }) {
@@ -327,6 +345,9 @@ function CmaSessionCard({
         ) : null}
         <div id={detailsId} hidden={collapsed} className="space-y-2">
           <SessionActivity state={state} />
+          {operations.map((operation) => (
+            <CmaOperationProgress key={operation.id} operation={operation} showStatus={false} />
+          ))}
           <SessionDetails
             session={session}
             state={state}

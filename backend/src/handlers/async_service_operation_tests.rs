@@ -2486,6 +2486,10 @@ async fn cma_submission_tracks_status_after_turn_settlement_and_projects_only_me
     assert!(running.cma.as_ref().unwrap().checked_at.is_some());
     // A real agent ID and catalog homepage are insufficient without a callback.
     assert!(a.history().await["cma_operations"][0]["cma_url"].is_null());
+    assert_eq!(
+        a.history().await["cma_operations"][0]["service_id"],
+        a.service
+    );
     let callback = "https://staging-cma.example:8443/agents/agt_coffee";
     *a.callback.lock().unwrap() = json!(callback);
     *a.phase.lock().unwrap() = "succeeded".into();
