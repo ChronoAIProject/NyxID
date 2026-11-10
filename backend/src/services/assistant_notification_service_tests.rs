@@ -2638,6 +2638,106 @@ async fn a_cached_feature_snapshot_makes_admission_read_free_and_authoritative()
     assert!(reads.load(Ordering::SeqCst) > 0);
 }
 
+#[tokio::test]
+async fn a_mixed_page_reads_each_referenced_collection_once() {
+    let finds = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = finds.clone();
+    let handler = EventHandler::callback(move |event| {
+        if let CommandEvent::Started(event) = event
+            && let Ok(collection) = event.command.get_str("find")
+        {
+            seen.lock().unwrap().push(collection.to_owned());
+        }
+    });
+    let db = connect_transaction_test_database_with_command_handler("notif_message_batch", handler)
+        .await;
+    let f = fixture_with(db).await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    // An agent reply in a private thread, previewed by message id.
+    let thread = seed_conversation(&f, &f.owner, "Notes").await;
+    let reply = Uuid::new_v4().to_string();
+    db.collection::<Document>(MESSAGES)
+        .insert_one(
+            doc! {"_id": &reply, "conversation_id": &thread, "user_id": &f.owner,
+            "role": "assistant", "text": "Summarised.", "status": "completed", "turn_id": "t-1"},
+        )
+        .await
+        .unwrap();
+    let mut update = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&thread),
+    );
+    update.source.message_id = Some(reply.clone());
+    insert_row(&f, &update).await;
+    // An automation result, previewed by its run's conversation and turn.
+    let trigger = Uuid::new_v4().to_string();
+    db.collection::<Document>(TRIGGER_ROWS)
+        .insert_one(
+            doc! {"_id": &trigger, "user_id": &f.owner, "label": "Nightly", "status": "active"},
+        )
+        .await
+        .unwrap();
+    let run_thread = seed_conversation(&f, &f.owner, "Nightly").await;
+    let run = Uuid::new_v4().to_string();
+    db.collection::<Document>(RUNS)
+        .insert_one(
+            doc! {"_id": &run, "user_id": &f.owner, "trigger_id": &trigger,
+            "label": "Nightly", "outcome": "completed", "thread_id": &run_thread, "turn_id": "t-9"},
+        )
+        .await
+        .unwrap();
+    db.collection::<Document>(MESSAGES)
+        .insert_one(
+            doc! {"_id": Uuid::new_v4().to_string(), "conversation_id": &run_thread,
+            "user_id": &f.owner, "role": "assistant", "text": "Report sent.",
+            "status": "completed", "turn_id": "t-9"},
+        )
+        .await
+        .unwrap();
+    insert_row(
+        &f,
+        &seeded(
+            &f.owner,
+            NotificationKind::AutomationResult,
+            NotificationSource {
+                source_type: SourceType::Trigger,
+                id: trigger.clone(),
+                trigger_id: Some(trigger.clone()),
+                run_id: Some(run.clone()),
+                conversation_id: Some(run_thread.clone()),
+                turn_id: Some("t-9".into()),
+                ..Default::default()
+            },
+        ),
+    )
+    .await;
+    finds.lock().unwrap().clear();
+    let listed = list(&f.state, &f.owner, &page(10)).await.unwrap();
+    assert_eq!(listed.items.len(), 2);
+    let previews: Vec<&str> = listed
+        .items
+        .iter()
+        .map(|item| item.preview.as_str())
+        .collect();
+    assert!(previews.contains(&"Summarised."));
+    assert!(previews.contains(&"Report sent."));
+    let finds = finds.lock().unwrap();
+    assert_eq!(
+        finds
+            .iter()
+            .filter(|collection| collection.as_str() == MESSAGES)
+            .count(),
+        1
+    );
+    // The page itself plus one lookup per referenced collection, never two.
+    let mut distinct = finds.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), finds.len());
+}
+
 // ---------------------------------------------------------------------------
 // Push claim authority: due time, limits, and stale snapshots
 // ---------------------------------------------------------------------------

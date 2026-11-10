@@ -1670,44 +1670,55 @@ async fn load_lookups(
             .await?,
         )
     };
-    let messages = if message_ids.is_empty() {
-        HashMap::new()
+    // One read of `assistant_messages` serves both previews by message id
+    // and automation replies by conversation and turn (<= 1 query per
+    // referenced collection).
+    let (messages, replies) = if message_ids.is_empty() && reply_pairs.is_empty() {
+        (HashMap::new(), HashMap::new())
     } else {
-        by_id(
-            load_documents(
-                db,
-                MESSAGES,
-                doc! {"_id": {"$in": ids(&message_ids)}},
-                doc! {"_id": 1, "text": 1, "status": 1, "error_code": 1, "conversation_id": 1},
-            )
-            .await?,
-        )
-    };
-    let replies = if reply_pairs.is_empty() {
-        HashMap::new()
-    } else {
-        let pairs: Vec<Document> = reply_pairs
+        let mut clauses: Vec<Document> = Vec::new();
+        if !message_ids.is_empty() {
+            clauses.push(doc! {"_id": {"$in": ids(&message_ids)}});
+        }
+        if !reply_pairs.is_empty() {
+            let pairs: Vec<Document> = reply_pairs
+                .iter()
+                .map(|(thread, turn)| doc! {"conversation_id": thread, "turn_id": turn})
+                .collect();
+            clauses.push(doc! {"user_id": user_id, "role": "assistant", "$or": pairs});
+        }
+        let wanted_pairs: HashSet<String> = reply_pairs
             .iter()
-            .map(|(thread, turn)| doc! {"conversation_id": thread, "turn_id": turn})
+            .map(|(thread, turn)| format!("{thread}|{turn}"))
             .collect();
-        load_documents(
+        let mut messages = HashMap::new();
+        let mut replies = HashMap::new();
+        for row in load_documents(
             db,
             MESSAGES,
-            doc! {"user_id": user_id, "role": "assistant", "$or": pairs},
+            doc! {"$or": clauses},
             doc! {"_id": 1, "text": 1, "status": 1, "error_code": 1, "conversation_id": 1,
-            "turn_id": 1},
+            "turn_id": 1, "role": 1, "user_id": 1},
         )
         .await?
-        .into_iter()
-        .filter_map(|row| {
-            let key = format!(
-                "{}|{}",
-                row.get_str("conversation_id").ok()?,
-                row.get_str("turn_id").ok()?
-            );
-            Some((key, row))
-        })
-        .collect()
+        {
+            if let Ok(id) = row.get_str("_id")
+                && message_ids.contains(id)
+            {
+                messages.insert(id.to_owned(), row.clone());
+            }
+            if row.get_str("role").ok() == Some("assistant")
+                && row.get_str("user_id").ok() == Some(user_id)
+                && let (Ok(thread), Ok(turn)) =
+                    (row.get_str("conversation_id"), row.get_str("turn_id"))
+            {
+                let key = format!("{thread}|{turn}");
+                if wanted_pairs.contains(&key) {
+                    replies.insert(key, row);
+                }
+            }
+        }
+        (messages, replies)
     };
     let group_messages = if group_message_ids.is_empty() {
         HashMap::new()
