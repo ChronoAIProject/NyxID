@@ -3415,6 +3415,151 @@ async fn a_row_that_coalesces_after_preparation_gives_its_claim_back_and_sends_t
     assert_eq!(sent.lock().unwrap().len(), 2);
 }
 
+#[tokio::test]
+async fn a_continually_coalescing_row_is_pushed_with_its_prepared_preview_once_past_the_grace() {
+    let finds = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = finds.clone();
+    let handler = EventHandler::callback(move |event| {
+        if let CommandEvent::Started(event) = event
+            && let Ok(collection) = event.command.get_str("find")
+        {
+            seen.lock().unwrap().push(collection.to_owned());
+        }
+    });
+    let db =
+        connect_transaction_test_database_with_command_handler("notif_push_starvation", handler)
+            .await;
+    let f = fixture_with(db).await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    push_prefs(&f, &f.owner, all_push()).await;
+    let busy_thread = seed_conversation(&f, &f.owner, "Busy").await;
+    let trigger_thread = seed_conversation(&f, &f.owner, "Trigger").await;
+    let texts = [
+        ("older", "Older text"),
+        ("newer", "Newer text"),
+        ("newest", "Newest text"),
+    ];
+    let mut message_ids = HashMap::new();
+    for (key, text) in texts {
+        let id = Uuid::new_v4().to_string();
+        db.collection::<Document>(MESSAGES)
+            .insert_one(
+                doc! {"_id": &id, "conversation_id": &busy_thread, "user_id": &f.owner,
+                "role": "assistant", "text": text, "status": "completed", "turn_id": key},
+            )
+            .await
+            .unwrap();
+        message_ids.insert(key, id);
+    }
+    // The busy row keeps coalescing; the trigger row's send is where the
+    // coalesce lands (after preparation, before the busy row's claim).
+    let mut busy = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&busy_thread),
+    );
+    busy.source.message_id = Some(message_ids["older"].clone());
+    let mut trigger = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&trigger_thread),
+    );
+    trigger.created_at = busy.created_at - Duration::seconds(1);
+    trigger.updated_at = trigger.created_at;
+    insert_row(&f, &busy).await;
+    insert_row(&f, &trigger).await;
+    let coalesce = |db: Database, busy_id: String, message_id: String| async move {
+        db.collection::<Document>(COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": &busy_id},
+                doc! {"$set": {"source.message_id": &message_id,
+                "updated_at": bson_date(Utc::now())}, "$inc": {"count": 1_i64}},
+            )
+            .await
+            .unwrap();
+    };
+    let sent: Sent = Default::default();
+    let sweep_with_coalesce = |message_key: &'static str| {
+        let (sender_db, sent_in, busy_id, message_id, fired) = (
+            db.clone(),
+            sent.clone(),
+            busy.id.clone(),
+            message_ids[message_key].clone(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        sweep_with(&f.state, move |user, title, body, data| {
+            let db = sender_db.clone();
+            let sent = sent_in.clone();
+            let (busy_id, message_id, fired) = (busy_id.clone(), message_id.clone(), fired.clone());
+            async move {
+                if !fired.swap(true, Ordering::SeqCst) {
+                    coalesce(db, busy_id, message_id).await;
+                }
+                sent.lock().unwrap().push((user, title, body, data));
+                Ok(automation::Outcome::Accepted)
+            }
+        })
+    };
+    // Young row: the stale claim is given back.
+    sweep_with_coalesce("newer").await.unwrap();
+    assert_eq!(sent.lock().unwrap().len(), 1);
+    let push = push_of(&f, &busy.id).await;
+    assert_eq!((push.state.as_str(), push.attempts), ("pending", 0));
+    assert_eq!(reservations(&f, &f.owner).await, (1, 1));
+    // The row keeps coalescing sweep after sweep. Once it is older than the
+    // grace, the prepared preview goes out in the same sweep: no requeue, no
+    // extra lookup on any referenced collection.
+    db.collection::<Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &busy.id},
+            doc! {"$set": {"created_at": bson_date(
+                Utc::now() - Duration::minutes(PUSH_REQUEUE_GRACE_MINUTES + 1)
+            )}},
+        )
+        .await
+        .unwrap();
+    let mut trigger2 = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&seed_conversation(&f, &f.owner, "Trigger two").await),
+    );
+    trigger2.created_at = Utc::now() - Duration::minutes(PUSH_REQUEUE_GRACE_MINUTES + 2);
+    trigger2.updated_at = trigger2.created_at;
+    insert_row(&f, &trigger2).await;
+    finds.lock().unwrap().clear();
+    sweep_with_coalesce("newest").await.unwrap();
+    {
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 3);
+        assert_eq!(
+            sent[2].3.get("notification_id").map(String::as_str),
+            Some(busy.id.as_str())
+        );
+        // The prepared snapshot, not the body that landed during the sweep.
+        assert_eq!(sent[2].2, "Newer text");
+    }
+    let push = push_of(&f, &busy.id).await;
+    assert_eq!((push.state.as_str(), push.attempts), ("sent", 1));
+    assert_eq!(reservations(&f, &f.owner).await, (3, 3));
+    {
+        let finds = finds.lock().unwrap();
+        for collection in [MESSAGES, CONVERSATIONS, AGENTS] {
+            assert!(
+                finds
+                    .iter()
+                    .filter(|name| name.as_str() == collection)
+                    .count()
+                    <= 1,
+                "{collection} read more than once"
+            );
+        }
+    }
+    // Nothing is due any more; the newest body arrives with the next activity.
+    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
+    assert_eq!(sent.lock().unwrap().len(), 3);
+}
+
 // ---------------------------------------------------------------------------
 // Owner home thread heard through several bots
 // ---------------------------------------------------------------------------

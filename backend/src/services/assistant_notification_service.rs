@@ -100,6 +100,11 @@ const PUSH_SENDING_STALE_MINUTES: i64 = 10;
 /// most this many attempts, within this window after the first attempt.
 pub const PUSH_MAX_ATTEMPTS: u32 = 3;
 pub const PUSH_RETRY_MIN_SECONDS: i64 = 60;
+/// A row that coalesced between batched preparation and its claim gives the
+/// claim back while it is younger than this, so the next sweep pushes the
+/// newer preview; older rows are pushed with the prepared preview so a
+/// continually coalescing source cannot starve its push.
+pub const PUSH_REQUEUE_GRACE_MINUTES: i64 = 2;
 pub const PUSH_RETRY_WINDOW_MINUTES: i64 = 30;
 const PUSH_BATCH: i64 = 64;
 const PUSH_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -3241,6 +3246,13 @@ fn push_kind(row: &AssistantNotification) -> NotificationKind {
         .unwrap_or(row.kind)
 }
 
+/// Keep the first failure of a batch for the caller; the sweep goes on.
+fn note(first_error: &mut Option<AppError>, result: AppResult<()>) {
+    if let Err(error) = result {
+        first_error.get_or_insert(error);
+    }
+}
+
 /// The sweep with an injectable sender: `Err(code)` is a definite
 /// availability failure before any send.
 ///
@@ -3291,21 +3303,30 @@ where
     for row in pending {
         // Snapshot checks that need no claim; the claim re-reads the row
         // and enforces seen/limit/cap gates authoritatively.
+        // A failed cheap skip leaves the row due; it is recorded, not fatal.
         if row.resolved_at.is_some() || !row.unread {
-            push_skip(db, &row.id, "already_seen").await?;
+            note(
+                &mut first_error,
+                push_skip(db, &row.id, "already_seen").await,
+            );
             continue;
         }
         let user = row.user_id.clone();
         let enabled = match flags.get(&user) {
             Some(value) => *value,
-            None => {
-                let value = self::enabled(db, &user).await?;
-                flags.insert(user.clone(), value);
-                value
-            }
+            None => match self::enabled(db, &user).await {
+                Ok(value) => {
+                    flags.insert(user.clone(), value);
+                    value
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            },
         };
         if !enabled {
-            push_skip(db, &row.id, "flag_off").await?;
+            note(&mut first_error, push_skip(db, &row.id, "flag_off").await);
             continue;
         }
         let preference = match preferences.get(&user) {
@@ -3328,7 +3349,10 @@ where
             },
         };
         if !push_preferred(&preference, push_kind(&row)) {
-            push_skip(db, &row.id, "preference_off").await?;
+            note(
+                &mut first_error,
+                push_skip(db, &row.id, "preference_off").await,
+            );
             continue;
         }
         match due.iter().position(|(owner, _)| *owner == user) {
@@ -3390,9 +3414,20 @@ where
             Claim::Claimed(claimed) => *claimed,
             Claim::Skipped | Claim::NotClaimed => continue,
         };
-        if claimed.row.updated_at != row.updated_at || claimed.row.count != row.count {
-            // Coalesced since preparation: the prepared preview is stale.
-            // Give the claim back; the next sweep prepares the newer refs.
+        if claimed.row.source_key != row.source_key || claimed.row.user_id != row.user_id {
+            // Impossible under coalescing (identity is fixed at insert), so
+            // the prepared payload is not this row's: give the claim back.
+            requeue_claimed(db, &claimed).await?;
+            continue;
+        }
+        if (claimed.row.updated_at != row.updated_at || claimed.row.count != row.count)
+            && Utc::now() - row.created_at < Duration::minutes(PUSH_REQUEUE_GRACE_MINUTES)
+        {
+            // Coalesced since preparation while young: give the claim back so
+            // the next sweep pushes the newer preview. Past the grace the
+            // prepared preview is sent: a push is a snapshot of the activity
+            // at preparation (ACL-checked then), not a promise of the very
+            // latest body, and a busy source must not starve its own push.
             requeue_claimed(db, &claimed).await?;
             continue;
         }
