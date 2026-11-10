@@ -2335,6 +2335,7 @@ async fn push_barrier_sends_once_honors_preferences_and_never_resends_ambiguous_
     );
     row.push = Some(PushState {
         state: "sending".into(),
+        kind: Some(NotificationKind::AgentUpdate),
         attempt: Some("old".into()),
         code: None,
         attempts: 1,
@@ -2590,7 +2591,7 @@ fn previews_are_single_line_bounded_and_markdown_free() {
     assert_eq!(preview_text("a\u{202e}b\tc"), "ab c");
     assert_eq!(parse_kinds("agent_update, chat_update").unwrap().len(), 2);
     assert!(parse_kinds("nope").is_err());
-    assert_eq!(reason_copy("grace_expired").starts_with("Skipped"), true);
+    assert!(reason_copy("grace_expired").starts_with("Skipped"));
 }
 
 #[tokio::test]
