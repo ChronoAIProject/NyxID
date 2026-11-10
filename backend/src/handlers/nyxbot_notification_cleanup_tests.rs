@@ -2,6 +2,148 @@ use super::*;
 use crate::test_utils::{assert_notification_probe, seed_notification_purge_probe};
 
 #[tokio::test]
+async fn provider_binding_detach_preserves_pending_decision_until_owner_decides() {
+    use crate::services::{
+        assistant_acknowledgement_service as acks, feature_flag_service as flags,
+    };
+    let (state, _, server) = Box::pin(setup("notification_binding_card")).await;
+    let _server = tokio_util::task::AbortOnDropHandle::new(server);
+    crate::services::assistant_notification_service::ensure_indexes(&state.db)
+        .await
+        .unwrap();
+    flags::set_platform_override(
+        &state.db,
+        flags::ASSISTANT_NOTIFICATIONS_FLAG_KEY,
+        &flags::FlagTarget::User(OWNER.into()),
+        true,
+        OWNER,
+    )
+    .await
+    .unwrap();
+    let (row, key) = Box::pin(channel(&state, "gateway")).await;
+    assert_eq!(
+        put_binding(
+            State(state.clone()),
+            Path("bnd_confirm".into()),
+            bearer(&key),
+            Json(binding_body(&key, OWNER)),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        put_conversation(
+            State(state.clone()),
+            Path(("bnd_confirm".into(), PARTITION.into())),
+            bearer(&key),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"owner_sender_ids":["7"]}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        Box::pin(respond(
+            &state,
+            &key,
+            &event("Delete an old key", "7", "binding-card"),
+            "binding-card",
+        ))
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let conversation = state
+        .db
+        .collection::<AssistantConversation>(CONVERSATIONS)
+        .find_one(doc! {"user_id":OWNER,"reply_channel.nyxbot_channel_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let chat = acks::for_key(&state.db, OWNER, Some(&conversation.credential_api_key_id))
+        .await
+        .unwrap()
+        .unwrap();
+    let (card, created) = Box::pin(acks::request_tracked(
+        &state.db,
+        &chat,
+        acks::Request {
+            kind: "action",
+            service: None,
+            tool: Some("nyxid__delete_agent_key"),
+            arguments: Some(&json!({"key_id":"old-key"})),
+            summary: "Delete an old agent key",
+            platform: false,
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(created);
+    assert_eq!(card.status, "pending");
+    let notifications = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME);
+    let filter = doc! {"user_id":OWNER,"source.card_id":&card.id};
+    let pending = notifications
+        .find_one(filter.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.get_str("kind").unwrap(), "needs_decision");
+    assert_eq!(
+        pending
+            .get_document("source")
+            .unwrap()
+            .get_str("channel_id")
+            .unwrap(),
+        row.id
+    );
+    assert!(matches!(pending.get("resolved_at"), Some(bson::Bson::Null)));
+    assert_eq!(
+        delete_binding(
+            State(state.clone()),
+            Path("bnd_confirm".into()),
+            bearer(&key),
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    let retained = notifications
+        .find_one(filter.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.get("_id"), pending.get("_id"));
+    assert!(matches!(
+        retained.get("resolved_at"),
+        Some(bson::Bson::Null)
+    ));
+    // The owner can decide from the retained NyxID history while CMA rebinds.
+    Box::pin(acks::decide(
+        &state.db,
+        OWNER,
+        &conversation.id,
+        &card.id,
+        false,
+    ))
+    .await
+    .unwrap();
+    let resolved = notifications.find_one(filter).await.unwrap().unwrap();
+    assert!(resolved.get_datetime("resolved_at").is_ok());
+    assert!(!resolved.get_bool("unread").unwrap());
+}
+
+#[tokio::test]
 async fn provider_thread_delete_purges_exact_chat_and_lanes_but_retains_history() {
     for native in [false, true] {
         let (state, _, server) = Box::pin(setup("notification_provider_thread_purge")).await;
