@@ -2,7 +2,7 @@ import { render, screen } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { CmaDesktopPanel } from "./cma-desktop-panel";
 const mocks = vi.hoisted(() => ({ desktop: vi.fn() }));
-vi.mock("@/hooks/use-nyxbot-cma-agents", () => ({
+vi.mock("@/hooks/use-assistant-cma-agents", () => ({
   useCmaDesktop: mocks.desktop,
 }));
 beforeEach(() => vi.clearAllMocks());

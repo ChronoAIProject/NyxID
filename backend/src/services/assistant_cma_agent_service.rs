@@ -9,19 +9,17 @@ use mongodb::{
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::nyxbot_cma_gateway::{
+use super::assistant_cma_gateway::{
     CmaAgent, CmaDesktopDescriptor, CmaGateway, CmaGatewayError, validate_remote_id,
 };
-use super::nyxbot_cma_sandbox_service::NYXID_CREATED_SOURCE;
+use super::assistant_cma_sandbox_service::NYXID_CREATED_SOURCE;
 use crate::{
     errors::{AppError, AppResult},
     models::{
-        nyxbot_cma_agent::{AgentObservationState, COLLECTION_NAME, NyxbotCmaAgent},
-        nyxbot_cma_sandbox::{NyxbotCmaSandbox, SandboxAdmissionState},
+        assistant_cma_agent::{AgentObservationState, AssistantCmaAgent, COLLECTION_NAME},
+        assistant_cma_sandbox::{AssistantCmaSandbox, SandboxAdmissionState},
     },
 };
-
-pub const AGENT_REFERENCE_INDEX: &str = "cma_agent_owner_service_remote";
 
 pub fn indexes() -> Vec<IndexModel> {
     vec![
@@ -29,7 +27,6 @@ pub fn indexes() -> Vec<IndexModel> {
             .keys(doc! {"user_id":1,"cma_service_id":1,"cma_agent_id":1})
             .options(
                 IndexOptions::builder()
-                    .name(AGENT_REFERENCE_INDEX.to_owned())
                     .unique(true)
                     .partial_filter_expression(doc! {"cma_agent_id":{"$type":"string"}})
                     .build(),
@@ -101,7 +98,11 @@ pub struct AgentDto {
     pub profile: Option<serde_json::Value>,
 }
 
-fn dto(row: &NyxbotCmaAgent, parent: Option<&NyxbotCmaSandbox>, reason: Option<&str>) -> AgentDto {
+fn dto(
+    row: &AssistantCmaAgent,
+    parent: Option<&AssistantCmaSandbox>,
+    reason: Option<&str>,
+) -> AgentDto {
     AgentDto {
         id: row.id.clone(),
         cma_agent_id: row.cma_agent_id.clone(),
@@ -177,18 +178,21 @@ fn unavailable_parent(error: &AppError) -> Option<&'static str> {
     }
 }
 
-pub async fn get_owned(db: &Database, owner: &str, id: &str) -> AppResult<NyxbotCmaAgent> {
-    db.collection::<NyxbotCmaAgent>(COLLECTION_NAME)
+pub async fn get_owned(db: &Database, owner: &str, id: &str) -> AppResult<AssistantCmaAgent> {
+    db.collection::<AssistantCmaAgent>(COLLECTION_NAME)
         .find_one(doc! {"_id":id,"user_id":owner})
         .await?
         .ok_or_else(|| AppError::NotFound("CMA Agent not found".into()))
 }
 
-async fn parent_ref(db: &Database, row: &NyxbotCmaAgent) -> AppResult<Option<NyxbotCmaSandbox>> {
+async fn parent_ref(
+    db: &Database,
+    row: &AssistantCmaAgent,
+) -> AppResult<Option<AssistantCmaSandbox>> {
     let Some(remote) = &row.cma_sandbox_id else {
         return Err(AppError::NotFound("CMA Agent parent not found".into()));
     };
-    let parent = db.collection::<NyxbotCmaSandbox>(crate::models::nyxbot_cma_sandbox::COLLECTION_NAME)
+    let parent = db.collection::<AssistantCmaSandbox>(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
         .find_one(doc! {"user_id":&row.user_id,"cma_service_id":&row.cma_service_id,"cma_sandbox_id":remote,"source":NYXID_CREATED_SOURCE}).await?
         .ok_or_else(|| AppError::NotFound("CMA Agent parent not found".into()))?;
     if row.sandbox_generation != Some(parent.generation) {
@@ -197,7 +201,7 @@ async fn parent_ref(db: &Database, row: &NyxbotCmaAgent) -> AppResult<Option<Nyx
     Ok(Some(parent))
 }
 
-fn verify_observation(row: &NyxbotCmaAgent, remote: &CmaAgent) -> AppResult<()> {
+fn verify_observation(row: &AssistantCmaAgent, remote: &CmaAgent) -> AppResult<()> {
     if remote.id != row.cma_agent_id
         || remote
             .owner_id
@@ -224,7 +228,7 @@ pub async fn require_bound(
     gateway: &dyn CmaGateway,
     owner: &str,
     id: &str,
-) -> AppResult<(NyxbotCmaAgent, Option<NyxbotCmaSandbox>)> {
+) -> AppResult<(AssistantCmaAgent, Option<AssistantCmaSandbox>)> {
     let row = get_owned(db, owner, id).await?;
     let (service_id, parent) = tokio::try_join!(
         async { gateway.service_id(owner).await.map_err(AppError::from) },
@@ -255,7 +259,7 @@ async fn verify_parent_id(gateway: &dyn CmaGateway, owner: &str, parent_id: &str
 async fn read_verified_agent(
     gateway: &dyn CmaGateway,
     owner: &str,
-    row: &NyxbotCmaAgent,
+    row: &AssistantCmaAgent,
 ) -> AppResult<CmaAgent> {
     // The persisted parent is immutable and already bound to this owner and
     // generation. Its live read need not wait for another Agent GET.
@@ -300,7 +304,7 @@ pub async fn register_live(
     owner: &str,
     remote_id: &str,
     source: Option<&AgentSource>,
-) -> AppResult<NyxbotCmaAgent> {
+) -> AppResult<AssistantCmaAgent> {
     validate_remote_id(remote_id)?;
     let service_id = gateway.service_id(owner).await?;
     let remote = gateway.get_agent(owner, remote_id).await?;
@@ -319,7 +323,7 @@ pub async fn register_live(
         .ok_or_else(|| AppError::Conflict("cma_agent_parent_unavailable".into()))?;
     let db = super::transaction_service::durable_database(db);
     ensure_indexes(&db).await?;
-    db.collection::<NyxbotCmaSandbox>(crate::models::nyxbot_cma_sandbox::COLLECTION_NAME)
+    db.collection::<AssistantCmaSandbox>(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
         .find_one(doc! {"user_id":owner,"cma_service_id":&service_id,"cma_sandbox_id":parent_id,"source":NYXID_CREATED_SOURCE})
         .await?
         .ok_or_else(|| AppError::NotFound("Sandbox was not created through NyxID".into()))?;
@@ -360,12 +364,12 @@ pub async fn register_live(
             let parent_id=remote.sandbox_id.as_deref().ok_or_else(||AppError::Conflict("cma_agent_parent_unavailable".into()))?;
             // A real parent write serializes this insert with receipt folding,
             // so a late registration cannot recreate a discarded generation.
-            let parent=db.collection::<NyxbotCmaSandbox>(crate::models::nyxbot_cma_sandbox::COLLECTION_NAME)
+            let parent=db.collection::<AssistantCmaSandbox>(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
                 .find_one_and_update(doc! {"user_id":owner,"cma_service_id":service,"cma_sandbox_id":parent_id,"source":NYXID_CREATED_SOURCE},doc! {"$inc":{"agent_reference_version":1}})
                 .return_document(ReturnDocument::After).session(&mut *tx).await?
                 .ok_or_else(||AppError::Conflict("cma_agent_parent_unavailable".into()))?;
             let identity=doc! {"user_id":owner,"cma_service_id":service,"cma_agent_id":&remote.id};
-            if let Some(existing)=db.collection::<NyxbotCmaAgent>(COLLECTION_NAME).find_one(identity.clone()).session(&mut *tx).await? {
+            if let Some(existing)=db.collection::<AssistantCmaAgent>(COLLECTION_NAME).find_one(identity.clone()).session(&mut *tx).await? {
                 verify_observation(&existing,remote)?;
                 if existing.sandbox_generation!=Some(parent.generation) {return Err(AppError::Conflict("cma_sandbox_generation_changed".into()));}
             }
@@ -374,7 +378,7 @@ pub async fn register_live(
                 "cma_agent_id":&remote.id,"cma_sandbox_id":parent_id,"sandbox_generation":parent.generation,
                 "cma_workspace_id":&remote.workspace_id,"cma_worktree_id":&remote.worktree_id,
                 "created_at":bson::DateTime::from_chrono(*now)};
-            db.collection::<NyxbotCmaAgent>(COLLECTION_NAME).find_one_and_update(filter,doc! {"$set":set,"$setOnInsert":insert})
+            db.collection::<AssistantCmaAgent>(COLLECTION_NAME).find_one_and_update(filter,doc! {"$set":set,"$setOnInsert":insert})
                 .upsert(true).return_document(ReturnDocument::After).session(tx).await?
                 .ok_or_else(||AppError::Conflict("cma_agent_registration_changed".into()))
         })
@@ -412,7 +416,7 @@ pub async fn detail(
             None => Err(error),
         };
     }
-    let updated = db.collection::<NyxbotCmaAgent>(COLLECTION_NAME).find_one_and_update(
+    let updated = db.collection::<AssistantCmaAgent>(COLLECTION_NAME).find_one_and_update(
         doc! {"_id":&row.id,"user_id":owner,"cma_agent_id":&row.cma_agent_id,"cma_service_id":&row.cma_service_id,"sandbox_generation":row.sandbox_generation},
         doc! {"$set":observation_fields(&remote,Utc::now())}).return_document(ReturnDocument::After).await?
         .ok_or_else(||AppError::NotFound("CMA Agent not found".into()))?;
@@ -421,7 +425,7 @@ pub async fn detail(
 
 pub fn desktop_reason(
     remote: &CmaAgent,
-    parent: Option<&NyxbotCmaSandbox>,
+    parent: Option<&AssistantCmaSandbox>,
 ) -> Option<&'static str> {
     if remote.desktop != Some(true) {
         return Some("desktop_not_enabled");
@@ -503,7 +507,7 @@ fn unavailable_desktop(reason: &str) -> CmaDesktopDescriptor {
     }
 }
 
-fn verify_reference(current: &NyxbotCmaAgent, original: &NyxbotCmaAgent) -> AppResult<()> {
+fn verify_reference(current: &AssistantCmaAgent, original: &AssistantCmaAgent) -> AppResult<()> {
     if current.id != original.id
         || current.user_id != original.user_id
         || current.cma_agent_id != original.cma_agent_id
@@ -522,8 +526,8 @@ async fn revalidate_reference(
     db: &Database,
     gateway: &dyn CmaGateway,
     owner: &str,
-    original: &NyxbotCmaAgent,
-) -> AppResult<(NyxbotCmaAgent, Option<NyxbotCmaSandbox>)> {
+    original: &AssistantCmaAgent,
+) -> AppResult<(AssistantCmaAgent, Option<AssistantCmaSandbox>)> {
     let ((), (current, parent)) = tokio::try_join!(
         require_enabled(db, owner),
         require_bound(db, gateway, owner, &original.id),
@@ -537,7 +541,7 @@ pub async fn revalidate(
     db: &Database,
     gateway: &dyn CmaGateway,
     owner: &str,
-    original: &NyxbotCmaAgent,
+    original: &AssistantCmaAgent,
 ) -> AppResult<()> {
     let (current, _) = revalidate_reference(db, gateway, owner, original).await?;
     read_verified_agent(gateway, owner, &current).await?;
@@ -547,8 +551,8 @@ pub async fn revalidate(
 async fn stream_observation(
     gateway: &dyn CmaGateway,
     owner: &str,
-    row: &NyxbotCmaAgent,
-    parent: Option<&NyxbotCmaSandbox>,
+    row: &AssistantCmaAgent,
+    parent: Option<&AssistantCmaSandbox>,
     response: Option<&str>,
     desktop: bool,
 ) -> AppResult<()> {
@@ -590,7 +594,7 @@ pub async fn revalidate_stream(
     db: &Database,
     gateway: &dyn CmaGateway,
     owner: &str,
-    original: &NyxbotCmaAgent,
+    original: &AssistantCmaAgent,
     response: Option<&str>,
     desktop: bool,
 ) -> AppResult<()> {
@@ -651,7 +655,7 @@ mod tests {
 
     fn apply_callback_observation(
         callback: Option<serde_json::Value>,
-    ) -> (NyxbotCmaAgent, Document) {
+    ) -> (AssistantCmaAgent, Document) {
         let now = Utc::now();
         let mut stored = doc! {
             "_id":"internal-agent","user_id":"owner","cma_service_id":"catalog-service",
@@ -661,7 +665,7 @@ mod tests {
             "last_observed_revision":6,"source_conversation_id":"private-chat",
             "callback_url":"https://old.example/agents/agent"
         };
-        let previous: NyxbotCmaAgent = bson::from_document(stored.clone()).unwrap();
+        let previous: AssistantCmaAgent = bson::from_document(stored.clone()).unwrap();
         let mut payload = serde_json::to_value(remote()).unwrap();
         payload.as_object_mut().unwrap().remove("callback_url");
         if let Some(callback) = callback {
@@ -743,7 +747,7 @@ mod tests {
 
     #[test]
     fn public_agent_projection_omits_private_source_and_untrusted_profile_fields() {
-        let mut row:NyxbotCmaAgent=bson::from_document(doc! {
+        let mut row:AssistantCmaAgent=bson::from_document(doc! {
             "_id":"internal-agent","user_id":"owner","cma_service_id":"catalog-service","cma_agent_id":"agent",
             "cma_sandbox_id":"sandbox","cma_workspace_id":"workspace","cma_worktree_id":"worktree",
             "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
@@ -780,7 +784,7 @@ mod tests {
 #[cfg(test)]
 mod stream_authority_tests {
     use super::*;
-    use crate::services::nyxbot_cma_gateway::{
+    use crate::services::assistant_cma_gateway::{
         CmaEventSnapshot, CmaLifecycleResult, CmaResponse, CmaResult, CmaSandbox, CmaTranscript,
     };
     use std::{sync::Mutex, time::Duration};
@@ -817,7 +821,7 @@ mod stream_authority_tests {
                 parent: CmaSandbox {
                     id: "sandbox".into(),
                     owner_id: Some("owner".into()),
-                    state: crate::models::nyxbot_cma_sandbox::SandboxObservationState::Ready,
+                    state: crate::models::assistant_cma_sandbox::SandboxObservationState::Ready,
                     resource_state: Some("active".into()),
                     name: None,
                     machine_included: Some(true),
@@ -923,7 +927,7 @@ mod stream_authority_tests {
         }
     }
 
-    fn reference() -> NyxbotCmaAgent {
+    fn reference() -> AssistantCmaAgent {
         bson::from_document(doc! {
             "_id":"local-agent", "user_id":"owner", "cma_service_id":"service",
             "cma_agent_id":"agent", "cma_sandbox_id":"sandbox",
@@ -934,7 +938,7 @@ mod stream_authority_tests {
         .unwrap()
     }
 
-    fn parent_reference() -> NyxbotCmaSandbox {
+    fn parent_reference() -> AssistantCmaSandbox {
         bson::from_document(doc! {
             "_id":"local-sandbox", "user_id":"owner", "cma_service_id":"service",
             "label":"Sandbox", "cma_sandbox_id":"sandbox", "occupies_account_slot":true,

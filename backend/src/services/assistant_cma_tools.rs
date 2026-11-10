@@ -1,12 +1,12 @@
 //! CMA-native bridges. These never select/create an Agent or alter its lifecycle.
 use super::{
-    assistant_acknowledgement_service as acks, nyxbot_cma_agent_service as agents,
-    nyxbot_cma_gateway::{CatalogCmaGateway, CmaFileWrite, CmaGateway},
-    nyxbot_cma_sandbox_service as sandboxes,
+    assistant_acknowledgement_service as acks, assistant_cma_agent_service as agents,
+    assistant_cma_gateway::{CatalogCmaGateway, CmaFileWrite, CmaGateway},
+    assistant_cma_sandbox_service as sandboxes,
 };
 use crate::{
     errors::{AppError, AppResult},
-    models::{assistant_agent::AssistantAgent, nyxbot_cma_agent::NyxbotCmaAgent},
+    models::{assistant_agent::AssistantAgent, assistant_cma_agent::AssistantCmaAgent},
 };
 use futures::TryStreamExt;
 use mongodb::{
@@ -105,10 +105,10 @@ fn field<'a>(args: &'a Value, key: &str) -> AppResult<&'a str> {
 }
 async fn remote_id(db: &Database, owner: &str, input: &str) -> AppResult<String> {
     if input.starts_with("agt_") {
-        super::nyxbot_cma_gateway::validate_remote_id(input)?;
+        super::assistant_cma_gateway::validate_remote_id(input)?;
         return Ok(input.into());
     }
-    db.collection::<NyxbotCmaAgent>(crate::models::nyxbot_cma_agent::COLLECTION_NAME)
+    db.collection::<AssistantCmaAgent>(crate::models::assistant_cma_agent::COLLECTION_NAME)
         .find_one(doc! {"_id":input,"user_id":owner})
         .await?
         .map(|row| row.cma_agent_id)
@@ -594,10 +594,10 @@ pub(super) async fn write_attachment_to_created_parent(
     db: &Database,
     gateway: &dyn CmaGateway,
     owner: &str,
-    agent: &NyxbotCmaAgent,
+    agent: &AssistantCmaAgent,
     path: &str,
     bytes: &[u8],
-) -> AppResult<super::nyxbot_cma_gateway::CmaFileWrite> {
+) -> AppResult<super::assistant_cma_gateway::CmaFileWrite> {
     if agent.user_id != owner {
         return Err(refused());
     }
@@ -608,18 +608,18 @@ pub(super) async fn write_attachment_to_created_parent(
     {
         return Err(AppError::Conflict("cma_sandbox_generation_changed".into()));
     }
-    super::nyxbot_cma_admission::require_available_parent(&sandbox)?;
+    super::assistant_cma_admission::require_available_parent(&sandbox)?;
     Ok(gateway
         .write_agent_file(owner, &agent.cma_agent_id, path, bytes)
         .await?)
 }
 
-fn agent_summary(row: &NyxbotCmaAgent) -> Value {
+fn agent_summary(row: &AssistantCmaAgent) -> Value {
     json!({"id":row.id,"agent_id":row.cma_agent_id,"label":row.label,"sandbox_id":row.cma_sandbox_id,"workspace_id":row.cma_workspace_id,"status":row.resource_state,"last_observed":row.last_observed,"last_known_response_id":row.source_response_id})
 }
 fn resource_list_result(
     sandbox_list: &sandboxes::SandboxListDto,
-    rows: &[NyxbotCmaAgent],
+    rows: &[AssistantCmaAgent],
     next_cursor: Option<String>,
 ) -> Value {
     json!({
@@ -681,7 +681,7 @@ mod tests {
             let key = result["new_creation_idempotency_key"]
                 .as_str()
                 .expect("a new creation must use a server-generated key");
-            super::super::nyxbot_cma_gateway::validate_idempotency_key(key).unwrap();
+            super::super::assistant_cma_gateway::validate_idempotency_key(key).unwrap();
             assert_eq!(uuid::Uuid::parse_str(key).unwrap().get_version_num(), 4);
             assert!(
                 keys.insert(key.to_owned()),
@@ -695,7 +695,7 @@ mod tests {
     }
     #[test]
     fn resource_summary_keeps_the_name_bound_to_its_remote_identity() {
-        let mut row = NyxbotCmaAgent {
+        let mut row = AssistantCmaAgent {
             id: "local-reference".into(),
             user_id: "owner".into(),
             cma_service_id: "service".into(),

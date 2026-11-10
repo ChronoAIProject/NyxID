@@ -1,7 +1,7 @@
 import { useParams } from "@tanstack/react-router";
 import { RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useCmaSandbox } from "@/hooks/use-nyxbot-cma-sandboxes";
+import { useCmaSandbox } from "@/hooks/use-assistant-cma-sandboxes";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { CmaSandboxCard } from "./assistant-cma-sandboxes";

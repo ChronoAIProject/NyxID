@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type RFB from "@novnc/novnc";
 import { Eye, Maximize, MousePointer2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useCmaDesktop } from "@/hooks/use-nyxbot-cma-agents";
+import { useCmaDesktop } from "@/hooks/use-assistant-cma-agents";
 import { useAuthStore } from "@/stores/auth-store";
 
 const reasons: Record<string, string> = {
@@ -13,8 +13,7 @@ const reasons: Record<string, string> = {
   agent_deleted:
     "This Agent was deleted. Its desktop connection is unavailable.",
   agent_failed: "This Agent has failed. Its desktop connection is unavailable.",
-  agent_paused:
-    "This Agent is paused. Its desktop connection is unavailable.",
+  agent_paused: "This Agent is paused. Its desktop connection is unavailable.",
   agent_state_unknown:
     "This Agent’s current state could not be confirmed. Check its status before reconnecting.",
   agent_unavailable:

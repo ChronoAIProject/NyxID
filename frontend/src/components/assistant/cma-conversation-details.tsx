@@ -13,7 +13,7 @@ import type { CmaDisplayEvent } from "@/lib/assistant/cma-events";
 import {
   cmaPublicText,
   type CmaTranscriptTurn,
-} from "@/schemas/nyxbot-cma-agent";
+} from "@/schemas/assistant-cma-agent";
 import { CmaStatus, CmaTime } from "./cma-execution-content";
 
 export function CmaConversationDetails({
@@ -41,7 +41,9 @@ export function CmaConversationDetails({
           <ChevronRight aria-hidden />
           Execution details
           {count > 0 && (
-            <span className="rounded bg-overlay px-1.5 type-badge">{count}</span>
+            <span className="rounded bg-overlay px-1.5 type-badge">
+              {count}
+            </span>
           )}
         </Button>
       </DialogTrigger>

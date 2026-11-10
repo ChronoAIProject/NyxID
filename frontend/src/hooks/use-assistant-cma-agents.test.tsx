@@ -4,7 +4,7 @@ import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
-import { useCmaEventStream } from "./use-nyxbot-cma-agents";
+import { useCmaEventStream } from "./use-assistant-cma-agents";
 const mocks = vi.hoisted(() => ({ http: vi.fn() }));
 vi.mock("@/lib/assistant/assistant-http", () => ({
   assistantHttp: mocks.http,

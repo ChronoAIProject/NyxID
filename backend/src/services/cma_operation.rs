@@ -410,14 +410,14 @@ pub async fn register_observed_reference(
     cma: &CmaOperation,
     value: &Value,
 ) -> crate::errors::AppResult<bool> {
-    use super::nyxbot_cma_gateway::CmaGateway;
+    use super::assistant_cma_gateway::CmaGateway;
     use mongodb::bson::doc;
     let db = &state.db;
     let service_id=if let Some(service)=db.collection::<crate::models::user_service::UserService>(crate::models::user_service::COLLECTION_NAME)
         .find_one(doc! {"_id":&watch.service_id,"user_id":&watch.user_id,"is_active":true,"deleted_at":null}).await? {
         service.catalog_service_id.ok_or_else(||crate::errors::AppError::Forbidden("CMA catalog identity unavailable".into()))?
     } else { watch.service_id.clone() };
-    let gateway = super::nyxbot_cma_gateway::CatalogCmaGateway::for_service(state, &service_id)
+    let gateway = super::assistant_cma_gateway::CatalogCmaGateway::for_service(state, &service_id)
         .with_watch_authority(watch, state.node_ws_manager.clone());
     if gateway.service_id(&watch.user_id).await? != service_id {
         return Ok(false);
@@ -432,7 +432,7 @@ pub async fn register_observed_reference(
     if cma.kind == Presentation::Provisioning
         && let Some(operation) = operation
     {
-        super::nyxbot_cma_admission::record_creation_observation(
+        super::assistant_cma_admission::record_creation_observation(
             db,
             &gateway,
             &watch.user_id,
@@ -456,7 +456,7 @@ pub async fn register_observed_reference(
     } else {
         None
     };
-    let source = super::nyxbot_cma_agent_service::AgentSource {
+    let source = super::assistant_cma_agent_service::AgentSource {
         conversation_id: Some(watch.conversation_id.clone()),
         agent_id: Some(watch.agent_id.clone()),
         turn_id: Some(watch.turn_id.clone()),
@@ -469,7 +469,7 @@ pub async fn register_observed_reference(
         },
         ..Default::default()
     };
-    let reference = super::nyxbot_cma_agent_service::register_live(
+    let reference = super::assistant_cma_agent_service::register_live(
         db,
         &gateway,
         &watch.user_id,
@@ -512,7 +512,7 @@ fn control_target(value: &Value, response: &str) -> Option<(i64, i64)> {
 fn apply_approval_page(
     scan: &mut crate::models::async_service_operation::CmaApprovalScan,
     response: &str,
-    page: &super::nyxbot_cma_gateway::CmaEventSnapshot,
+    page: &super::assistant_cma_gateway::CmaEventSnapshot,
 ) -> crate::errors::AppResult<()> {
     use crate::errors::AppError;
     use crate::models::async_service_operation::CmaPendingApproval;
@@ -683,11 +683,11 @@ async fn observe_approval(
     state: &crate::AppState,
     watch: &crate::models::async_service_operation::AsyncServiceOperation,
     cma: &CmaOperation,
-    gateway: &super::nyxbot_cma_gateway::CatalogCmaGateway,
+    gateway: &super::assistant_cma_gateway::CatalogCmaGateway,
     agent: &str,
     response: &str,
 ) -> crate::errors::AppResult<bool> {
-    use super::nyxbot_cma_gateway::CmaGateway;
+    use super::assistant_cma_gateway::CmaGateway;
     use crate::models::async_service_operation::COLLECTION_NAME;
     use mongodb::bson::{self, doc};
     let controls = gateway
@@ -808,7 +808,7 @@ mod tests {
 
     #[test]
     fn approval_scan_uses_all_pages_and_ignores_other_tasks_and_resolved_approvals() {
-        use super::super::nyxbot_cma_gateway::{CmaEvent, CmaEventSnapshot};
+        use super::super::assistant_cma_gateway::{CmaEvent, CmaEventSnapshot};
         use crate::models::async_service_operation::CmaApprovalScan;
         let event = |kind: &str, id: &str, response: &str, turn: i64| CmaEvent {
             id: None,

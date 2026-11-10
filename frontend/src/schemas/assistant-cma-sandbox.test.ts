@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { cmaSandboxSchema, cmaSandboxListSchema } from "./nyxbot-cma-sandbox";
+import {
+  cmaSandboxSchema,
+  cmaSandboxListSchema,
+} from "./assistant-cma-sandbox";
 
 describe("CMA environment responses", () => {
   const pending = {

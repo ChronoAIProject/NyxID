@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::bson_datetime;
 
-pub const COLLECTION_NAME: &str = "nyxbot_cma_sandboxes";
+pub const COLLECTION_NAME: &str = "assistant_cma_sandboxes";
 
 /// Local admission state for a CMA Sandbox reference. The occupied slot is
 /// intentionally separate from this state: a failed or unknown remote
@@ -83,7 +83,7 @@ pub enum SandboxCapacitySource {
 /// expose this row directly in an API response; service DTOs must project the
 /// identifiers and bounded lifecycle facts they need.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct NyxbotCmaSandbox {
+pub struct AssistantCmaSandbox {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -143,9 +143,9 @@ pub struct NyxbotCmaSandbox {
     pub updated_at: DateTime<Utc>,
 }
 
-impl std::fmt::Debug for NyxbotCmaSandbox {
+impl std::fmt::Debug for AssistantCmaSandbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NyxbotCmaSandbox")
+        f.debug_struct("AssistantCmaSandbox")
             .field("id", &self.id)
             .field("user_id", &self.user_id)
             .field("cma_service_id", &self.cma_service_id)
@@ -169,7 +169,7 @@ mod tests {
     #[test]
     fn bson_serialization_keeps_dates_and_encrypted_request_bytes() {
         let now = Utc::now();
-        let row = NyxbotCmaSandbox {
+        let row = AssistantCmaSandbox {
             id: "sandbox-row".into(),
             user_id: "user".into(),
             cma_service_id: "service".into(),
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn optional_dates_are_stored_as_null_and_encrypted_bytes_are_not_debugged() {
         let now = Utc::now();
-        let row = NyxbotCmaSandbox {
+        let row = AssistantCmaSandbox {
             id: "sandbox-row".into(),
             user_id: "user".into(),
             cma_service_id: "service".into(),

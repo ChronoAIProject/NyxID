@@ -1,6 +1,6 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import { mockDashboard } from "./managed-onboarding-fixtures";
-import type { CmaSandbox } from "../src/schemas/nyxbot-cma-sandbox";
+import type { CmaSandbox } from "../src/schemas/assistant-cma-sandbox";
 
 const sandbox: CmaSandbox = {
   id: "sandbox-local-01",
@@ -34,7 +34,8 @@ const agentBase = `${base}/cma-agents/${agentId}`;
 const exactOutput =
   "Exact task result: the requested release checks are complete.";
 const sharedOutput = "Earlier shared Agent history from another NyxBot chat.";
-const responseOnlyOutput = "Response-only output must not replace the verified conversation.";
+const responseOnlyOutput =
+  "Response-only output must not replace the verified conversation.";
 
 interface FixtureOptions {
   empty?: boolean;
@@ -490,7 +491,9 @@ for (const width of [1440, 390]) {
     ).toBeVisible();
     await expect(page.getByText(exactOutput, { exact: true })).toBeVisible();
     await expect(page.getByText(sharedOutput, { exact: true })).toBeVisible();
-    await expect(page.getByText(responseOnlyOutput, { exact: true })).toHaveCount(0);
+    await expect(
+      page.getByText(responseOnlyOutput, { exact: true }),
+    ).toHaveCount(0);
     await expect(
       page.getByRole("region", { name: "Linked request", exact: true }),
     ).toContainText(exactOutput);
@@ -506,7 +509,9 @@ for (const width of [1440, 390]) {
       `${agentBase}/responses/${responseId}/events`,
     );
     await capture(page, testInfo, "assistant-linked-request");
-    await page.getByRole("button", { name: "Jump to latest", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Jump to latest", exact: true })
+      .click();
     await expect(page).toHaveURL(
       new RegExp(`/assistant/cma-agents/${agentId}\\?response=${responseId}$`),
     );
@@ -582,7 +587,9 @@ test("a direct assistant entry opens recent conversation without inventing a res
   ).toBeVisible();
   await expect(page.getByText(sharedOutput, { exact: true })).toBeVisible();
   await expect(page.getByText(exactOutput, { exact: true })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Linked request", exact: true })).toHaveCount(0);
+  await expect(
+    page.getByRole("region", { name: "Linked request", exact: true }),
+  ).toHaveCount(0);
   expect(api.reads.some((path) => path.includes("/responses/"))).toBe(false);
   await capture(page, testInfo, "assistant-direct-entry");
   expect(api.writes).toEqual([]);
@@ -598,7 +605,9 @@ for (const binding of ["wrong-agent", "wrong-response"] as const) {
     await expect(page.getByRole("alert")).toHaveText(
       "The linked request is unavailable or does not belong to this assistant.",
     );
-    await expect(page.getByText(responseOnlyOutput, { exact: true })).toHaveCount(0);
+    await expect(
+      page.getByText(responseOnlyOutput, { exact: true }),
+    ).toHaveCount(0);
     await expect(page.getByText(exactOutput, { exact: true })).toBeVisible();
     await expect(page.getByText(sharedOutput, { exact: true })).toBeVisible();
     await expect(
@@ -618,7 +627,7 @@ for (const binding of ["wrong-agent", "wrong-response"] as const) {
 test("Desktop without a machine remains passive", async ({
   page,
 }, testInfo) => {
-  // nyxbot_cma_agent_service::desktop_reason returns this native reason.
+  // assistant_cma_agent_service::desktop_reason returns this native reason.
   const api = await cmaApi(page, { desktopReason: "desktop_not_enabled" });
   await page.goto(`/assistant/cma-agents/${agentId}?tab=desktop`);
   await expect(

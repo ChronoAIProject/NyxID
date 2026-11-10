@@ -147,6 +147,8 @@ pub mod assistant_agent_learning;
 pub mod assistant_attachment;
 pub mod assistant_channel_media;
 pub mod assistant_checkpoint;
+pub mod assistant_cma_agent;
+pub mod assistant_cma_sandbox;
 pub mod assistant_conversation;
 pub mod assistant_direct_handoff;
 pub mod assistant_group;
@@ -162,8 +164,6 @@ pub mod catalog_skill_revision;
 pub mod channel_delivery;
 pub mod channel_email;
 pub mod nyxbot_channel;
-pub mod nyxbot_cma_agent;
-pub mod nyxbot_cma_sandbox;
 pub mod nyxbot_event_binding;
 pub mod nyxbot_gateway_response;
 pub mod nyxbot_image_delivery;
@@ -254,8 +254,8 @@ pub mod discord_gateway;
 
 pub mod assistant_delegated_image;
 
+pub mod assistant_cma_creation;
 pub mod cma_session_origin;
-pub mod nyxbot_cma_creation;
 pub mod org_channel;
 pub mod voice_responses;
 

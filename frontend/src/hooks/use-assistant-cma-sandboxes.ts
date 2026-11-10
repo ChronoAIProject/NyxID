@@ -8,7 +8,7 @@ import {
   cmaSandboxSchema,
   cmaSandboxListSchema,
   cmaSandboxMutationSchema,
-} from "@/schemas/nyxbot-cma-sandbox";
+} from "@/schemas/assistant-cma-sandbox";
 
 const BASE = "/assistant/nyxagent/sandboxes";
 export const cmaQueryKeys = {

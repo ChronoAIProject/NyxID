@@ -935,7 +935,7 @@ fn native_inventory_is_closed_and_schemas_exclude_secret_inputs() {
         tools::TOOL_NAMES.len()
     );
     assert_eq!(
-        super::nyxbot_cma_tools::NAMES,
+        super::assistant_cma_tools::NAMES,
         &["list_cma_resources", "cma_save_attachment", "cma_guide",]
     );
     let service = tools::virtual_service(&orchestrator_chat());
@@ -947,7 +947,7 @@ fn native_inventory_is_closed_and_schemas_exclude_secret_inputs() {
     let memory = super::assistant_team_tools::AGENT_TOOL_NAMES.len();
     assert_eq!(
         service.endpoints.len(),
-        tools::TOOL_NAMES.len() - super::nyxbot_cma_tools::NAMES.len() + team + memory - 2
+        tools::TOOL_NAMES.len() - super::assistant_cma_tools::NAMES.len() + team + memory - 2
     );
     let mut subagent = orchestrator_chat();
     subagent.role = crate::models::assistant_conversation::AgentRole::Subagent;
@@ -991,11 +991,14 @@ fn native_inventory_is_closed_and_schemas_exclude_secret_inputs() {
                 "{name} {forbidden}"
             );
         }
-        if super::nyxbot_cma_tools::owns(name) {
+        if super::assistant_cma_tools::owns(name) {
             assert!(service.endpoints.iter().all(|e| e.name != *name));
             assert!(limited.endpoints.iter().all(|e| e.name != *name));
-            assert!(!super::nyxbot_cma_tools::description(name).is_empty());
-            assert_eq!(tools::schema(name), super::nyxbot_cma_tools::schema(name));
+            assert!(!super::assistant_cma_tools::description(name).is_empty());
+            assert_eq!(
+                tools::schema(name),
+                super::assistant_cma_tools::schema(name)
+            );
             continue;
         }
         let endpoint = service.endpoints.iter().find(|e| e.name == *name).unwrap();
@@ -1091,7 +1094,7 @@ async fn subagents_reach_only_read_tools_after_an_account_grant_and_preserve_own
             )
             .await;
         assert!(result.is_error, "{name}");
-        if super::nyxbot_cma_tools::owns(name) {
+        if super::assistant_cma_tools::owns(name) {
             assert_eq!(result.value["error"], "forbidden", "{name}");
             assert!(result.permission_request.is_none(), "{name}");
             assert!(result.value.get("acknowledgement_id").is_none(), "{name}");
@@ -1131,7 +1134,7 @@ async fn subagents_reach_only_read_tools_after_an_account_grant_and_preserve_own
                 &minimal_args(name, &missing),
             )
             .await;
-        if super::nyxbot_cma_tools::owns(name) {
+        if super::assistant_cma_tools::owns(name) {
             assert!(result.is_error, "{name}");
             assert_eq!(result.value["error"], "forbidden", "{name}");
             assert!(result.permission_request.is_none(), "{name}");
@@ -1175,7 +1178,7 @@ async fn subagents_reach_only_read_tools_after_an_account_grant_and_preserve_own
         assert_eq!(event.get_str("role").unwrap(), "subagent");
         assert!(event.contains_key("tool_name") && event.contains_key("outcome"));
         assert!(!event.contains_key("arguments") && !event.contains_key("result"));
-        if super::nyxbot_cma_tools::owns(
+        if super::assistant_cma_tools::owns(
             event
                 .get_str("tool_name")
                 .unwrap()
@@ -1403,7 +1406,7 @@ async fn native_inventory(full: bool) {
     assert!(key_service::get_api_key(db, &f.owner, &key).await.is_err());
     // Ordinary account access, including Full access, does not grant CMA.
     let discovered = tools::virtual_service_for(db, &f.chat).await;
-    for name in super::nyxbot_cma_tools::NAMES {
+    for name in super::assistant_cma_tools::NAMES {
         assert!(discovered.endpoints.iter().all(|e| e.name != *name));
         let result = f
             .tools()
@@ -1428,7 +1431,7 @@ async fn native_inventory(full: bool) {
             })
             .await
             .unwrap();
-        if super::nyxbot_cma_tools::owns(name) {
+        if super::assistant_cma_tools::owns(name) {
             assert_eq!(count, 0, "{name}");
             let refused = db
                 .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)

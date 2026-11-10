@@ -1,4 +1,4 @@
-use super::super::nyxbot_cma_gateway::{CmaEvent, CmaEventSnapshot};
+use super::super::assistant_cma_gateway::{CmaEvent, CmaEventSnapshot};
 use super::*;
 
 fn event(

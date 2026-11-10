@@ -1,13 +1,13 @@
 //! Human execution views and bounded, exact-resource CMA SSE/RFB relays.
-use super::nyxbot_cma_sandboxes::{PageQuery, owner};
+use super::assistant_cma_sandboxes::{PageQuery, owner};
 use crate::{
     AppState,
     errors::{AppError, AppResult},
-    models::nyxbot_cma_agent::NyxbotCmaAgent,
+    models::assistant_cma_agent::AssistantCmaAgent,
     mw::auth::{AuthMethod, AuthUser},
     services::{
-        nyxbot_cma_agent_service as agents,
-        nyxbot_cma_gateway::{
+        assistant_cma_agent_service as agents,
+        assistant_cma_gateway::{
             CatalogCmaGateway, CmaDesktopSocket, CmaGateway, MAX_CURSOR_BYTES,
             MAX_DESKTOP_FRAME_BYTES, MAX_STREAM_SECONDS,
         },
@@ -39,7 +39,7 @@ async fn reference(
     state: &AppState,
     auth: &AuthUser,
     id: &str,
-) -> AppResult<(String, NyxbotCmaAgent, CatalogCmaGateway)> {
+) -> AppResult<(String, AssistantCmaAgent, CatalogCmaGateway)> {
     let owner = owner(state, auth).await?;
     let row = agents::get_owned(&state.db, &owner, id).await?;
     let gateway = CatalogCmaGateway::for_service(state, &row.cma_service_id);
@@ -63,7 +63,7 @@ pub async fn transcript(
     auth: AuthUser,
     Path(id): Path<String>,
     Query(query): Query<PageQuery>,
-) -> AppResult<Json<crate::services::nyxbot_cma_gateway::CmaTranscript>> {
+) -> AppResult<Json<crate::services::assistant_cma_gateway::CmaTranscript>> {
     let (owner, row, gateway) = reference(&state, &auth, &id).await?;
     agents::revalidate(&state.db, &gateway, &owner, &row).await?;
     Ok(Json(
@@ -77,7 +77,7 @@ pub async fn snapshot(
     auth: AuthUser,
     Path(id): Path<String>,
     Query(query): Query<PageQuery>,
-) -> AppResult<Json<crate::services::nyxbot_cma_gateway::CmaEventSnapshot>> {
+) -> AppResult<Json<crate::services::assistant_cma_gateway::CmaEventSnapshot>> {
     let (owner, row, gateway) = reference(&state, &auth, &id).await?;
     agents::revalidate(&state.db, &gateway, &owner, &row).await?;
     Ok(Json(
@@ -90,7 +90,7 @@ pub async fn response(
     State(state): State<AppState>,
     auth: AuthUser,
     Path((id, response_id)): Path<(String, String)>,
-) -> AppResult<Json<crate::services::nyxbot_cma_gateway::CmaResponse>> {
+) -> AppResult<Json<crate::services::assistant_cma_gateway::CmaResponse>> {
     let (owner, row, gateway) = reference(&state, &auth, &id).await?;
     agents::revalidate(&state.db, &gateway, &owner, &row).await?;
     Ok(Json(
@@ -103,7 +103,7 @@ pub async fn desktop(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<String>,
-) -> AppResult<Json<crate::services::nyxbot_cma_gateway::CmaDesktopDescriptor>> {
+) -> AppResult<Json<crate::services::assistant_cma_gateway::CmaDesktopDescriptor>> {
     let owner = owner(&state, &auth).await?;
     let row = agents::get_owned(&state.db, &owner, &id).await?;
     let gateway = CatalogCmaGateway::for_service(&state, &row.cma_service_id);
@@ -193,7 +193,7 @@ async fn stream_authority(
     gateway: &dyn CmaGateway,
     owner: &str,
     session: Option<uuid::Uuid>,
-    row: &NyxbotCmaAgent,
+    row: &AssistantCmaAgent,
     response: Option<&str>,
     desktop: bool,
 ) -> AppResult<()> {
@@ -501,7 +501,7 @@ pub async fn desktop_ws(
 async fn desktop_relay(
     state: AppState,
     auth: AuthUser,
-    row: NyxbotCmaAgent,
+    row: AssistantCmaAgent,
     gateway: CatalogCmaGateway,
     upstream: CmaDesktopSocket,
     socket: WebSocket,

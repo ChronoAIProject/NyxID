@@ -2639,53 +2639,53 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     let assistant_routes = Router::new()
         .route(
             "/nyxagent/sandboxes",
-            get(handlers::nyxbot_cma_sandboxes::list),
+            get(handlers::assistant_cma_sandboxes::list),
         )
         .route(
             "/nyxagent/sandboxes/{id}",
-            get(handlers::nyxbot_cma_sandboxes::detail)
-                .patch(handlers::nyxbot_cma_sandboxes::label)
-                .delete(handlers::nyxbot_cma_sandboxes::retire),
+            get(handlers::assistant_cma_sandboxes::detail)
+                .patch(handlers::assistant_cma_sandboxes::label)
+                .delete(handlers::assistant_cma_sandboxes::retire),
         )
         .route(
             "/nyxagent/sandboxes/{id}/commands",
-            post(handlers::nyxbot_cma_sandboxes::commands),
+            post(handlers::assistant_cma_sandboxes::commands),
         )
         .route(
             "/nyxagent/sandboxes/{id}/events",
-            get(handlers::nyxbot_cma_sandboxes::events),
+            get(handlers::assistant_cma_sandboxes::events),
         )
         .route(
             "/nyxagent/cma-agents/{id}",
-            get(handlers::nyxbot_cma_agents::detail),
+            get(handlers::assistant_cma_agents::detail),
         )
         .route(
             "/nyxagent/cma-agents/{id}/transcript",
-            get(handlers::nyxbot_cma_agents::transcript),
+            get(handlers::assistant_cma_agents::transcript),
         )
         .route(
             "/nyxagent/cma-agents/{id}/events/snapshot",
-            get(handlers::nyxbot_cma_agents::snapshot),
+            get(handlers::assistant_cma_agents::snapshot),
         )
         .route(
             "/nyxagent/cma-agents/{id}/events",
-            get(handlers::nyxbot_cma_agents::events),
+            get(handlers::assistant_cma_agents::events),
         )
         .route(
             "/nyxagent/cma-agents/{id}/responses/{response_id}",
-            get(handlers::nyxbot_cma_agents::response),
+            get(handlers::assistant_cma_agents::response),
         )
         .route(
             "/nyxagent/cma-agents/{id}/responses/{response_id}/events",
-            get(handlers::nyxbot_cma_agents::response_events),
+            get(handlers::assistant_cma_agents::response_events),
         )
         .route(
             "/nyxagent/cma-agents/{id}/desktop",
-            get(handlers::nyxbot_cma_agents::desktop),
+            get(handlers::assistant_cma_agents::desktop),
         )
         .route(
             "/nyxagent/cma-agents/{id}/desktop/ws",
-            get(handlers::nyxbot_cma_agents::desktop_ws),
+            get(handlers::assistant_cma_agents::desktop_ws),
         )
         .route(
             "/nyxagent/invocations/{key}",

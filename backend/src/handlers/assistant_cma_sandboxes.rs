@@ -4,9 +4,9 @@ use crate::{
     errors::{AppError, AppResult},
     mw::auth::AuthUser,
     services::{
-        nyxbot_cma_agent_service as agents,
-        nyxbot_cma_gateway::{CatalogCmaGateway, validate_idempotency_key},
-        nyxbot_cma_sandbox_service as sandboxes,
+        assistant_cma_agent_service as agents,
+        assistant_cma_gateway::{CatalogCmaGateway, validate_idempotency_key},
+        assistant_cma_sandbox_service as sandboxes,
     },
 };
 use axum::{
@@ -141,7 +141,7 @@ pub async fn commands(
         )
         .await?
     } else {
-        crate::services::nyxbot_cma_admission::recover_creation(
+        crate::services::assistant_cma_admission::recover_creation(
             &state.db,
             &state.encryption_keys,
             &gateway,
@@ -195,7 +195,7 @@ pub async fn events(
     auth: AuthUser,
     Path(id): Path<String>,
     Query(query): Query<PageQuery>,
-) -> AppResult<Json<crate::services::nyxbot_cma_gateway::CmaEventSnapshot>> {
+) -> AppResult<Json<crate::services::assistant_cma_gateway::CmaEventSnapshot>> {
     let owner = owner(&state, &auth).await?;
     let row = sandboxes::get_owned(&state.db, &owner, &id).await?;
     let gateway = CatalogCmaGateway::for_service(&state, &row.cma_service_id);

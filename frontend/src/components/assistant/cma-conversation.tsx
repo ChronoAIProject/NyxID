@@ -6,7 +6,7 @@ import type { CmaDisplayEvent } from "@/lib/assistant/cma-events";
 import {
   cmaPublicText,
   type CmaTranscriptTurn,
-} from "@/schemas/nyxbot-cma-agent";
+} from "@/schemas/assistant-cma-agent";
 import { CmaMessage, CmaStatus } from "./cma-execution-content";
 import { CmaConversationDetails } from "./cma-conversation-details";
 

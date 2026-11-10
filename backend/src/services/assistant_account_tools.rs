@@ -85,8 +85,8 @@ pub fn destructive(name: &str) -> bool {
 }
 
 pub fn schema(name: &str) -> Value {
-    if super::nyxbot_cma_tools::owns(name) {
-        return super::nyxbot_cma_tools::schema(name);
+    if super::assistant_cma_tools::owns(name) {
+        return super::assistant_cma_tools::schema(name);
     }
     let string = json!({"type": "string", "minLength": 1, "maxLength": 200});
     let boolean = json!({"type": "boolean"});
@@ -196,8 +196,8 @@ pub fn schema(name: &str) -> Value {
 }
 
 fn description(name: &str) -> String {
-    if super::nyxbot_cma_tools::owns(name) {
-        return super::nyxbot_cma_tools::description(name);
+    if super::assistant_cma_tools::owns(name) {
+        return super::assistant_cma_tools::description(name);
     }
     let purpose = match name {
         "list_agent_keys" => "List agent keys without secrets.",
@@ -335,14 +335,14 @@ pub async fn virtual_service_for(
                 .filter(|e| e.name == super::assistant_skill_authoring::TOOL_NAME),
         );
     }
-    if super::nyxbot_cma_tools::chat_eligible(db, chat)
+    if super::assistant_cma_tools::chat_eligible(db, chat)
         .await
         .unwrap_or(false)
     {
         service
             .endpoints
             .extend(
-                super::nyxbot_cma_tools::NAMES
+                super::assistant_cma_tools::NAMES
                     .iter()
                     .map(|name| McpToolEndpoint {
                         endpoint_id: format!("nyxid__{name}"),
@@ -378,7 +378,7 @@ fn account_service() -> McpToolService {
         durable_endpoint_metadata: Default::default(),
         endpoints: TOOL_NAMES
             .iter()
-            .filter(|name| !super::nyxbot_cma_tools::owns(name))
+            .filter(|name| !super::assistant_cma_tools::owns(name))
             .map(|name| McpToolEndpoint {
                 attachment_input: None,
                 async_operation: None,
@@ -753,8 +753,8 @@ impl AccountTools<'_> {
         let name = tool_name.strip_prefix("nyxid__").unwrap_or_default();
         validate_arguments(name, args)?;
         super::assistant_nyxagent::require_enabled(self.db, &chat.user_id).await?;
-        if super::nyxbot_cma_tools::owns(name) {
-            return super::nyxbot_cma_tools::execute(self, chat, name, args).await;
+        if super::assistant_cma_tools::owns(name) {
+            return super::assistant_cma_tools::execute(self, chat, name, args).await;
         }
         if !chat.is_orchestrator() && !read_only(name) {
             return Ok(ToolResult {

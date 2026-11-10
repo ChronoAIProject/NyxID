@@ -19,7 +19,7 @@ const mocks = vi.hoisted(() => ({
   desktop: vi.fn(),
 }));
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: () => true }));
-vi.mock("@/hooks/use-nyxbot-cma-agents", () => ({
+vi.mock("@/hooks/use-assistant-cma-agents", () => ({
   useCmaAgent: mocks.agent,
   useCmaResponse: mocks.task,
   useCmaTranscript: mocks.transcript,

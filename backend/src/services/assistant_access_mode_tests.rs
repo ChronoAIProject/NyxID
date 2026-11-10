@@ -626,7 +626,7 @@ async fn every_changing_account_tool_has_a_card_summary() {
             // CMA dispatch owns its cards before the generic account gate.
             // cma_native_write_tools_create_bound_cards_without_remote_mutation
             // exercises attachment copying through AccountTools against a loopback mock.
-            if super::nyxbot_cma_tools::owns(name) {
+            if super::assistant_cma_tools::owns(name) {
                 assert!(
                     ["cma_save_attachment"].contains(name),
                     "no dedicated CMA card summary case for {name}"

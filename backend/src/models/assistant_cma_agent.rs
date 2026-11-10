@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use super::bson_datetime;
 
-pub const COLLECTION_NAME: &str = "nyxbot_cma_agents";
+pub const COLLECTION_NAME: &str = "assistant_cma_agents";
 
 /// Last known remote lifecycle state for a CMA Agent. Missing/failed reads are
 /// represented explicitly as `Unknown`; they never authorize a new resource or
@@ -41,7 +41,7 @@ impl AgentObservationState {
 /// the read-only execution view. The row contains only safe profile facts and
 /// bounded source metadata; task prompts and credentials remain elsewhere.
 #[derive(Clone, Serialize, Deserialize)]
-pub struct NyxbotCmaAgent {
+pub struct AssistantCmaAgent {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -98,9 +98,9 @@ pub struct NyxbotCmaAgent {
     pub updated_at: DateTime<Utc>,
 }
 
-impl std::fmt::Debug for NyxbotCmaAgent {
+impl std::fmt::Debug for AssistantCmaAgent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NyxbotCmaAgent")
+        f.debug_struct("AssistantCmaAgent")
             .field("id", &self.id)
             .field("user_id", &self.user_id)
             .field("cma_service_id", &self.cma_service_id)
@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn bson_serialization_keeps_dates_and_safe_profile() {
         let now = Utc::now();
-        let row = NyxbotCmaAgent {
+        let row = AssistantCmaAgent {
             id: "agent-row".into(),
             user_id: "user".into(),
             cma_service_id: "service".into(),
@@ -179,7 +179,7 @@ mod tests {
             document.get("profile_snapshot"),
             Some(Bson::Document(_))
         ));
-        let restored: NyxbotCmaAgent = bson::from_document(document).expect("deserialize agent");
+        let restored: AssistantCmaAgent = bson::from_document(document).expect("deserialize agent");
         assert_eq!(restored.cma_agent_id, "remote-agent");
         assert_eq!(restored.observation_state, AgentObservationState::Ready);
     }

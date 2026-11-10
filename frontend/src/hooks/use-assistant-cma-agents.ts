@@ -11,11 +11,11 @@ import {
   cmaEventSnapshotSchema,
   cmaResponseSchema,
   cmaTranscriptSchema,
-} from "@/schemas/nyxbot-cma-agent";
+} from "@/schemas/assistant-cma-agent";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { useFeature } from "./use-feature-flag";
-import { cmaQueryKeys } from "./use-nyxbot-cma-sandboxes";
+import { cmaQueryKeys } from "./use-assistant-cma-sandboxes";
 import {
   mergeCmaEvents,
   normalizeCmaEvent,

@@ -98,7 +98,7 @@ pub(crate) async fn admit(
     let binding = Binding::current(target, caller)?;
     let guard: Box<dyn ServiceDispatchGuard> = match policy {
         Policy::Cma => Box::new(
-            super::nyxbot_cma_admission::admit(
+            super::assistant_cma_admission::admit(
                 db,
                 keys,
                 jwt,
@@ -621,7 +621,7 @@ mod tests {
         assert!(verify(Some(&admission), &ordinary, None).unwrap().is_none());
         assert_eq!(
             db.collection::<mongodb::bson::Document>(
-                crate::models::nyxbot_cma_creation::COLLECTION_NAME
+                crate::models::assistant_cma_creation::COLLECTION_NAME
             )
             .count_documents(mongodb::bson::doc! {})
             .await

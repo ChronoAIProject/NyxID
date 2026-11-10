@@ -149,6 +149,8 @@ mod catalog_editor_tests;
 mod tools_tests;
 
 pub mod admin_assistant;
+pub mod assistant_cma_agents;
+pub mod assistant_cma_sandboxes;
 pub mod assistant_feedback;
 #[cfg(test)]
 mod assistant_feedback_tests;
@@ -161,8 +163,6 @@ pub mod channel_platforms;
 #[cfg(test)]
 mod curation_tests;
 pub mod nyxbot;
-pub mod nyxbot_cma_agents;
-pub mod nyxbot_cma_sandboxes;
 pub mod nyxbot_event_bindings;
 pub mod options;
 pub(crate) mod org_group;

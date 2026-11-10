@@ -484,7 +484,7 @@ async fn cma_fixture() -> AsyncFixture {
 
 async fn cma_existing_agent_fixture() -> AsyncFixture {
     use crate::services::{
-        nyxbot_cma_gateway::CatalogCmaGateway, nyxbot_cma_sandbox_service as sandboxes,
+        assistant_cma_gateway::CatalogCmaGateway, assistant_cma_sandbox_service as sandboxes,
     };
 
     let a = cma_fixture().await;
@@ -550,7 +550,7 @@ async fn reserve_cma_submission(a: &AsyncFixture) -> AsyncServiceOperation {
 #[tokio::test]
 async fn cma_guide_is_discovered_without_skills_and_has_no_provider_resource_or_card_effects() {
     use crate::services::{
-        assistant_account_tools as tools, feature_flag_service as flags, nyxbot_cma_tools as cma,
+        assistant_account_tools as tools, assistant_cma_tools as cma, feature_flag_service as flags,
     };
     let a = cma_fixture().await;
     let db = &a.f.state.db;
@@ -603,9 +603,9 @@ async fn cma_guide_is_discovered_without_skills_and_has_no_provider_resource_or_
         }
     }
     let collections = [
-        crate::models::nyxbot_cma_sandbox::COLLECTION_NAME,
-        crate::models::nyxbot_cma_agent::COLLECTION_NAME,
-        crate::models::nyxbot_cma_creation::COLLECTION_NAME,
+        crate::models::assistant_cma_sandbox::COLLECTION_NAME,
+        crate::models::assistant_cma_agent::COLLECTION_NAME,
+        crate::models::assistant_cma_creation::COLLECTION_NAME,
         crate::models::assistant_acknowledgement::COLLECTION_NAME,
     ];
     let mut counts = Vec::new();
@@ -1235,8 +1235,8 @@ async fn async_submission_distinguishes_lost_cma_receipt_from_unreachable_provid
                 let creation =
                     a.f.state
                         .db
-                        .collection::<crate::models::nyxbot_cma_creation::NyxbotCmaCreation>(
-                            crate::models::nyxbot_cma_creation::COLLECTION_NAME,
+                        .collection::<crate::models::assistant_cma_creation::AssistantCmaCreation>(
+                            crate::models::assistant_cma_creation::COLLECTION_NAME,
                         )
                         .find_one(doc! {"user_id":&a.f.owner,"idempotency_key":&key})
                         .await
@@ -1246,8 +1246,8 @@ async fn async_submission_distinguishes_lost_cma_receipt_from_unreachable_provid
                 let parent =
                     a.f.state
                         .db
-                        .collection::<crate::models::nyxbot_cma_sandbox::NyxbotCmaSandbox>(
-                            crate::models::nyxbot_cma_sandbox::COLLECTION_NAME,
+                        .collection::<crate::models::assistant_cma_sandbox::AssistantCmaSandbox>(
+                            crate::models::assistant_cma_sandbox::COLLECTION_NAME,
                         )
                         .find_one(doc! {"user_id":&a.f.owner})
                         .await
@@ -1265,12 +1265,12 @@ async fn assert_unreadable_cma_creation_receipt(status: u16, body: &str, reason:
     use crate::{
         crypto::aes::RecordContext,
         models::{
-            nyxbot_cma_creation::{COLLECTION_NAME as CREATIONS, NyxbotCmaCreation},
-            nyxbot_cma_sandbox::{COLLECTION_NAME as SANDBOXES, NyxbotCmaSandbox},
+            assistant_cma_creation::{AssistantCmaCreation, COLLECTION_NAME as CREATIONS},
+            assistant_cma_sandbox::{AssistantCmaSandbox, COLLECTION_NAME as SANDBOXES},
             user_endpoint::COLLECTION_NAME as ENDPOINTS,
             user_service::{COLLECTION_NAME as SERVICES, UserService},
         },
-        services::nyxbot_cma_sandbox_service::prepare_creation_request,
+        services::assistant_cma_sandbox_service::prepare_creation_request,
     };
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
@@ -1348,7 +1348,7 @@ async fn assert_unreadable_cma_creation_receipt(status: u16, body: &str, reason:
             json!({"name":"Receipt fixture"})
         );
         let creation = db
-            .collection::<NyxbotCmaCreation>(CREATIONS)
+            .collection::<AssistantCmaCreation>(CREATIONS)
             .find_one(doc! {"user_id":&a.f.owner,"idempotency_key":&key})
             .await
             .unwrap()
@@ -1373,7 +1373,7 @@ async fn assert_unreadable_cma_creation_receipt(status: u16, body: &str, reason:
                 .unwrap();
         assert_eq!(recovered.as_slice(), request.body.as_slice());
         let parent = db
-            .collection::<NyxbotCmaSandbox>(SANDBOXES)
+            .collection::<AssistantCmaSandbox>(SANDBOXES)
             .find_one(doc! {"_id":&creation.sandbox_ref_id,"user_id":&a.f.owner})
             .await
             .unwrap()
@@ -1578,7 +1578,7 @@ async fn lost_creation_fixture(path: &str) -> (AsyncFixture, wiremock::MockServe
 #[tokio::test]
 async fn generic_cma_retirement_preserves_original_key_for_management_retry() {
     use crate::models::{
-        nyxbot_cma_sandbox::{COLLECTION_NAME as SANDBOXES, NyxbotCmaSandbox},
+        assistant_cma_sandbox::{AssistantCmaSandbox, COLLECTION_NAME as SANDBOXES},
         service_endpoint::{COLLECTION_NAME as ENDPOINTS, ServiceEndpoint},
     };
     use crate::services::feature_flag_service as flags;
@@ -1628,7 +1628,7 @@ async fn generic_cma_retirement_preserves_original_key_for_management_retry() {
             .unwrap()
     );
     let parent = db
-        .collection::<NyxbotCmaSandbox>(SANDBOXES)
+        .collection::<AssistantCmaSandbox>(SANDBOXES)
         .find_one(doc! {"user_id":&a.f.owner})
         .await
         .unwrap()
@@ -1648,14 +1648,16 @@ async fn generic_cma_retirement_preserves_original_key_for_management_retry() {
     human.auth_method = crate::mw::auth::AuthMethod::AccessToken;
     let mut headers = HeaderMap::new();
     headers.insert("idempotency-key", "new-dialog-candidate".parse().unwrap());
-    let (_, Json(pending)) = crate::handlers::nyxbot_cma_sandboxes::retire(
+    let (_, Json(pending)) = crate::handlers::assistant_cma_sandboxes::retire(
         State(a.f.state.clone()),
         human,
         Path(parent.id.clone()),
         headers,
-        Json(crate::handlers::nyxbot_cma_sandboxes::GenerationRequest {
-            generation: parent.generation,
-        }),
+        Json(
+            crate::handlers::assistant_cma_sandboxes::GenerationRequest {
+                generation: parent.generation,
+            },
+        ),
     )
     .await
     .unwrap();
@@ -1688,14 +1690,14 @@ async fn recover_lost_creation(
     auth: Option<AuthUser>,
 ) -> AppResult<(
     StatusCode,
-    Json<crate::services::nyxbot_cma_sandbox_service::SandboxCommandDto>,
+    Json<crate::services::assistant_cma_sandbox_service::SandboxCommandDto>,
 )> {
-    use crate::handlers::nyxbot_cma_sandboxes as management;
+    use crate::handlers::assistant_cma_sandboxes as management;
     let parent =
         a.f.state
             .db
-            .collection::<crate::models::nyxbot_cma_sandbox::NyxbotCmaSandbox>(
-                crate::models::nyxbot_cma_sandbox::COLLECTION_NAME,
+            .collection::<crate::models::assistant_cma_sandbox::AssistantCmaSandbox>(
+                crate::models::assistant_cma_sandbox::COLLECTION_NAME,
             )
             .find_one(doc! {"user_id":&a.f.owner})
             .await
@@ -1720,8 +1722,8 @@ async fn recover_lost_creation(
 #[tokio::test]
 async fn explicit_cma_creation_recovery_survives_deleted_chat_and_replays_exact_request() {
     use crate::models::{
-        nyxbot_cma_creation::{COLLECTION_NAME as CREATIONS, NyxbotCmaCreation},
-        nyxbot_cma_sandbox::COLLECTION_NAME as SANDBOXES,
+        assistant_cma_creation::{AssistantCmaCreation, COLLECTION_NAME as CREATIONS},
+        assistant_cma_sandbox::COLLECTION_NAME as SANDBOXES,
     };
     use wiremock::{
         Mock, ResponseTemplate,
@@ -1731,7 +1733,7 @@ async fn explicit_cma_creation_recovery_survives_deleted_chat_and_replays_exact_
         let (a, provider, original) = lost_creation_fixture(endpoint).await;
         let db = &a.f.state.db;
         let creation = db
-            .collection::<NyxbotCmaCreation>(CREATIONS)
+            .collection::<AssistantCmaCreation>(CREATIONS)
             .find_one(doc! {"user_id":&a.f.owner})
             .await
             .unwrap()
@@ -1746,14 +1748,14 @@ async fn explicit_cma_creation_recovery_survives_deleted_chat_and_replays_exact_
         // Neither management GET may replay a creation, even after chat deletion.
         let mut human = crate::test_utils::test_auth_user(&a.f.owner);
         human.auth_method = crate::mw::auth::AuthMethod::AccessToken;
-        let _ = crate::handlers::nyxbot_cma_sandboxes::list(
+        let _ = crate::handlers::assistant_cma_sandboxes::list(
             State(a.f.state.clone()),
             human.clone(),
             Query(Default::default()),
         )
         .await
         .unwrap();
-        let _ = crate::handlers::nyxbot_cma_sandboxes::detail(
+        let _ = crate::handlers::assistant_cma_sandboxes::detail(
             State(a.f.state.clone()),
             human,
             Path(creation.sandbox_ref_id.clone()),
@@ -1781,7 +1783,7 @@ async fn explicit_cma_creation_recovery_survives_deleted_chat_and_replays_exact_
 
         // An uncertain explicit replay must retain the same unknown occupied slot.
         assert!(recover_lost_creation(&a, generation, None).await.is_err());
-        let parent = crate::services::nyxbot_cma_sandbox_service::get_owned(
+        let parent = crate::services::assistant_cma_sandbox_service::get_owned(
             db,
             &a.f.owner,
             &creation.sandbox_ref_id,
@@ -1847,7 +1849,7 @@ async fn explicit_cma_creation_recovery_survives_deleted_chat_and_replays_exact_
         assert!(!result.pending && result.sandbox.occupies_account_slot);
         assert_eq!(result.sandbox.cma_sandbox_id.as_deref(), Some("sbx_coffee"));
         let recorded = db
-            .collection::<NyxbotCmaCreation>(CREATIONS)
+            .collection::<AssistantCmaCreation>(CREATIONS)
             .find_one(doc! {"_id":&creation.id})
             .await
             .unwrap()
@@ -1889,8 +1891,8 @@ async fn explicit_cma_creation_recovery_rejects_invalid_authority_and_material_w
     use crate::{
         crypto::aes::RecordContext,
         models::{
-            nyxbot_cma_creation::{COLLECTION_NAME as CREATIONS, NyxbotCmaCreation},
-            nyxbot_cma_sandbox::COLLECTION_NAME as SANDBOXES,
+            assistant_cma_creation::{AssistantCmaCreation, COLLECTION_NAME as CREATIONS},
+            assistant_cma_sandbox::COLLECTION_NAME as SANDBOXES,
         },
     };
     for invalid in [
@@ -1905,7 +1907,7 @@ async fn explicit_cma_creation_recovery_rejects_invalid_authority_and_material_w
         let (a, provider, _) = lost_creation_fixture("/api/v1/sandboxes").await;
         let db = &a.f.state.db;
         let creation = db
-            .collection::<NyxbotCmaCreation>(CREATIONS)
+            .collection::<AssistantCmaCreation>(CREATIONS)
             .find_one(doc! {"user_id":&a.f.owner})
             .await
             .unwrap()
@@ -1977,7 +1979,7 @@ async fn explicit_cma_creation_recovery_rejects_invalid_authority_and_material_w
             provider.received_requests().await.unwrap().is_empty(),
             "{invalid}"
         );
-        let parent = crate::services::nyxbot_cma_sandbox_service::get_owned(
+        let parent = crate::services::assistant_cma_sandbox_service::get_owned(
             db,
             &a.f.owner,
             &creation.sandbox_ref_id,
@@ -1994,12 +1996,14 @@ async fn explicit_cma_creation_recovery_rejects_invalid_authority_and_material_w
 
 #[tokio::test]
 async fn explicit_cma_creation_recovery_does_not_reacquire_a_confirmed_absence() {
-    use crate::models::nyxbot_cma_creation::{COLLECTION_NAME as CREATIONS, NyxbotCmaCreation};
+    use crate::models::assistant_cma_creation::{
+        AssistantCmaCreation, COLLECTION_NAME as CREATIONS,
+    };
     use crate::services::{catalog_service, proxy_service, service_dispatch_registry as registry};
     let (a, provider, raw) = lost_creation_fixture("/api/v1/sandboxes").await;
     let db = &a.f.state.db;
     let creation = db
-        .collection::<NyxbotCmaCreation>(CREATIONS)
+        .collection::<AssistantCmaCreation>(CREATIONS)
         .find_one(doc! {"user_id":&a.f.owner})
         .await
         .unwrap()
@@ -2077,7 +2081,7 @@ async fn explicit_cma_creation_recovery_does_not_reacquire_a_confirmed_absence()
     )
     .await;
     assert!(replay.is_err());
-    let parent = crate::services::nyxbot_cma_sandbox_service::get_owned(
+    let parent = crate::services::assistant_cma_sandbox_service::get_owned(
         db,
         &a.f.owner,
         &creation.sandbox_ref_id,
@@ -2087,7 +2091,7 @@ async fn explicit_cma_creation_recovery_does_not_reacquire_a_confirmed_absence()
     assert!(!parent.occupies_account_slot);
     assert_eq!(parent.generation, creation.sandbox_generation);
     let unchanged = db
-        .collection::<NyxbotCmaCreation>(CREATIONS)
+        .collection::<AssistantCmaCreation>(CREATIONS)
         .find_one(doc! {"_id":&creation.id})
         .await
         .unwrap()
@@ -2103,7 +2107,7 @@ async fn explicit_cma_creation_recovery_does_not_reacquire_a_confirmed_absence()
 
 #[tokio::test]
 async fn cma_watch_observation_survives_flag_disable_without_widening_authority() {
-    use crate::services::{feature_flag_service as flags, nyxbot_cma_tools as cma};
+    use crate::services::{assistant_cma_tools as cma, feature_flag_service as flags};
     let a = cma_existing_agent_fixture().await;
     let db = &a.f.state.db;
     let target = flags::FlagTarget::User(a.f.owner.clone());
@@ -2496,7 +2500,7 @@ async fn cma_submission_tracks_status_after_turn_settlement_and_projects_only_me
     );
     assert!(finished.cma.as_ref().unwrap().agent_ref_id.is_some());
     assert_eq!(
-        db.collection::<bson::Document>(crate::models::nyxbot_cma_creation::COLLECTION_NAME)
+        db.collection::<bson::Document>(crate::models::assistant_cma_creation::COLLECTION_NAME)
             .count_documents(doc! {
                 "user_id":&a.f.owner,"operation_id":"lifecycle-1",
                 "submission_state":"confirmed","cma_agent_id":"agt_coffee",

@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
-import type { CmaTranscriptTurn } from "@/schemas/nyxbot-cma-agent";
+import type { CmaTranscriptTurn } from "@/schemas/assistant-cma-agent";
 import { AssistantCmaAgentPage } from "./assistant-cma-agent";
 const mocks = vi.hoisted(() => ({
   response: undefined as string | undefined,
@@ -44,7 +44,7 @@ vi.mock("@tanstack/react-router", () => ({
 vi.mock("@/hooks/use-feature-flag", () => ({
   useFeature: () => mocks.enabled,
 }));
-vi.mock("@/hooks/use-nyxbot-cma-agents", () => ({
+vi.mock("@/hooks/use-assistant-cma-agents", () => ({
   useCmaAgent: mocks.agent,
   useCmaResponse: mocks.task,
   useCmaTranscript: mocks.history,

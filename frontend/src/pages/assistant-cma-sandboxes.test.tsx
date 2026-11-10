@@ -6,7 +6,7 @@ import {
   within,
 } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
-import type { CmaSandbox } from "@/schemas/nyxbot-cma-sandbox";
+import type { CmaSandbox } from "@/schemas/assistant-cma-sandbox";
 import {
   AssistantCmaSandboxesPage,
   CmaSandboxCard,
@@ -41,7 +41,7 @@ vi.mock("@tanstack/react-router", () => ({
     </a>
   ),
 }));
-vi.mock("@/hooks/use-nyxbot-cma-sandboxes", () => ({
+vi.mock("@/hooks/use-assistant-cma-sandboxes", () => ({
   useCmaSandboxes: mocks.list,
   useRenameCmaSandbox: () => ({ mutateAsync: mocks.rename }),
   useCmaSandboxCommand: () => ({ mutateAsync: mocks.command }),

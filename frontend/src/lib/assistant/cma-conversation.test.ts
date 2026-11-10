@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import type { CmaTranscriptTurn } from "@/schemas/nyxbot-cma-agent";
+import type { CmaTranscriptTurn } from "@/schemas/assistant-cma-agent";
 import type { CmaDisplayEvent } from "./cma-events";
 import {
   cmaTurnEvents,

@@ -17,15 +17,15 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use super::nyxbot_cma_gateway::{
+use super::assistant_cma_gateway::{
     CmaEventSnapshot, CmaGateway, CmaGatewayError, CmaSandbox, validate_idempotency_key,
     validate_remote_id,
 };
 use crate::{
     crypto::aes::{EncryptionKeys, RecordContext},
     errors::{AppError, AppResult},
-    models::nyxbot_cma_sandbox::{
-        COLLECTION_NAME, NyxbotCmaSandbox, SandboxAdmissionState, SandboxCapacitySource,
+    models::assistant_cma_sandbox::{
+        AssistantCmaSandbox, COLLECTION_NAME, SandboxAdmissionState, SandboxCapacitySource,
         SandboxObservationState,
     },
 };
@@ -34,9 +34,6 @@ pub const MAX_RECOVERY_BYTES: usize = 64 * 1024;
 pub const MAX_LOCAL_PAGE_SIZE: i64 = 100;
 /// Written only by the local creation admission path, never by discovery.
 pub const NYXID_CREATED_SOURCE: &str = "nyxbot";
-pub const OCCUPIED_SLOT_INDEX: &str = "cma_sandbox_one_occupied_owner";
-pub const CREATION_KEY_INDEX: &str = "cma_sandbox_owner_creation_key";
-pub const REMOTE_REFERENCE_INDEX: &str = "cma_sandbox_owner_service_remote";
 
 /// Recovery bytes deliberately have no Debug or Serialize implementation.
 pub struct NormalizedCreationRequest {
@@ -81,11 +78,11 @@ async fn release_external_slots(db: &Database, owner_id: &str) -> AppResult<()> 
 pub(super) async fn active_created(
     db: &Database,
     owner_id: &str,
-) -> AppResult<Vec<NyxbotCmaSandbox>> {
+) -> AppResult<Vec<AssistantCmaSandbox>> {
     let mut filter = created_filter(owner_id);
     filter.insert("admission_state", doc! {"$ne": "retired"});
-    let rows: Vec<NyxbotCmaSandbox> = db
-        .collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+    let rows: Vec<AssistantCmaSandbox> = db
+        .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
         .find(filter)
         .limit(MAX_LOCAL_PAGE_SIZE + 1)
         .await?
@@ -188,7 +185,6 @@ pub fn indexes() -> Vec<IndexModel> {
             .keys(doc! {"user_id": 1})
             .options(
                 IndexOptions::builder()
-                    .name(OCCUPIED_SLOT_INDEX.to_owned())
                     .unique(true)
                     .partial_filter_expression(doc! {"occupies_account_slot": true})
                     .build(),
@@ -198,7 +194,6 @@ pub fn indexes() -> Vec<IndexModel> {
             .keys(doc! {"user_id": 1, "idempotency_key": 1})
             .options(
                 IndexOptions::builder()
-                    .name(CREATION_KEY_INDEX.to_owned())
                     .unique(true)
                     .partial_filter_expression(doc! {"idempotency_key": {"$type": "string"}})
                     .build(),
@@ -208,7 +203,6 @@ pub fn indexes() -> Vec<IndexModel> {
             .keys(doc! {"user_id": 1, "cma_service_id": 1, "cma_sandbox_id": 1})
             .options(
                 IndexOptions::builder()
-                    .name(REMOTE_REFERENCE_INDEX.to_owned())
                     .unique(true)
                     .partial_filter_expression(doc! {"cma_sandbox_id": {"$type": "string"}})
                     .build(),
@@ -237,18 +231,18 @@ async fn creation_by_key(
     db: &Database,
     owner_id: &str,
     key: &str,
-) -> AppResult<Option<NyxbotCmaSandbox>> {
+) -> AppResult<Option<AssistantCmaSandbox>> {
     Ok(db
-        .collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+        .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
         .find_one(doc! {"user_id": owner_id, "idempotency_key": key})
         .await?)
 }
 
 fn same_creation(
-    row: NyxbotCmaSandbox,
+    row: AssistantCmaSandbox,
     service_id: &str,
     hash: &str,
-) -> AppResult<NyxbotCmaSandbox> {
+) -> AppResult<AssistantCmaSandbox> {
     if row.cma_service_id != service_id || row.request_hash.as_deref() != Some(hash) {
         return Err(AppError::Conflict(
             "cma_creation_idempotency_conflict".into(),
@@ -268,7 +262,7 @@ pub async fn begin_creation(
     owner_id: &str,
     idempotency_key: &str,
     request: &[u8],
-) -> AppResult<NyxbotCmaSandbox> {
+) -> AppResult<AssistantCmaSandbox> {
     validate_idempotency_key(idempotency_key)?;
     let normalized = prepare_creation_request(request)?;
     let parsed: Value = serde_json::from_slice(request).map_err(|_| invalid_request())?;
@@ -291,7 +285,7 @@ pub async fn begin_creation(
         None => None,
     };
     if let Some(row) = db
-        .collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+        .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
         .find_one(doc! {"user_id": owner_id, "occupies_account_slot": true})
         .await?
     {
@@ -301,7 +295,7 @@ pub async fn begin_creation(
         return Err(occupied());
     }
     let previous = db
-        .collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+        .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
         .find_one(doc! {"user_id": owner_id})
         .sort(doc! {"generation": -1})
         .await?;
@@ -318,7 +312,7 @@ pub async fn begin_creation(
         .encrypt_record(normalized.bytes.as_slice(), &context)
         .await?;
     let now = Utc::now();
-    let row = NyxbotCmaSandbox {
+    let row = AssistantCmaSandbox {
         id,
         user_id: owner_id.to_owned(),
         cma_service_id: service_id.clone(),
@@ -370,7 +364,7 @@ pub async fn begin_creation(
                 Box::pin(async move {
                     super::erasure_admission::fence_in_session(db, owner, tx).await?;
                     Ok(db
-                        .collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+                        .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
                         .find_one_and_update(filter.clone(), doc! {"$set":replacement})
                         .return_document(ReturnDocument::After)
                         .session(tx)
@@ -442,16 +436,16 @@ pub(super) async fn recover_creation_request(
     Ok(bytes)
 }
 
-pub async fn get_owned(db: &Database, owner_id: &str, id: &str) -> AppResult<NyxbotCmaSandbox> {
+pub async fn get_owned(db: &Database, owner_id: &str, id: &str) -> AppResult<AssistantCmaSandbox> {
     let mut filter = created_filter(owner_id);
     filter.insert("_id", id);
-    db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+    db.collection::<AssistantCmaSandbox>(COLLECTION_NAME)
         .find_one(filter)
         .await?
         .ok_or_else(|| AppError::NotFound("Sandbox not found".into()))
 }
 
-pub fn require_generation(row: &NyxbotCmaSandbox, expected: i64) -> AppResult<()> {
+pub fn require_generation(row: &AssistantCmaSandbox, expected: i64) -> AppResult<()> {
     if expected <= 0 || row.generation != expected {
         return Err(stale());
     }
@@ -472,21 +466,21 @@ fn verify_remote_owner(sandbox: &CmaSandbox, owner_id: &str) -> AppResult<()> {
     Ok(())
 }
 
-async fn verify_deployment(gateway: &dyn CmaGateway, row: &NyxbotCmaSandbox) -> AppResult<()> {
+async fn verify_deployment(gateway: &dyn CmaGateway, row: &AssistantCmaSandbox) -> AppResult<()> {
     if gateway.service_id(&row.user_id).await? != row.cma_service_id {
         return Err(AppError::Conflict("cma_deployment_changed".into()));
     }
     Ok(())
 }
 
-fn has_confirmed_capacity(row: &NyxbotCmaSandbox) -> bool {
+fn has_confirmed_capacity(row: &AssistantCmaSandbox) -> bool {
     row.capacity_source.is_some()
         && row.cpu_millis.is_some_and(|value| value > 0)
         && row.memory_mib.is_some_and(|value| value > 0)
 }
 
 fn apply_observation(
-    row: &mut NyxbotCmaSandbox,
+    row: &mut AssistantCmaSandbox,
     observation: &CmaSandbox,
     expected_generation: i64,
     at: DateTime<Utc>,
@@ -548,13 +542,13 @@ fn apply_observation(
     Ok(())
 }
 
-fn binding_filter(row: &NyxbotCmaSandbox) -> Document {
+fn binding_filter(row: &AssistantCmaSandbox) -> Document {
     doc! {"_id": &row.id, "user_id": &row.user_id, "cma_service_id": &row.cma_service_id,
     "source": &row.source, "creation_ref": &row.creation_ref, "generation": row.generation,
     "cma_sandbox_id": &row.cma_sandbox_id}
 }
 
-pub(super) fn observation_filter(row: &NyxbotCmaSandbox) -> Document {
+pub(super) fn observation_filter(row: &AssistantCmaSandbox) -> Document {
     let mut filter = binding_filter(row);
     filter.extend(doc! {"occupies_account_slot": row.occupies_account_slot, "admission_state": row.admission_state.as_str(), "retire_requested_at": row.retire_requested_at.map(bson::DateTime::from_chrono), "last_observed": row.last_observed.map(bson::DateTime::from_chrono)});
     filter.insert(
@@ -570,10 +564,10 @@ pub(super) fn observation_filter(row: &NyxbotCmaSandbox) -> Document {
 
 async fn persist_observation(
     db: &Database,
-    before: &NyxbotCmaSandbox,
-    after: &NyxbotCmaSandbox,
-) -> AppResult<NyxbotCmaSandbox> {
-    let collection = db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME);
+    before: &AssistantCmaSandbox,
+    after: &AssistantCmaSandbox,
+) -> AppResult<AssistantCmaSandbox> {
+    let collection = db.collection::<AssistantCmaSandbox>(COLLECTION_NAME);
     let mut expected = before.clone();
     let mut changed = after.clone();
     // Network I/O is not repeated. Reconcile only local observation/registration
@@ -619,7 +613,7 @@ async fn persist_observation(
     Err(CmaGatewayError::Unavailable.into())
 }
 
-pub(super) fn observation_set(after: &NyxbotCmaSandbox) -> AppResult<Document> {
+pub(super) fn observation_set(after: &AssistantCmaSandbox) -> AppResult<Document> {
     let document = bson::to_document(after)
         .map_err(|_| AppError::Internal("Invalid Sandbox observation".into()))?;
     let fields = [
@@ -659,7 +653,7 @@ pub async fn observe(
     owner_id: &str,
     id: &str,
     generation: i64,
-) -> AppResult<NyxbotCmaSandbox> {
+) -> AppResult<AssistantCmaSandbox> {
     let row = get_owned(db, owner_id, id).await?;
     require_generation(&row, generation)?;
     verify_deployment(gateway, &row).await?;
@@ -694,7 +688,7 @@ pub async fn associate_created(
     id: &str,
     generation: i64,
     remote_id: &str,
-) -> AppResult<NyxbotCmaSandbox> {
+) -> AppResult<AssistantCmaSandbox> {
     let row = get_owned(db, owner_id, id).await?;
     require_generation(&row, generation)?;
     verify_deployment(gateway, &row).await?;
@@ -714,7 +708,7 @@ pub async fn associate_created(
     super::transaction_service::run_db_only(db, &context, |tx, (db, before, observation)| {
         Box::pin(async move {
             super::erasure_admission::fence_in_session(db,&before.user_id,tx).await?;
-            let collection = db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME);
+            let collection = db.collection::<AssistantCmaSandbox>(COLLECTION_NAME);
             let mut identity = binding_filter(before);
             identity.insert("cma_sandbox_id", doc! {"$in": [bson::to_bson(&before.cma_sandbox_id).map_err(|_| invalid_request())?, bson::Bson::String(observation.id.clone())]});
             let current = collection.find_one(identity).session(&mut *tx).await?.ok_or_else(stale)?;
@@ -746,7 +740,7 @@ pub async fn associate_created(
                 }
                 // Agent refs use the remote parent identity, so only its local
                 // generation changes when the provisional reference is folded.
-                db.collection::<Document>(crate::models::nyxbot_cma_agent::COLLECTION_NAME)
+                db.collection::<Document>(crate::models::assistant_cma_agent::COLLECTION_NAME)
                     .update_many(doc! {"user_id":&current.user_id,"cma_service_id":&current.cma_service_id,"cma_sandbox_id":&observation.id,"sandbox_generation":duplicate.generation}, doc! {"$set":{"sandbox_generation":current.generation}})
                     .session(&mut *tx).await?;
             }
@@ -770,7 +764,7 @@ async fn mark_submission(
     generation: i64,
     operation_id: Option<&str>,
     unknown: bool,
-) -> AppResult<NyxbotCmaSandbox> {
+) -> AppResult<AssistantCmaSandbox> {
     if let Some(operation_id) = operation_id {
         validate_remote_id(operation_id)?;
     }
@@ -784,7 +778,7 @@ async fn mark_submission(
         set.insert("operation_id", operation_id);
     }
     super::transaction_service::durable_database(db)
-        .collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+        .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
         .find_one_and_update(observation_filter(&row), doc! {"$set": set})
         .return_document(ReturnDocument::After)
         .await?
@@ -792,7 +786,7 @@ async fn mark_submission(
 }
 
 pub(super) fn apply_no_resource_confirmation(
-    row: &mut NyxbotCmaSandbox,
+    row: &mut AssistantCmaSandbox,
     generation: i64,
     key: &str,
     request_hash: &str,
@@ -825,7 +819,7 @@ async fn confirm_no_resource(
     generation: i64,
     key: &str,
     request_hash: &str,
-) -> AppResult<NyxbotCmaSandbox> {
+) -> AppResult<AssistantCmaSandbox> {
     let row = get_owned(db, owner_id, id).await?;
     let mut changed = row.clone();
     apply_no_resource_confirmation(&mut changed, generation, key, request_hash, Utc::now())?;
@@ -877,8 +871,8 @@ pub struct SandboxDto {
     pub billing: SandboxBillingDto,
 }
 
-impl From<&NyxbotCmaSandbox> for SandboxDto {
-    fn from(row: &NyxbotCmaSandbox) -> Self {
+impl From<&AssistantCmaSandbox> for SandboxDto {
+    fn from(row: &AssistantCmaSandbox) -> Self {
         Self {
             id: row.id.clone(),
             label: row.label.clone(),
@@ -939,8 +933,8 @@ pub async fn list(
         Uuid::parse_str(cursor).map_err(|_| invalid_request())?;
         filter.insert("_id", doc! {"$gt": cursor});
     }
-    let mut rows: Vec<NyxbotCmaSandbox> = db
-        .collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+    let mut rows: Vec<AssistantCmaSandbox> = db
+        .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
         .find(filter)
         .sort(doc! {"_id": 1})
         .limit(MAX_LOCAL_PAGE_SIZE + 1)
@@ -998,7 +992,7 @@ pub async fn refresh_owner(
     let db = super::transaction_service::durable_database(db);
     ensure_indexes(&db).await?;
     release_external_slots(&db, owner_id).await?;
-    super::nyxbot_cma_admission::recover_owner(&db, gateway, owner_id).await?;
+    super::assistant_cma_admission::recover_owner(&db, gateway, owner_id).await?;
     let mut observed = HashSet::new();
     for row in active_created(&db, owner_id).await? {
         if row.cma_sandbox_id.is_some() {
@@ -1047,7 +1041,7 @@ pub async fn detail_live(
 ) -> AppResult<SandboxDto> {
     // Known lifecycle receipts remain recoverable without their original chat
     // or watch; refresh only observes them and never resubmits creation.
-    super::nyxbot_cma_admission::recover_owner(db, gateway, owner_id).await?;
+    super::assistant_cma_admission::recover_owner(db, gateway, owner_id).await?;
     let row = get_owned(db, owner_id, id).await?;
     if row.cma_sandbox_id.is_none() {
         return Ok(unknown_projection(SandboxDto::from(&row)));
@@ -1077,7 +1071,7 @@ pub async fn update_label(
     let row = get_owned(db, owner_id, id).await?;
     require_generation(&row, generation)?;
     let changed = db
-        .collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+        .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
         .find_one_and_update(
             doc! {"_id": id, "user_id": owner_id, "generation": generation},
             doc! {"$set": {"label": label, "updated_at": bson::DateTime::now()}},
@@ -1095,14 +1089,14 @@ pub async fn resolve_created(
     gateway: &dyn CmaGateway,
     owner_id: &str,
     remote_id: &str,
-) -> AppResult<NyxbotCmaSandbox> {
+) -> AppResult<AssistantCmaSandbox> {
     validate_remote_id(remote_id)?;
     let service_id = gateway.service_id(owner_id).await?;
     let mut filter = created_filter(owner_id);
     filter.insert("cma_service_id", service_id);
     filter.insert("cma_sandbox_id", remote_id);
     let row = db
-        .collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+        .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
         .find_one(filter)
         .await?
         .ok_or_else(|| AppError::NotFound("Sandbox was not created through NyxID".into()))?;
@@ -1124,7 +1118,7 @@ pub enum SandboxCommand {
 
 /// Shared by management and the final dispatch guard. A keyless, already
 /// pending intent cannot safely be replaced with a different request.
-pub(super) fn retirement_intent_set(row: &NyxbotCmaSandbox, key: &str) -> AppResult<Document> {
+pub(super) fn retirement_intent_set(row: &AssistantCmaSandbox, key: &str) -> AppResult<Document> {
     validate_idempotency_key(key)?;
     match row.retirement_idempotency_key.as_deref() {
         Some(original) if original != key => {
@@ -1179,7 +1173,7 @@ pub async fn command(
     if command == SandboxCommand::Retire && row.retire_requested_at.is_none() {
         let mut filter = binding_filter(&row);
         filter.extend(doc! {"occupies_account_slot": true, "retire_requested_at": null});
-        let collection = db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME);
+        let collection = db.collection::<AssistantCmaSandbox>(COLLECTION_NAME);
         row = match collection
             .find_one_and_update(
                 filter,
@@ -1289,7 +1283,7 @@ pub async fn events(
 
 #[cfg(test)]
 mod tests {
-    use super::super::nyxbot_cma_gateway::*;
+    use super::super::assistant_cma_gateway::*;
     use super::*;
     use serde_json::json;
     use std::sync::{
@@ -1576,7 +1570,7 @@ mod tests {
         ensure_indexes(&db).await.unwrap();
         let gateway = FakeGateway::new();
         let row = fixture_row();
-        db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+        db.collection::<AssistantCmaSandbox>(COLLECTION_NAME)
             .insert_one(&row)
             .await
             .unwrap();
@@ -1660,7 +1654,7 @@ mod tests {
         // the durable creation identity without becoming an extra allocation.
         let mut legacy = external_row("conflict", false, "remote-sandbox");
         legacy.generation = row.generation + 1;
-        db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+        db.collection::<AssistantCmaSandbox>(COLLECTION_NAME)
             .insert_one(&legacy)
             .await
             .unwrap();
@@ -1695,7 +1689,7 @@ mod tests {
         db.drop().await.unwrap();
     }
 
-    fn external_row(source: &str, occupied: bool, remote_id: &str) -> NyxbotCmaSandbox {
+    fn external_row(source: &str, occupied: bool, remote_id: &str) -> AssistantCmaSandbox {
         let mut row = fixture_row();
         row.source = source.into();
         row.cma_sandbox_id = Some(remote_id.into());
@@ -1767,7 +1761,7 @@ mod tests {
             ("claimed", false, "external-three"),
         ] {
             let row = external_row(source, occupied, remote_id);
-            db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+            db.collection::<AssistantCmaSandbox>(COLLECTION_NAME)
                 .insert_one(&row)
                 .await
                 .unwrap();
@@ -1796,7 +1790,7 @@ mod tests {
             );
         }
         let external_agent_id = Uuid::new_v4().to_string();
-        db.collection::<Document>(crate::models::nyxbot_cma_agent::COLLECTION_NAME)
+        db.collection::<Document>(crate::models::assistant_cma_agent::COLLECTION_NAME)
             .insert_one(doc! {
                 "_id": &external_agent_id, "user_id": "owner",
                 "cma_service_id": "cma-service", "cma_agent_id": "external-agent",
@@ -1806,7 +1800,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            super::super::nyxbot_cma_agent_service::require_bound(
+            super::super::assistant_cma_agent_service::require_bound(
                 &db,
                 &gateway,
                 "owner",
@@ -1823,7 +1817,7 @@ mod tests {
             .filter_map(|parent| parent.cma_sandbox_id.as_ref())
             .collect();
         assert!(
-            db.collection::<Document>(crate::models::nyxbot_cma_agent::COLLECTION_NAME)
+            db.collection::<Document>(crate::models::assistant_cma_agent::COLLECTION_NAME)
                 .find_one(
                     doc! {"user_id":"owner","deleted_at":null,"cma_sandbox_id":{"$in":parent_ids}}
                 )
@@ -1842,7 +1836,7 @@ mod tests {
         assert!(created.occupies_account_slot);
         for row in &refs {
             let stored = db
-                .collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+                .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
                 .find_one(doc! {"_id":&row.id})
                 .await
                 .unwrap()
@@ -1870,7 +1864,7 @@ mod tests {
         ensure_indexes(&db).await.unwrap();
         let gateway = FakeGateway::new();
         let row = fixture_row();
-        db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+        db.collection::<AssistantCmaSandbox>(COLLECTION_NAME)
             .insert_one(&row)
             .await
             .unwrap();
@@ -1912,7 +1906,7 @@ mod tests {
             .await
             .unwrap();
         let external = external_row("conflict", false, "external");
-        db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+        db.collection::<AssistantCmaSandbox>(COLLECTION_NAME)
             .insert_one(&external)
             .await
             .unwrap();
@@ -1941,21 +1935,22 @@ mod tests {
         let gateway = FakeGateway::new();
         let parent = fixture_row();
         assert!(parent.retire_requested_at.is_none());
-        db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+        db.collection::<AssistantCmaSandbox>(COLLECTION_NAME)
             .insert_one(&parent)
             .await
             .unwrap();
-        let agent: crate::models::nyxbot_cma_agent::NyxbotCmaAgent = bson::from_document(doc! {
-            "_id":Uuid::new_v4().to_string(), "user_id":"owner", "cma_service_id":"cma-service",
-            "cma_agent_id":"managed-agent", "cma_sandbox_id":"remote-sandbox",
-            "sandbox_generation":parent.generation,
-            "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now(),
-        })
-        .unwrap();
+        let agent: crate::models::assistant_cma_agent::AssistantCmaAgent =
+            bson::from_document(doc! {
+                "_id":Uuid::new_v4().to_string(), "user_id":"owner", "cma_service_id":"cma-service",
+                "cma_agent_id":"managed-agent", "cma_sandbox_id":"remote-sandbox",
+                "sandbox_generation":parent.generation,
+                "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now(),
+            })
+            .unwrap();
         let mut stale_agent = agent.clone();
         stale_agent.sandbox_generation = Some(parent.generation + 1);
         assert!(
-            super::super::nyxbot_cma_tools::write_attachment_to_created_parent(
+            super::super::assistant_cma_tools::write_attachment_to_created_parent(
                 &db,
                 &gateway,
                 "owner",
@@ -1966,7 +1961,7 @@ mod tests {
             .await
             .is_err()
         );
-        let saved = super::super::nyxbot_cma_tools::write_attachment_to_created_parent(
+        let saved = super::super::assistant_cma_tools::write_attachment_to_created_parent(
             &db,
             &gateway,
             "owner",
@@ -1979,7 +1974,7 @@ mod tests {
         assert_eq!(saved.size_bytes, 4);
         gateway.current.lock().unwrap().state = SandboxObservationState::Retired;
         assert!(
-            super::super::nyxbot_cma_tools::write_attachment_to_created_parent(
+            super::super::assistant_cma_tools::write_attachment_to_created_parent(
                 &db,
                 &gateway,
                 "owner",
@@ -2033,7 +2028,7 @@ mod tests {
         row.last_observed = Some(Utc::now());
         let mut document = bson::to_document(&row).unwrap();
         document.insert("capacity_source", "runtime_allocation");
-        let stored: NyxbotCmaSandbox = bson::from_document(document).unwrap();
+        let stored: AssistantCmaSandbox = bson::from_document(document).unwrap();
         let projection = unknown_projection(SandboxDto::from(&stored));
         let value = serde_json::to_value(projection).unwrap();
         assert_eq!(value["capacity"]["source"], "runtime_allocation");
@@ -2079,7 +2074,7 @@ mod tests {
             SandboxObservationState::Retired,
         ] {
             apply_observation(&mut row, &remote_sandbox(state), generation, Utc::now()).unwrap();
-            let stored: NyxbotCmaSandbox =
+            let stored: AssistantCmaSandbox =
                 bson::from_document(bson::to_document(&row).unwrap()).unwrap();
             assert_eq!(
                 (stored.cpu_millis, stored.memory_mib, stored.capacity_source),
@@ -2097,7 +2092,7 @@ mod tests {
         }
         let mut legacy = bson::to_document(&row).unwrap();
         legacy.remove("capacity_source");
-        let old: NyxbotCmaSandbox = bson::from_document(legacy).unwrap();
+        let old: AssistantCmaSandbox = bson::from_document(legacy).unwrap();
         assert_eq!(old.capacity_source, None);
     }
 
@@ -2257,7 +2252,7 @@ mod tests {
             Utc::now(),
         )
         .unwrap();
-        let collection = db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME);
+        let collection = db.collection::<AssistantCmaSandbox>(COLLECTION_NAME);
         collection.insert_one(&before).await.unwrap();
         collection.update_one(doc! {"_id": &before.id}, doc! {"$set": {
             "last_observed": bson::DateTime::now(), "observation_state": "paused",
@@ -2287,7 +2282,7 @@ mod tests {
             Utc::now(),
         )
         .unwrap();
-        let collection = db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME);
+        let collection = db.collection::<AssistantCmaSandbox>(COLLECTION_NAME);
         collection.insert_one(&before).await.unwrap();
         collection
             .update_one(
@@ -2322,7 +2317,7 @@ mod tests {
             Utc::now(),
         )
         .unwrap();
-        let collection = db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME);
+        let collection = db.collection::<AssistantCmaSandbox>(COLLECTION_NAME);
         collection.insert_one(&before).await.unwrap();
         collection
             .update_one(
@@ -2371,7 +2366,7 @@ mod tests {
             Utc::now(),
         )
         .unwrap();
-        let collection = db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME);
+        let collection = db.collection::<AssistantCmaSandbox>(COLLECTION_NAME);
         for change in [
             doc! {"generation": 2_i64},
             doc! {"cma_sandbox_id": "another-sandbox"},
@@ -2436,7 +2431,7 @@ mod tests {
         ensure_indexes(&db).await.unwrap();
         let gateway = FakeGateway::new();
         let row = fixture_row();
-        db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+        db.collection::<AssistantCmaSandbox>(COLLECTION_NAME)
             .insert_one(&row)
             .await
             .unwrap();
@@ -2536,7 +2531,7 @@ mod tests {
         let gateway = FakeGateway::new();
         gateway.timeout.store(true, Ordering::Relaxed);
         let row = fixture_row();
-        db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+        db.collection::<AssistantCmaSandbox>(COLLECTION_NAME)
             .insert_one(&row)
             .await
             .unwrap();
@@ -2574,7 +2569,7 @@ mod tests {
         other.id = Uuid::new_v4().to_string();
         other.cma_sandbox_id = Some("other-sandbox".into());
         other.generation = 2;
-        db.collection::<NyxbotCmaSandbox>(COLLECTION_NAME)
+        db.collection::<AssistantCmaSandbox>(COLLECTION_NAME)
             .insert_one(&other)
             .await
             .unwrap();
@@ -2593,9 +2588,9 @@ mod tests {
         db.drop().await.unwrap();
     }
 
-    fn fixture_row() -> NyxbotCmaSandbox {
+    fn fixture_row() -> AssistantCmaSandbox {
         let now = Utc::now();
-        NyxbotCmaSandbox {
+        AssistantCmaSandbox {
             id: Uuid::new_v4().to_string(),
             user_id: "owner".into(),
             cma_service_id: "cma-service".into(),

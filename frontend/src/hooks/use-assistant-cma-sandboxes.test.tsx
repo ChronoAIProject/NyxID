@@ -12,7 +12,7 @@ import {
   cmaQueryKeys,
   useCmaSandboxes,
   useCmaSandboxCommand,
-} from "./use-nyxbot-cma-sandboxes";
+} from "./use-assistant-cma-sandboxes";
 
 const transport = vi.fn<typeof fetch>();
 const clients: QueryClient[] = [];

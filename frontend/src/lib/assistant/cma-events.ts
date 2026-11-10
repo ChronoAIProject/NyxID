@@ -2,7 +2,7 @@ import {
   cmaPublicText,
   type CmaTranscriptMessage,
   type CmaResourceEvent,
-} from "@/schemas/nyxbot-cma-agent";
+} from "@/schemas/assistant-cma-agent";
 
 export interface CmaEventScope {
   agentId: string;

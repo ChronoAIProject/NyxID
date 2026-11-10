@@ -33,7 +33,7 @@ import {
   useCmaTranscript,
   useCmaEventSnapshot,
   useCmaEventStream,
-} from "@/hooks/use-nyxbot-cma-agents";
+} from "@/hooks/use-assistant-cma-agents";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { mergeCmaEvents, snapshotCmaEvents } from "@/lib/assistant/cma-events";
 import { linkedCmaTurn } from "@/lib/assistant/cma-conversation";
@@ -116,12 +116,16 @@ export function CmaAgentView({
         </span>
         <div className="min-w-0">
           {!panel && (
-            <p className="mb-1 type-secondary text-text-tertiary">Cloud assistant</p>
+            <p className="mb-1 type-secondary text-text-tertiary">
+              Cloud assistant
+            </p>
           )}
           <Heading
-            className={panel
-              ? "type-dialog-title tracking-tight"
-              : "type-compact-page-title sm:type-page-title tracking-tight"}
+            className={
+              panel
+                ? "type-dialog-title tracking-tight"
+                : "type-compact-page-title sm:type-page-title tracking-tight"
+            }
           >
             {agent.data?.label ?? "Cloud assistant"}
           </Heading>

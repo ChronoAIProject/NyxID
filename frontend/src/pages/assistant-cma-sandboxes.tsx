@@ -34,12 +34,12 @@ import {
   useCmaSandboxCommand,
   useRenameCmaSandbox,
   useRetireCmaSandbox,
-} from "@/hooks/use-nyxbot-cma-sandboxes";
+} from "@/hooks/use-assistant-cma-sandboxes";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import {
   cmaSandboxLabelSchema,
   type CmaSandbox,
-} from "@/schemas/nyxbot-cma-sandbox";
+} from "@/schemas/assistant-cma-sandbox";
 import { cn } from "@/lib/utils";
 
 type Action = "rename" | "pause" | "revive" | "retire" | "recover_creation";

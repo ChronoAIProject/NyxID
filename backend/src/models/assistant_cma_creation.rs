@@ -2,10 +2,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-pub const COLLECTION_NAME: &str = "nyxbot_cma_creations";
+pub const COLLECTION_NAME: &str = "assistant_cma_creations";
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct NyxbotCmaCreation {
+pub struct AssistantCmaCreation {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -43,9 +43,9 @@ pub struct NyxbotCmaCreation {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
 }
-impl std::fmt::Debug for NyxbotCmaCreation {
+impl std::fmt::Debug for AssistantCmaCreation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NyxbotCmaCreation")
+        f.debug_struct("AssistantCmaCreation")
             .field("id", &self.id)
             .field("submission_state", &self.submission_state)
             .finish_non_exhaustive()
@@ -56,7 +56,7 @@ mod tests {
     use super::*;
     #[test]
     fn recovery_material_is_stored_but_never_debugged() {
-        let row = NyxbotCmaCreation {
+        let row = AssistantCmaCreation {
             id: "id".into(),
             user_id: "owner".into(),
             cma_service_id: "service".into(),

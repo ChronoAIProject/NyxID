@@ -19,8 +19,8 @@ use crate::{
     AppState,
     errors::AppError,
     models::{
+        assistant_cma_sandbox::{SandboxCapacitySource, SandboxObservationState},
         downstream_service::DownstreamService,
-        nyxbot_cma_sandbox::{SandboxCapacitySource, SandboxObservationState},
         user::{COLLECTION_NAME as USERS, User},
     },
 };
@@ -456,7 +456,7 @@ impl CatalogCmaGateway {
     pub(super) async fn replay_creation(
         &self,
         keys: &crate::crypto::aes::EncryptionKeys,
-        creation: &crate::models::nyxbot_cma_creation::NyxbotCmaCreation,
+        creation: &crate::models::assistant_cma_creation::AssistantCmaCreation,
         body: &[u8],
     ) -> crate::errors::AppResult<()> {
         use super::{proxy_service, service_dispatch_registry as registry};
@@ -500,8 +500,8 @@ impl CatalogCmaGateway {
                 Ok(vec![
                     ("Idempotency-Key".into(), creation.idempotency_key.clone()),
                     (
-                        super::nyxbot_cma_admission::RECOVERY_SUBMISSION_HEADER.into(),
-                        super::nyxbot_cma_admission::recovery_submission(creation),
+                        super::assistant_cma_admission::RECOVERY_SUBMISSION_HEADER.into(),
+                        super::assistant_cma_admission::recovery_submission(creation),
                     ),
                 ]
                 .into())
@@ -559,8 +559,8 @@ impl CatalogCmaGateway {
         let request = request
             .build()
             .map_err(|_| CmaGatewayError::InvalidRequest)?;
-        super::nyxbot_cma_agent_service::require_enabled(&self.db, owner_id).await?;
-        super::nyxbot_cma_admission::require_recovery_current(&self.db, creation).await?;
+        super::assistant_cma_agent_service::require_enabled(&self.db, owner_id).await?;
+        super::assistant_cma_admission::require_recovery_current(&self.db, creation).await?;
         let guard = registry::verify(Some(&admission), &target, Some(&caller))?
             .ok_or(CmaGatewayError::ConfigurationRequired)?;
         guard.before_send(&request).await?;
@@ -904,7 +904,7 @@ impl CatalogCmaGateway {
                 request.method().as_str(),
                 &format!("/{}", segments.join("/")),
             )?;
-            super::nyxbot_cma_tools::scope(
+            super::assistant_cma_tools::scope(
                 &self.db,
                 chat,
                 &service.id,
@@ -926,7 +926,7 @@ impl CatalogCmaGateway {
             }
             let path = format!("/{}", segments.join("/"));
             authorize_native_route(&service, request.method().as_str(), &path)?;
-            super::nyxbot_cma_tools::watch_scope(
+            super::assistant_cma_tools::watch_scope(
                 &self.db,
                 nodes,
                 watch,

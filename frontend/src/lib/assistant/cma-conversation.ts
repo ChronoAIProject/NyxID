@@ -1,4 +1,4 @@
-import type { CmaTranscriptTurn } from "@/schemas/nyxbot-cma-agent";
+import type { CmaTranscriptTurn } from "@/schemas/assistant-cma-agent";
 import type { CmaDisplayEvent } from "./cma-events";
 
 /** Only an explicit, consistent CMA turn-start binding can locate a response. */
