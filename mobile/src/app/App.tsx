@@ -31,6 +31,7 @@ import {
   ActivityIndicator,
   AppState,
   findNodeHandle,
+  Linking,
   StyleSheet,
   Text,
   View,
@@ -104,6 +105,12 @@ import {
   WorkspaceDrawer,
   type WorkspaceRoute,
 } from "../components/workspace/WorkspaceDrawer";
+import { NOTIFICATIONS } from "../features/notifications/useNotifications";
+import { notificationsApi } from "../lib/api/notificationsApi";
+import {
+  notificationPushSignalFromData,
+  notificationPushSignalFromResponse,
+} from "../lib/notifications/notificationPushSignal";
 import { ChatLayoutProvider } from "../features/display/ChatLayoutContext";
 import { ThemeProvider, useTheme } from "../theme/ThemeContext";
 import {
@@ -147,6 +154,33 @@ function refreshQueryCacheFromPushSignal(signal: PushSyncSignal | null) {
     });
   }
   signalApprovalStateMayHaveChanged();
+}
+
+/** A NyxBot notification push marks its feed stale; the focused bell or
+ * screen refetches, and background arrivals wait for the resume sweep. */
+function refreshNotificationsFromPush(data: unknown) {
+  if (!notificationPushSignalFromData(data)?.kind) return;
+  void queryClient.invalidateQueries({
+    queryKey: NOTIFICATIONS,
+    refetchType:
+      AppState.currentState === "active" && onlineManager.isOnline()
+        ? "active"
+        : "none",
+  });
+}
+
+/** Tapping a push opened its thread; the row it names is read now. A tap
+ * before sign-in simply leaves the row unread until the thread is opened. */
+function markNotificationReadFromTap(notificationId: string) {
+  void notificationsApi
+    .markRead({ ids: [notificationId] })
+    .catch(() => undefined)
+    .finally(() => {
+      void queryClient.invalidateQueries({
+        queryKey: NOTIFICATIONS,
+        refetchType: "active",
+      });
+    });
 }
 
 function getActiveRouteName(
@@ -335,6 +369,7 @@ export default function App() {
         } catch {
           // never break push pipeline on telemetry failure
         }
+        refreshNotificationsFromPush(notification.request.content.data);
       },
     );
 
@@ -347,6 +382,9 @@ export default function App() {
     const handleResponse = (
       response: Notifications.NotificationResponse | null,
     ) => {
+      const notificationId =
+        notificationPushSignalFromResponse(response)?.notificationId;
+      if (notificationId) markNotificationReadFromTap(notificationId);
       const challengeId = extractChallengeIdFromNotificationResponse(response);
       if (!challengeId) return;
 
@@ -384,7 +422,7 @@ export default function App() {
       const message = notification.title ?? notification.body;
       if (!message) return;
 
-      const { challengeId } = notification;
+      const { challengeId, deeplink, notificationId } = notification;
       setPushToast({
         message,
         kind: "info",
@@ -393,7 +431,15 @@ export default function App() {
               label: "Review",
               onPress: () => openChallengeFromNotification(challengeId),
             }
-          : undefined,
+          : deeplink
+            ? {
+                label: "Open",
+                onPress: () => {
+                  if (notificationId) markNotificationReadFromTap(notificationId);
+                  void Linking.openURL(deeplink).catch(() => undefined);
+                },
+              }
+            : undefined,
       });
     });
   }, [openChallengeFromNotification]);

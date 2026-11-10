@@ -70,11 +70,18 @@ export function setupSettingsScreen(
     connectedTelegram = false,
     pushDevices = 0,
     voiceEnabled = false,
+    nyxbotNotifications,
     params,
   }: {
     connectedTelegram?: boolean;
     pushDevices?: number;
     voiceEnabled?: boolean;
+    /** NyxBot notification flag and its saved push switches. */
+    nyxbotNotifications?: {
+      enabled: boolean;
+      push?: Record<string, boolean>;
+      pending?: boolean;
+    };
     params?: Record<string, unknown>;
   } = {},
 ) {
@@ -106,7 +113,29 @@ export function setupSettingsScreen(
     {},
     { get: (_target, name) => (name === "__esModule" ? false : String(name)) },
   );
+  const pushPreferenceMutations: unknown[] = [];
   const harness = hookHarness<Element>({
+    "../notifications/useNotifications": {
+      useNotificationsEnabled: () => nyxbotNotifications?.enabled ?? false,
+      useNotificationPushPreferences: () => ({
+        data: nyxbotNotifications?.pending
+          ? undefined
+          : {
+              automation_result: false,
+              automation_problem: false,
+              needs_decision: false,
+              agent_update: false,
+              chat_update: false,
+              group_mention: false,
+              ...(nyxbotNotifications?.push ?? {}),
+            },
+        isPending: nyxbotNotifications?.pending ?? false,
+      }),
+      useUpdateNotificationPushPreferences: () => ({
+        mutate: (value: unknown) => pushPreferenceMutations.push(value),
+        isPending: false,
+      }),
+    },
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "react-native": {
       ...Object.fromEntries(
@@ -267,6 +296,7 @@ export function setupSettingsScreen(
     parent,
     row,
     mutations,
+    pushPreferenceMutations,
     deviceChoices,
     sheets,
     pushes,

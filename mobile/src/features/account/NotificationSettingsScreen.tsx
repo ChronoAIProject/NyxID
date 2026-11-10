@@ -8,7 +8,17 @@ import {
   View,
 } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Send } from "lucide-react-native";
+import {
+  AtSign,
+  Bell,
+  Bot,
+  CalendarClock,
+  CircleAlert,
+  CircleHelp,
+  MessageSquare,
+  Send,
+  type LucideIcon,
+} from "lucide-react-native";
 import type { SheetScreenProps } from "../../app/navigationTypes";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { OfflineBanner } from "../../components/OfflineBanner";
@@ -34,6 +44,61 @@ import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
 import { approvalDeliveryWarning } from "./approvalDeliveryPolicy";
+import {
+  DEFAULT_NOTIFICATION_PUSH,
+  NOTIFICATION_KINDS,
+  type NotificationKind,
+} from "../notifications/notificationContracts";
+import {
+  useNotificationPushPreferences,
+  useNotificationsEnabled,
+  useUpdateNotificationPushPreferences,
+} from "../notifications/useNotifications";
+
+/** One switch per closed notification kind (SPEC D9); all default off. */
+export const NYXBOT_PUSH_ROWS: {
+  kind: NotificationKind;
+  label: string;
+  detail: string;
+  Icon: LucideIcon;
+}[] = [
+  {
+    kind: "automation_result",
+    label: "Automation results",
+    detail: "A scheduled or webhook task finished",
+    Icon: CalendarClock,
+  },
+  {
+    kind: "automation_problem",
+    label: "Automation problems",
+    detail: "A task failed, was skipped or paused",
+    Icon: CircleAlert,
+  },
+  {
+    kind: "needs_decision",
+    label: "Decisions needed",
+    detail: "An action card is waiting for you",
+    Icon: CircleHelp,
+  },
+  {
+    kind: "agent_update",
+    label: "Agent updates",
+    detail: "Replies in threads you did not start here",
+    Icon: Bot,
+  },
+  {
+    kind: "chat_update",
+    label: "Chat updates",
+    detail: "Replies in your channel bot chats",
+    Icon: MessageSquare,
+  },
+  {
+    kind: "group_mention",
+    label: "Group mentions",
+    detail: "Someone mentioned you in a group",
+    Icon: AtSign,
+  },
+];
 
 // Push-register failure modes are surfaced as a tagged error so the
 // caller can branch on `reason` (e.g. iOS denial → Alert + Linking
@@ -104,6 +169,21 @@ export function NotificationSettingsScreen(
   });
 
   const [isTelegramLinkVisible, setIsTelegramLinkVisible] = useState(false);
+
+  // NyxBot notification pushes: hidden until the flag is on for this person.
+  const nyxbotNotifications = useNotificationsEnabled(true);
+  const pushPreferences = useNotificationPushPreferences(nyxbotNotifications);
+  const pushPreferenceMutation = useUpdateNotificationPushPreferences();
+  const setKindPush = (kind: NotificationKind, value: boolean) => {
+    pushPreferenceMutation.mutate(
+      { ...(pushPreferences.data ?? DEFAULT_NOTIFICATION_PUSH), [kind]: value },
+      {
+        onSuccess: () =>
+          showToast("NyxBot notification settings updated", "success"),
+        onError: (error) => showToast(resolveErrorMessage(error), "error"),
+      },
+    );
+  };
 
   // Manual re-registration when the device isn't on the user's account
   // (permission denied at first launch, token fetch failed, or original
@@ -414,6 +494,37 @@ export function NotificationSettingsScreen(
                 />
               )}
             </SettingsGroup>
+            {nyxbotNotifications ? (
+              <SettingsGroup
+                title="NyxBot notifications"
+                footer={
+                  notifSettings.push_enabled && notifSettings.push_device_count > 0
+                    ? "Pushed once when a new notification arrives; the feed in Notifications always keeps them."
+                    : "Turn on push notifications above to receive these on this device; the feed in Notifications always keeps them."
+                }
+              >
+                {NYXBOT_PUSH_ROWS.map((row) => (
+                  <SettingsRow
+                    key={row.kind}
+                    icon={row.Icon}
+                    label={row.label}
+                    detail={row.detail}
+                    accessory={
+                      <Switch
+                        accessibilityLabel={row.label}
+                        value={pushPreferences.data?.[row.kind] ?? false}
+                        onValueChange={(value) => setKindPush(row.kind, value)}
+                        disabled={
+                          !pushPreferences.data ||
+                          pushPreferenceMutation.isPending
+                        }
+                        trackColor={switchTrack}
+                      />
+                    }
+                  />
+                ))}
+              </SettingsGroup>
+            ) : null}
             <SettingsGroup
               title="Approval requests"
               inset={false}

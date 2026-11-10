@@ -77,6 +77,9 @@ export type ForegroundNotification = {
   body: string | null;
   challengeId: string | null;
   type: PushSyncSignalType | null;
+  /** NyxBot notification pushes: the row to mark read and where to open. */
+  notificationId: string | null;
+  deeplink: string | null;
 };
 
 type ForegroundNotificationHandler = (notification: ForegroundNotification) => void;
@@ -192,11 +195,18 @@ function presentForegroundNotification(
     return;
   }
 
+  const data = content.data as
+    | { notification_id?: unknown; deeplink?: unknown; deep_link?: unknown }
+    | null
+    | undefined;
   foregroundNotificationHandler?.({
     title,
     body,
     challengeId: signal?.challengeId ?? null,
     type: signal?.type ?? null,
+    notificationId: asNonEmptyString(data?.notification_id),
+    deeplink:
+      asNonEmptyString(data?.deeplink) ?? asNonEmptyString(data?.deep_link),
   });
 }
 
