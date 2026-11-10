@@ -658,7 +658,9 @@ function NyxAgentThreadPage() {
   function requestConfirmationAgain(id: string, kind: string) {
     setRequestError(undefined);
     void chat.send(`Please request a new ${kind} for expired request ${id}. Recheck the current state and permissions first; do not reuse the expired confirmation.`).catch((error: unknown) => {
-      setRequestError({ scope: errorScope, message: error instanceof Error ? error.message : "Could not request a new confirmation." });
+      if (!isAdmittedSendError(error)) {
+        setRequestError({ scope: errorScope, message: error instanceof Error ? error.message : "Could not request a new confirmation." });
+      }
     });
   }
   const composerRef = useRef<HTMLDivElement>(null);
@@ -764,8 +766,11 @@ function NyxAgentThreadPage() {
       await chat.retry(selectedId, messageId);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not retry your message. Try again shortly.";
+      // Admitted stream interruptions belong to the transport; history may
+      // already have reconciled them by the time this catch runs.
+      if (isAdmittedSendError(error)) return;
       setRequestError({ scope: errorScope, message });
-      toast.error(isAdmittedSendError(error) ? "Live reply interrupted" : "Could not retry your message", {
+      toast.error("Could not retry your message", {
         description: assistantErrorSummary(message),
       });
     }
@@ -852,15 +857,16 @@ function NyxAgentThreadPage() {
     try {
       await chat.send(text, uploads, model);
     } catch (error) {
+      // Keep admission marked for upload/draft handling, but do not copy a
+      // transient stream notice into a permanent component error or toast.
+      if (isAdmittedSendError(error)) throw error;
       const message =
         error instanceof Error
           ? error.message
           : "NyxBot is temporarily unavailable. Try again shortly.";
       setRequestError({ scope: sending.scope, message });
       toast.error(
-        isAdmittedSendError(error)
-          ? "Live reply interrupted"
-          : "Could not send your message",
+        "Could not send your message",
         {
           description: assistantErrorSummary(message),
         },
@@ -1003,6 +1009,7 @@ function NyxAgentThreadPage() {
       : undefined;
   const dockedError =
     chat.error ??
+    chat.interruption ??
     (requestError?.scope === errorScope ? requestError.message : undefined) ??
     turnError;
   const threadPanels = !showHome ? (

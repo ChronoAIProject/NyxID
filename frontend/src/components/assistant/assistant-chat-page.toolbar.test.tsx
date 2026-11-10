@@ -1,3 +1,4 @@
+vi.mock("./composer-editor", () => import("./composer-editor.test-support"));
 import { voicePreferences } from "@/test/voice-fixture";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
@@ -19,6 +20,7 @@ import type { NyxAgentAccessMode, NyxAgentAcknowledgement } from "@/schemas/assi
 const state = vi.hoisted(() => ({
   search: {} as Record<string, unknown>,
   streaming: false,
+  interruption: undefined as string | undefined,
   destroyed: false,
   mode: "nyxmode" as NyxAgentAccessMode,
   override: null as NyxAgentAccessMode | null,
@@ -72,6 +74,7 @@ vi.mock("@/hooks/use-assistant-nyxagent", () => ({ useNyxAgentAssistantChat: () 
   conversation: state.search.c ? conversation : undefined,
   session: { title: "Thread", messages: state.staleCard ? [{ id: `nyxagent-acknowledgement:${staleCard.id}`, role: "system", content: staleCard.summary }]
     : state.search.c ? [{ id: "one", role: "assistant", content: "Hello" }] : [] },
+  interruption: state.interruption,
   isStreaming: state.streaming, waiting: [], acknowledgements: state.staleCard ? [{ ...staleCard, status: state.expiredCard ? "expired" : staleCard.status }] : [], approvals: [], conversations: [], threadsLoaded: false,
   send: state.send, stop: vi.fn(), refreshHistory: vi.fn(), deleteConversation: vi.fn(),
 }) }));
@@ -126,7 +129,8 @@ beforeEach(() => {
   state.override = null;
   state.staleCard = false;
   state.expiredCard = false;
-  state.send.mockClear();
+  state.send.mockReset();
+  state.interruption = undefined;
   state.agentLoaded = true;
   state.desktop = true;
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
@@ -355,4 +359,34 @@ it("2072 expired card requests a fresh owner turn without deciding or replaying 
   await waitFor(() => expect(state.send).toHaveBeenCalledExactlyOnceWith(
     "Please request a new confirmation for expired request old-card. Recheck the current state and permissions first; do not reuse the expired confirmation.",
   ));
+});
+
+it("retracts the admitted send alert when history reconciles, without a sticky request error (#2316)", async () => {
+  state.search = { c: conversation.id };
+  const message = "The live reply was interrupted. NyxBot may still be working; check the chat before sending again.";
+  state.send.mockImplementationOnce(async () => {
+    state.interruption = message;
+    throw Object.assign(new Error(message), { admitted: true });
+  });
+  const client = new QueryClient();
+  const view = render(<QueryClientProvider client={client}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "Publish the skill" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(state.send).toHaveBeenCalledOnce());
+  await waitFor(() => expect(screen.getByRole("textbox")).toHaveValue(""));
+  view.rerender(<QueryClientProvider client={client}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  expect(screen.getByRole("alert")).toHaveTextContent(message);
+  state.interruption = undefined;
+  view.rerender(<QueryClientProvider client={client}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("retains a genuine rejected-send error after a refresh (#2316)", async () => {
+  state.search = { c: conversation.id };
+  state.send.mockRejectedValueOnce(new Error("Service is unavailable. Try again shortly."));
+  mount();
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "Question" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Service is unavailable");
+  expect(screen.getByRole("textbox")).toHaveValue("Question");
 });
