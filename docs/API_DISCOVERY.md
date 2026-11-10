@@ -888,6 +888,42 @@ External MCP clients keep the legacy connection response contract. See
 [the engine contract](chat/08-nyxagent-engine.md#protected-org-connections-and-hosted-personal-setup)
 for bounds, owner checks, failures, and readiness-gated personal intent locks.
 
+### Attachment eligibility and legacy publication (#2327)
+
+Chat discovery and preparation use the same live attachment eligibility gate.
+It checks the non-guest owner turn, bound active/unexpired conversation key,
+`assistant:attachment-writes`, exact catalog/connection identity, instance-spec
+absence and current compiled operation contracts. Managed Base creation also
+requires an active credential belonging to the hosted user connection and all
+four published dependencies. Platform credential bindings and no-auth connections
+cannot supply this managed capability. Every
+child effect repeats the gate, including the flag and operation-generation
+checks, alongside the existing destination, scope and credential fences.
+
+An active legacy endpoint without `publication` is Published, consistent with
+Tool publication defaults. Explicit draft, validated or paused rows are never
+republished by this fix. No data repair is required. A second connection such
+as `api-lark-2` uses its exact UserService ID and canonical catalog identity;
+its display slug grants no authority. An instance OpenAPI override remains
+untrusted even when it contains an exact hosted spec or falls back to catalog
+rows; clearing it restores eligibility when the other gates pass.
+
+Refusals carry static `attachment_write_*` reasons, including `guest_turn`,
+`flag_off`, `not_live_owner_chat`, `key_ineligible`, `untrusted_spec_override`,
+`operation_not_published`, `required_operation_missing`, `untrusted_contract`,
+`invalid_operation_generation`, `operation_generation_changed`,
+`hosted_connection_required`, `connection_credential_required`,
+`credential_unavailable` and `contract_changed`. These messages contain no
+request content, credentials or attachment identifiers. Database failures remain
+infrastructure errors. Discovery cannot promise that future arguments satisfy
+saved destination/input scopes or that the vendor has granted upload access.
+
+The journal, reservation identities and dispatch barrier are unchanged. Mixed
+fleets fail closed on old readers that still require explicit publication; upgrade
+all readers for consistent legacy-row availability. This fix requires no new
+drain, schema migration or environment variable. The existing attachment-feature
+rollout and rollback rules still apply.
+
 ## Lark/Feishu wiki document links
 
 The four Lark/Feishu catalog services expose read-only `wiki_get_node`
