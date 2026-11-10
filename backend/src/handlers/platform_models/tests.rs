@@ -749,3 +749,139 @@ async fn public_retail_metadata_is_projected_only_after_live_entitlement_and_fla
     assert!(read().await.unwrap().0.models.is_empty());
     state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn family_contract_readiness_gates_authoring_and_both_admin_and_public_readers() {
+    use crate::services::{
+        billing::model_tariffs, platform_model_execution::certification, security_readiness_service,
+    };
+    let (state, admin, _, _) = setup().await;
+    let heartbeat = security_readiness_service::controlled_ready_test_replica(&state.db).await;
+    heartbeat.abort();
+    let _ = heartbeat.await;
+    let Json(created) = create(
+        State(state.clone()),
+        admin.clone(),
+        Json(CreateRequest {
+            public_id: "nyxid/gpt-6-astra".into(),
+            family: ModelFamily::Openai,
+            ..input()
+        }),
+    )
+    .await
+    .unwrap();
+    let mut model = registry::get(&state.db, &created.id).await.unwrap();
+    let (mut service, mut tariff, _) = model_tariffs::tests::fixture();
+    model.billing_service_id = Some(service.id.clone());
+    tariff.model_id = model.id.clone();
+    tariff.public_model = model.public_id.clone();
+    tariff.contract.version = "openai.responses.v2".into();
+    use sha2::{Digest, Sha256};
+    tariff.contract.fixture_sha256 = format!(
+        "{:x}",
+        Sha256::digest(
+            certification::family_fixture(tariff.contract.family)
+                .unwrap()
+                .as_bytes()
+        )
+    );
+    tariff.source = format!(
+        "contract-attested-v1:{} provider documentation verified",
+        model.public_id
+    );
+    for c in &mut tariff.components {
+        c.credits_per_unit = "0".into();
+        c.explicit_free = true;
+    }
+    model_tariffs::validate(&mut tariff, &service.slug).unwrap();
+    service
+        .billing
+        .as_mut()
+        .unwrap()
+        .platform_key_pricing
+        .as_mut()
+        .unwrap()
+        .model_prices[0]
+        .model_id = model.id.clone();
+    state
+        .db
+        .collection::<PlatformModel>(crate::models::platform_model::COLLECTION_NAME)
+        .replace_one(doc! {"_id":&model.id}, &model)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")
+        .insert_one(&service)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<crate::models::platform_model_tariff::ModelTariff>("platform_model_tariffs")
+        .insert_one(&tariff)
+        .await
+        .unwrap();
+    let Json(ready) = admin_get(State(state.clone()), admin.clone(), Path(model.id.clone()))
+        .await
+        .unwrap();
+    assert!(ready.execution_ready);
+    assert!(ready.required_readiness.contains(&certification::READINESS));
+    let prices = registry::retail_explanations(&state.db, std::slice::from_ref(&model), 900, true)
+        .await
+        .unwrap();
+    assert!(prices[&model.id][0].available);
+    state
+        .db
+        .collection::<bson::Document>(crate::models::security_replica::COLLECTION_NAME)
+        .update_many(
+            doc! {},
+            doc! {"$pull":{"capabilities":certification::READINESS}},
+        )
+        .await
+        .unwrap();
+    let Json(unready) = admin_get(State(state.clone()), admin.clone(), Path(model.id.clone()))
+        .await
+        .unwrap();
+    assert!(!unready.execution_ready);
+    assert_eq!(unready.blocking_reason, "execution_fleet_not_ready");
+    let mut prices =
+        registry::retail_explanations(&state.db, std::slice::from_ref(&model), 900, true)
+            .await
+            .unwrap();
+    let explanation = prices.remove(&model.id).unwrap().remove(0);
+    assert_eq!(
+        explanation.blocking_reason.as_deref(),
+        Some("model_contract_fleet_not_ready")
+    );
+    let price = RetailPrice::from(explanation);
+    assert!(!price.available);
+    assert!(price.components.is_empty());
+    assert!(matches!(
+        create_tariff(
+            State(state.clone()),
+            admin,
+            Path(model.id),
+            Json(model_tariffs::NewTariff {
+                revision: model.revision,
+                lane: tariff.lane,
+                variant: tariff.variant,
+                contract: tariff.contract,
+                bounds: tariff.bounds,
+                components: tariff.components,
+                source: tariff.source,
+            })
+        )
+        .await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>("platform_model_tariffs")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    state.db.drop().await.unwrap();
+}

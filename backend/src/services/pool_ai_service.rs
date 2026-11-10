@@ -547,6 +547,10 @@ pub struct EventDecoder {
     decoder: super::sse_parser::BoundedEventDecoder,
 }
 impl EventDecoder {
+    pub fn has_incomplete_event(&self) -> bool {
+        self.decoder.has_incomplete_event()
+    }
+
     pub fn push(&mut self, bytes: &[u8]) -> AppResult<Vec<super::sse_parser::SseEvent>> {
         let mut events = Vec::new();
         for &byte in bytes {

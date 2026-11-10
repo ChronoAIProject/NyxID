@@ -42,6 +42,7 @@ pub const CAPABILITIES: &[&str] = &[
     super::platform_model_service::REGISTRY_READINESS,
     super::platform_model_service::EXECUTION_READINESS,
     super::platform_model_execution::images::READINESS,
+    super::platform_model_execution::certification::READINESS,
     super::billing::model_tariffs::READINESS,
     "assistant:generated-artifacts",
     "assistant:org-agents",
