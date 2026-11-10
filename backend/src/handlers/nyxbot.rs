@@ -6359,7 +6359,9 @@ async fn direct_reply(
             message_id: message_id.to_owned(),
             reply: super::channel_relay::AsyncReplyBody {
                 text: Some(text.to_owned()),
-                metadata: None,
+                metadata: crate::services::channel_reply_plan::assistant_metadata(
+                    &channel.platform,
+                ),
                 attachments: Vec::new(),
             },
         }),

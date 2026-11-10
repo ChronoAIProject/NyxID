@@ -320,6 +320,7 @@ pub struct ChannelBotDiagnosticsResponse {
     pub last_inbound_source: Option<String>,
     pub last_outbound_at: Option<String>,
     pub last_outbound_error: Option<ChannelBotErrorResponse>,
+    pub last_outbound_notice: Option<ChannelBotErrorResponse>,
     pub last_webhook_at: Option<String>,
     pub last_webhook_error: Option<ChannelBotErrorResponse>,
     pub subscription_state: Option<ChannelBotSubscriptionResponse>,
@@ -430,6 +431,7 @@ fn diagnostics_response(
         last_inbound_source: d.last_inbound_source.clone(),
         last_outbound_at: d.last_outbound_at.map(|v| v.to_rfc3339()),
         last_outbound_error: d.last_outbound_error.as_ref().map(error),
+        last_outbound_notice: d.last_outbound_notice.as_ref().map(error),
         last_webhook_at: d.last_webhook_at.map(|v| v.to_rfc3339()),
         last_webhook_error: d.last_webhook_error.as_ref().map(error),
         subscription_state: d

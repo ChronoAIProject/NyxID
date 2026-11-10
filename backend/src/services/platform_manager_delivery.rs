@@ -1889,7 +1889,11 @@ async fn send_claimed(
         };
         let mut part_trace = crate::turn_trace::Operation::part(crate::turn_trace::TurnContext::current(), index);
         let result = if let Some(token) = &credential {
-            telegram_part(api, token, scope::actor_string(&row.sender).as_str(), &part).await
+            let guard = telegram_effect_guard(state, row, claim_id, &body, &identity, public.as_ref());
+            super::telegram_formatting::scope(&state.db,
+                journal::formatting_receipt(&plan, index, &attempt), None,
+                super::channel_platform::with_post_effect_guard(guard,
+                    telegram_part(api, token, scope::actor_string(&row.sender).as_str(), &part))).await
         } else if let CapturedMaterial::Native(authority) = &material {
             use super::platform_native_reply_service::NativeSendOutcome;
             match super::platform_native_reply_service::send_part(
@@ -2103,68 +2107,84 @@ enum PartResult {
     Uncertain,
 }
 
+/// Revalidate immediately before each HTTP effect, including the plain fallback.
+fn telegram_effect_guard(
+    state: &AppState,
+    row: &Delivery,
+    claim: &str,
+    body: &str,
+    identity: &Arc<dyn ManagerIdentityProducer>,
+    public: Option<&Arc<dyn PublicTurnProducer>>,
+) -> super::channel_platform::PostEffectGuard {
+    let state = state.clone();
+    let row = row.clone();
+    let claim = claim.to_owned();
+    let body = Arc::new(Zeroizing::new(body.to_owned()));
+    let identity = Arc::clone(identity);
+    let public = public.cloned();
+    Arc::new(move || {
+        let state = state.clone();
+        let row = row.clone();
+        let claim = claim.clone();
+        let body = Arc::clone(&body);
+        let identity = Arc::clone(&identity);
+        let public = public.clone();
+        Box::pin(async move {
+            if revalidate_part(
+                &state,
+                &row,
+                &claim,
+                body.as_str(),
+                identity.as_ref(),
+                public.as_deref(),
+            )
+            .await?
+            {
+                Ok(())
+            } else {
+                Err(refused())
+            }
+        })
+    })
+}
+
 async fn telegram_part(
     api: &super::telegram_new_api::TelegramApi<'_>,
     token: &str,
     chat: &str,
     part: &super::channel_platform::OutboundReply,
 ) -> PartResult {
-    let Ok(chat) = chat.parse::<i64>() else {
+    use super::channel_platform::PlatformAdapter;
+    if chat.parse::<i64>().is_err() {
         return PartResult::Refused;
-    };
-    let mut payload = serde_json::json!({"chat_id":chat,"text":part.text,"protect_content":true,"link_preview_options":{"is_disabled":true}});
-    if let Some(entities) = part.metadata.as_ref().and_then(|m| m.get("entities")) {
-        payload["entities"] = entities.clone();
     }
-    let response = api
-        .http
-        .post(format!("{}/bot{token}/sendMessage", api.base_url))
-        .timeout(std::time::Duration::from_secs(20))
-        .json(&payload)
-        .send()
-        .await;
-    let envelope = match response {
-        Ok(mut response) => {
-            if !response.status().is_success() && !response.status().is_client_error() {
-                return PartResult::Uncertain;
-            }
-            let mut bytes = Zeroizing::new(Vec::new());
-            loop {
-                match response.chunk().await {
-                    Ok(Some(chunk)) if bytes.len() + chunk.len() <= 65536 => {
-                        bytes.extend_from_slice(&chunk)
-                    }
-                    Ok(None) => break,
-                    _ => return PartResult::Uncertain,
-                }
-            }
-            serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+    let mut part = part.clone();
+    let metadata = part.metadata.get_or_insert_with(|| serde_json::json!({}));
+    metadata["protect_content"] = true.into();
+    metadata["link_preview_options"] = serde_json::json!({"is_disabled":true});
+    match super::channel_adapters::telegram::TelegramAdapter::for_api_base(api.base_url)
+        .send_reply(
+            api.http,
+            &super::channel_platform::BotCredentials {
+                token,
+                platform_bot_id: None,
+                platform_secrets: None,
+                billing: None,
+            },
+            chat,
+            &part,
+        )
+        .await
+    {
+        Ok(Some(id)) => PartResult::Sent(id),
+        Err(AppError::RateLimitedWithRetry { retry_after }) => {
+            PartResult::Retry(retry_after as i64)
         }
-        Err(_) => None,
-    };
-    if let Some(value) = envelope {
-        if value["ok"] == true
-            && let Some(id) = value["result"]["message_id"].as_i64().filter(|id| *id > 0)
-        {
-            return PartResult::Sent(id.to_string());
-        }
-        if value["ok"] == false {
-            if value["error_code"] == 429
-                && let Some(delay) = value["parameters"]["retry_after"]
-                    .as_i64()
-                    .filter(|n| *n > 0 && *n <= 86400)
-            {
-                return PartResult::Retry(delay);
-            }
-            if value["error_code"]
-                .as_i64()
-                .is_some_and(|code| (400..500).contains(&code))
-            {
-                return PartResult::Refused;
-            }
-        }
+        // The installed manager guard returns Conflict before provider I/O.
+        Err(AppError::Conflict(_)) => PartResult::Refused,
+        Err(error) if super::telegram_formatting::definite_refusal(&error) => PartResult::Refused,
+        _ => PartResult::Uncertain,
     }
-    PartResult::Uncertain
 }
 
 async fn send_single_claimed(
@@ -3369,6 +3389,252 @@ mod future_size_tests {
         let row = rows.find_one(doc! {"_id":&id}).await.unwrap().unwrap();
         assert_eq!(row.get_array("telegram_message_ids").unwrap().len(), 4);
         assert_eq!(row.get_str("state").unwrap(), "sent");
+        db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod telegram_formatting_tests {
+    use super::*;
+    use crate::services::{
+        channel_reply_plan, channel_text_delivery as journal, telegram_formatting,
+    };
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    #[tokio::test]
+    async fn revoked_authority_blocks_plain_fallback_after_confirmed_parse_refusal() {
+        let server = MockServer::start().await;
+        Mock::given(path("/botfixture/sendMessage"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({"ok":false,"error_code":400,"description":"can't parse entities"})))
+            .expect(1).mount(&server).await;
+        let checks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&checks);
+        let guard: super::super::channel_platform::PostEffectGuard = Arc::new(move || {
+            let seen = Arc::clone(&seen);
+            Box::pin(async move {
+                if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    Ok(())
+                } else {
+                    Err(refused())
+                }
+            })
+        });
+        let http = reqwest::Client::new();
+        let base = server.uri();
+        let api = super::super::telegram_new_api::TelegramApi {
+            http: &http,
+            base_url: &base,
+        };
+        let part = channel_reply_plan::assistant_parts("**bold**", "telegram", "").remove(0);
+        let outcome = super::super::channel_platform::with_post_effect_guard(
+            guard,
+            telegram_part(&api, "fixture", "123", &part),
+        )
+        .await;
+        assert!(matches!(outcome, PartResult::Refused));
+        assert_eq!(checks.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn stale_part_claim_blocks_plain_fallback_before_second_effect() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("manager_stale_formatting").await;
+        journal::ensure_indexes(&db).await.unwrap();
+        let server = MockServer::start().await;
+        Mock::given(path("/botfixture/sendMessage"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({"ok":false,"error_code":400,"description":"can't parse entities"})))
+            .expect(1).mount(&server).await;
+        let part = channel_reply_plan::assistant_parts("**bold** `code`", "telegram", "").remove(0);
+        let row = journal::begin(
+            &db,
+            "manager",
+            "owner",
+            "turn",
+            &channel_reply_plan::fingerprint(std::slice::from_ref(&part)),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            journal::claim(&db, &row, 0).await.unwrap(),
+            journal::PartClaim::Send(_)
+        ));
+        let http = reqwest::Client::new();
+        let base = server.uri();
+        let api = super::super::telegram_new_api::TelegramApi {
+            http: &http,
+            base_url: &base,
+        };
+        let outcome = telegram_formatting::scope(
+            &db,
+            journal::formatting_receipt(&row, 0, "stale-attempt"),
+            None,
+            telegram_part(&api, "fixture", "123", &part),
+        )
+        .await;
+        assert!(matches!(outcome, PartResult::Uncertain));
+        let saved = journal::load(&db, "manager").await.unwrap().unwrap();
+        assert!(saved.parts[0].formatting_fallback.is_none());
+        assert!(journal::claim(&db, &saved, 0).await.is_err());
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_action_card_text_fallback_retains_receipt_and_claim() {
+        let db = crate::test_utils::connect_transaction_test_database("manager_formatting").await;
+        journal::ensure_indexes(&db).await.unwrap();
+        let server = MockServer::start().await;
+        let sequence = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(path("/botfixture/sendMessage")).respond_with(move |_: &wiremock::Request| {
+            if sequence.fetch_add(1,std::sync::atomic::Ordering::SeqCst)==0 {
+                ResponseTemplate::new(400).set_body_json(serde_json::json!({"ok":false,"error_code":400,"description":"can't parse entities"}))
+            }else{ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true,"result":{"message_id":19}}))}
+        }).expect(2).mount(&server).await;
+        let part = channel_reply_plan::assistant_parts(
+            "**中文 🦉 မြန်မာ**\n\nReply yes 4821 to approve. `C:\\qa\\menu_01.txt`",
+            "telegram",
+            "",
+        )
+        .remove(0);
+        let row = journal::begin(
+            &db,
+            "manager",
+            "owner",
+            "turn",
+            &channel_reply_plan::fingerprint(std::slice::from_ref(&part)),
+            1,
+        )
+        .await
+        .unwrap();
+        let journal::PartClaim::Send(attempt) = journal::claim(&db, &row, 0).await.unwrap() else {
+            panic!("claim")
+        };
+        let http = reqwest::Client::new();
+        let base = server.uri();
+        let api = super::super::telegram_new_api::TelegramApi {
+            http: &http,
+            base_url: &base,
+        };
+        let outcome = telegram_formatting::scope(
+            &db,
+            journal::formatting_receipt(&row, 0, &attempt),
+            None,
+            telegram_part(&api, "fixture", "123", &part),
+        )
+        .await;
+        assert!(matches!(outcome,PartResult::Sent(ref id) if id=="19"));
+        journal::finish(
+            &db,
+            &row,
+            0,
+            &attempt,
+            crate::models::channel_text_delivery::TextPartState::Sent,
+            Some("19"),
+            None,
+        )
+        .await
+        .unwrap();
+        let saved = journal::load(&db, "manager").await.unwrap().unwrap();
+        assert_eq!(
+            saved.parts[0].formatting_fallback.as_deref(),
+            Some(telegram_formatting::FALLBACK)
+        );
+        assert!(matches!(
+            journal::claim(&db, &saved, 0).await.unwrap(),
+            journal::PartClaim::Sent(_)
+        ));
+        assert!(
+            journal::begin(&db, "manager", "owner", "turn", "changed-plan", 1)
+                .await
+                .is_err()
+        );
+        let requests = server.received_requests().await.unwrap();
+        let bodies: Vec<serde_json::Value> = requests
+            .iter()
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        assert_eq!(bodies[0]["text"], bodies[1]["text"]);
+        assert!(bodies[1].get("entities").is_none());
+        assert_eq!(bodies[1]["protect_content"], true);
+        db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod telegram_retry_formatting_tests {
+    use super::*;
+    use crate::services::{
+        channel_reply_plan, channel_text_delivery as journal, telegram_formatting,
+    };
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    #[tokio::test]
+    async fn proven_rate_refusal_after_plain_fallback_resumes_plain_without_reformatting() {
+        let db = crate::test_utils::connect_transaction_test_database("manager_format_retry").await;
+        journal::ensure_indexes(&db).await.unwrap();
+        let server = MockServer::start().await;
+        let sequence = std::sync::atomic::AtomicUsize::new(0);
+        Mock::given(path("/botfixture/sendMessage")).respond_with(move |_: &wiremock::Request| {
+            match sequence.fetch_add(1,std::sync::atomic::Ordering::SeqCst) {
+                0=>ResponseTemplate::new(400).set_body_json(serde_json::json!({"ok":false,"error_code":400,"description":"can't parse entities"})),
+                1=>ResponseTemplate::new(429).set_body_json(serde_json::json!({"ok":false,"error_code":429,"parameters":{"retry_after":1}})),
+                _=>ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok":true,"result":{"message_id":19}})),
+            }
+        }).expect(3).mount(&server).await;
+        let part = channel_reply_plan::assistant_parts("**bold** `code`", "telegram", "").remove(0);
+        let hash = channel_reply_plan::fingerprint(std::slice::from_ref(&part));
+        let row = journal::begin(&db, "manager", "owner", "turn", &hash, 1)
+            .await
+            .unwrap();
+        let journal::PartClaim::Send(attempt) = journal::claim(&db, &row, 0).await.unwrap() else {
+            panic!("claim")
+        };
+        let http = reqwest::Client::new();
+        let base = server.uri();
+        let api = super::super::telegram_new_api::TelegramApi {
+            http: &http,
+            base_url: &base,
+        };
+        let outcome = telegram_formatting::scope(
+            &db,
+            journal::formatting_receipt(&row, 0, &attempt),
+            None,
+            telegram_part(&api, "fixture", "123", &part),
+        )
+        .await;
+        assert!(matches!(outcome, PartResult::Retry(1)));
+        journal::finish(
+            &db,
+            &row,
+            0,
+            &attempt,
+            crate::models::channel_text_delivery::TextPartState::Pending,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let saved = journal::begin(&db, "manager", "owner", "turn", &hash, 1)
+            .await
+            .unwrap();
+        let journal::PartClaim::Send(attempt) = journal::claim(&db, &saved, 0).await.unwrap()
+        else {
+            panic!("retry claim")
+        };
+        assert!(matches!(
+            telegram_formatting::scope(
+                &db,
+                journal::formatting_receipt(&saved, 0, &attempt),
+                None,
+                telegram_part(&api, "fixture", "123", &part)
+            )
+            .await,
+            PartResult::Sent(_)
+        ));
+        let requests = server.received_requests().await.unwrap();
+        let last: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
+        assert!(last.get("entities").is_none() && last.get("parse_mode").is_none());
+        assert_eq!(last["text"], "bold code");
         db.drop().await.unwrap();
     }
 }

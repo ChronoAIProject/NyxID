@@ -596,3 +596,41 @@ not support regeneration; no authorization/identity format changes or writer
 drain are required for this cosmetic enhancement. Existing creation-authority
 rollout requirements above still apply. No setup secrets, usernames, labels or
 seed values are added to logs or audit.
+
+## Assistant Markdown and formatting refusals (#2317 / #2310)
+
+NyxID-owned Telegram replies use CommonMark display text plus native Telegram
+entities. Headings become bold; code retains literal content; lists retain
+readable markers. Offsets and budgets count UTF-16 units. Fitting entities stay
+whole at boundaries; oversized spans become independent continuation entities.
+The shared `channel_reply_plan` / `channel_text` planner owns splitting.
+
+A definite HTTP 400, `ok:false`, code 400 entity-parsing refusal can retry the
+same rendered text once with entities removed. This stays inside the original
+part claim. Before fallback, metadata-only receipts record
+`telegram_formatting_fallback`; channel health retains the same notice separately
+from a terminal error. Manager retry after a confirmed rate refusal remembers
+plain-text fallback. Timeout, malformed response and 5xx never trigger fallback.
+A final definite refusal stops the suffix with an incomplete delivery, retaining
+accepted prefix IDs. A bound non-guest NyxBot relay event also gets an idempotent
+notice in its saved thread. Execution completion remains separate from delivery.
+
+Gateway `nyxid_relay` text is still rendered by CMA before returning to NyxID.
+CMA must send original unescaped CommonMark to the explicit
+`/api/v1/channel-relay/reply/commonmark`, `/thread-reply/commonmark`, or
+`/reply/update/commonmark` endpoint. Authentication and receipt semantics match
+the corresponding ordinary endpoint. Keep routing/keyboard metadata; do not
+supply `entities` or `parse_mode` with CommonMark. Old replicas return 404 at
+these paths, with no send; never retry on the old path after an uncertain send.
+Legacy relay text is not heuristically unescaped. Legacy public wire payloads remain unchanged, including the historical
+Markdown default: this base ignores metadata.parse_mode. The new contract does
+not silently reinterpret an external caller's syntax.
+Until CMA adopts this contract, its escaped gateway output can still show raw
+Markdown/backslashes; this NyxID change alone does not close that production case.
+
+Rendering changes preserve logical keys, immutable hashes and attempt fences.
+A changed plan under an existing key fails closed rather than restarting a
+prefix. Drain in-flight manager/proactive rows and writers before switching
+renderer versions and before rollback, as required by the multipart contract
+above. Mixed binaries may refuse a changed plan; they must never delete/rekey
+receipts or replay a sending/uncertain part. No new environment variable.
