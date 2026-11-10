@@ -99,11 +99,13 @@ async fn proxy_only_agent_key_reaches_redemption_and_returns_agent_evidence() {
     let issued = crate::services::invocation_diagnostic_service::issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::ApiKey,
-        Some(&key.id),
-        None,
-        None,
+        crate::services::invocation_diagnostic_service::IssueIdentity::new(
+            &actor,
+            &AuthMethod::ApiKey,
+            Some(&key.id),
+            None,
+            None,
+        ),
         &id,
     )
     .await
@@ -317,11 +319,13 @@ async fn redemption_rechecks_current_execution_scope_before_handle_lookup() {
     let issued = crate::services::invocation_diagnostic_service::issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
-        None,
+        crate::services::invocation_diagnostic_service::IssueIdentity::new(
+            &actor,
+            &AuthMethod::AccessToken,
+            None,
+            None,
+            None,
+        ),
         &id,
     )
     .await

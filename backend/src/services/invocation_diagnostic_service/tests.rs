@@ -520,11 +520,7 @@ async fn handle_redemption_probes_once_and_completed_result_is_retry_readable() 
     let issued = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
-        None,
+        IssueIdentity::new(&actor, &AuthMethod::AccessToken, None, None, None),
         &id,
     )
     .await
@@ -589,11 +585,13 @@ async fn general_agent_key_preserves_child_binding_and_returns_agent_evidence() 
     let issued = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::ApiKey,
-        Some(&key_id),
-        Some(&child_id),
-        None,
+        IssueIdentity::new(
+            &actor,
+            &AuthMethod::ApiKey,
+            Some(&key_id),
+            Some(&child_id),
+            None,
+        ),
         &id,
     )
     .await
@@ -646,11 +644,13 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
     let client_bound = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
-        Some("oauth-client-a"),
+        IssueIdentity::new(
+            &actor,
+            &AuthMethod::AccessToken,
+            None,
+            None,
+            Some("oauth-client-a"),
+        ),
         &id,
     )
     .await
@@ -676,11 +676,13 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
     let issued = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::ApiKey,
-        Some("agent-key-id"),
-        None,
-        None,
+        IssueIdentity::new(
+            &actor,
+            &AuthMethod::ApiKey,
+            Some("agent-key-id"),
+            None,
+            None,
+        ),
         &id,
     )
     .await
@@ -730,11 +732,7 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
     let expired = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
-        None,
+        IssueIdentity::new(&actor, &AuthMethod::AccessToken, None, None, None),
         &id,
     )
     .await
@@ -774,11 +772,13 @@ async fn service_account_redemption_revalidates_with_its_execution_owner() {
     let issued = issue(
         &state.db,
         &state.config,
-        &service_account_id,
-        &AuthMethod::ServiceAccount,
-        None,
-        None,
-        None,
+        IssueIdentity::new(
+            &service_account_id,
+            &AuthMethod::ServiceAccount,
+            None,
+            None,
+            None,
+        ),
         &id,
     )
     .await
@@ -887,11 +887,13 @@ async fn shared_agent_redemption_preserves_owner_shared_connection_authority() {
     let issued = issue(
         &fixture.state.db,
         &config,
-        &fixture.outsider,
-        &AuthMethod::ApiKey,
-        auth.api_key_id.as_deref(),
-        None,
-        None,
+        IssueIdentity::new(
+            &fixture.outsider,
+            &AuthMethod::ApiKey,
+            auth.api_key_id.as_deref(),
+            None,
+            None,
+        ),
         &service,
     )
     .await
@@ -968,11 +970,7 @@ async fn assistant_model_transport_redemption_preserves_the_proxy_scope_exceptio
     let issued = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::ApiKey,
-        Some(&key_id),
-        None,
-        None,
+        IssueIdentity::new(&actor, &AuthMethod::ApiKey, Some(&key_id), None, None),
         &service,
     )
     .await
@@ -995,11 +993,7 @@ async fn running_claims_are_never_replayed() {
     let issued = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
-        None,
+        IssueIdentity::new(&actor, &AuthMethod::AccessToken, None, None, None),
         &id,
     )
     .await
@@ -1061,11 +1055,7 @@ async fn concurrent_redemptions_start_only_one_probe() {
     let issued = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
-        None,
+        IssueIdentity::new(&actor, &AuthMethod::AccessToken, None, None, None),
         &id,
     )
     .await
@@ -1163,11 +1153,7 @@ async fn redemption_waits_only_while_concurrency_capacity_is_exhausted() {
     let issued = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
-        None,
+        IssueIdentity::new(&actor, &AuthMethod::AccessToken, None, None, None),
         &id,
     )
     .await
@@ -1247,11 +1233,7 @@ async fn issuance_does_not_read_the_feature_flag_but_redemption_respects_it() {
     let issued = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
-        None,
+        IssueIdentity::new(&actor, &AuthMethod::AccessToken, None, None, None),
         &id,
     )
     .await

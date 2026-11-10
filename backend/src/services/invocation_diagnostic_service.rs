@@ -162,25 +162,40 @@ fn auth_method_name(method: &AuthMethod) -> &'static str {
     }
 }
 
+pub(crate) struct IssueIdentity<'a> {
+    actor_id: &'a str,
+    auth_method: &'a AuthMethod,
+    api_key_id: Option<&'a str>,
+    api_key_credential_id: Option<&'a str>,
+    client_id: Option<&'a str>,
+}
+
+impl<'a> IssueIdentity<'a> {
+    pub(crate) fn new(
+        actor_id: &'a str,
+        auth_method: &'a AuthMethod,
+        api_key_id: Option<&'a str>,
+        api_key_credential_id: Option<&'a str>,
+        client_id: Option<&'a str>,
+    ) -> Self {
+        Self {
+            actor_id,
+            auth_method,
+            api_key_id,
+            api_key_credential_id,
+            client_id,
+        }
+    }
+}
+
 pub(crate) async fn issue(
     db: &Database,
     config: &AppConfig,
-    actor_id: &str,
-    auth_method: &AuthMethod,
-    api_key_id: Option<&str>,
-    api_key_credential_id: Option<&str>,
-    client_id: Option<&str>,
+    identity: IssueIdentity<'_>,
     exact_user_service_id: &str,
 ) -> AppResult<Option<IssuedHandle>> {
     monitoring_service::configured_base_url(config)?;
-    let Some(reservation) = reserve_issue(
-        actor_id,
-        auth_method,
-        api_key_id,
-        api_key_credential_id,
-        client_id,
-        exact_user_service_id,
-    ) else {
+    let Some(reservation) = reserve_issue(&identity, exact_user_service_id) else {
         return Ok(None);
     };
     let raw = format!(
@@ -191,11 +206,11 @@ pub(crate) async fn issue(
     let row = InvocationDiagnostic {
         id: uuid::Uuid::new_v4().to_string(),
         handle_hash: crate::crypto::token::hash_token(&raw),
-        actor_user_id: actor_id.to_owned(),
-        original_auth_method: auth_method_name(auth_method).to_owned(),
-        original_api_key_id: api_key_id.map(str::to_owned),
-        original_api_key_credential_id: api_key_credential_id.map(str::to_owned),
-        original_client_id: client_id.map(str::to_owned),
+        actor_user_id: identity.actor_id.to_owned(),
+        original_auth_method: auth_method_name(identity.auth_method).to_owned(),
+        original_api_key_id: identity.api_key_id.map(str::to_owned),
+        original_api_key_credential_id: identity.api_key_credential_id.map(str::to_owned),
+        original_client_id: identity.client_id.map(str::to_owned),
         exact_user_service_id: exact_user_service_id.to_owned(),
         state: InvocationDiagnosticState::Pending,
         diagnostic: None,
@@ -220,19 +235,15 @@ pub(crate) async fn issue(
 }
 
 fn reserve_issue(
-    actor_id: &str,
-    auth_method: &AuthMethod,
-    api_key_id: Option<&str>,
-    api_key_credential_id: Option<&str>,
-    client_id: Option<&str>,
+    identity: &IssueIdentity<'_>,
     exact_user_service_id: &str,
 ) -> Option<IssueReservation> {
     let fingerprint = IssueFingerprint {
-        actor_id: actor_id.to_owned(),
-        auth_method: auth_method_name(auth_method),
-        api_key_id: api_key_id.map(str::to_owned),
-        api_key_credential_id: api_key_credential_id.map(str::to_owned),
-        client_id: client_id.map(str::to_owned),
+        actor_id: identity.actor_id.to_owned(),
+        auth_method: auth_method_name(identity.auth_method),
+        api_key_id: identity.api_key_id.map(str::to_owned),
+        api_key_credential_id: identity.api_key_credential_id.map(str::to_owned),
+        client_id: identity.client_id.map(str::to_owned),
         exact_user_service_id: exact_user_service_id.to_owned(),
     };
     let now = Instant::now();
