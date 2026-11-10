@@ -47,15 +47,24 @@ retains its media presentation.
 
 The sidebar header contains the NyxID logo and circular Search control. Quick
 actions (Scan QR code and Terminal login code) precede Workspace. Workspace
-contains Notifications with its unread count (only while the
-`assistant:notifications` flag is on; the count turns amber while a decision
-waits), Automations, Machines, Plugins, Activity with its live pending count,
-and Create new agent. Private chats also show the same bell in their header.
+contains Notifications with its unread count (only while both the
+`assistant:notifications` and `assistant:nyxagent-engine` flags are on; the
+count turns amber while a decision waits), Automations, Machines, Plugins,
+Activity with its live pending count, and Create new agent. Private chats also
+show the same bell in their header. Thread, crew, channel-bot and Recents rows
+carry the unread counts the one notification summary attributes to them.
 Opening a thread or crew marks its notifications read once it has stayed in
-front for 1.5 seconds. Canonical `/assistant?c=<thread>`, `?g=<crew>` and
-`?agent=` links resolve to their chat; `?panel=notifications` opens the feed
-above it. Push taps that name a `notification_id` mark that row read before
-their `deeplink` opens the thread. There are no disabled coming-soon destinations. Agents
+front for 1.5 seconds. A notification row follows the server's canonical
+link first (`/assistant?c=<thread|crew>`, `?card=` focuses a decision,
+`?agent=<id>&details=<section>` opens the agent's details, where an
+organization bot's public transcript lives, `/assistant/automations` the
+list) and falls back to its own references; links on other origins open
+nothing. The same parser serves `?g=<crew>`, `?agent=` chats and
+`?panel=notifications` above them. Push taps that name a `notification_id`
+go through one controller, whether from the OS (background or cold start) or
+the in-app toast's Open action: the `deeplink` is routed in-app first and the
+row is marked read only after that dispatch; a tap before the navigator is
+ready or before sign-in waits. There are no disabled coming-soon destinations. Agents
 (personal, then organization), Crews and plain-text Recents follow. The pinned
 Chat pill opens NyxBot Home; the gear opens Settings. A measured bottom spacer
 keeps the last row above the bar at maximum scroll. A fade hides rows passing

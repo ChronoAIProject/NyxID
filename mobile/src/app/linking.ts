@@ -17,6 +17,7 @@ import {
   NYXID_UNIVERSAL_LINK_HOST,
 } from "../lib/env";
 import { buildLinkingPrefixes } from "../lib/linkingPrefixes";
+import { isAssistantNotificationResponse } from "../lib/notifications/notificationPushSignal";
 
 type NotificationData = {
   deeplink?: unknown;
@@ -234,6 +235,10 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
       const url = extractUrlFromNotificationResponse(lastNotificationResponse);
       if (url) {
         reportDeepLinkOpened(url);
+        // NyxBot notification taps are routed by the app's push controller
+        // (navigate, then mark read), which also handles cold starts.
+        if (isAssistantNotificationResponse(lastNotificationResponse))
+          return null;
         return rewriteChallengeUrl(url);
       }
       return null;
@@ -266,6 +271,8 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
           const url = extractUrlFromNotificationResponse(response);
           if (url) {
             reportDeepLinkOpened(url);
+            // See getInitialURL: one surface routes NyxBot notification taps.
+            if (isAssistantNotificationResponse(response)) return;
             listener(rewriteChallengeUrl(url));
           }
         });

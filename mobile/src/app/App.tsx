@@ -31,7 +31,6 @@ import {
   ActivityIndicator,
   AppState,
   findNodeHandle,
-  Linking,
   StyleSheet,
   Text,
   View,
@@ -105,12 +104,11 @@ import {
   WorkspaceDrawer,
   type WorkspaceRoute,
 } from "../components/workspace/WorkspaceDrawer";
-import { NOTIFICATIONS } from "../features/notifications/useNotifications";
 import { notificationsApi } from "../lib/api/notificationsApi";
-import {
-  notificationPushSignalFromData,
-  notificationPushSignalFromResponse,
-} from "../lib/notifications/notificationPushSignal";
+import { NYXID_APP_SCHEME, NYXID_TRUSTED_FRONTEND_URLS } from "../lib/env";
+import { createNotificationPushController } from "../lib/notifications/notificationPushController";
+import { notificationPushSignalFromResponse } from "../lib/notifications/notificationPushSignal";
+import { canonicalLinkNavigation } from "./workspaceCanonicalLinks";
 import { ChatLayoutProvider } from "../features/display/ChatLayoutContext";
 import { ThemeProvider, useTheme } from "../theme/ThemeContext";
 import {
@@ -156,33 +154,6 @@ function refreshQueryCacheFromPushSignal(signal: PushSyncSignal | null) {
   signalApprovalStateMayHaveChanged();
 }
 
-/** A NyxBot notification push marks its feed stale; the focused bell or
- * screen refetches, and background arrivals wait for the resume sweep. */
-function refreshNotificationsFromPush(data: unknown) {
-  if (!notificationPushSignalFromData(data)?.kind) return;
-  void queryClient.invalidateQueries({
-    queryKey: NOTIFICATIONS,
-    refetchType:
-      AppState.currentState === "active" && onlineManager.isOnline()
-        ? "active"
-        : "none",
-  });
-}
-
-/** Tapping a push opened its thread; the row it names is read now. A tap
- * before sign-in simply leaves the row unread until the thread is opened. */
-function markNotificationReadFromTap(notificationId: string) {
-  void notificationsApi
-    .markRead({ ids: [notificationId] })
-    .catch(() => undefined)
-    .finally(() => {
-      void queryClient.invalidateQueries({
-        queryKey: NOTIFICATIONS,
-        refetchType: "active",
-      });
-    });
-}
-
 function getActiveRouteName(
   state: NavigationState | PartialState<NavigationState> | undefined,
 ): string | undefined {
@@ -213,9 +184,36 @@ export default function App() {
   const [navigationGuardRevision, setNavigationGuardRevision] = useState(0);
   const lastAppStateRef = useRef(AppState.currentState);
   const [pushToast, setPushToast] = useState<ToastState | null>(null);
+  // NyxBot notification pushes (SPEC D9): one controller routes a tap from
+  // the OS, a cold start or the in-app toast to its canonical workspace page
+  // through the same parser as universal links, then marks the row read.
+  // `appLinking` leaves these responses alone, so nothing routes them twice.
+  const [pushController] = useState(() =>
+    createNotificationPushController({
+      api: notificationsApi,
+      queryClient,
+      frontendUrls: NYXID_TRUSTED_FRONTEND_URLS,
+      appScheme: NYXID_APP_SCHEME,
+      isForeground: () => AppState.currentState === "active",
+      isOnline: () => onlineManager.isOnline(),
+      openPath: (path) => {
+        if (!navigationRef.isReady() || navigationGuardsRef.current.size > 0)
+          return false;
+        const state = navigationRef.getRootState();
+        if (!state?.routeNames.includes("Workspace")) return false;
+        const next = canonicalLinkNavigation(path);
+        if (!next) return false;
+        if (next.type === "action") navigationRef.dispatch(next.action);
+        else navigationRef.resetRoot(next.state);
+        return true;
+      },
+    }),
+  );
 
   const flushPendingChallengeTapNavigation = useCallback(() => {
     if (!navigationRef.isReady()) return;
+    // A notification tap waits for the same moments: ready, signed in, guards lifted.
+    void pushController.flush();
 
     const pendingChallengeId = pendingChallengeFromTapRef.current;
     if (!pendingChallengeId) return;
@@ -229,7 +227,7 @@ export default function App() {
 
     pendingChallengeFromTapRef.current = null;
     navigationRef.dispatch(action);
-  }, [navigationRef]);
+  }, [navigationRef, pushController]);
 
   const onNavigationGuardChange = useCallback<WorkspaceNavigationGuardChange>(
     (id, blocked, critical = false) => {
@@ -369,22 +367,22 @@ export default function App() {
         } catch {
           // never break push pipeline on telemetry failure
         }
-        refreshNotificationsFromPush(notification.request.content.data);
+        pushController.received(notification.request.content.data);
       },
     );
 
     return () => {
       subscription.remove();
     };
-  }, []);
+  }, [pushController]);
 
   useEffect(() => {
     const handleResponse = (
       response: Notifications.NotificationResponse | null,
     ) => {
-      const notificationId =
-        notificationPushSignalFromResponse(response)?.notificationId;
-      if (notificationId) markNotificationReadFromTap(notificationId);
+      // Background taps and the cold-start last response take the same path.
+      if (pushController.tapped(notificationPushSignalFromResponse(response)))
+        return;
       const challengeId = extractChallengeIdFromNotificationResponse(response);
       if (!challengeId) return;
 
@@ -410,7 +408,7 @@ export default function App() {
     return () => {
       responseSubscription.remove();
     };
-  }, [flushPendingChallengeTapNavigation]);
+  }, [flushPendingChallengeTapNavigation, pushController]);
 
   // In-app replacement for the OS banner suppressed while the app is
   // foregrounded (see `configureNotificationHandler`). Without this, a push
@@ -434,15 +432,16 @@ export default function App() {
           : deeplink
             ? {
                 label: "Open",
+                // In-app, like a tapped push: a universal link opened from
+                // its own app would go to Safari instead.
                 onPress: () => {
-                  if (notificationId) markNotificationReadFromTap(notificationId);
-                  void Linking.openURL(deeplink).catch(() => undefined);
+                  pushController.tapped({ notificationId, deeplink });
                 },
               }
             : undefined,
       });
     });
-  }, [openChallengeFromNotification]);
+  }, [openChallengeFromNotification, pushController]);
 
   useEffect(() => {
     const onPushSyncSignal = (signal: PushSyncSignal | null) => {
