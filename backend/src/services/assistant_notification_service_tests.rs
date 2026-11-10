@@ -3779,3 +3779,6 @@ async fn owner_home_thread_rows_follow_the_bot_the_owner_wrote_from_last() {
         .unwrap();
     assert!(rows_of(&f, &f.owner).await.is_empty());
 }
+
+#[path = "assistant_notification_pm_tests.rs"]
+mod pm_review;
