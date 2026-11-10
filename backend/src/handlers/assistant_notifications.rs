@@ -258,6 +258,6 @@ pub async fn list_for_tool(state: &AppState, user_id: &str, args: &Value) -> App
         },
     )
     .await?;
-    Ok(serde_json::to_value(page)
-        .map_err(|_| AppError::Internal("Notification list unavailable".into()))?)
+    serde_json::to_value(page)
+        .map_err(|_| AppError::Internal("Notification list unavailable".into()))
 }
