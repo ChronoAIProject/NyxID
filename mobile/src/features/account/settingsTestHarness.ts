@@ -34,6 +34,7 @@ const EXPANDED = [
   "SettingsGroup",
   "SettingsRow",
   "SettingsMenuRow",
+  "NyxBotPushSwitches",
 ];
 
 function renderRows(node: Element, fontScale: number): Element {
@@ -101,6 +102,8 @@ export function setupSettingsScreen(
   const dynamicText = {};
   const screenContainer = { ScreenContainer: "ScreenContainer" };
   const settingsList = {};
+  // The extracted switches render through the harness so their rows are real.
+  const pushSwitches = {};
   const theme = {
     useTheme: () => ({
       colors: lightColors,
@@ -136,6 +139,7 @@ export function setupSettingsScreen(
         isPending: false,
       }),
     },
+    "./NyxBotPushSwitches": pushSwitches,
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "react-native": {
       ...Object.fromEntries(
@@ -257,6 +261,7 @@ export function setupSettingsScreen(
     settingsList,
     load("../../components/settings/SettingsList.tsx"),
   );
+  Object.assign(pushSwitches, load("./NyxBotPushSwitches.tsx"));
   const module = load(file) as Record<string, (props: any) => Element>;
   const Screen = module[exportName]!;
   harness.mount(() =>
