@@ -138,6 +138,7 @@ describe("feature flag catalog", () => {
       ATTACHMENT_WRITES: "assistant:attachment-writes",
       AGENT_LEARNING: "assistant:agent-learning",
       SKILL_PIN_DISABLE: "assistant:skill-pin-disable",
+      SKILL_RUNS: "assistant:skill-runs",
       ORG_AGENTS: "assistant:org-agents",
       SHARED_AGENTS: "assistant:shared-agents",
       INFERENCE_PLATFORM_MODELS: "inference:platform-models",
