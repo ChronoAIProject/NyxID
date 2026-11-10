@@ -2103,7 +2103,7 @@ async fn real_member_replies_notify_once_per_public_post_and_delete_with_the_gro
     flags::set_platform_override(&state.db, feed::FLAG_KEY, &FlagTarget::Global, true, OWNER)
         .await
         .unwrap();
-    feed::reset_flag_cache();
+    feed::reset_flag_cache(&state.db);
     let agent = researcher(&state).await;
     let group = groups::create(
         &state.db,

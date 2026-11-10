@@ -1665,7 +1665,7 @@ async fn real_shared_agent_settlement_notifies_only_the_requester_from_its_publi
     flags::set_platform_override(db, feed::FLAG_KEY, &FlagTarget::Global, true, &f.admin)
         .await
         .unwrap();
-    feed::reset_flag_cache();
+    feed::reset_flag_cache(db);
     let group = join(&f, &group, &f.member).await;
     share(&f, &agent, &[&f.member]).await;
     let claim = runtime_start(&f, &f.member, &group, &agent).await;

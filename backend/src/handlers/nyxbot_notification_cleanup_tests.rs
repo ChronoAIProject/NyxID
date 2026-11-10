@@ -19,7 +19,7 @@ async fn owner_private_channel_replies_are_chat_updates_on_the_shared_home_threa
     )
     .await
     .unwrap();
-    feed::reset_flag_cache();
+    feed::reset_flag_cache(&state.db);
     let (connection, key) = Box::pin(channel(&state, "gateway")).await;
     assert_eq!(
         put_binding(
