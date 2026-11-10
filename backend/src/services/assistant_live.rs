@@ -497,6 +497,10 @@ fn pipeline() -> Vec<Document> {
     ]
 }
 
+#[cfg(test)]
+#[path = "assistant_notification_live_tests.rs"]
+mod notification_tests;
+
 fn decode(change: &ChangeStreamEvent<Document>) -> Option<LiveEvent> {
     if !matches!(
         change.operation_type,
