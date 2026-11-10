@@ -5539,6 +5539,21 @@ async fn handle_meta_search(
         response_json["chat_access_hint"] = serde_json::json!(chat_access_hint(auth));
     }
 
+    if crate::services::lark_wiki::relevant_query(query)
+        && let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest)
+        && let Ok(Some(guidance)) = crate::services::lark_wiki::discovery(
+            &state.db,
+            &services,
+            chat,
+            &auth.allowed_service_ids,
+            &auth.allowed_platform_service_ids,
+            &state.config.frontend_url,
+        )
+        .await
+    {
+        response_json["lark_setup"] = guidance;
+    }
+
     let text = if auth.chat.is_some() {
         bounded_chat_search_result(response_json)
     } else {
@@ -12139,3 +12154,7 @@ mod turn_trace_parity_tests {
         eprintln!("turn trace MCP command parity: {:?}", measured[0]);
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_lark_wiki_tests.rs"]
+mod lark_wiki_tests;
