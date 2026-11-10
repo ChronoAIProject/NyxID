@@ -1651,6 +1651,89 @@ async fn collaboration_runtime_settlement_publishes_only_final_text_once() {
 }
 
 #[tokio::test]
+async fn real_shared_agent_settlement_notifies_only_the_requester_from_its_public_reply() {
+    use crate::{
+        models::assistant_notification::{AssistantNotification, NotificationKind, SourceType},
+        services::{
+            assistant_notification_service as feed,
+            feature_flag_service::{self as flags, FlagTarget},
+        },
+    };
+    let (f, agent, group) = setup("collaboration_real_feed_settle").await;
+    let db = &f.state.db;
+    feed::ensure_indexes(db).await.unwrap();
+    flags::set_platform_override(db, feed::FLAG_KEY, &FlagTarget::Global, true, &f.admin)
+        .await
+        .unwrap();
+    feed::reset_flag_cache();
+    let group = join(&f, &group, &f.member).await;
+    share(&f, &agent, &[&f.member]).await;
+    let claim = runtime_start(&f, &f.member, &group, &agent).await;
+    let row = &claim.conversation;
+    let result = svc::assistant_nyxagent::TurnResult {
+        text: "Public shared-agent report".into(),
+        session_id: None,
+        response_id: None,
+        error: None,
+    };
+    svc::assistant_nyxagent::finish_turn(
+        db,
+        row,
+        &row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &result,
+    )
+    .await
+    .unwrap();
+    let history = messages(db, &f.member, &group.id, None).await.unwrap();
+    let public_reply = history.last().unwrap();
+    assert_eq!(public_reply.text, result.text);
+    let notifications = db.collection::<AssistantNotification>(
+        crate::models::assistant_notification::COLLECTION_NAME,
+    );
+    let rows: Vec<_> = notifications
+        .find(doc! {})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].user_id, f.member);
+    assert_eq!(rows[0].kind, NotificationKind::AgentUpdate);
+    assert_eq!(rows[0].source.source_type, SourceType::CollaborationGroup);
+    assert_eq!(rows[0].source.group_id.as_deref(), Some(group.id.as_str()));
+    assert_eq!(
+        rows[0].source.message_id.as_deref(),
+        Some(public_reply.id.as_str())
+    );
+    assert!(
+        rows[0].source.conversation_id.is_none(),
+        "private execution threads must not become destinations"
+    );
+    let listed = feed::list(&f.state, &f.member, &feed::ListQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(listed.items[0].preview, result.text);
+    assert!(listed.items[0].url.contains(&format!("c={}", group.id)));
+    assert_eq!(feed::summary(db, &f.admin).await.unwrap().unread_count, 0);
+    assert!(
+        svc::assistant_nyxagent::finish_turn(
+            db,
+            row,
+            &row.credential_api_key_id,
+            &uuid::Uuid::new_v4().to_string(),
+            &result,
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(notifications.count_documents(doc! {}).await.unwrap(), 1);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn collaboration_runtime_revocation_fences_keys_and_resharing_gets_a_new_session() {
     let (f, agent, group) = setup("collaboration_runtime_revoke").await;
     let group = join(&f, &group, &f.member).await;

@@ -62,7 +62,8 @@ pub enum SourceType {
     #[default]
     Conversation,
     Group,
-    /// A channel-bot chat. `id` is the conversation id of that chat's thread.
+    /// A channel-bot chat. `id` is its conversation id for personal routes,
+    /// or its public provider thread id for organization routes.
     ChannelChat,
     CollaborationGroup,
     Trigger,
@@ -98,7 +99,7 @@ impl SourceType {
 pub struct NotificationSource {
     #[serde(rename = "type")]
     pub source_type: SourceType,
-    /// Conversation id, group id, channel chat conversation id or trigger id.
+    /// Conversation, group, channel chat or trigger identity visible to the recipient.
     pub id: String,
     #[serde(default)]
     pub conversation_id: Option<String>,
@@ -171,7 +172,7 @@ pub struct AssistantNotification {
     pub user_id: String,
     pub kind: NotificationKind,
     pub source: NotificationSource,
-    /// `{kind}:{source.type}:{source.id}`; coalescing identity.
+    /// `{source.type}:{source.id}`; shared across coalesced kinds on one source.
     pub source_key: String,
     pub coalesced: bool,
     /// Needs the person's attention: neither read nor resolved. Indexed with
