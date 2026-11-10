@@ -670,34 +670,33 @@ async fn cma_guide_is_discovered_without_skills_and_has_no_provider_resource_or_
     );
     // Only specialists can be shared. Use a real granted specialist thread so
     // both recipient exclusion and live grant revocation exercise valid access.
-    let (agent, home) = crate::services::assistant_team_service::create_specialist(
-        db,
-        &a.f.state.encryption_keys,
-        &a.f.owner,
-        crate::services::assistant_team_service::CreateRequest {
-            machines: None,
-            logins: None,
-            name: "cma-guide-worker".into(),
-            description: "Exercise personal CMA guide access".into(),
-            display_name: None,
-            persona: None,
-            targets: crate::services::assistant_team_service::GrantTargets {
-                service_ids: vec![a.service.clone()],
-                ..Default::default()
-            },
-            account_read: false,
-            specialty: None,
-            created_by: "user",
-        },
+    let (status, Json(created)) = crate::handlers::assistant_team::create_agent(
+        State(a.f.state.clone()),
+        crate::test_utils::test_auth_user(&a.f.owner),
+        Json(
+            serde_json::from_value(json!({
+                "name": "cma-guide-worker",
+                "description": "Exercise personal CMA guide access",
+                "services": [a.service.clone()],
+            }))
+            .unwrap(),
+        ),
     )
     .await
-    .unwrap()
+    .unwrap();
+    assert_eq!(status, StatusCode::CREATED);
+    let agent = crate::services::assistant_team_service::agent(
+        db,
+        &a.f.owner,
+        created["id"].as_str().unwrap(),
+    )
+    .await
     .unwrap();
     let row = engine::begin_turn(
         db,
         &a.f.owner,
         &engine::TurnRequest {
-            conversation_id: Some(home.id),
+            conversation_id: Some(created["home_conversation_id"].as_str().unwrap().into()),
             agent_id: None,
             text: "Read the CMA guide".into(),
             model: None,
