@@ -256,9 +256,17 @@ The row's durable send barrier is:
 pending → sending → sent | failed | unknown | skipped
 ```
 
-A sending claim commits before provider I/O. An expired or ambiguous sending
-claim becomes `unknown` and is never resent. A conclusive receipt may be settled
-without sending again. Only an explicit retryable refusal permits a bounded
+A sweep checks flags and preferences, then prepares previews in one batch per
+person before claiming any sends. Each row takes its sending claim immediately
+before its own provider call, which has a ten-second timeout; unsent rows do not
+wait in `sending` behind other deliveries. A row that changes after preparation
+returns atomically to its prior pending or retry state, with its reservations
+released and no attempt consumed, for preparation in the next sweep. A lookup
+failure leaves unclaimed rows due, and one person's failure does not strand
+another person's rows.
+
+A claim left in `sending` for ten minutes becomes `unknown` and is never resent.
+A conclusive receipt may be settled without sending again. Only an explicit retryable refusal permits a bounded
 retry under the same rules as [automation notification delivery](../NYXBOT_SCHEDULES.md#notification-result-delivery).
 Retries wait at least sixty seconds, permit at most three attempts and stop
 thirty minutes after the first attempt. The claim transaction checks the current
