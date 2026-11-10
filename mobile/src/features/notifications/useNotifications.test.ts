@@ -21,6 +21,7 @@ function setup(options: {
   summary?: unknown;
   dataUpdatedAt?: number;
   focused?: boolean;
+  active?: boolean;
   live?: boolean;
 } = {}) {
   const state = {
@@ -28,7 +29,11 @@ function setup(options: {
     summary: options.summary as unknown,
     dataUpdatedAt: options.dataUpdatedAt ?? 1,
     focused: options.focused ?? true,
+    /** Screen focused and app in front; toggled by tests for pauses. */
+    active: options.active ?? true,
     live: options.live ?? false,
+    epoch: 7,
+    source: { type: "conversation", id: C } as { type: "conversation" | "group"; id: string } | undefined,
   };
   const reads: unknown[] = [];
   const feeds: { queryKey: unknown[]; enabled?: boolean; queryFn: (context: { pageParam?: string; signal?: AbortSignal }) => unknown }[] = [];
@@ -64,7 +69,7 @@ function setup(options: {
     "../../lib/api/notificationsApi": {
       notificationsApi: { list: async (params: unknown) => { lists.push(params); return { items: [], next_cursor: null, as_of: "x" }; } },
     },
-    "../../lib/auth/authEpoch": { getAuthEpoch: () => 7 },
+    "../../lib/auth/authEpoch": { getAuthEpoch: () => state.epoch },
     "../groups/useGroupsLive": {
       useGroupsLive: (_epoch: number, _active: boolean, _available: unknown, onEvent?: (event: unknown) => void) => {
         onLiveEvent = onEvent;
@@ -226,4 +231,120 @@ test("Needs you asks the server for waiting decisions only; other filters keep h
     { kinds: ["automation_result", "automation_problem"], pendingOnly: false },
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(x.feeds.at(-1)!.queryKey)), [...NOTIFICATIONS, "feed", 7, "needs_you"]);
+});
+
+const exactSummary = (unread: number) => ({
+  unread_count: unread, needs_decision_count: 0, by_source_truncated: false,
+  by_source: unread ? [{ source_type: "channel_chat", id: C, conversation_id: C, unread }] : [],
+});
+const truncatedSummary = { unread_count: 4, needs_decision_count: 0, by_source_truncated: true, by_source: [] };
+/** Mounts the hook on the harness state so tests can pause, blur and switch threads. */
+const mountVisible = (x: ReturnType<typeof setup>) =>
+  x.h.mount(() => x.module.useVisibleThreadRead(x.state.source, true, x.state.active));
+const refresh = (x: ReturnType<typeof setup>, summary: unknown) => {
+  x.state.summary = summary;
+  x.state.dataUpdatedAt += 1;
+  x.h.render();
+};
+
+test("summary refreshes before the deadline neither restart nor skip it, and after it each refresh is judged at once", async () => {
+  const x = setup({ summary: exactSummary(2) });
+  mountVisible(x);
+  for (let i = 0; i < 3; i++) {
+    await wait(400);
+    refresh(x, exactSummary(2));
+  }
+  assert.deepEqual(x.reads, [], "still inside the debounce");
+  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150 - 1200);
+  assert.equal(x.reads.length, 1, "a busy feed cannot postpone the open thread's read");
+  refresh(x, exactSummary(5));
+  assert.equal(x.reads.length, 2, "once due, a changed count reads without waiting again");
+  x.h.unmount();
+});
+
+test("an unread count the server leaves unchanged is asked about three times, then only a change or a clear re-arms", async () => {
+  const x = setup({ summary: exactSummary(2) });
+  mountVisible(x);
+  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  assert.equal(x.reads.length, 1);
+  refresh(x, exactSummary(2));
+  refresh(x, exactSummary(2));
+  assert.equal(x.reads.length, 3, "two more tries for the same count");
+  refresh(x, exactSummary(2));
+  refresh(x, exactSummary(2));
+  assert.equal(x.reads.length, 3, "then the thread stops asking");
+  refresh(x, exactSummary(3));
+  assert.equal(x.reads.length, 4, "a changed count is new work");
+  refresh(x, exactSummary(3));
+  refresh(x, exactSummary(3));
+  refresh(x, exactSummary(3));
+  assert.equal(x.reads.length, 6, "the budget restarted with the new count");
+  refresh(x, exactSummary(0));
+  assert.equal(x.reads.length, 6, "nothing to read once cleared");
+  refresh(x, exactSummary(3));
+  assert.equal(x.reads.length, 7, "after a clear the same count is fresh again");
+  x.h.unmount();
+});
+
+test("a background pause keeps what this open already read and re-arms the debounce; a navigation blur and return is a new open", async () => {
+  const x = setup({ summary: truncatedSummary });
+  mountVisible(x);
+  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  assert.equal(x.reads.length, 1, "truncated summaries read once per open");
+  x.state.active = false;
+  x.h.render();
+  x.state.active = true;
+  x.h.render();
+  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  assert.equal(x.reads.length, 1, "resuming from the background does not read again");
+  x.state.focused = false;
+  x.state.active = false;
+  x.h.render();
+  x.state.focused = true;
+  x.state.active = true;
+  x.h.render();
+  await wait(VISIBLE_THREAD_READ_DELAY_MS - 300);
+  assert.equal(x.reads.length, 1, "a reopened thread waits the full debounce again");
+  await wait(450);
+  assert.equal(x.reads.length, 2, "returning from another screen is a new open");
+  x.state.epoch = 8;
+  x.h.render();
+  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  assert.equal(x.reads.length, 3, "another account is a new open");
+  x.h.unmount();
+});
+
+test("a pause preserves an exhausted budget while switching threads starts over, and the pending read is cancelled by a pause", async () => {
+  const x = setup({ summary: exactSummary(2) });
+  mountVisible(x);
+  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  refresh(x, exactSummary(2));
+  refresh(x, exactSummary(2));
+  refresh(x, exactSummary(2));
+  assert.equal(x.reads.length, 3);
+  x.state.active = false;
+  x.h.render();
+  x.state.active = true;
+  x.h.render();
+  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  assert.equal(x.reads.length, 3, "a pause does not refill the budget for the same count");
+  const other = `nyxa-${"d".repeat(32)}`;
+  x.state.source = { type: "conversation", id: other };
+  x.state.summary = { ...exactSummary(0), by_source: [{ source_type: "conversation", id: other, conversation_id: null, unread: 1 }] };
+  x.h.render();
+  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  assert.deepEqual(JSON.parse(JSON.stringify(x.reads.at(-1))), { source: { type: "conversation", id: other } }, "another thread reads on its own");
+  x.state.source = { type: "conversation", id: C };
+  x.state.summary = exactSummary(2);
+  x.h.render();
+  await wait(VISIBLE_THREAD_READ_DELAY_MS - 300);
+  x.state.active = false;
+  x.h.render();
+  await wait(600);
+  assert.equal(x.reads.length, 4, "pausing before the debounce ends cancels that read");
+  x.state.active = true;
+  x.h.render();
+  await wait(VISIBLE_THREAD_READ_DELAY_MS + 150);
+  assert.equal(x.reads.length, 5, "coming back to the thread reads after a full debounce");
+  x.h.unmount();
 });

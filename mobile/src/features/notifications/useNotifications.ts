@@ -216,12 +216,71 @@ export type VisibleNotificationSource = {
   id: string;
 };
 
+/** Reads sent for one unchanged unread count before the thread stops asking
+ * (the server did not clear it); a changed count starts a fresh budget. */
+export const VISIBLE_THREAD_MAX_EXACT_READS = 3;
+
+type VisibleReadView = {
+  exact: number;
+  anyUnread: number;
+  truncated: boolean;
+  dataUpdatedAt: number;
+};
+/** What one open of a thread has already read; reset by a new open only. */
+type VisibleReadState = {
+  exactReads: number;
+  lastReadExact?: number;
+  lastReadAt?: number;
+  fallbackUsed: boolean;
+};
+const freshVisibleReadState = (): VisibleReadState => ({
+  exactReads: 0,
+  fallbackUsed: false,
+});
+
+function visibleReadDecision(
+  view: VisibleReadView,
+  state: VisibleReadState,
+): { read: boolean; state: VisibleReadState } {
+  if (view.exact > 0) {
+    // This summary was already read; wait for the server's next word.
+    if (state.lastReadAt === view.dataUpdatedAt) return { read: false, state };
+    const sameCount = state.lastReadExact === view.exact;
+    if (sameCount && state.exactReads >= VISIBLE_THREAD_MAX_EXACT_READS)
+      return { read: false, state };
+    return {
+      read: true,
+      state: {
+        ...state,
+        exactReads: sameCount ? state.exactReads + 1 : 1,
+        lastReadExact: view.exact,
+        lastReadAt: view.dataUpdatedAt,
+      },
+    };
+  }
+  // Nothing is attributed to this thread now: a later arrival starts fresh.
+  const cleared =
+    state.lastReadExact === undefined
+      ? state
+      : { ...state, exactReads: 0, lastReadExact: undefined, lastReadAt: undefined };
+  if (view.truncated && view.anyUnread > 0 && !cleared.fallbackUsed)
+    return { read: true, state: { ...cleared, fallbackUsed: true } };
+  return { read: false, state: cleared };
+}
+
 /**
- * Opening a thread marks its rows read (SPEC D6): once it has stayed in front
- * for the debounce, send one source read. The summary attributes channel and
- * automation rows to their thread, so exact counts re-arm the read; when the
- * bounded summary is truncated a thread reads once per open while anything is
- * unread. Decisions become seen, never resolved, server-side.
+ * Opening a thread marks its rows read (SPEC D6). The thread must stay in
+ * front for the debounce; that deadline is armed once per open or resume
+ * and survives summary refreshes, so a busy feed cannot postpone it. From
+ * then on every summary is judged at once: an exact unread count reads,
+ * re-reads when the count changes, and asks at most
+ * `VISIBLE_THREAD_MAX_EXACT_READS` times for a count the server leaves
+ * unchanged. A truncated summary with unexact counts reads once per open.
+ * An open is one thread under one account while the screen stays focused:
+ * a background pause keeps what was already read, while a navigation blur
+ * and return, another thread, another account or a fresh mount start over
+ * (the web's tab-visibility behavior). Decisions become seen, never
+ * resolved, server-side.
  */
 export function useVisibleThreadRead(
   source: VisibleNotificationSource | undefined,
@@ -230,30 +289,61 @@ export function useVisibleThreadRead(
 ) {
   const summary = useNotificationSummary(enabled, active);
   const markRead = useMarkNotificationsRead();
+  const focused = useIsFocused();
   const mutate = useRef(markRead.mutate);
   mutate.current = markRead.mutate;
-  const attempted = useRef<string | undefined>(undefined);
-  const exact = source
-    ? unreadForSource(summary.data, source.type, source.id)
-    : 0;
-  const anyUnread = summary.data?.unread_count ?? 0;
-  const truncated = summary.data?.by_source_truncated ?? false;
-  const token = !source
-    ? undefined
-    : exact > 0
-      ? `${source.type}:${source.id}:exact:${summary.dataUpdatedAt}`
-      : truncated && anyUnread > 0
-        ? `${source.type}:${source.id}:any`
-        : undefined;
-  const sourceType = source?.type;
-  const sourceId = source?.id;
+  const sourceKey = source ? `${source.type}:${source.id}` : undefined;
+  const identity = sourceKey ? `${getAuthEpoch()}:${sourceKey}` : undefined;
+  const view: VisibleReadView = {
+    exact: source ? unreadForSource(summary.data, source.type, source.id) : 0,
+    anyUnread: summary.data?.unread_count ?? 0,
+    truncated: summary.data?.by_source_truncated ?? false,
+    dataUpdatedAt: summary.dataUpdatedAt,
+  };
+  const latest = useRef({ view, source });
+  latest.current = { view, source };
+  const open = useRef<{
+    identity?: string;
+    focused: boolean;
+    state: VisibleReadState;
+    due: boolean;
+    /** Counts opens so the deadline re-arms for each one. */
+    generation: number;
+  }>({ identity, focused, state: freshVisibleReadState(), due: false, generation: 0 });
+  if (open.current.identity !== identity || (focused && !open.current.focused))
+    open.current = {
+      identity,
+      focused,
+      state: freshVisibleReadState(),
+      due: false,
+      generation: open.current.generation + 1,
+    };
+  else open.current.focused = focused;
+  const generation = open.current.generation;
+  const judge = useRef(() => {});
+  judge.current = () => {
+    const current = open.current;
+    const target = latest.current.source;
+    if (!current.due || !target) return;
+    const next = visibleReadDecision(latest.current.view, current.state);
+    current.state = next.state;
+    if (next.read) mutate.current({ source: { type: target.type, id: target.id } });
+  };
+  // The deadline: armed for each open when the thread is in front, dropped on pause.
   useEffect(() => {
-    if (!enabled || !active || !token || !sourceType || !sourceId) return;
-    if (attempted.current === token) return;
+    if (!enabled || !active || !identity) return;
     const timer = setTimeout(() => {
-      attempted.current = token;
-      mutate.current({ source: { type: sourceType, id: sourceId } });
+      open.current.due = true;
+      judge.current();
     }, VISIBLE_THREAD_READ_DELAY_MS);
-    return () => clearTimeout(timer);
-  }, [enabled, active, token, sourceType, sourceId]);
+    return () => {
+      clearTimeout(timer);
+      open.current.due = false;
+    };
+  }, [enabled, active, identity, generation]);
+  // After the deadline every summary refresh is judged immediately.
+  const { exact, anyUnread, truncated, dataUpdatedAt } = view;
+  useEffect(() => {
+    if (enabled && active) judge.current();
+  }, [enabled, active, identity, generation, exact, anyUnread, truncated, dataUpdatedAt]);
 }
