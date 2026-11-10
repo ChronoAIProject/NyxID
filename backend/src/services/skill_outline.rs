@@ -39,7 +39,7 @@ pub const NO_OUTLINE_HINT: &str =
     "This skill has no NYX template outline. Read SKILL.md and explain it in your own words.";
 
 const SKILL_READ_OUTLINE: &str = " Pass section=outline instead of path to read the skill's NYX template outline (Overview, Approach steps, Needs and produces); page it with offset and next_offset.";
-const PREVIEW_OUTLINE: &str = " Also returns the skill's NYX template outline as outline (outline_available false when it has none). When outline has a next_offset, call again with outline_offset=next_offset for an outline-only page.";
+const PREVIEW_OUTLINE: &str = " Also returns the skill's NYX template outline as outline (outline_available false when it has none). When outline has a next_offset, call again with outline_offset=next_offset and its outline_fingerprint for an outline-only page; if the result has no outline field, call again with outline_offset=0.";
 
 /// Stable-instruction text this feature adds to an owner turn: empty with the
 /// flag off, so flag-off instructions are byte-identical to before.
@@ -63,29 +63,38 @@ pub async fn enabled(db: &Database, actor: &str) -> AppResult<bool> {
 /// called for owner chats with the flag on; flag-off tool lists stay unchanged.
 pub fn extend_tools(endpoints: &mut [McpToolEndpoint]) {
     for endpoint in endpoints {
-        let (suffix, property, schema) = match endpoint.name.as_str() {
+        let (suffix, properties) = match endpoint.name.as_str() {
             "skill_read" => (
                 SKILL_READ_OUTLINE,
-                "section",
-                json!({"type": "string", "enum": ["outline"]}),
+                vec![("section", json!({"type": "string", "enum": ["outline"]}))],
             ),
             "preview_agent_skill" => (
                 PREVIEW_OUTLINE,
-                "outline_offset",
-                json!({"type": "integer", "minimum": 0, "maximum": 65536}),
+                vec![
+                    (
+                        "outline_offset",
+                        json!({"type": "integer", "minimum": 0, "maximum": 65536}),
+                    ),
+                    (
+                        "outline_fingerprint",
+                        json!({"type": "string", "maxLength": 64}),
+                    ),
+                ],
             ),
             _ => continue,
         };
         if let Some(description) = endpoint.description.as_mut() {
             description.push_str(suffix);
         }
-        if let Some(properties) = endpoint
+        if let Some(schema) = endpoint
             .request_body_schema
             .as_mut()
             .and_then(|schema| schema.get_mut("properties"))
             .and_then(|properties| properties.as_object_mut())
         {
-            properties.insert(property.into(), schema);
+            for (name, property) in properties {
+                schema.insert(name.into(), property);
+            }
         }
     }
 }

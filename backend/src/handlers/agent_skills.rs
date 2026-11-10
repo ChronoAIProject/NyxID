@@ -934,6 +934,7 @@ pub(crate) async fn dispatch(
                     args["outline_offset"]
                         .as_u64()
                         .map(|offset| offset as usize),
+                    args["outline_fingerprint"].as_str(),
                 )?
             } else {
                 json!(preview)

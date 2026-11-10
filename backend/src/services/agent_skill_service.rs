@@ -775,38 +775,86 @@ pub async fn read_outline(
 }
 
 /// `preview_agent_skill` with the verified root's outline
-/// (`assistant:skill-runs`). Without `outline_offset`, the preview carries the
-/// first outline page when both fit one tool result; otherwise its `outline`
-/// says how to fetch it. With `outline_offset`, the result is an outline-only
-/// page. Every result stays within the tool-response budget.
-pub fn preview_with_outline(preview: &Preview, outline_offset: Option<usize>) -> AppResult<Value> {
-    const HINT: &str =
-        "Call preview_agent_skill again with outline_offset=next_offset for an outline-only page.";
+/// (`assistant:skill-runs`).
+///
+/// Without `outline_offset`, `outline` is the first page when preview and page
+/// fit one tool result together, else a notice to fetch it separately. When
+/// even that can't fit, the result is the plain preview, exactly as with the
+/// flag off. With `outline_offset`, the result is an outline-only page; pages
+/// after the first must echo `outline_fingerprint`, so a dependency tag that
+/// moved between calls can't splice two different outlines together.
+pub fn preview_with_outline(
+    preview: &Preview,
+    outline_offset: Option<usize>,
+    fingerprint: Option<&str>,
+) -> AppResult<Value> {
     let id = &preview.reference.skill_id;
     let version = &preview.reference.version;
     let outline = rendered_outline(preview.skill_md.as_deref(), &preview.reference.dependencies);
     if let Some(offset) = outline_offset {
-        return match outline {
-            Some(outline) => page_with(&outline, id, version, "outline", offset, PAGE_BUDGET, HINT),
-            None => Ok(no_outline(id, version)),
+        let Some(outline) = outline else {
+            return Ok(no_outline(id, version));
         };
+        let print = outline_fingerprint(&outline);
+        if offset > 0 && fingerprint != Some(print.as_str()) {
+            return Ok(
+                json!({"skill_id":id,"version":version,"path":"outline","untrusted_guidance":true,"outline_changed":true,"complete":false,"next_offset":0,"continuation_hint":"The outline changed since the page you continued from, for example because a dependency tag moved. Read it again from outline_offset=0."}),
+            );
+        }
+        return outline_page_value(&outline, id, version, offset, PAGE_BUDGET, &print);
     }
-    let mut value = json!(preview);
-    let Some(outline) = outline else {
-        value["outline"] = no_outline(id, version);
-        return Ok(value);
-    };
-    // The page is nested in the preview, which costs about one extra escape
-    // layer; the assembled result is checked below either way.
-    let budget = PAGE_BUDGET.saturating_sub(wire_len(&value));
-    if budget >= MIN_OUTLINE_BUDGET {
-        value["outline"] = page_with(&outline, id, version, "outline", 0, budget, HINT)?;
+    let plain = json!(preview);
+    let mut candidates = Vec::new();
+    match outline {
+        Some(outline) => {
+            let print = outline_fingerprint(&outline);
+            let budget = PAGE_BUDGET.saturating_sub(wire_len(&plain));
+            if budget >= MIN_OUTLINE_BUDGET {
+                candidates.push(outline_page_value(
+                    &outline, id, version, 0, budget, &print,
+                )?);
+            }
+            candidates.push(json!({"skill_id":id,"version":version,"path":"outline","untrusted_guidance":true,"outline_available":true,"outline_fingerprint":print,"complete":false,"next_offset":0,"continuation_hint":"The outline did not fit in this preview. Call preview_agent_skill again with outline_offset=0 for an outline-only page."}));
+        }
+        None => candidates.push(no_outline(id, version)),
+    }
+    for candidate in candidates {
+        let mut value = plain.clone();
+        value["outline"] = candidate;
         if wire_len(&value) <= PAGE_BUDGET {
             return Ok(value);
         }
     }
-    value["outline"] = json!({"skill_id":id,"version":version,"path":"outline","untrusted_guidance":true,"outline_available":true,"complete":false,"next_offset":0,"continuation_hint":"The outline did not fit in this preview. Call preview_agent_skill again with outline_offset=0 for an outline-only page."});
-    Ok(value)
+    Ok(plain)
+}
+
+/// Room left in a page budget for the `outline_fingerprint` field.
+const FINGERPRINT_ROOM: usize = 96;
+const PREVIEW_HINT: &str = "Call preview_agent_skill again with outline_offset=next_offset and this outline_fingerprint for the next outline-only page.";
+
+fn outline_page_value(
+    outline: &str,
+    id: &str,
+    version: &str,
+    offset: usize,
+    budget: usize,
+    print: &str,
+) -> AppResult<Value> {
+    let mut page = page_with(
+        outline,
+        id,
+        version,
+        "outline",
+        offset,
+        budget.saturating_sub(FINGERPRINT_ROOM),
+        PREVIEW_HINT,
+    )?;
+    page["outline_fingerprint"] = print.into();
+    Ok(page)
+}
+
+fn outline_fingerprint(outline: &str) -> String {
+    hex::encode(Sha256::digest(outline.as_bytes()))[..32].to_owned()
 }
 
 fn rendered_outline(skill_md: Option<&str>, closure: &[SkillPin]) -> Option<String> {

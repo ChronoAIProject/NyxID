@@ -131,10 +131,13 @@ NyxBot's instructions, tool list and tool results are unchanged.
 - **Previewing.** `preview_agent_skill` adds an `outline` page for the verified
   root package, so NyxBot can explain a skill before it is attached. When the
   preview and the outline don't both fit one tool result, `outline` says so
-  instead of carrying content. Calling again with `outline_offset` returns an
-  outline-only page (start at `0`, continue with `next_offset`). Every result
-  stays within the tool-response budget. The HTTP preview used by the app is
-  unchanged.
+  instead of carrying content; when even that notice can't fit, the result is
+  the plain preview, exactly as with the flag off. Calling again with
+  `outline_offset` returns an outline-only page (start at `0`). Pages after the
+  first must echo the `outline_fingerprint` of the page they continue: if a
+  dependency tag moved between calls, the continuation answers
+  `outline_changed` instead of splicing two outlines. The HTTP preview used by
+  the app is unchanged.
 - **Explaining.** NyxBot's instructions ask it to read the outline before
   multi-step or changing work a skill covers, explain it in plain words, and ask
   whether to go ahead. Agreeing is not an approval.

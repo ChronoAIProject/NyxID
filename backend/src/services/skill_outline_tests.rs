@@ -516,6 +516,19 @@ async fn flag_gates_tool_discovery_and_skill_read() {
         matches!(&refused, AppError::Forbidden(m) if m.contains("not enabled")),
         "{refused:?}"
     );
+    // A plain file read keeps its existing refusal for an unbound skill.
+    let plain = crate::handlers::agent_skills::dispatch(
+        &f.state,
+        &f.chat,
+        "skill_read",
+        &json!({"skill": "not-attached"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&plain, AppError::Forbidden(m) if m.starts_with("Skill unavailable")),
+        "{plain:?}"
+    );
 
     set_platform_override(
         &f.state.db,
@@ -547,9 +560,32 @@ async fn flag_gates_tool_discovery_and_skill_read() {
             .await
             .unwrap_err();
     assert!(
-        !matches!(&missing, AppError::Forbidden(m) if m.contains("not enabled")),
+        matches!(&missing, AppError::Forbidden(m) if m.starts_with("Skill unavailable")),
         "{missing:?}"
     );
+    // The unbound read is audited with metadata only, exactly like a file read.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let refused = f
+                .state
+                .db
+                .collection::<crate::models::audit_log::AuditLog>(
+                    crate::models::audit_log::COLLECTION_NAME,
+                )
+                .count_documents(mongodb::bson::doc! {
+                    "event_type": "assistant_skill_read_refused",
+                    "event_data": {"reason": "skill_not_bound"},
+                })
+                .await
+                .unwrap();
+            if refused >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("both unbound reads are audited");
     let bad_section = json!({"skill": "not-attached", "section": "files"});
     assert!(matches!(
         crate::handlers::agent_skills::dispatch(&f.state, &f.chat, "skill_read", &bad_section)
@@ -574,5 +610,52 @@ async fn flag_gates_tool_discovery_and_skill_read() {
         crate::handlers::agent_skills::dispatch(&f.state, &guest, "skill_read", &outline_read).await,
         Err(AppError::Forbidden(m)) if m.contains("owner turns")
     ));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failing_flag_lookup_keeps_todays_tools() {
+    use crate::services::assistant_account_tools::virtual_service_for;
+    let f = crate::services::assistant_authority_tests::orchestrator_fixture(
+        "skill_outline_flag_failure",
+    )
+    .await;
+    // A matching malformed override makes flag resolution fail.
+    f.state
+        .db
+        .collection::<mongodb::bson::Document>(
+            crate::models::feature_flag_override::COLLECTION_NAME,
+        )
+        .insert_one(mongodb::bson::doc! {
+            "_id": "malformed-skill-runs", "flag_key": FLAG_KEY,
+            "enabled": true, "target_kind": "unknown"
+        })
+        .await
+        .unwrap();
+    assert!(enabled(&f.state.db, &f.owner).await.is_err());
+    let service = virtual_service_for(&f.state.db, &f.chat).await;
+    for name in ["skill_read", "preview_agent_skill"] {
+        let listed = service.endpoints.iter().find(|e| e.name == name).unwrap();
+        let fixed = crate::services::assistant_team_tools::endpoints()
+            .into_iter()
+            .chain(crate::services::assistant_team_tools::agent_endpoints())
+            .find(|e| e.name == name)
+            .unwrap();
+        assert_eq!(
+            json!([listed.description, listed.request_body_schema]),
+            json!([fixed.description, fixed.request_body_schema]),
+            "{name}"
+        );
+    }
+    // An explicit outline read reports the failure instead of guessing.
+    let outline = crate::handlers::agent_skills::dispatch(
+        &f.state,
+        &f.chat,
+        "skill_read",
+        &json!({"skill": "not-attached", "section": "outline"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(!matches!(&outline, AppError::Forbidden(_)), "{outline:?}");
     f.state.db.drop().await.unwrap();
 }

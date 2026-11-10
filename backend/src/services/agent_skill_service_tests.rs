@@ -995,7 +995,7 @@ async fn preview_outline_is_bounded_untrusted_and_absent_without_template() {
     let plain = json!(verified);
     assert!(plain.get("skill_md").is_none());
     assert!(!plain.to_string().contains("tidy summary"));
-    let value = preview_with_outline(&verified, None).unwrap();
+    let value = preview_with_outline(&verified, None, None).unwrap();
     assert_eq!(value["reference"], plain["reference"]);
     assert!(value.get("skill_md").is_none());
     let outline = &value["outline"];
@@ -1005,13 +1005,13 @@ async fn preview_outline_is_bounded_untrusted_and_absent_without_template() {
     assert!(content.starts_with("Overview:\nYou get one tidy summary."));
     assert!(content.contains("2. Summarise: I write the summary.\n   Asks you"));
     // outline_offset asks for an outline-only page.
-    let only = preview_with_outline(&verified, Some(0)).unwrap();
+    let only = preview_with_outline(&verified, Some(0), None).unwrap();
     assert!(only.get("reference").is_none());
     assert_eq!(only["content"], outline["content"]);
 
     // A legacy skill keeps working; it simply has no outline.
     let legacy = preview(&Registry::new(), ID, "1.0").await.unwrap();
-    let value = preview_with_outline(&legacy, None).unwrap();
+    let value = preview_with_outline(&legacy, None, None).unwrap();
     assert_eq!(value["outline"]["outline_available"], false);
     assert!(value["outline"].get("content").is_none());
 }
@@ -1026,12 +1026,12 @@ async fn preview_with_maximum_metadata_defers_the_outline_within_budget() {
         .collect();
     let verified = preview(&registry, ID, "1.0").await.unwrap();
     assert_eq!(verified.reference.dependencies.len(), 16);
-    let value = preview_with_outline(&verified, None).unwrap();
+    let value = preview_with_outline(&verified, None, None).unwrap();
     assert!(wire_len(&value) <= 9200, "{}", wire_len(&value));
     assert_eq!(value["outline"]["outline_available"], true);
     assert_eq!(value["outline"]["next_offset"], 0);
     assert!(value["outline"].get("content").is_none());
-    let only = preview_with_outline(&verified, Some(0)).unwrap();
+    let only = preview_with_outline(&verified, Some(0), None).unwrap();
     assert!(wire_len(&only) <= 9200);
     assert!(only["content"].as_str().unwrap().starts_with("Overview:"));
 
@@ -1064,11 +1064,15 @@ async fn max_size_cjk_outline_pages_through_skill_read_and_preview() {
     assert_eq!(via_read, expected);
 
     let verified = preview(&registry, ID, "1.0").await.unwrap();
-    let first = preview_with_outline(&verified, None).unwrap();
+    let first = preview_with_outline(&verified, None, None).unwrap();
     assert!(wire_len(&first) <= 9200, "{}", wire_len(&first));
+    let print = first["outline"]["outline_fingerprint"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let via_preview = collect_pages(|offset| {
-        let verified = &verified;
-        async move { preview_with_outline(verified, Some(offset)).unwrap() }
+        let (verified, print) = (&verified, &print);
+        async move { preview_with_outline(verified, Some(offset), Some(print)).unwrap() }
     })
     .await;
     assert_eq!(via_preview, expected);
@@ -1121,4 +1125,77 @@ async fn outline_reads_only_attached_pins_and_resolves_uses_in_the_root_closure(
     agent.skills[0].disabled = true;
     assert!(read_outline(&registry, &agent, ID, None, 0).await.is_err());
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn oversized_previews_stay_identical_to_the_flag_off_response() {
+    // Accepted maximums with JSON escaping: the preview alone exceeds the budget.
+    let heavy = |hash: String| -> Vec<Value> {
+        (0..16)
+            .map(|n| json!({"guid": uuid::Uuid::new_v4().to_string(), "name": format!("{n:02}{}", "\"\\".repeat(127)), "version": "1234567890123456.123456789012345", "skillHash": hash}))
+            .collect()
+    };
+    let mut registry = outline_registry(OUTLINE_SKILL);
+    registry.closure = heavy(registry.reference().sha256);
+    let verified = preview(&registry, ID, "1.0").await.unwrap();
+    let plain = json!(verified);
+    assert!(wire_len(&plain) > 9200);
+    assert_eq!(preview_with_outline(&verified, None, None).unwrap(), plain);
+    // The outline remains readable on its own.
+    let only = preview_with_outline(&verified, Some(0), None).unwrap();
+    assert!(wire_len(&only) <= 9200);
+    assert!(only["content"].as_str().unwrap().starts_with("Overview:"));
+    // So does the no-outline case.
+    let mut legacy = Registry::new();
+    legacy.closure = heavy(legacy.reference().sha256);
+    let legacy = preview(&legacy, ID, "1.0").await.unwrap();
+    assert_eq!(
+        preview_with_outline(&legacy, None, None).unwrap(),
+        json!(legacy)
+    );
+}
+
+#[tokio::test]
+async fn outline_pages_cannot_splice_two_resolved_closures() {
+    let skill = format!(
+        "---\nname: example\nmetadata:\n  depends-on:\n    - helper@beta\n---\n## Overview\n{}\n\n## Approach\n1. **Prepare.** I get ready.\n   Uses: helper\n{}",
+        "概".repeat(1_200),
+        (2..=8)
+            .map(|n| format!("{n}. **Write {n}.** {}\n", "步".repeat(300)))
+            .collect::<String>()
+    );
+    let mut registry = outline_registry(&skill);
+    let hash = registry.reference().sha256;
+    let helper = uuid::Uuid::new_v4().to_string();
+    let at = |version: &str| {
+        vec![json!({"guid": helper, "name": "helper", "version": version, "skillHash": hash})]
+    };
+    registry.closure = at("1.9");
+    let before = preview(&registry, ID, "1.0").await.unwrap();
+    let first = preview_with_outline(&before, Some(0), None).unwrap();
+    let next = first["next_offset"].as_u64().expect("more than one page") as usize;
+    let print = first["outline_fingerprint"].as_str().unwrap().to_owned();
+    assert!(first["content"].as_str().unwrap().contains("version 1.9"));
+    // Same resolution: the continuation is served.
+    let same = preview_with_outline(&before, Some(next), Some(&print)).unwrap();
+    assert!(same.get("content").is_some());
+    // The tag moved between calls: the continuation is refused, not spliced.
+    registry.closure = at("1.10");
+    let after = preview(&registry, ID, "1.0").await.unwrap();
+    let moved = preview_with_outline(&after, Some(next), Some(&print)).unwrap();
+    assert_eq!(moved["outline_changed"], true);
+    assert!(moved.get("content").is_none());
+    // A continuation without the fingerprint is refused too.
+    assert_eq!(
+        preview_with_outline(&before, Some(next), None).unwrap()["outline_changed"],
+        true
+    );
+    // Starting again reads the new resolution.
+    let restart = preview_with_outline(&after, Some(0), None).unwrap();
+    assert!(
+        restart["content"]
+            .as_str()
+            .unwrap()
+            .contains("version 1.10")
+    );
 }
