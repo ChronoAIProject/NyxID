@@ -302,14 +302,16 @@ export function ChannelBotsManager({
                       {!row.org_specialist && !row.owner_linked && row.inbound_hint ? (
                         <p>{row.inbound_hint}</p>
                       ) : null}
-                      {["failing", "interrupted", "media_failed"].includes(
+                      {["failing", "unconfirmed", "interrupted", "media_failed"].includes(
                         row.delivery_status ?? "",
                       ) ? (
                         <p className="text-13 text-destructive">
-                          {row.delivery_status === "failing"
+                          {row.delivery_status === "unconfirmed"
+                            ? "Intake not confirmed: "
+                            : row.delivery_status === "failing"
                             ? "Messages are not reaching the agent: "
                             : "Attachment problem: "}
-                          {row.delivery_reason ?? "delivery failed"}
+                          {row.delivery_reason ?? (row.delivery_status === "unconfirmed" ? "No authenticated inbound has been confirmed." : "delivery failed")}
                           {row.delivery_failed_at
                             ? ` (${formatRelativeTime(row.delivery_failed_at)})`
                             : ""}
@@ -628,6 +630,16 @@ function OwnerLink({
 }
 
 function DiscordGatewayStatus({ row }: { readonly row: NyxAgentChannelAgent }) {
+  if (row.discord_intake) {
+    const intake = row.discord_intake;
+    return <div className="space-y-1 type-secondary text-muted-foreground">
+      <p>Receiving side: {intake.receiving_side === "native_gateway" ? "Agent Event Gateway" : intake.receiving_side === "interactions_only" ? "Discord interactions" : "NyxID relay"}. Intake: {intake.state}.</p>
+      <p>Last confirmed inbound: {intake.last_inbound_at ? formatDateTime(intake.last_inbound_at) : "not observed"}.</p>
+      {intake.handed_over_at ? <p>Handed over: {formatDateTime(intake.handed_over_at)}.</p> : null}
+      {intake.block_reason ? <p>Intake blocked by: {intake.block_reason}.</p> : null}
+      {row.gateway_native_activation ? <p>Native selection: {row.gateway_native_activation_detail ?? row.gateway_native_activation}. Selection does not confirm connection health.</p> : null}
+    </div>;
+  }
   if (row.transport === "gateway") {
     if (row.gateway_source?.type !== "discord") {
       return <p className="text-13 text-muted-foreground">Agent Event Gateway with NyxID relay intake. Native Discord is not confirmed.</p>;
@@ -640,7 +652,7 @@ function DiscordGatewayStatus({ row }: { readonly row: NyxAgentChannelAgent }) {
   if (!row.gateway_native_activation) return null;
   const draining = row.gateway_native_activation === "relay_draining";
   return <div className="space-y-1 text-13 text-muted-foreground">
-    <p>{draining ? "Waiting for the native gateway to release Discord before the relay can resume." : row.status === "active" && row.delivery_status !== "failing" ? "Working on NyxID relay." : "NyxID relay selected. Check channel health for delivery status."}</p>
+    <p>{draining ? "Waiting for the native gateway to release Discord before the relay can resume." : row.status === "active" && row.delivery_status === "ok" ? "Working on NyxID relay." : "NyxID relay selected. Check channel health for delivery status."}</p>
     {row.gateway_native_activation !== "relay_ready" && !draining ? <>
       <p>Native gateway activation did not complete: {row.gateway_native_activation_detail ?? row.gateway_native_activation}.</p>
       <p>A successful relay reply does not confirm native gateway acceptance.</p>

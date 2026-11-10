@@ -12,6 +12,7 @@ fn facts(platform: &'static str, status: &'static str) -> HealthFacts<'static> {
         subscription_registered: None,
         backoff_active: false,
         gateway: false,
+        discord_intake: None,
     }
 }
 
@@ -170,6 +171,7 @@ fn recommendation_table_covers_status_mode_and_failure_codes() {
             subscription_registered: None,
             backoff_active: *backoff,
             gateway: false,
+            discord_intake: None,
         };
         assert_eq!(recommend(&facts).action, *expected, "{facts:?}");
     }
@@ -360,4 +362,221 @@ async fn failure_notices_go_to_every_org_admin_or_the_personal_owner() {
         .unwrap();
     assert_eq!(recipient, owner);
     TEST_NOTICES.lock().unwrap().remove(&bot.id);
+}
+
+fn discord_bot() -> ChannelBot {
+    bson::from_document(doc! {
+        "_id":"discord-health","user_id":"owner","platform":"discord","label":"Bot",
+        "bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![]},
+        "platform_bot_id":"100","platform_bot_username":"bot","webhook_registered":false,
+        "webhook_secret_hash":"","status":"active","is_active":true,
+        "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+    })
+    .unwrap()
+}
+
+#[test]
+fn discord_intake_states_never_report_healthy_without_current_evidence() {
+    use crate::models::discord_gateway::DiscordGatewayStatus;
+    let mut bot = discord_bot();
+    for state in [
+        "stopped",
+        "disabled",
+        "waiting",
+        "connecting",
+        "disconnected",
+        "connected",
+    ] {
+        bot.diagnostics.discord_gateway = Some(DiscordGatewayStatus {
+            state: state.into(),
+            reason: None,
+            updated_at: Utc::now(),
+        });
+        let mut facts = HealthFacts::for_bot(&bot, Utc::now(), false);
+        facts.discord_intake = Some(discord::project(&bot, None, None, true));
+        assert_eq!(
+            recommend(&facts).action == "none",
+            state == "connected",
+            "{state}"
+        );
+        facts.discord_intake = Some(discord::project(&bot, None, None, false));
+        assert_ne!(recommend(&facts).action, "none", "stale {state}");
+        facts.discord_intake = Some(discord::project(
+            &bot,
+            None,
+            Some("release_unresolved"),
+            true,
+        ));
+        assert_eq!(
+            facts.discord_intake.as_ref().unwrap().code,
+            Some(discord::RELAY_BLOCKED)
+        );
+        assert_eq!(recommend(&facts).action, "contact_admin");
+    }
+    let unloaded = HealthFacts::for_bot(&bot, Utc::now(), false);
+    assert!(unloaded.discord_intake.is_none());
+    assert_eq!(recommend(&unloaded).action, "none");
+    assert_eq!(recommend(&unloaded).text, "Healthy.");
+    let gateway = HealthFacts::for_bot(&bot, Utc::now(), true);
+    assert!(gateway.discord_intake.is_none());
+    assert_eq!(recommend(&gateway).action, "gateway");
+}
+
+#[tokio::test]
+async fn discord_health_live_lease_and_release_fences_are_batched_without_provider_calls() {
+    let db = crate::test_utils::connect_test_database("discord_health_evidence")
+        .await
+        .expect("review Mongo required");
+    let mut bot = discord_bot();
+    discord_flag(&db, None, "global", None, true).await;
+    crate::services::security_readiness_service::ready_test_replica(&db).await;
+    bot.diagnostics.discord_gateway = Some(crate::models::discord_gateway::DiscordGatewayStatus {
+        state: "connected".into(),
+        reason: None,
+        updated_at: Utc::now() - chrono::Duration::days(2),
+    });
+    assert_eq!(
+        discord::load(&db, std::slice::from_ref(&bot))
+            .await
+            .unwrap()[&bot.id]
+            .code,
+        Some(discord::RELAY_UNCONFIRMED)
+    );
+    let inventory = setup_evidence(&db, &bot, false).await.unwrap();
+    assert_ne!(inventory["recommended_action"], "none");
+    assert_eq!(
+        inventory["discord_intake"]["code"],
+        discord::RELAY_UNCONFIRMED
+    );
+    db.collection::<bson::Document>(crate::models::coordination::LEASE_COLLECTION_NAME).insert_one(doc!{"_id":format!("discord-gateway:{}",bot.id),"expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::minutes(1))}).await.unwrap();
+    assert!(
+        discord::load(&db, std::slice::from_ref(&bot))
+            .await
+            .unwrap()[&bot.id]
+            .code
+            .is_none()
+    );
+    db.collection::<bson::Document>(crate::models::nyxbot_gateway_release::COLLECTION_NAME)
+        .insert_one(doc! {"_id":"uncertain","channel_bot_id":&bot.id,"state":"review_required"})
+        .await
+        .unwrap();
+    let loaded = discord::load(&db, std::slice::from_ref(&bot))
+        .await
+        .unwrap();
+    assert_eq!(loaded[&bot.id].code, Some(discord::RELAY_BLOCKED));
+    assert_eq!(loaded[&bot.id].block_reason, Some("release_unresolved"));
+    bot.platform = "lark".into();
+    assert!(discord::load(&db, &[bot]).await.unwrap().is_empty());
+    db.drop().await.unwrap();
+}
+
+async fn discord_flag(
+    db: &mongodb::Database,
+    org: Option<&str>,
+    kind: &str,
+    target: Option<&str>,
+    enabled: bool,
+) {
+    db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {
+        "_id":uuid::Uuid::new_v4().to_string(), "flag_key":crate::services::feature_flag_service::DISCORD_GATEWAY_FLAG_KEY,
+        "org_user_id":org,"target_kind":kind,"target_key":target,"enabled":enabled,
+        "updated_by":"test","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn discord_health_flag_off_is_neutral_and_enabled_unready_is_blocked() {
+    let db = crate::test_utils::connect_test_database("discord_health_flags")
+        .await
+        .unwrap();
+    let mut bot = discord_bot();
+    for state in [None, Some("stopped"), Some("connected")] {
+        bot.diagnostics.discord_gateway =
+            state.map(|s| crate::models::discord_gateway::DiscordGatewayStatus {
+                state: s.into(),
+                reason: None,
+                updated_at: Utc::now(),
+            });
+        let loaded = discord::load(&db, std::slice::from_ref(&bot))
+            .await
+            .unwrap();
+        let intake = &loaded[&bot.id];
+        assert_eq!(intake.receiving_side, "interactions_only");
+        assert!(intake.code.is_none());
+        let inventory = setup_evidence(&db, &bot, false).await.unwrap();
+        assert_eq!(inventory["recommended_action"], "none");
+        assert_eq!(inventory["recommended_action_text"], "Healthy.");
+    }
+    discord_flag(&db, None, "user", Some(&bot.user_id), true).await;
+    let loaded = discord::load(&db, std::slice::from_ref(&bot))
+        .await
+        .unwrap();
+    assert_eq!(loaded[&bot.id].code, Some(discord::RELAY_BLOCKED));
+    assert_eq!(loaded[&bot.id].block_reason, Some("readiness_unavailable"));
+    assert!(
+        discord::advice(&loaded[&bot.id])
+            .unwrap()
+            .text
+            .contains("fleet readiness")
+    );
+    crate::services::security_readiness_service::ready_test_replica(&db).await;
+    let loaded = discord::load(&db, std::slice::from_ref(&bot))
+        .await
+        .unwrap();
+    assert_eq!(loaded[&bot.id].code, Some(discord::RELAY_UNCONFIRMED));
+    bot.status = "failed".into();
+    bot.diagnostics.failure_reason = Some(codes::AUTH_REVOKED.into());
+    assert!(
+        discord::load(&db, std::slice::from_ref(&bot))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        setup_evidence(&db, &bot, false).await.unwrap()["recommended_action"],
+        "reconnect"
+    );
+    bot.status = "active".into();
+    bot.is_active = false;
+    assert!(discord::load(&db, &[bot]).await.unwrap().is_empty());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn discord_health_batch_matches_personal_org_global_and_revoked_membership_precedence() {
+    use crate::services::feature_flag_service as flags;
+    let db = crate::test_utils::connect_test_database("discord_health_precedence")
+        .await
+        .unwrap();
+    crate::services::security_readiness_service::ready_test_replica(&db).await;
+    discord_flag(&db, None, "global", None, true).await;
+    discord_flag(&db, Some("org"), "org", None, false).await;
+    discord_flag(&db, None, "user", Some("personal"), true).await;
+    discord_flag(&db, None, "user", Some("disabled"), false).await;
+    for (person, revoked) in [("member", false), ("personal", false), ("former", true)] {
+        db.collection::<bson::Document>(MEMBERSHIPS).insert_one(doc! {
+            "_id":uuid::Uuid::new_v4().to_string(),"org_user_id":"org","member_user_id":person,"role":"member",
+            "created_at":bson::DateTime::now(),"revoked_at":if revoked {bson::Bson::DateTime(bson::DateTime::now())}else{bson::Bson::Null},
+        }).await.unwrap();
+    }
+    let bots: Vec<_> = ["member", "personal", "former", "disabled", "org", "global"]
+        .into_iter()
+        .map(|owner| {
+            let mut bot = discord_bot();
+            bot.id = owner.into();
+            bot.user_id = owner.into();
+            bot
+        })
+        .collect();
+    let loaded = discord::load(&db, &bots).await.unwrap();
+    for bot in bots {
+        // Test-only individual resolution is the existing ingress authority;
+        // the production loader resolves all these owners in two batched reads.
+        let expected =
+            flags::personal_flag_enabled(&db, &bot.user_id, flags::DISCORD_GATEWAY_FLAG_KEY)
+                .await
+                .unwrap();
+        assert_eq!(loaded[&bot.id].code.is_some(), expected, "{}", bot.user_id);
+    }
+    db.drop().await.unwrap();
 }
