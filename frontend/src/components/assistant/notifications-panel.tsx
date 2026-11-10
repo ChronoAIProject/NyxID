@@ -31,6 +31,7 @@ import { useAccountPanel } from "@/hooks/use-account-panel";
 import {
   useMarkNotificationsRead,
   useNotificationList,
+  useNotificationsEnabled,
 } from "@/hooks/use-assistant-notifications";
 import { notificationTarget } from "@/lib/assistant/notification-navigation";
 import { restorePanelFocus } from "@/lib/assistant/panel-focus";
@@ -159,8 +160,11 @@ export function NotificationsPanel({
   readonly opener: () => HTMLElement | null;
 }) {
   const { current, update } = useAccountPanel();
+  // The account panel unmounts this sheet when the feature goes away; until
+  // it does, no further feed requests leave and nothing renders.
+  const enabled = useNotificationsEnabled();
   const filter = notificationFilter(current.panelTab) ?? "all";
-  const list = useNotificationList(filter);
+  const list = useNotificationList(filter, enabled);
   const markRead = useMarkNotificationsRead();
   const navigate = useNavigate();
   const [announcement, setAnnouncement] = useState<string>();
@@ -202,6 +206,8 @@ export function NotificationsPanel({
     }
     void navigate({ to: target.to as never, search: target.search as never });
   }
+
+  if (!enabled) return null;
 
   function markAll() {
     if (!asOf) return;

@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import {
   useInfiniteQuery,
   useMutation,
@@ -144,21 +144,69 @@ export function unreadSources(summary: NotificationSummary | undefined): UnreadS
   return { conversationIds, groupIds };
 }
 
+/** How the summary speaks for the open source. */
+export interface SourceStanding {
+  /** `exact`: the source is listed; `fallback`: only a truncated total says something is unread. */
+  readonly kind: "none" | "exact" | "fallback";
+  /** The listed unread count (0 for `fallback` and `none`). */
+  readonly unread: number;
+}
+
 /**
- * Whether the open thread or group has unread rows. A truncated aggregate
- * cannot say, so any unread row counts then (the read is idempotent).
+ * What the summary says about the open thread or group. A truncated
+ * aggregate cannot name sources, so any unread row counts then (the read
+ * is idempotent); an exact listing names the source and its count.
  */
+export function sourceStanding(
+  summary: NotificationSummary | undefined,
+  source: { readonly conversationId?: string; readonly groupId?: string },
+): SourceStanding {
+  if (!summary || summary.unread_count <= 0) return { kind: "none", unread: 0 };
+  let unread = 0;
+  for (const entry of summary.by_source) {
+    if (entry.unread <= 0) continue;
+    const matches =
+      (source.conversationId &&
+        (entry.conversation_id === source.conversationId ||
+          ((entry.source_type === "conversation" || entry.source_type === "channel_chat") &&
+            entry.id === source.conversationId))) ||
+      (source.groupId &&
+        (entry.source_type === "group" || entry.source_type === "collaboration_group") &&
+        entry.id === source.groupId);
+    if (matches) unread += entry.unread;
+  }
+  if (unread > 0) return { kind: "exact", unread };
+  return summary.by_source_truncated ? { kind: "fallback", unread: 0 } : { kind: "none", unread: 0 };
+}
+
+/** Whether the open thread or group has unread rows (see `sourceStanding`). */
 export function sourceHasUnread(
   summary: NotificationSummary | undefined,
   source: { readonly conversationId?: string; readonly groupId?: string },
 ): boolean {
-  if (!summary || summary.unread_count <= 0) return false;
-  if (summary.by_source_truncated) return true;
-  const sources = unreadSources(summary);
-  return Boolean(
-    (source.conversationId && sources.conversationIds.has(source.conversationId)) ||
-      (source.groupId && sources.groupIds.has(source.groupId)),
-  );
+  return sourceStanding(summary, source).kind !== "none";
+}
+
+/**
+ * Consecutive reads of one open source while the summary keeps listing it
+ * unread. Normally one read clears it; a second covers activity that landed
+ * between the read and the refreshed summary. Beyond this, only a changed
+ * count re-arms, so a server that never clears cannot drive a read loop.
+ */
+export const NOTIFICATION_SOURCE_READ_MAX_CONSECUTIVE = 3;
+
+interface SourceReadState {
+  key?: string;
+  /** Deadline of the pending debounced read, so re-renders never extend it. */
+  dueAt?: number;
+  /** The summary observation (`dataUpdatedAt`) the last read was based on; only another observation can re-arm. */
+  readObservedAt: number;
+  /** Reads since the summary last reported the source clear. */
+  consecutive: number;
+  /** The listed count at the last read, for the bounded re-arm rule. */
+  lastUnread?: number;
+  /** A truncated aggregate earns one read per open source. */
+  fallbackSent: boolean;
 }
 
 /**
@@ -166,37 +214,90 @@ export function sourceHasUnread(
  * while the tab is visible, and only when the summary says there is
  * something to mark. A pending decision becomes seen (its badge clears) but
  * stays listed until the card is decided.
+ *
+ * Re-arming follows the summary, not a boolean: every new summary observation
+ * that still lists the open source unread (new activity, or activity that
+ * raced the read) schedules another read, bounded by
+ * `NOTIFICATION_SOURCE_READ_MAX_CONSECUTIVE` until the source clears once. A
+ * truncated aggregate cannot name sources, so it earns one read per open.
  */
 export function useNotificationSourceRead({
   conversationId,
   groupId,
   enabled,
+  delayMs = NOTIFICATION_SOURCE_READ_DELAY_MS,
 }: {
   readonly conversationId?: string;
   readonly groupId?: string;
   readonly enabled: boolean;
+  readonly delayMs?: number;
 }) {
   const userId = useAuthStore((state) => state.user?.id);
   const summary = useNotificationSummary(enabled);
-  const { mutate: reportRead } = useMarkNotificationsRead();
-  const due = sourceHasUnread(summary.data, { conversationId, groupId });
+  const { mutateAsync: reportRead } = useMarkNotificationsRead();
   const source = useMemo<NotificationReadSource | undefined>(() => {
     if (conversationId) return { type: "conversation", id: conversationId };
     if (groupId) return { type: "group", id: groupId };
     return undefined;
   }, [conversationId, groupId]);
+  const sourceKey = source && userId ? `${userId}:${source.type}:${source.id}` : undefined;
+  const standing = sourceStanding(summary.data, { conversationId, groupId });
+  const observedAt = summary.dataUpdatedAt;
+  const state = useRef<SourceReadState>({ readObservedAt: 0, consecutive: 0, fallbackSent: false });
   useEffect(() => {
-    if (!enabled || !userId || !source || !due) return;
+    const current = state.current;
+    if (current.key !== sourceKey) {
+      // Another thread or crew (or another person): a fresh open.
+      state.current = { key: sourceKey, readObservedAt: 0, consecutive: 0, fallbackSent: false };
+    }
+    const memory = state.current;
+    if (!enabled || !userId || !source || !sourceKey) return;
+    if (standing.kind === "none") {
+      // The server confirmed the source clear: later activity starts a new run.
+      memory.consecutive = 0;
+      memory.lastUnread = undefined;
+      memory.dueAt = undefined;
+      return;
+    }
+    if (standing.kind === "fallback") {
+      if (memory.fallbackSent) return;
+    } else {
+      // Only another summary observation than the one already read can prove
+      // new activity (clocks are not compared: an in-memory round trip can
+      // finish within the millisecond the read was sent).
+      if (observedAt === memory.readObservedAt) return;
+      if (
+        memory.consecutive >= NOTIFICATION_SOURCE_READ_MAX_CONSECUTIVE &&
+        memory.lastUnread === standing.unread
+      ) {
+        return;
+      }
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let disposed = false;
+    // One read per observed summary: a tab toggle after sending must not resend.
     let sent = false;
+    const send = () => {
+      sent = true;
+      memory.dueAt = undefined;
+      if (standing.kind === "fallback") {
+        memory.fallbackSent = true;
+      } else {
+        memory.consecutive += 1;
+        memory.lastUnread = standing.unread;
+      }
+      memory.readObservedAt = observedAt;
+      void reportRead({ source }).catch(() => undefined);
+    };
     const schedule = () => {
-      if (sent || timer !== undefined || document.visibilityState === "hidden") return;
+      if (disposed || sent || timer !== undefined || document.visibilityState === "hidden") return;
+      // A refreshed summary keeps the original deadline instead of extending it.
+      memory.dueAt ??= Date.now() + delayMs;
       timer = setTimeout(() => {
         timer = undefined;
-        if (sent || document.visibilityState === "hidden") return;
-        sent = true;
-        reportRead({ source });
-      }, NOTIFICATION_SOURCE_READ_DELAY_MS);
+        if (disposed || document.visibilityState === "hidden") return;
+        send();
+      }, Math.max(0, memory.dueAt - Date.now()));
     };
     const onVisibility = () => {
       if (document.visibilityState === "hidden") {
@@ -209,8 +310,9 @@ export function useNotificationSourceRead({
     schedule();
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      disposed = true;
       if (timer !== undefined) clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [enabled, userId, source, due, reportRead]);
+  }, [enabled, userId, source, sourceKey, standing.kind, standing.unread, observedAt, delayMs, reportRead]);
 }

@@ -2,6 +2,7 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { notificationQueryKeys } from "@/hooks/use-assistant-notifications";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { NotificationsPanel } from "./notifications-panel";
@@ -188,6 +189,26 @@ describe("NotificationsPanel", () => {
     await user.click(within(alert).getByRole("button", { name: "Retry" }));
     expect(await screen.findByText("Nothing new")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Mark all as read" })).toBeDisabled();
+  });
+
+  it("stops fetching and disappears when the Notifications feature turns off while open", async () => {
+    const { client } = renderPanel();
+    await screen.findByRole("list", { name: "Notifications" });
+    const before = listRequests().length;
+    act(() => {
+      useAuthStore.getState().setUser({
+        id: "owner", email: "owner@example.com", display_name: "Owner", avatar_url: null,
+        email_verified: true, mfa_enabled: false, is_admin: false, is_active: true,
+        created_at: "2026-11-06T00:00:00Z",
+        capabilities: { enabled_features: [FEATURE_FLAG.NYXAGENT_ENGINE] },
+      });
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Notifications" })).not.toBeInTheDocument());
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: notificationQueryKeys.root("owner") });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(listRequests()).toHaveLength(before);
   });
 
   it("closes through the sheet and reports mark-read failures", async () => {
