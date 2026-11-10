@@ -2123,7 +2123,9 @@ async fn real_member_replies_notify_once_per_public_post_and_delete_with_the_gro
         .enumerate()
     {
         post(&state, OWNER, &group.id, prompt, None).await.unwrap();
-        let transcript = settled(&state, &group.id, (index + 1) * 2).await;
+        // Include the creation notice: private settlement clears working
+        // before the public member reply is appended.
+        let transcript = settled(&state, &group.id, 1 + (index + 1) * 2).await;
         let reply = transcript
             .iter()
             .rev()

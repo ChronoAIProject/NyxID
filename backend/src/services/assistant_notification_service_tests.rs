@@ -308,7 +308,10 @@ async fn background_turns_coalesce_until_read_while_user_turns_and_flag_off_prod
         ),
     )
     .await;
-    assert!(row.active_turn.as_ref().unwrap().notifications_enabled);
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().notifications_enabled,
+        Some(true)
+    );
     let first_reply = settle(&f, &row, "# Summary\n\n- one\n- **two**", None).await;
     let rows = rows_of(&f, &f.owner).await;
     assert_eq!(rows.len(), 1);
@@ -463,7 +466,7 @@ async fn turn_lost_reclaim_records_a_failed_update_and_destroyed_agents_stop_upd
     assert_eq!(rows[0].kind, NotificationKind::AgentUpdate);
     assert_eq!(rows[0].outcome.as_deref(), Some("failed"));
     assert_eq!(rows[0].reason.as_deref(), Some("turn_lost"));
-    settle(&f, &next, "ok", None).await;
+    let prior_reply = settle(&f, &next, "ok", None).await;
     // Destroying the agent stops further updates for its threads.
     let row = begin(
         &f,
@@ -472,10 +475,50 @@ async fn turn_lost_reclaim_records_a_failed_update_and_destroyed_agents_stop_upd
     )
     .await;
     team::destroy(db, &f.owner, &researcher.id).await.unwrap();
+    assert!(
+        rows_of(&f, &f.owner).await.is_empty(),
+        "destroy purges the agent's rows"
+    );
     // Destroy revoked the thread's key and asked the turn to stop: whether the
     // late settlement is refused or recorded as stopped, no update appears.
-    let _ = try_settle(&f, &row, "late", Some(TurnError::new("cancelled"))).await;
-    assert_eq!(rows_of(&f, &f.owner).await.len(), 1);
+    let (late_reply, verdict) =
+        try_settle(&f, &row, "late", Some(TurnError::new("cancelled"))).await;
+    match verdict {
+        Ok(Some(error)) => assert_eq!(error.code, "cancelled"),
+        Err(AppError::NotFound(_) | AppError::AssistantTurnRequired) => {}
+        other => panic!("unexpected late settlement verdict: {other:?}"),
+    }
+    assert!(rows_of(&f, &f.owner).await.is_empty());
+    // Exercise the producer guard even when settlement refuses first.
+    let mut message = db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {"_id": &prior_reply})
+        .await
+        .unwrap()
+        .unwrap();
+    message.id = late_reply;
+    message.turn_id = row.active_turn.as_ref().unwrap().turn_id.clone();
+    message.status = "failed".into();
+    message.error_code = Some("cancelled".into());
+    let mut session = db.client().start_session().await.unwrap();
+    let db = db.clone();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            transactions::transaction_result(
+                record_turn_settled_in_session(
+                    &db,
+                    session,
+                    &row,
+                    row.active_turn.as_ref().unwrap(),
+                    &message,
+                )
+                .await,
+            )
+        })
+        .await
+        .unwrap();
+    assert!(rows_of(&f, &f.owner).await.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -712,7 +755,9 @@ async fn org_guest_lane_notifies_the_route_admin_from_the_public_transcript_only
             .unwrap()
             .contains_key("notification_fence")
     );
-    // The sanitized public transcript entry the settlement would publish.
+    // Isolate the public-preview join from transcript publication: this
+    // private thread's public entry is seeded; publisher behavior has separate
+    // org_channel_service transcript tests.
     db.collection::<Document>(ORG_CHANNEL_MESSAGES)
         .insert_one(
             doc! {"_id": &reply, "text": "public reply", "role": "agent",
@@ -1263,6 +1308,37 @@ async fn action_card(
 }
 
 #[tokio::test]
+async fn trigger_turn_cards_resolve_the_deferred_flag_when_the_card_is_raised() {
+    let f = fixture("notif_trigger_cards").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    let nyxbot = team::ensure_nyxbot(db, &f.owner).await.unwrap();
+    let home = team::home_thread(db, &f.state.encryption_keys, &nyxbot)
+        .await
+        .unwrap();
+    let row = begin(
+        &f,
+        &f.owner,
+        &start(Some(&home.id), "Scheduled work", TurnOrigin::Trigger),
+    )
+    .await;
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().notifications_enabled,
+        None
+    );
+    set_flag(&f, false).await;
+    action_card(&f, &row, &nyxbot.id, "Disabled feed decision?").await;
+    assert!(rows_of(&f, &f.owner).await.is_empty());
+    set_flag(&f, true).await;
+    let card = action_card(&f, &row, &nyxbot.id, "Automation needs a decision?").await;
+    let rows = rows_of(&f, &f.owner).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].kind, NotificationKind::NeedsDecision);
+    assert_eq!(rows[0].source.card_id.as_deref(), Some(card.id.as_str()));
+    assert_eq!(summary(db, &f.owner).await.unwrap().needs_decision_count, 1);
+}
+
+#[tokio::test]
 async fn pending_cards_create_decision_rows_that_resolve_on_decide_expire_sweep_and_supersede() {
     let f = fixture("notif_cards").await;
     let db = &f.state.db;
@@ -1595,6 +1671,10 @@ async fn group_cards_mark_the_visible_group_and_opening_it_reads_them_without_re
     member.group_id = Some(group.id.clone());
     let row = begin(&f, &f.owner, &member).await;
     assert_eq!(row.group_id.as_deref(), Some(group.id.as_str()));
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().notifications_enabled,
+        None
+    );
     let card = action_card(&f, &row, &researcher.id, "Delete service g?").await;
     let rows = rows_of(&f, &f.owner).await;
     assert_eq!(rows.len(), 1);

@@ -501,10 +501,10 @@ pub struct ActiveTurn {
     /// Confirmation continuation claims ignore the original run grace deadline.
     #[serde(default)]
     pub trigger_continuation: bool,
-    /// NyxBot Notifications were enabled for the owner at admission, so
-    /// settlement writes feed rows without re-reading flags.
+    /// Owner notification flag at admission. Group/trigger turns defer this
+    /// check until a card is raised; their public producer owns settlement.
     #[serde(default)]
-    pub notifications_enabled: bool,
+    pub notifications_enabled: Option<bool>,
     pub turn_id: String,
     #[serde(default)]
     pub origin: TurnOrigin,

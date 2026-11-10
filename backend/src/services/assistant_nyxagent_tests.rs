@@ -1338,7 +1338,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             report_to: None,
             with_nyxbot: false,
             trigger_continuation: false,
-            notifications_enabled: false,
+            notifications_enabled: Some(false),
             activities: Vec::new(),
             attachments: Vec::new(),
             turn_id: Uuid::new_v4().to_string(),
@@ -7952,7 +7952,10 @@ async fn notification_write_failure_rolls_back_settlement_and_retry_commits_both
     let row = begin_turn(&db, &owner, &start, &state.encryption_keys)
         .await
         .unwrap();
-    assert!(row.active_turn.as_ref().unwrap().notifications_enabled);
+    assert_eq!(
+        row.active_turn.as_ref().unwrap().notifications_enabled,
+        Some(true)
+    );
     let credential =
         credentials::load_for_conversation(&db, &state.encryption_keys, &owner, &row.id)
             .await

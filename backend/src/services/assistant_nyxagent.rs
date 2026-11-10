@@ -3063,11 +3063,13 @@ pub(crate) async fn begin_owner_turn_in_session(
     // Group transcript and trigger terminal producers resolve their own flags;
     // their hidden turn settlements never create a notification.
     let notifications_enabled = if matches!(start.origin, TurnOrigin::Group | TurnOrigin::Trigger) {
-        false
+        None
     } else {
-        super::assistant_notification_service::enabled(db, user_id)
-            .await
-            .unwrap_or(false)
+        Some(
+            super::assistant_notification_service::enabled(db, user_id)
+                .await
+                .unwrap_or(false),
+        )
     };
     row.active_turn = Some(ActiveTurn {
         platform_model_context: None,

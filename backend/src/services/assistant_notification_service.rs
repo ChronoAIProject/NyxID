@@ -612,7 +612,7 @@ pub async fn record_turn_settled_in_session(
     let org_guest = channel
         .and_then(|channel| channel.org_execution.as_ref())
         .is_some_and(|execution| execution.guest);
-    if (!turn.notifications_enabled && !org_guest)
+    if (turn.notifications_enabled != Some(true) && !org_guest)
         || row.guest_model_setup
         || row.collaboration.is_some()
         || row.group_id.is_some()
@@ -889,9 +889,14 @@ pub async fn record_card_pending_in_session(
         .map_or(conversation.user_id.as_str(), |binding| {
             binding.original_requester_id.as_str()
         });
-    let enabled = match conversation.active_turn.as_ref() {
-        Some(turn) if audience == conversation.user_id => turn.notifications_enabled,
-        _ => self::enabled(db, audience).await?,
+    let snapshot = conversation
+        .active_turn
+        .as_ref()
+        .filter(|_| audience == conversation.user_id)
+        .and_then(|turn| turn.notifications_enabled);
+    let enabled = match snapshot {
+        Some(enabled) => enabled,
+        None => self::enabled(db, audience).await?,
     };
     if !enabled {
         return Ok(());
