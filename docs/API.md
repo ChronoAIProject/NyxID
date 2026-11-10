@@ -8808,6 +8808,13 @@ Public messages use `post:<conversation_id>` addresses. Agents use `POST /api/v1
 - the stable `recommended_action` (`none`, `reconnect`, `resubscribe`, `verify`, `wait_rate_limit`, `enable_billing`, `contact_admin`, `gateway`) and `recommended_action_text`;
 - `can_write`.
 
+Discord responses also include optional `discord_intake`: receiving side
+(`nyxid_relay`, `native_gateway`, or intentional `interactions_only`),
+observed state, stable code/block reason, hand-over time when known, and last
+authenticated inbound (binding-scoped for native intake). The admin health/list endpoints and
+NyxBot channel listing expose the same evidence. Native `selected` without a
+confirmed event is unconfirmed, not healthy; see [Discord intake health](CHANNEL_BOT_RELAY.md#discord-intake-health-and-failed-hand-overs-2328-2323).
+
 Unauthorized callers get the not-found shape.
 
 `POST /api/v1/channel-bots/{id}/resubscribe` needs write access and is X-only. It re-registers the X Activity subscription, reads it back live, records a `channel_bot_resubscribed` audit row, and returns fresh health.

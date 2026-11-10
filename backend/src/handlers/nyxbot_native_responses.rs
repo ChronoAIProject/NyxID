@@ -232,12 +232,26 @@ async fn accept(
     let result=session.start_transaction().and_run2(async move |session| {
         let row = &tx_row;
         let result:AppResult<()> = async {
+            let discord = matches!(&row.gateway_source, Some(crate::models::nyxbot_channel::GatewaySource::Discord { .. }));
+            // Clear intake uncertainty atomically with the existing admission
+            // fence, never a genuine delivery error. This adds no DB operation.
+            let admission: mongodb::options::UpdateModifications = if discord {
+                let clear = doc! {"$and":[{"$eq":["$delivery_status","unconfirmed"]},
+                    {"$eq":["$delivery_error","discord_native_intake_unconfirmed"]}]};
+                vec![doc! {"$set":{
+                    "native_admission_revision":{"$add":[{"$ifNull":["$native_admission_revision",0_i64]},1_i64]},
+                    "delivery_status":{"$cond":[&clear,"unknown","$delivery_status"]},
+                    "delivery_error":{"$cond":[&clear,"$$REMOVE","$delivery_error"]}
+                }}].into()
+            } else {
+                doc! {"$inc":{"native_admission_revision":1_i64}}.into()
+            };
             // Contend with transport changes, binding revocation and erasure.
             let fenced=db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&row.id,"transport":"gateway","status":"active",
                 "binding_id":&row.binding_id,"agent_api_key_id":&row.agent_api_key_id,"gateway_native_phase":"ready",
                 "gateway_channel_id":&row.gateway_channel_id,"gateway_source":bson::to_bson(&row.gateway_source).map_err(|_|AppError::OAuthAuthorityUnavailable)?,
                 "gateway_setup_release_id":bson::Bson::Null,"pending_agent_api_key_id":bson::Bson::Null},
-                doc! {"$inc":{"native_admission_revision":1_i64}}).session(&mut *session).await?;
+                admission).session(&mut *session).await?;
             if fenced.matched_count!=1 {return Err(AppError::OAuthAuthorityUnavailable);}
             let owner=db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME).update_one(
                 doc! {"_id":&row.user_id,"is_active":true,"platform_personal_deleting":{"$ne":true}},
@@ -247,13 +261,34 @@ async fn accept(
             if let Some(crate::models::nyxbot_channel::GatewaySource::Discord { bot_id }) = &row.gateway_source {
                 bot_filter.extend(doc! {"platform":"discord","platform_bot_id":bot_id,"status":{"$in":["active","pending_webhook"]}});
             }
+            // Relay record_inbound already records this per message. Fold the
+            // native equivalent into the mandatory bot fence instead of adding
+            // another write or throttling the authoritative bot timestamp.
+            let mut bot_update = doc! {"$inc":{"native_admission_revision":1_i64}};
+            if discord {
+                bot_update.insert("$set", doc! {"diagnostics.last_inbound_at":bson::DateTime::now(),
+                    "diagnostics.last_inbound_source":"native_discord_gateway"});
+            }
             let bot=db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
-                bot_filter.clone(),
-                doc! {"$inc":{"native_admission_revision":1_i64}}).session(&mut *session).await?;
+                bot_filter.clone(), bot_update).session(&mut *session).await?;
             if bot.matched_count!=1 {return Err(AppError::Forbidden("Bot unavailable".into()));}
-            if matches!(&row.gateway_source, Some(crate::models::nyxbot_channel::GatewaySource::Discord { .. })) {
-                // The current provider key/binding, closed source identity and
-                // command metadata were verified before this admission transaction.
+            if discord {
+                // Only a first/current-hand-over or >60s-old observation writes
+                // the channel evidence. Filter live storage, not the caller's
+                // snapshot; concurrent admissions cannot undo newer evidence.
+                db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {
+                    "_id":&row.id,"binding_id":&row.binding_id,
+                    "$or":[
+                        {"gateway_intake.binding_id":{"$ne":&row.binding_id}},
+                        {"gateway_intake.last_inbound_at":bson::Bson::Null},
+                        {"gateway_intake.last_inbound_at":{"$lt":bson::DateTime::from_chrono(now-ChronoDuration::seconds(60))}},
+                        {"$expr":{"$lt":["$gateway_intake.last_inbound_at","$gateway_intake.handed_over_at"]}}
+                    ]}, vec![doc! {"$set":{"gateway_intake":{
+                        "binding_id":{"$literal":&row.binding_id},
+                        "handed_over_at":{"$cond":[{"$eq":["$gateway_intake.binding_id",{"$literal":&row.binding_id}]},
+                            {"$ifNull":["$gateway_intake.handed_over_at",bson::Bson::Null]},bson::Bson::Null]},
+                        "last_inbound_at":bson::DateTime::from_chrono(now)
+                    }}}]).session(&mut *session).await?;
                 bot_filter.insert("status", "pending_webhook");
                 db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
                     bot_filter, doc! {"$set":{"status":"active","updated_at":bson::DateTime::now(),

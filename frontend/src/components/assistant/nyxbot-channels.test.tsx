@@ -92,6 +92,24 @@ it.each([undefined, "ok"])("keeps legacy and healthy status %s quiet", (status) 
   expect(screen.queryByText(/Messages are not reaching|Attachment problem/)).not.toBeInTheDocument();
 });
 
+it.each([
+  ["gateway", "native_gateway", "unconfirmed", "Agent Event Gateway", "unconfirmed", null],
+  ["direct", "nyxid_relay", "failing", "NyxID relay", "stopped", "release_unresolved"],
+])("shows %s Discord intake evidence without claiming delivery", (transport, side, status, label, state, block) => {
+  data.channels = [nyxAgentChannelAgentSchema.parse({
+    id: "channel", channel_bot_id: "bot", platform: "discord", bot_label: "Receipts",
+    transport, status: "active", owner_linked: true, delivery_status: status,
+    delivery_reason: "Intake needs confirmation.", created_at: "2026-10-01T00:00:00Z",
+    discord_intake: { receiving_side: side, state, code: null, block_reason: block, handed_over_at: null, last_inbound_at: null },
+  })];
+  render(<ChannelBotsManager agents={[]} />);
+  expect(screen.getByText(`Receiving side: ${label}. Intake: ${state}.`)).toBeVisible();
+  expect(screen.getByText("Last confirmed inbound: not observed.")).toBeVisible();
+  expect(screen.getByText(/Intake needs confirmation/)).toBeVisible();
+  if (block) expect(screen.getByText(`Intake blocked by: ${block}.`)).toBeVisible();
+  expect(screen.queryByText(/Connected through the Agent Event Gateway/)).not.toBeInTheDocument();
+});
+
 const at = "2026-10-01T00:00:00Z";
 function agent(id: string, status = "idle", owner_kind?: "person" | "org") {
   return assistantAgentSchema.parse({ id, name: id, kind: "specialist", owner_kind, status, created_at: at, last_active_at: at });
@@ -445,4 +463,27 @@ it.each(["active", "pending", "failed"])("keeps the audience section mounted for
   data.channels = [connection(status, status === "failed" ? "org_access_lost" : undefined)];
   render(<ChannelBotsManager agents={[agent("first")]} />);
   expect(screen.getByRole("region", { name: "Who can talk to this bot" })).toBeVisible();
+});
+
+
+it("shows intentional interactions-only intake without a delivery warning", () => {
+  data.channels = [nyxAgentChannelAgentSchema.parse({
+    id:"channel",channel_bot_id:"bot",platform:"discord",bot_label:"Receipts",transport:"direct",
+    status:"active",owner_linked:true,delivery_status:"unknown",created_at:at,
+    discord_intake:{receiving_side:"interactions_only",state:"not_enabled",code:null,block_reason:null,handed_over_at:null,last_inbound_at:null},
+  })];
+  render(<ChannelBotsManager agents={[]} />);
+  expect(screen.getByText("Receiving side: Discord interactions. Intake: not_enabled.")).toBeVisible();
+  expect(screen.queryByText(/Messages are not reaching|Intake not confirmed|Working on NyxID relay/)).not.toBeInTheDocument();
+});
+
+
+it.each(["unknown", "unconfirmed"])("does not call legacy relay status %s working", (status) => {
+  data.channels = [nyxAgentChannelAgentSchema.parse({ ...connection("active"), platform:"discord",transport:"direct",
+    gateway_native_activation:"gateway_rejected_request",delivery_status:status })];
+  render(<ChannelBotsManager agents={[]} />);
+  expect(screen.getByText("NyxID relay selected. Check channel health for delivery status.")).toBeVisible();
+  expect(screen.queryByText("Working on NyxID relay.")).not.toBeInTheDocument();
+  if (status === "unconfirmed") expect(screen.getByText(/Intake not confirmed: No authenticated inbound has been confirmed/)).toBeVisible();
+  expect(screen.queryByText(/delivery failed/)).not.toBeInTheDocument();
 });

@@ -78,6 +78,9 @@ pub(crate) async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::
             )
             .await?;
     }
+    db.collection::<Document>(CHANNELS).create_index(IndexModel::builder()
+        .keys(doc! {"platform":1,"status":1,"transport":1,"gateway_repair_checked_at":1,"_id":1})
+        .options(IndexOptions::builder().name("discord_setup_repair".to_owned()).build()).build()).await?;
     db.collection::<Document>(CHANNELS).create_index(IndexModel::builder().keys(doc! {"_id":1,"status":1})
         .options(IndexOptions::builder().name("gateway_release_reconcile".to_owned()).partial_filter_expression(
             doc! {"$or":[{"gateway_channel_id":{"$type":"string"}},{"gateway_record_id":{"$type":"string"}}]}).build()).build()).await?;
@@ -329,6 +332,11 @@ pub(crate) async fn adopt_in_session(
         return Err(conflict());
     }
     if row.platform == "discord" {
+        if row.gateway_source.is_some() {
+            db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&row.id,"binding_id":&row.binding_id},
+                doc! {"$set":{"gateway_intake":{"binding_id":&row.binding_id,"handed_over_at":bson::DateTime::now(),"last_inbound_at":bson::Bson::Null},
+                    "delivery_status":"unconfirmed","delivery_error":"discord_native_intake_unconfirmed"}}).session(&mut *session).await?;
+        }
         super::discord_gateway::transport::retire_resume(db, &row.channel_bot_id, session).await?;
     }
     Ok(())
@@ -549,8 +557,9 @@ pub(crate) async fn retire_attempt(
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let work:AppResult<_>=Box::pin(async {
-            let mut filter=doc! {"_id":&id,"$or":[{"state":"provisional"},{"state":"settled","resolution":"not_created"}]};
-            if reason==ReleaseReason::StaleSetup {filter.insert("$expr",doc! {"$lte":["$provisional_expires_at","$$NOW"]});}
+            let mut filter=doc! {"_id":&id,"$or":[{"state":{"$in":["provisional","due","review_required"]}},
+                {"state":"settled","resolution":{"$in":["not_created","cancelled","released","missing","confirmed_missing"]}}]};
+            if reason==ReleaseReason::StaleSetup {filter.insert("$expr",doc! {"$lte":[{"$ifNull":["$provisional_expires_at",{"$dateAdd":{"startDate":"$updated_at","unit":"minute","amount":SETUP_MINUTES}}]},"$$NOW"]});}
             let Some(release)=db.collection::<Release>(RELEASES).find_one(filter).session(&mut *session).await? else {return Ok(());};
             let row=db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {"_id":&release.channel_id}).session(&mut *session).await?;
             if let Some(row)=row {
@@ -575,6 +584,16 @@ pub(crate) async fn retire_attempt(
                 }
             }
             queue(&db,&release,reason,session).await?;
+            // Fence a due worker's stale local-reference observation as we
+            // detach. Only a local-reference review can resume automatically;
+            // other uncertainty still requires its existing review process.
+            if (release.state == ReleaseState::Due ||
+                (release.state == ReleaseState::ReviewRequired && release.last_error.as_deref() == Some("live_reference")))
+                && db.collection::<Document>(CHANNELS).find_one(live_filter(&release)).session(&mut *session).await?.is_none() {
+                db.collection::<Document>(RELEASES).update_one(doc! {"_id":&id,"revision":release.revision},
+                    doc! {"$set":{"state":"due","claim_id":bson::Bson::Null,"lease_until":bson::Bson::Null,
+                        "next_attempt_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()},"$inc":{"revision":1_i64}}).session(&mut *session).await?;
+            }
             revoke_in_session(&db,&release.owner_user_id,&release.agent_api_key_id,session).await?;
             revoke_in_session(&db,&release.bot_owner_id,&release.route_api_key_id,session).await?;
             super::channel_routing_service::retire_key_routes_in_session(&db,&release.bot_owner_id,&release.channel_bot_id,&release.route_api_key_id,session).await?;
@@ -1223,6 +1242,7 @@ pub(crate) async fn settle_native_drains(db: &Database) -> AppResult<()> {
 }
 
 pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
+    repair_direct_attempts(state).await?;
     settle_native_drains(&state.db).await?;
     let stale: Vec<Release> = state
         .db
@@ -1399,8 +1419,16 @@ pub(crate) async fn fallback(
 }
 
 pub(crate) async fn retire_pending(state: &AppState, row: &NyxbotChannel) -> AppResult<()> {
+    retire_pending_with_reason(state, row, ReleaseReason::StaleSetup).await
+}
+
+async fn retire_pending_with_reason(
+    state: &AppState,
+    row: &NyxbotChannel,
+    reason: ReleaseReason,
+) -> AppResult<()> {
     if let Some(id) = &row.gateway_setup_release_id {
-        return retire_attempt(state, id, ReleaseReason::StaleSetup).await;
+        return retire_attempt(state, id, reason).await;
     }
     let db = state.db.clone();
     let row = row.clone();
@@ -1409,12 +1437,56 @@ pub(crate) async fn retire_pending(state: &AppState, row: &NyxbotChannel) -> App
         let work:AppResult<_>=Box::pin(async {
             if db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&row.id,"transport":&row.transport,"status":"active",
                 "pending_agent_api_key_id":&row.pending_agent_api_key_id,"pending_route_api_key_id":&row.pending_route_api_key_id,"gateway_setup_release_id":bson::Bson::Null},
-                doc! {"$unset":{"pending_agent_api_key_id":"","pending_route_api_key_id":""}}).session(&mut *session).await?.matched_count!=1 {return Ok(());}
+                {
+                    let mut unset=doc! {"pending_agent_api_key_id":"","pending_route_api_key_id":""};
+                    if row.transport=="direct" {unset.extend(doc! {"gateway_source":"","gateway_native_phase":"","binding_id":""});}
+                    doc! {"$inc":{"execution_policy_revision":1_i64},"$unset":unset}
+                }).session(&mut *session).await?.matched_count!=1 {return Ok(());}
             if let Some(key)=row.pending_agent_api_key_id.as_deref() {revoke_in_session(&db,&row.user_id,key,session).await?;}
             if let Some(key)=row.pending_route_api_key_id.as_deref() {revoke_in_session(&db,bot_owner(&row),key,session).await?;}
             Ok(())
         }).await;transactions::transaction_result(work)
     }).await.map_err(transactions::map_transaction_error)
+}
+
+/// Immediate cleanup may not retire a newer move or an adopted gateway route.
+pub(crate) async fn retire_failed_move(
+    state: &AppState,
+    row: &NyxbotChannel,
+    agent: &str,
+    route: &str,
+) -> AppResult<()> {
+    if let Some(current)=state.db.collection::<NyxbotChannel>(CHANNELS).find_one(doc! {
+        "_id":&row.id,"status":"active","transport":"direct","route_api_key_id":&row.route_api_key_id,
+        "pending_agent_api_key_id":agent,"pending_route_api_key_id":route,
+    }).await? {
+        retire_pending_with_reason(state,&current,ReleaseReason::SetupFailed).await?;
+    }
+    Ok(())
+}
+
+/// Bounded rotating repair of legacy/crashed local attempts. Remote uncertainty
+/// remains represented by the existing release/drain rows on every replica.
+pub(crate) async fn repair_direct_attempts(state: &AppState) -> AppResult<()> {
+    let rows:Vec<NyxbotChannel>=state.db.collection(CHANNELS).find(doc! {
+        "platform":"discord","status":"active","transport":"direct",
+        "$or":[{"pending_agent_api_key_id":{"$type":"string"}},
+            {"pending_route_api_key_id":{"$type":"string"}},{"gateway_setup_release_id":{"$type":"string"}}],
+        "$expr":{"$lte":[{"$ifNull":["$gateway_attempted_at","$updated_at"]},
+            {"$dateSubtract":{"startDate":"$$NOW","unit":"minute","amount":SETUP_MINUTES}}]},
+    }).sort(doc! {"gateway_repair_checked_at":1,"_id":1}).limit(10).await?.try_collect().await?;
+    for row in rows {
+        state
+            .db
+            .collection::<Document>(CHANNELS)
+            .update_one(
+                doc! {"_id":&row.id},
+                doc! {"$set":{"gateway_repair_checked_at":bson::DateTime::now()}},
+            )
+            .await?;
+        retire_pending(state, &row).await?;
+    }
+    Ok(())
 }
 
 pub(crate) async fn list(

@@ -1286,7 +1286,8 @@ impl AccountTools<'_> {
                 let orgs = self.org_names(user, [bot.user_id.clone()]).await?;
                 let mut view = owned_bot_view(&bot, user, &orgs);
                 let gateway = channel_bot_service::gateway_linked(self.db, &bot.id).await?;
-                view["health"] = super::channel_bot_health::setup_evidence(&bot, gateway);
+                view["health"] =
+                    super::channel_bot_health::setup_evidence(self.db, &bot, gateway).await?;
                 view["personal_routing_available"] = json!(
                     super::platform_bot_authority::permits_personal_routes(self.db, &bot.id)
                         .await?
