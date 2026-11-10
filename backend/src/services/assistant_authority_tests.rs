@@ -922,13 +922,18 @@ fn native_inventory_is_closed_and_schemas_exclude_secret_inputs() {
     let service = tools::virtual_service(&orchestrator_chat());
     // NyxBot also gets the team and memory tools; specialists get read-only
     // account tools plus their own agent tools. The flag-gated drafting tool
-    // is in both lists and only `virtual_service_for` adds it.
+    // is in both lists; notification digests are NyxBot-only. Actor-aware
+    // discovery adds either tool after checking its rollout flag.
     let team = super::assistant_team_tools::TOOL_NAMES.len();
     let memory = super::assistant_team_tools::AGENT_TOOL_NAMES.len();
     assert_eq!(
         service.endpoints.len(),
-        tools::TOOL_NAMES.len() + team + memory - 2
+        tools::TOOL_NAMES.len() + team + memory - 3
     );
+    assert!(service.endpoints.iter().all(|endpoint| !matches!(
+        endpoint.name.as_str(),
+        "draft_agent_skill" | "list_notifications"
+    )));
     let mut subagent = orchestrator_chat();
     subagent.role = crate::models::assistant_conversation::AgentRole::Subagent;
     let limited = tools::virtual_service(&subagent);
