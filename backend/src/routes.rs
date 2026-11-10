@@ -35,6 +35,16 @@ macro_rules! collect_billing_route_specs {
     }};
 }
 
+macro_rules! model_contract_metadata_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router; (
+            "/platform-models/contracts", "/api/v1/admin/platform-models/contracts",
+            "handlers::platform_models::certified_contracts", get(handlers::platform_models::certified_contracts),
+            crate::services::billing::route_inventory::BillingRoutePolicy::Exempt("Certified contract metadata; no downstream request")
+        ))
+    };
+}
+
 macro_rules! llm_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
@@ -546,6 +556,10 @@ macro_rules! oracle_billing_routes {
 pub(crate) fn mounted_billing_route_inventory()
 -> Vec<crate::services::billing::route_inventory::BillingRouteSpec> {
     let mut routes = llm_billing_routes!(collect_billing_route_specs, ());
+    routes.extend(model_contract_metadata_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
     routes.extend(codex_connection_billing_routes!(
         collect_billing_route_specs,
         ()
@@ -1066,7 +1080,22 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             put(handlers::admin_sa_connections::update_sa_connection_credential),
         );
 
-    let admin_routes = Router::new()
+    let admin_routes = model_contract_metadata_routes!(register_billing_routes, Router::new())
+        .route(
+            "/platform-models/credentials",
+            get(handlers::platform_models::credentials::list)
+                .post(handlers::platform_models::credentials::create_request),
+        )
+        .route(
+            "/platform-models/credentials/{id}",
+            get(handlers::platform_models::credentials::get)
+                .put(handlers::platform_models::credentials::update_request),
+        )
+        .route(
+            "/platform-models/offerings",
+            get(handlers::platform_models::credentials::offerings)
+                .post(handlers::platform_models::credentials::create_offering),
+        )
         .route(
             "/platform-models/{id}/tariffs/{tariff_id}/retire",
             post(handlers::platform_models::retire_tariff),

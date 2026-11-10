@@ -1,5 +1,106 @@
 # Platform models
 
+## Operator quick start
+
+Admin → Platform Models now includes **Provider credentials**. Admins write;
+operators can inspect the metadata and current route references. The feature-off
+UI is read-only. After fleet readiness, use an admin-only
+`inference:platform-models` override to stage configuration before enabling it for
+customers. No save, list or replacement probes a real provider.
+
+1. **Credential:** add a Google Cloud service-account JSON file (Vertex AI),
+   OpenAI key or Anthropic key. Inputs are masked; stored credentials cannot be
+   viewed. JSON is checked locally and with the executor's closed service-account
+   parser at save, including RSA validity and standard Google authorities. External
+   accounts, credential sources and unknown JSON fields are refused. This checks
+   key shape, not whether the provider accepts the key or grants access.
+2. **Model + billing identity:** create a disabled draft and leave **Create billing
+   identity automatically** checked, or select an existing offering. The UI creates
+   the draft, creates the empty offering, then links it with the draft revision.
+   If linking fails, retry only that step. If a create response is uncertain, reload
+   the inventories before creating again; open the existing draft and select the
+   existing identity. An unlinked offering has no credential and is safe to retain.
+3. **Routes:** choose the credential by name and kind; configure the private target
+   and exact native model. Only `model_route` records appear in this picker.
+4. **Access:** allow the intended people, organizations or groups; denies win.
+5. **Price:** choose the family’s v2 certified contract. The editor fills its
+   version and fixture digest and offers only supported accounting options.
+   Review model limits, features and prices; enter a verification link or note and
+   check **I verified this model’s limits, features and prices**. Create, publish
+   and verify the complete tariff and sync status.
+6. **Enable:** activate the model and routes after their readiness checks pass.
+7. **Flag:** roll out `inference:platform-models` to the intended customer cohort.
+
+CLI equivalents (human login required; never pass a secret as a command argument):
+
+```sh
+nyxid admin models credentials list
+chmod 600 /path/to/service-account.json
+nyxid admin models credentials add --kind gcp-service-account --name 'Vertex production' --file /path/to/service-account.json
+nyxid admin models credentials add --kind openai --name 'OpenAI production' --key-env OPENAI_API_KEY
+nyxid admin models credentials add --kind anthropic --name 'Anthropic production' --key-env ANTHROPIC_API_KEY
+nyxid admin models credentials rotate CREDENTIAL_ID --file /path/to/replacement.json
+nyxid admin models credentials rotate CREDENTIAL_ID --key-env OPENAI_API_KEY
+nyxid admin models credentials disable CREDENTIAL_ID
+nyxid admin models offering create --name 'Model billing identity'
+nyxid admin models create --file model.json
+nyxid admin models update MODEL_ID --revision REV --file contract-with-billing-service-id.json
+nyxid admin models routes set MODEL_ID --revision REV --file routes.json
+nyxid admin models access set MODEL_ID --revision REV --file access.json
+nyxid admin models contracts list
+nyxid admin models prices create MODEL_ID --revision REV --file tariff.json --contract openai.responses.v2 --attest 'Provider documentation link or verification note'
+nyxid admin models prices publish MODEL_ID
+nyxid admin models prices verify MODEL_ID
+nyxid admin models update MODEL_ID --revision REV --file enabled-contract.json
+```
+
+Refresh the model revision between writes. The CLI reads key files in zeroizing
+memory and refuses symlinks and group/world-accessible files on Unix. API-key
+input uses an environment variable; it is never printed. JSON and table output
+are allowlisted metadata only. Rotation reads the current catalog timestamp and
+fences replacement inside the existing catalog transaction; stale writes return
+409 without automatic replay. Disable refuses while a current enabled route
+references the credential, even if its model is disabled. Retired route revisions
+do not block it. Concurrent route changes can still make a route unavailable;
+execution always rechecks the credential's live enable state.
+
+`GET /api/v1/admin/platform-models/contracts` is read-only admin/operator metadata,
+available flag-off and without provider/readiness probes. It derives versions,
+fixture digests, transports, required/optional/forbidden flags, allowed cache TTLs
+and modality partitions from the same definitions used by execution validation.
+It lists `gemini.generate.v2`, `anthropic.messages.v2` and `openai.responses.v2`.
+The UI and CLI compose `contract-attested-v1:<public model> <reference>`;
+the full source is bounded to 1000 UTF-8 bytes without control characters.
+
+The CLI’s paired `--contract` / `--attest` options fill the contract identity and
+required defaults. The manifest still supplies prices, bounds and variant, and
+may override supported accounting options. Defaults use aggregate accounting,
+all allowed cache-write TTLs, and Gemini tool-input billing; each selected class
+needs a price or an explicit-free component. These defaults certify no model
+limits or feature claims. Removing TTLs changes the contract and must reflect the
+model you verified. Accounting modality partitions are distinct from accepting
+image input. Without these options the manifest-only command is unchanged.
+
+Historical v1 revisions remain readable, publishable and usable only for their
+four historical models. A new revision of a supported family defaults to v2 even
+when using a v1 price as a template, and always requires fresh confirmation.
+Open MaaS has no v2 contract and keeps its existing advanced manifest/editor path.
+The editor does not silently fall back to manual v2 authoring if metadata fails;
+upgrade serving replicas before using the new controls. No persisted schema,
+fixture bytes, historical evidence or execution-readiness requirement changes.
+
+Admin/operator metadata endpoints are `GET /admin/platform-models/credentials`
+(and `/{id}`) and `GET /admin/platform-models/offerings`, with 100-row keyset pages
+and `after` / `next_after`. Admin-only writes are `POST` to either collection and
+`PUT /admin/platform-models/credentials/{id}` with `expected_updated_at` plus a
+replacement `credential` or `enabled:false`. Writes require the effective feature
+flag; reads remain available while it is off. These endpoints use the existing
+catalog create/update paths, encrypted storage, readiness and live-role fences.
+They do not change ordinary catalog behavior or persisted closed structs. Kind is
+only a display label derived from the catalog endpoint (standard Google, OpenAI
+or Anthropic endpoint); older custom endpoints retain a neutral label. No secret
+is decrypted to discover its kind. A route's closed target remains authoritative.
+
 This is the approved platform-model contract for
 [#2274](https://github.com/ChronoAIProject/NyxID/issues/2274), including the owner's
 public-name, credential and first-release scope decisions. It supersedes the

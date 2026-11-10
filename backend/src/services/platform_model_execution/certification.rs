@@ -12,6 +12,7 @@ use crate::{
     },
 };
 use sha2::{Digest, Sha256};
+pub(crate) mod contracts;
 
 pub(super) fn image_fixture(route: &RouteTarget) -> Option<&'static str> {
     match route {
@@ -163,13 +164,7 @@ pub(crate) const READINESS: &str = "inference:platform-model-contracts-v1";
 pub(crate) fn family_fixture(
     family: crate::models::platform_model_tariff::UsageFamily,
 ) -> Option<&'static str> {
-    use crate::models::platform_model_tariff::UsageFamily;
-    match family {
-        UsageFamily::Gemini => Some(include_str!("fixtures/gemini-contract-v2.json")),
-        UsageFamily::Claude => Some(include_str!("fixtures/claude-contract-v2.json")),
-        UsageFamily::Openai => Some(include_str!("fixtures/responses-contract-v2.json")),
-        UsageFamily::OpenMaas => None,
-    }
+    contracts::for_family(family).map(|definition| definition.fixture)
 }
 
 pub(crate) fn family_contract(c: &UsageContract) -> bool {
@@ -190,35 +185,7 @@ pub(crate) fn validate_family_tariff(t: &ModelTariff) -> AppResult<()> {
         return Err(unsupported());
     }
     let c = &t.contract;
-    use crate::models::platform_model_tariff::{CacheTtl, UsageFamily};
-    let version = match c.family {
-        UsageFamily::Gemini => "gemini.generate.v2",
-        UsageFamily::Claude => "anthropic.messages.v2",
-        UsageFamily::Openai => "openai.responses.v2",
-        UsageFamily::OpenMaas => return Err(unsupported()),
-    };
-    if c.version != version
-        || !c.tokens
-        || !c.cache_read
-        || c.images
-        || !c.output_modalities.is_empty()
-        || !(c.input_modalities.is_empty()
-            || c.family == UsageFamily::Gemini && c.input_modalities == [UsageModality::Image])
-        || c.family != UsageFamily::Gemini && c.bill_tool_input
-        || c.family == UsageFamily::Claude && c.split_reasoning
-        || c.cache_write_ttls.iter().any(|ttl| {
-            !matches!(
-                (c.family, ttl),
-                (
-                    UsageFamily::Claude,
-                    CacheTtl::FiveMinutes | CacheTtl::OneHour
-                ) | (
-                    UsageFamily::Openai,
-                    CacheTtl::ThirtyMinutes | CacheTtl::TwelveHours
-                )
-            )
-        })
-    {
+    if !contracts::for_family(c.family).is_some_and(|definition| definition.accepts(c)) {
         return Err(unsupported());
     }
     Ok(())
@@ -231,34 +198,8 @@ fn certify_family(
     has_images: bool,
 ) -> AppResult<()> {
     validate_family_tariff(tariff)?;
-    let transport_matches = matches!(
-        (native, route),
-        (
-            Native::Gemini,
-            RouteTarget::VertexPublisher {
-                publisher: VertexPublisher::Google,
-                ..
-            }
-        ) | (
-            Native::Claude,
-            RouteTarget::VertexPublisher {
-                publisher: VertexPublisher::Anthropic,
-                ..
-            }
-        ) | (
-            Native::Claude,
-            RouteTarget::DirectProvider {
-                provider: DirectProvider::Anthropic,
-                ..
-            }
-        ) | (
-            Native::Responses,
-            RouteTarget::DirectProvider {
-                provider: DirectProvider::Openai,
-                ..
-            }
-        )
-    );
+    let transport_matches = contracts::for_family(tariff.contract.family)
+        .is_some_and(|definition| definition.accepts_route(route));
     if !transport_matches
         || native.family() != tariff.contract.family
         || has_images && tariff.bounds.max_images == 0

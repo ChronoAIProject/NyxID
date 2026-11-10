@@ -1,3 +1,11 @@
+import { ContractPicker } from "./contract-picker";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  type CertifiedContract,
+  type UsageContract,
+  attestation,
+  validSource,
+} from "@/schemas/model-contracts";
 import { titleCase } from "@/schemas/platform-models";
 import { useAdminBillingService } from "@/hooks/use-admin-billing";
 import { useState } from "react";
@@ -5,6 +13,7 @@ import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useModelTariffs,
+  useModelContracts,
   usePlatformModelChange,
   adminModelPath,
 } from "@/hooks/use-platform-models";
@@ -45,21 +54,69 @@ const component = z
     (c) => /^0(?:\.0+)?$/.test(c.credits_per_unit) === c.explicit_free,
     "Zero must be explicitly free; positive prices cannot be free",
   );
-const schema = z.object({
-  lane: z.enum(["platform_key", "byok"]),
-  source: z.string().min(1),
-  variant: objectJson,
-  contract: objectJson,
-  bounds: objectJson,
-  components: z.array(component).min(1),
-});
+const schema = z
+  .object({
+    certified: z.boolean(),
+    confirmed: z.boolean(),
+    reference: z.string(),
+    publicModel: z.string(),
+    lane: z.enum(["platform_key", "byok"]),
+    source: z.string(),
+    variant: objectJson,
+    contract: objectJson,
+    bounds: objectJson,
+    components: z.array(component).min(1),
+  })
+  .superRefine((v, ctx) => {
+    if (v.certified && !v.confirmed)
+      ctx.addIssue({
+        code: "custom",
+        path: ["confirmed"],
+        message: "Confirm your verification before creating a revision",
+      });
+    if (v.certified && !v.reference.trim())
+      ctx.addIssue({
+        code: "custom",
+        path: ["reference"],
+        message: "Enter a verification reference",
+      });
+    if (
+      !validSource(
+        v.certified ? attestation(v.publicModel, v.reference) : v.source,
+      )
+    )
+      ctx.addIssue({
+        code: "custom",
+        path: [v.certified ? "reference" : "source"],
+        message:
+          "Verification source must be at most 1000 UTF-8 bytes with no control characters",
+      });
+  });
 type Values = z.infer<typeof schema>;
-function defaults(t?: Tariff): Values {
+function defaults(
+  model: AdminModel,
+  definitions: CertifiedContract[],
+  t?: Tariff,
+): Values {
+  const definition = definitions[0];
   return {
+    certified: !!definition,
+    confirmed: false,
+    reference: "",
+    publicModel: model.public_id,
     lane: t?.lane === "byok" ? "byok" : "platform_key",
     source: t?.source ?? "",
     variant: JSON.stringify(t?.variant ?? {}, null, 2),
-    contract: t ? JSON.stringify(t.contract, null, 2) : "",
+    contract: definition
+      ? JSON.stringify(
+          t?.contract.version === definition.version &&
+            t?.contract.fixture_sha256 === definition.fixture_sha256
+            ? t.contract
+            : definition.default_contract,
+        )
+      : t
+        ? JSON.stringify(t.contract, null, 2)
+        : "",
     bounds: t ? JSON.stringify(t.bounds, null, 2) : "",
     components:
       t?.components.map(
@@ -83,18 +140,20 @@ function defaults(t?: Tariff): Values {
 }
 function TariffForm({
   model,
+  definitions,
   template,
   done,
   reload,
 }: {
   readonly model: AdminModel;
+  readonly definitions: CertifiedContract[];
   readonly template?: Tariff;
   readonly done: () => void;
   readonly reload: () => void;
 }) {
   const form = useAppForm<Values>({
     resolver: zodResolver(schema),
-    defaultValues: defaults(template),
+    defaultValues: defaults(model, definitions, template),
     mode: "onChange",
   });
   const change = usePlatformModelChange();
@@ -108,7 +167,10 @@ function TariffForm({
               path: `${adminModelPath(model.id)}/tariffs`,
               method: "post",
               body: {
-                ...v,
+                lane: v.lane,
+                source: v.certified
+                  ? attestation(model.public_id, v.reference)
+                  : v.source,
                 revision: model.revision,
                 components: v.components.map((c) => ({
                   ...c,
@@ -147,10 +209,39 @@ function TariffForm({
               <option value="byok">BYOK</option>
             </NativeSelect>
           </Field>
-          <Field title="Verification source">
-            <Input {...form.register("source")} />
-          </Field>
-          {(["variant", "contract", "bounds"] as const).map((field) => (
+          {definitions.length > 0 ? (
+            <>
+              <ContractPicker
+                definitions={definitions}
+                value={JSON.parse(form.watch("contract")) as UsageContract}
+                onChange={(value) =>
+                  form.setValue("contract", JSON.stringify(value))
+                }
+              />
+              <Field title="Verification reference (link or note)">
+                <Input {...form.register("reference")} />
+              </Field>
+              <Field title="I verified this model's limits, features and prices">
+                <Checkbox
+                  checked={form.watch("confirmed")}
+                  onCheckedChange={(checked) =>
+                    form.setValue("confirmed", checked === true)
+                  }
+                />
+              </Field>
+            </>
+          ) : (
+            <Field title="Verification source">
+              <Input {...form.register("source")} />
+            </Field>
+          )}
+          {(
+            [
+              "variant",
+              ...(definitions.length ? [] : ["contract"]),
+              "bounds",
+            ] as ("variant" | "contract" | "bounds")[]
+          ).map((field) => (
             <Field key={field} title={`${titleCase(field)} JSON`}>
               <Textarea
                 rows={field === "contract" ? 10 : 4}
@@ -327,6 +418,9 @@ export function TariffsEditor({
   readonly reload: () => void;
 }) {
   const tariffs = useModelTariffs(model.id);
+  const contracts = useModelContracts();
+  const definitions =
+    contracts.data?.filter((d) => d.family === model.family) ?? [];
   const billing = useAdminBillingService(model.billing_service_id ?? "");
   const change = usePlatformModelChange();
   const [editing, setEditing] = useState<{ template?: Tariff } | null>(null);
@@ -339,7 +433,9 @@ export function TariffsEditor({
         rate is ready. Execution readiness is separate.
       </p>
       <SaveError
-        error={tariffs.error ?? billing.error ?? change.error}
+        error={
+          tariffs.error ?? billing.error ?? contracts.error ?? change.error
+        }
         reload={reload}
       />
       {billing.data?.effective.model_prices
@@ -375,20 +471,27 @@ export function TariffsEditor({
       {!readOnly && !editing && (
         <Button
           variant="outline"
-          disabled={!model.billing_service_id}
+          disabled={
+            !model.billing_service_id ||
+            (model.family !== "open_model" && definitions.length === 0)
+          }
           onClick={() => setEditing({})}
         >
           New price revision
         </Button>
       )}
-      {editing && !readOnly && (
-        <TariffForm
-          model={model}
-          template={editing.template}
-          done={() => setEditing(null)}
-          reload={reload}
-        />
-      )}
+      {editing &&
+        !readOnly &&
+        (model.family === "open_model" || definitions.length > 0) && (
+          <TariffForm
+            key={`${model.id}:${editing.template?.id ?? "new"}`}
+            definitions={definitions}
+            model={model}
+            template={editing.template}
+            done={() => setEditing(null)}
+            reload={reload}
+          />
+        )}
       {!model.billing_service_id && (
         <p className="type-secondary text-muted-foreground">
           Set the logical billing service in Public contract before adding
