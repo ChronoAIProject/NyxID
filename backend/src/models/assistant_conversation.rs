@@ -501,6 +501,10 @@ pub struct ActiveTurn {
     /// Confirmation continuation claims ignore the original run grace deadline.
     #[serde(default)]
     pub trigger_continuation: bool,
+    /// NyxBot Notifications were enabled for the owner at admission, so
+    /// settlement writes feed rows without re-reading flags.
+    #[serde(default)]
+    pub notifications_enabled: bool,
     pub turn_id: String,
     #[serde(default)]
     pub origin: TurnOrigin,

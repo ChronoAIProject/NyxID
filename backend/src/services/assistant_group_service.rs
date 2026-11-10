@@ -892,6 +892,14 @@ async fn append_following_bound(
                     .insert_one(&message)
                     .session(&mut *session)
                     .await?;
+                // Member replies and notices, never the owner's or NyxBot's
+                // own posts into the group.
+                if source_thread.is_some() || role == "notice" {
+                    super::assistant_notification_service::record_group_reply_in_session(
+                        &db, session, &owner, &group, &message,
+                    )
+                    .await?;
+                }
                 if let Some(conversation_id) = follower.as_deref() {
                     follow_in_session(
                         &db,

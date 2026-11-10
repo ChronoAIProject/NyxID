@@ -2737,6 +2737,9 @@ pub async fn live(State(state): State<AppState>, auth: AuthUser) -> AppResult<Re
                 Ok(LiveEvent::ChannelBot { user_id: owner, .. }) if owner == user_id => {
                     ("channels", json!({"type": "channels"}))
                 }
+                Ok(LiveEvent::Notification { id, user_id: owner }) if owner == user_id => {
+                    ("notification", json!({"type": "notification", "id": id}))
+                }
                 Ok(LiveEvent::Resync) | Err(broadcast::error::RecvError::Lagged(_)) => {
                     ("resync", json!({"type": "resync"}))
                 }

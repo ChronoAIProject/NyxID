@@ -2907,6 +2907,12 @@ pub(crate) async fn begin_owner_turn_in_session(
         .await?;
         super::platform_personal_turn_service::settle_saved_reply_in_session(db, session, &message)
             .await?;
+        Box::pin(
+            super::assistant_notification_service::record_turn_settled_in_session(
+                db, session, &row, &lost_turn, &message,
+            ),
+        )
+        .await?;
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(message)
             .session(&mut *session)
@@ -3054,6 +3060,10 @@ pub(crate) async fn begin_owner_turn_in_session(
     if start.invocation_id.is_some() || events.iter().any(|event| event.invocation_id.is_some()) {
         row.invocation_controlled = true;
     }
+    // Cached flag snapshot for settlement; a lookup failure reads as off.
+    let notifications_enabled = super::assistant_notification_service::enabled(db, user_id)
+        .await
+        .unwrap_or(false);
     row.active_turn = Some(ActiveTurn {
         platform_model_context: None,
         automation_work: automation_work.clone(),
@@ -3122,6 +3132,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         heartbeat_at: Some(now),
         trigger_run_id: start.trigger.as_ref().map(|c| c.run_id.clone()),
         trigger_continuation: start.trigger.as_ref().is_some_and(|c| c.continuation),
+        notifications_enabled,
         report_to,
         with_nyxbot,
         turn_id: turn_id.clone(),
@@ -4584,6 +4595,12 @@ artifact_recovery_target: None,
                 if let Some(turn) = settled_turn.as_ref() {
                     message.delegated_images.publication_refusal =
                         Box::pin(super::assistant_delegated_images::publish_in_session(&db, session, &message, turn)).await?.map(str::to_owned);
+                }
+                if let Some(turn) = settled_turn.as_ref() {
+                    Box::pin(super::assistant_notification_service::record_turn_settled_in_session(
+                        &db, session, &current, turn, &message,
+                    ))
+                    .await?;
                 }
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(message)

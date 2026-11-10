@@ -38,6 +38,30 @@ pub const TRIGGER_RUNS_PER_HOUR_LIMIT: i32 = 300;
 pub const DEFAULT_TRIGGER_RUNS_PER_DAY: i32 = 300;
 pub const TRIGGER_RUNS_PER_DAY_LIMIT: i32 = 3000;
 
+/// Mobile push per notification kind. All off by default: the in-app feed is
+/// always on while the feature is enabled.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationPushPreferences {
+    #[serde(default)]
+    pub automation_result: bool,
+    #[serde(default)]
+    pub automation_problem: bool,
+    #[serde(default)]
+    pub needs_decision: bool,
+    #[serde(default)]
+    pub agent_update: bool,
+    #[serde(default)]
+    pub chat_update: bool,
+    #[serde(default)]
+    pub group_mention: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationPreferences {
+    #[serde(default)]
+    pub push: NotificationPushPreferences,
+}
+
 /// Per-person NyxBot preferences. `_id` is the user ID; absent rows use defaults.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssistantSettings {
@@ -75,6 +99,9 @@ pub struct AssistantSettings {
     pub trigger_runs_per_day: i32,
     #[serde(default)]
     pub specialist_access_requests: SpecialistAccessRequests,
+    /// NyxBot Notifications preferences; additive, old readers ignore it.
+    #[serde(default)]
+    pub notifications: NotificationPreferences,
 }
 
 fn default_schedule_minimum() -> i32 {
@@ -122,6 +149,7 @@ impl AssistantSettings {
             trigger_runs_per_hour: DEFAULT_TRIGGER_RUNS_PER_HOUR,
             trigger_runs_per_day: DEFAULT_TRIGGER_RUNS_PER_DAY,
             specialist_access_requests: SpecialistAccessRequests::Denied,
+            notifications: NotificationPreferences::default(),
         }
     }
 }

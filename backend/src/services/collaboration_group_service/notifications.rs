@@ -136,6 +136,10 @@ pub(super) async fn enqueue(
             .insert_one(row)
             .session(&mut *session)
             .await?;
+        crate::services::assistant_notification_service::record_mention_in_session(
+            db, session, user, group, message,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -275,6 +279,9 @@ where
     Ok(())
 }
 
+#[cfg(test)]
+#[path = "assistant_notification_tests.rs"]
+mod assistant_notification_tests;
 #[cfg(test)]
 #[path = "notification_tests.rs"]
 mod tests;

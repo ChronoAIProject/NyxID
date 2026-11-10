@@ -2871,6 +2871,18 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .put(handlers::assistant_team::update_settings),
         )
         .route(
+            "/nyxagent/notifications",
+            get(handlers::assistant_notifications::list),
+        )
+        .route(
+            "/nyxagent/notifications/summary",
+            get(handlers::assistant_notifications::summary),
+        )
+        .route(
+            "/nyxagent/notifications/read",
+            post(handlers::assistant_notifications::read),
+        )
+        .route(
             "/nyxagent/onboarding",
             get(handlers::assistant_onboarding::get_onboarding)
                 .put(handlers::assistant_onboarding::save_onboarding),

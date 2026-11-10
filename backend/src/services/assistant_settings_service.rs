@@ -57,6 +57,7 @@ pub struct Update {
     pub max_group_handoffs_per_hour: Option<i32>,
     pub specialist_access_requests:
         Option<crate::models::assistant_settings::SpecialistAccessRequests>,
+    pub notifications: Option<crate::models::assistant_settings::NotificationPreferences>,
 }
 
 pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<AssistantSettings> {
@@ -222,6 +223,14 @@ pub async fn update(db: &Database, user_id: &str, update: Update) -> AppResult<A
                 .map_err(|_| AppError::Internal("Settings serialization failed".into()))?,
         );
         defaults.remove("specialist_access_requests");
+    }
+    if let Some(value) = update.notifications {
+        set.insert(
+            "notifications",
+            bson::to_bson(&value)
+                .map_err(|_| AppError::Internal("Settings serialization failed".into()))?,
+        );
+        defaults.remove("notifications");
     }
     let updated = db
         .collection::<AssistantSettings>(COLLECTION_NAME)

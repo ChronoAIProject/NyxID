@@ -153,6 +153,7 @@ pub mod assistant_feedback;
 #[cfg(test)]
 mod assistant_feedback_tests;
 pub mod assistant_group;
+pub mod assistant_notifications;
 pub mod assistant_nyxagent;
 pub mod assistant_onboarding;
 pub mod assistant_platform_models;

@@ -1338,6 +1338,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             report_to: None,
             with_nyxbot: false,
             trigger_continuation: false,
+            notifications_enabled: false,
             activities: Vec::new(),
             attachments: Vec::new(),
             turn_id: Uuid::new_v4().to_string(),

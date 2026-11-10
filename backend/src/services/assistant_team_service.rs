@@ -2415,6 +2415,13 @@ pub async fn destroy(db: &Database, owner: &str, agent_id: &str) -> AppResult<As
                         )
                         .session(&mut *session)
                         .await?;
+                    super::assistant_notification_service::resolve_cards_in_session(
+                        db,
+                        session,
+                        super::assistant_notification_service::CardScope::Conversation(&row.id),
+                        "superseded",
+                    )
+                    .await?;
                 }
                 Ok((agent, children))
             }

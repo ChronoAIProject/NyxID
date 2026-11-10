@@ -355,10 +355,19 @@ pub async fn retire_full_access_confirmations(
         if !ids.is_empty() {
             collection
                 .update_many(
-                    doc! {"_id": {"$in": ids}, "status": "pending", "confirmation.reason":{"$nin":["org_connection","delegation"]}},
+                    doc! {"_id": {"$in": ids.clone()}, "status": "pending", "confirmation.reason":{"$nin":["org_connection","delegation"]}},
                     doc! {"$set": {"status": "expired", "expires_at": sweep_time}},
                 )
                 .await?;
+            // Source first; a crash here leaves rows the list and summary
+            // reconcile lazily from the card's state.
+            super::assistant_notification_service::resolve_cards(
+                db,
+                super::assistant_notification_service::CardScope::Ids(&ids),
+                "superseded",
+                None,
+            )
+            .await?;
         }
     }
     // Proxy approvals can exist without an acknowledgement; their owning service
@@ -1915,6 +1924,8 @@ pub async fn expire(db: &Database, user: &str, conversation: &str) -> AppResult<
             doc! {"$set": {"status": "expired", "expiry_reason": "timeout"}},
         )
         .await?;
+    super::assistant_notification_service::resolve_expired_cards(db, user, Some(conversation))
+        .await?;
     Ok(())
 }
 
@@ -2603,6 +2614,15 @@ async fn request_candidate_in_session(
         .insert_one(&row)
         .session(&mut *session)
         .await?;
+    Box::pin(
+        super::assistant_notification_service::record_card_pending_in_session(
+            db,
+            session,
+            &row,
+            &conversation,
+        ),
+    )
+    .await?;
     super::assistant_voice::await_confirmation(db, &row, session).await?;
     Ok((row, true))
 }
@@ -3478,6 +3498,13 @@ pub(crate) async fn decide_in_session(
         .replace_one(filter, &row)
         .session(&mut *session)
         .await?;
+    super::assistant_notification_service::resolve_cards_in_session(
+        db,
+        session,
+        super::assistant_notification_service::CardScope::Ids(std::slice::from_ref(&row.id)),
+        "decided",
+    )
+    .await?;
     if allow && row.kind == "skills" && !by_nyxbot {
         // Internal outbox marker: the saved approval always has
         // durable work, even if the deciding process exits before

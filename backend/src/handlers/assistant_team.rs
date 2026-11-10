@@ -3729,6 +3729,7 @@ pub struct SettingsResponse {
     max_group_handoffs_limit: i32,
     max_group_handoffs_per_hour_limit: i32,
     specialist_access_requests: crate::models::assistant_settings::SpecialistAccessRequests,
+    notifications: crate::models::assistant_settings::NotificationPreferences,
 }
 impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResponse {
     fn from(row: crate::models::assistant_settings::AssistantSettings) -> Self {
@@ -3753,6 +3754,7 @@ impl From<crate::models::assistant_settings::AssistantSettings> for SettingsResp
             max_group_handoffs_per_hour_limit:
                 crate::models::assistant_settings::MAX_GROUP_HANDOFFS_PER_HOUR_LIMIT,
             specialist_access_requests: row.specialist_access_requests,
+            notifications: row.notifications,
         }
     }
 }
@@ -3787,6 +3789,8 @@ pub struct SettingsRequest {
     max_group_handoffs_per_hour: Option<i32>,
     #[serde(default)]
     specialist_access_requests: Option<crate::models::assistant_settings::SpecialistAccessRequests>,
+    #[serde(default)]
+    notifications: Option<crate::models::assistant_settings::NotificationPreferences>,
 }
 
 pub async fn update_settings(
@@ -3818,6 +3822,7 @@ pub async fn update_settings(
             max_group_handoffs: body.max_group_handoffs,
             max_group_handoffs_per_hour: body.max_group_handoffs_per_hour,
             specialist_access_requests: body.specialist_access_requests,
+            notifications: body.notifications,
         },
     )
     .await?;
@@ -4005,6 +4010,12 @@ pub fn spawn_sweeps(state: AppState) {
                     }
                 }
                 Err(error) => tracing::debug!(%error, "Assistant orphan sweep deferred"),
+            }
+            if crate::services::assistant_notification_service::sweep(&state)
+                .await
+                .is_err()
+            {
+                tracing::debug!("Notification sweep deferred");
             }
             if crate::services::execution_permission_dispatch::proposals::sweep(&state)
                 .await
