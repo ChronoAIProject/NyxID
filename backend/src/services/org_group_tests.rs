@@ -2236,3 +2236,142 @@ async fn notifications_follow_org_group_participant_and_transcript_purge() {
     assert_notification_probe(&f.state.db, &unrelated, true).await;
     f.state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn notifications_are_published_by_org_group_settlement_only_for_the_acting_member() {
+    use super::assistant_notification_service as feed;
+    use crate::models::assistant_notification::{
+        AssistantNotification, NotificationKind, SourceType,
+    };
+
+    async fn publish(
+        f: &Fixture,
+        group_id: &str,
+        agent: &AssistantAgent,
+        text: &str,
+        failed: bool,
+    ) {
+        let rows = f
+            .state
+            .db
+            .collection::<bson::Document>("assistant_notifications");
+        let before = rows.count_documents(doc! {}).await.unwrap();
+        let member = access(f, &f.member, group_id).await;
+        let request = enqueue(f, &member, agent, &[]).await;
+        assert_eq!(rows.count_documents(doc! {}).await.unwrap(), before);
+        let row = start(f, &member, agent, &request).await;
+        let credential = key(f, &row).await;
+        engine::finish_turn(
+            &f.state.db,
+            &row,
+            &credential.id,
+            &Uuid::new_v4().to_string(),
+            &engine::TurnResult {
+                text: text.into(),
+                session_id: None,
+                response_id: None,
+                error: failed.then(|| engine::TurnError::internal("turn_lost", "settlement")),
+            },
+        )
+        .await
+        .unwrap();
+        // Hidden member-thread settlement is silent; the public post is authoritative.
+        assert_eq!(rows.count_documents(doc! {}).await.unwrap(), before);
+        f.state
+            .db
+            .collection::<bson::Document>(REQUESTS)
+            .update_one(
+                doc! {"_id": &request},
+                doc! {"$set": {"pending_agent_ids": []}},
+            )
+            .await
+            .unwrap();
+        crate::handlers::org_group::member_settled(
+            &f.state,
+            member,
+            &row,
+            text,
+            failed.then_some("turn_lost"),
+        )
+        .await;
+    }
+
+    let f = Fixture::new("notifications_org_group_replies").await;
+    engine_flag(&f).await;
+    feed::ensure_indexes(&f.state.db).await.unwrap();
+    let (agent, _) = f.create().await;
+    let group = create(&f, &agent).await.group;
+    let notifications = f
+        .state
+        .db
+        .collection::<AssistantNotification>("assistant_notifications");
+    publish(&f, &group.id, &agent, "Flag-off reply", false).await;
+    assert_eq!(notifications.count_documents(doc! {}).await.unwrap(), 0);
+    for person in [&f.member, &f.admin] {
+        flags::set_platform_override(
+            &f.state.db,
+            flags::ASSISTANT_NOTIFICATIONS_FLAG_KEY,
+            &flags::FlagTarget::User(person.clone()),
+            true,
+            &f.admin,
+        )
+        .await
+        .unwrap();
+    }
+    feed::reset_flag_cache(&f.state.db);
+    publish(&f, &group.id, &agent, "# First member result", false).await;
+    let first = notifications.find_one(doc! {}).await.unwrap().unwrap();
+    assert_eq!(first.user_id, f.member);
+    assert_eq!(first.kind, NotificationKind::AgentUpdate);
+    assert_eq!(first.source.source_type, SourceType::Group);
+    assert_eq!(first.source.group_id.as_deref(), Some(group.id.as_str()));
+    assert_eq!(first.count, 1);
+    assert_eq!(notifications.count_documents(doc! {}).await.unwrap(), 1);
+    let query = feed::ListQuery {
+        limit: 20,
+        ..Default::default()
+    };
+    let page = feed::list(&f.state, &f.member, &query).await.unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].preview, "First member result");
+    assert!(page.items[0].url.contains(&group.id));
+    assert!(
+        feed::list(&f.state, &f.admin, &query)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        feed::list(&f.state, &f.org, &query)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    let summary = feed::summary(&f.state.db, &f.member).await.unwrap();
+    assert_eq!(summary.unread_count, 1);
+    assert_eq!(summary.by_source[0].id, group.id);
+    publish(&f, &group.id, &agent, "Second member result", false).await;
+    publish(&f, &group.id, &agent, "Unfinished work", true).await;
+    let latest = notifications.find_one(doc! {}).await.unwrap().unwrap();
+    assert_eq!(latest.id, first.id);
+    assert_eq!(latest.count, 3);
+    assert_eq!(latest.outcome.as_deref(), Some("failed"));
+    assert_eq!(notifications.count_documents(doc! {}).await.unwrap(), 1);
+    let page = feed::list(&f.state, &f.member, &query).await.unwrap();
+    assert!(page.items[0].preview.contains("could not finish"));
+    groups::update(
+        &f.state.db,
+        access(&f, &f.admin, &group.id).await,
+        None,
+        None,
+        Some(std::slice::from_ref(&f.admin)),
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(notifications.count_documents(doc! {}).await.unwrap(), 0);
+    f.state.db.drop().await.unwrap();
+}

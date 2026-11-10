@@ -930,8 +930,8 @@ pub(crate) async fn append_with_hook(
                     activities: Vec::new(),
                     org_group: true,
                     id,
-                    group_id: group.id,
-                    user_id: group.user_id,
+                    group_id: group.id.clone(),
+                    user_id: group.user_id.clone(),
                     seq: group.message_count,
                     author_user_id: Some(access.actor.clone()),
                     author_display_name: Some(name.clone()),
@@ -949,6 +949,16 @@ pub(crate) async fn append_with_hook(
                     .insert_one(&message)
                     .session(&mut *session)
                     .await?;
+                if agent.is_some() && matches!(role.as_str(), "agent" | "notice") {
+                    super::assistant_notification_service::record_group_reply_in_session(
+                        &db,
+                        session,
+                        &access.actor,
+                        &group,
+                        &message,
+                    )
+                    .await?;
+                }
                 if let Some(mut request) = enqueue.clone() {
                     request.message_seq = message.seq;
                     db.collection::<crate::models::assistant_group::GroupRequest>(
