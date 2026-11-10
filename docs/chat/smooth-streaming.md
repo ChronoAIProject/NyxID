@@ -239,11 +239,18 @@ produced a ~96-character freeze followed by a ~96-character jump — a worse
 stutter than the flicker being prevented. Clamping keeps one revealed unit
 moving out for every unit in.
 
-The bound is in *revealed* units, not arrived units and not wall-clock time.
-Because the paced head lags arrival by roughly one chunk under §5, an opener is
-released somewhat later than 96 further arrivals; and if the producer pauses
-immediately after a short opener, the short tail remains withheld until more
-text arrives or settle synchronously exposes the full text.
+The character bound is in *revealed* units, not arrived units. Because the
+paced head lags arrival by roughly one chunk under §5, an opener is released
+somewhat later than 96 further arrivals. A separate `MAX_TAIL_HOLD_MS = 800`
+idle limit in `useSmoothReveal` exposes the full arrived string on the next
+animation frame after that much time without a text change. A tool call or
+paused producer therefore cannot hide a short unfinished Markdown tail for
+the rest of the turn. The full string ends at a grapheme boundary; incomplete
+Markdown may appear literally until its closer arrives. New arrivals resume
+pacing, and the monotone display clamp keeps already-visible text on screen.
+Every text change starts a new idle deadline and invalidates the previous
+flush marker, including a replacement that restores an earlier string.
+Settling still exposes the full text synchronously.
 
 ### 4.4 Accepted approximations
 
@@ -254,10 +261,10 @@ single-marker emphasis at all (above), so `*italic*` flickers one asterisk
 before it resolves. Its bounded window does not carry block-fence state from an
 opener more than 256 units behind the head, so a literal `` ` `` or `**` late in
 a long fenced block can still cause an unnecessary hold. Every such hold is
-bounded by `MAX_HOLDBACK` revealed units and never changes settled output; it is
-not promised to be transient in wall-clock time while a producer is paused. This
-is deliberate; a real incremental CommonMark parser here is not worth its
-complexity.
+bounded by `MAX_HOLDBACK` revealed units, and the controller releases it on the
+next animation frame after `MAX_TAIL_HOLD_MS` without a text change. These
+approximations never change settled output. A real incremental CommonMark
+parser here is not worth its complexity.
 
 Also deliberately **not** done: the one-grapheme provisional-tail reserve
 (holding the last revealed grapheme in case a later chunk extends it with a
@@ -268,8 +275,9 @@ machinery isn't worth it.
 
 ### 4.5 Integration
 
-Applied inside `useSmoothReveal`'s paced return path:
-`text.slice(0, safeRevealEnd(text, min(revealed, text.length)))`, plus a
+Inside `useSmoothReveal`'s paced return path, the cut comes from
+`safeRevealEnd(text, min(revealed, text.length))` until the current text reaches
+its idle limit, when it becomes `text.length`. Both paths pass through a
 **monotone display clamp**: the returned cut never falls below the previous
 frame's cut along a prefix-preserving append chain, so appended text can never
 retract already-painted characters (a construct opening near the head, or the
@@ -342,7 +350,8 @@ if 0 < gap ≤ STALL_GAP_MS: gapEma = (gapEma == null) ? gap
                                   : gapEma + GAP_EMA_ALPHA × (gap − gapEma)
 if gap > STALL_GAP_MS:    gapEma = null
 lastArrival = now
-// source is not a prefix append (replacement): clear both arrival refs
+// source is not a prefix append (replacement): reset gap EMA and credit;
+// lastArrival = now, so the replacement gets a fresh idle deadline
 
 // per frame (after the unchanged SNAP_BACKLOG_CHARS check, which runs first):
 spread   = clamp(gapEma, DRAIN_MS, MAX_SPREAD_MS)           // ms
