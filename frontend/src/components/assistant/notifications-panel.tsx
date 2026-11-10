@@ -20,6 +20,8 @@ import {
 } from "@/components/ui/sheet";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import {
+  NOTIFICATION_EMPTY_PAGE_AUTOLOAD_LIMIT,
+  trailingEmptyPages,
   useMarkNotificationsRead,
   useNotificationList,
   useNotificationsEnabled,
@@ -138,10 +140,14 @@ export function NotificationsPanel({
   const asOf = list.data?.pages[0]?.as_of;
   const loadedUnread = items.some((item) => !item.read);
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = list;
+  // A page with no visible rows but a cursor (hidden or revoked sources only)
+  // keeps paging reachable; automatic loading stops after a few such pages so
+  // a long hidden stretch takes a deliberate Load more rather than a loop.
+  const autoLoad = trailingEmptyPages(list.data?.pages ?? []) < NOTIFICATION_EMPTY_PAGE_AUTOLOAD_LIMIT;
   const sentinel = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const element = sentinel.current;
-    if (!element || !hasNextPage || typeof IntersectionObserver === "undefined") return;
+    if (!element || !hasNextPage || !autoLoad || typeof IntersectionObserver === "undefined") return;
     const observer = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.isIntersecting) && !isFetchingNextPage) {
         void fetchNextPage();
@@ -149,7 +155,7 @@ export function NotificationsPanel({
     });
     observer.observe(element);
     return () => observer.disconnect();
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+  }, [hasNextPage, autoLoad, isFetchingNextPage, fetchNextPage]);
 
   function selectFilter(value: string) {
     const next = notificationFilter(value) ?? "all";
@@ -243,7 +249,7 @@ export function NotificationsPanel({
                 onRetry={() => void list.refetch()}
               />
             </div>
-          ) : items.length === 0 ? (
+          ) : items.length === 0 && !hasNextPage ? (
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MobileNotificationIcon className="h-40 w-40 text-muted-foreground/30" />
               <p className="type-row-title text-text-tertiary">{EMPTY_TITLE[filter]}</p>
@@ -253,11 +259,18 @@ export function NotificationsPanel({
             </div>
           ) : (
             <>
-              <ul aria-label="Notifications" className="space-y-1">
-                {items.map((item) => (
-                  <NotificationRow key={item.id} item={item} onOpen={openItem} />
-                ))}
-              </ul>
+              {items.length ? (
+                <ul aria-label="Notifications" className="space-y-1">
+                  {items.map((item) => (
+                    <NotificationRow key={item.id} item={item} onOpen={openItem} />
+                  ))}
+                </ul>
+              ) : (
+                // Every row of the pages so far is hidden; older pages may still have some.
+                <p role="status" className="px-2 py-6 text-center type-secondary text-text-tertiary">
+                  {isFetchingNextPage ? "Looking further back..." : "Nothing to show on this page yet."}
+                </p>
+              )}
               <div ref={sentinel} aria-hidden="true" className="h-px" />
               {hasNextPage ? (
                 <div className="flex justify-center pt-2">

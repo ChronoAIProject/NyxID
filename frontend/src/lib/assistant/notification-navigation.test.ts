@@ -19,6 +19,10 @@ describe("notificationTargetFromUrl", () => {
       kind: "route", to: "/assistant/automations", search: { agent: "agent-1" },
     });
     expect(notificationTargetFromUrl(`${ORIGIN}/assistant/approvals`, ORIGIN)).toEqual({ kind: "route", to: "/assistant/approvals", search: {} });
+    // An organization specialist's public channel chat links to the agent's Channels details.
+    expect(notificationTargetFromUrl(`${ORIGIN}/assistant?agent=0f5a9c8e-7b21-4d3a-9c6e-2a1b3c4d5e6f&details=channels`, ORIGIN)).toEqual({
+      kind: "route", to: "/assistant", search: { agent: "0f5a9c8e-7b21-4d3a-9c6e-2a1b3c4d5e6f", details: "channels" },
+    });
   });
 
   it("keeps other same-origin pages and foreign links as plain links, and refuses credentials", () => {

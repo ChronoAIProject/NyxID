@@ -4,9 +4,11 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nyxAgentLiveRefresh } from "./use-nyxagent-live";
 import {
+  NOTIFICATION_EMPTY_PAGE_AUTOLOAD_LIMIT,
   NOTIFICATION_SOURCE_READ_DELAY_MS,
   NOTIFICATION_SOURCE_READ_MAX_CONSECUTIVE,
   notificationQueryKeys,
+  trailingEmptyPages,
   sourceHasUnread,
   sourceStanding,
   unreadSources,
@@ -42,6 +44,8 @@ const requests: { endpoint: string; method: string; body?: unknown }[] = [];
 let summary: Record<string, unknown>;
 /** Summaries served in order; the last one repeats (a scripted server timeline). */
 let summaryQueue: Record<string, unknown>[] | undefined;
+/** The cursor the first page hands out; a test can point it at a self-repeating page. */
+let firstCursor = "page-2";
 /** The fake server remembers what was marked read, as the real one does. */
 const readIds = new Set<string>();
 
@@ -49,6 +53,7 @@ beforeEach(() => {
   requests.length = 0;
   readIds.clear();
   summaryQueue = undefined;
+  firstCursor = "page-2";
   summary = { unread_count: 1, needs_decision_count: 0, by_source: [{ source_type: "conversation", id: "nyxa-1", unread: 1 }] };
   useAuthStore.getState().setUser({
     id: "owner", email: "owner@example.com", display_name: "Owner", avatar_url: null,
@@ -79,9 +84,10 @@ beforeEach(() => {
       const query = new URLSearchParams(endpoint.slice(endpoint.indexOf("?") + 1));
       const cursor = query.get("cursor");
       const stored = (id: string, extra: Record<string, unknown> = {}) => row(id, { read: readIds.has(id), ...extra });
+      if (cursor === "loop") return json({ items: [], next_cursor: "loop", as_of: "2026-11-10T08:10:00Z" });
       return json(cursor
         ? { items: [stored("n-3")], next_cursor: null, as_of: "2026-11-10T08:10:00Z" }
-        : { items: [stored("n-1"), stored("n-2", { read: true })], next_cursor: "page-2", as_of: "2026-11-10T08:10:00Z" });
+        : { items: [stored("n-1"), stored("n-2", { read: true })], next_cursor: firstCursor, as_of: "2026-11-10T08:10:00Z" });
     }
     throw new Error(`Unexpected request: ${method} ${endpoint}`);
   };
@@ -111,6 +117,23 @@ describe("useNotificationList", () => {
     expect(second).toHaveLength(1);
     expect(result.current.data?.pages.flatMap((page) => page.items.map((item) => item.id))).toEqual(["n-1", "n-2", "n-3"]);
     expect(result.current.data?.pages[0]?.as_of).toBe("2026-11-10T08:10:00Z");
+  });
+
+  it("stops paging when the server repeats a cursor, and counts trailing empty pages", async () => {
+    firstCursor = "loop";
+    const { result } = renderHook(() => useNotificationList("all"), { wrapper });
+    await waitFor(() => expect(result.current.data?.pages).toHaveLength(1));
+    expect(result.current.hasNextPage).toBe(true);
+    await act(async () => { await result.current.fetchNextPage(); });
+    await waitFor(() => expect(result.current.data?.pages).toHaveLength(2));
+    // The second page answered with its own cursor again: nothing further to fetch.
+    expect(result.current.data?.pages[1]).toMatchObject({ items: [], next_cursor: "loop" });
+    expect(result.current.hasNextPage).toBe(false);
+    expect(trailingEmptyPages(result.current.data?.pages ?? [])).toBe(1);
+    expect(trailingEmptyPages([{ items: [] }, { items: [] }])).toBe(2);
+    expect(trailingEmptyPages([{ items: [] }, { items: [{}] }] as never)).toBe(0);
+    expect(trailingEmptyPages([])).toBe(0);
+    expect(NOTIFICATION_EMPTY_PAGE_AUTOLOAD_LIMIT).toBe(5);
   });
 
   it("sends no kind filter for All", async () => {

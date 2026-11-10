@@ -55,6 +55,22 @@ export function useNotificationSummary(enabled = true) {
   });
 }
 
+/**
+ * The server may answer a page with no visible rows but a cursor: its bounded
+ * row page held only hidden or revoked sources. After this many such pages in
+ * a row the feed stops loading further pages by itself; Load more still works.
+ */
+export const NOTIFICATION_EMPTY_PAGE_AUTOLOAD_LIMIT = 5;
+
+/** How many pages at the end of the loaded list came back without rows. */
+export function trailingEmptyPages(pages: readonly Pick<NotificationList, "items">[]): number {
+  let count = 0;
+  for (let index = pages.length - 1; index >= 0 && pages[index]!.items.length === 0; index -= 1) {
+    count += 1;
+  }
+  return count;
+}
+
 /** Newest first, one page at a time; the first page's `as_of` fences "Mark all as read". */
 export function useNotificationList(filter: NotificationFilter, enabled = true) {
   const userId = useAuthStore((state) => state.user?.id);
@@ -62,7 +78,9 @@ export function useNotificationList(filter: NotificationFilter, enabled = true) 
     queryKey: notificationQueryKeys.list(userId, filter),
     queryFn: ({ pageParam }) => notificationsApi.list({ cursor: pageParam, filter }),
     initialPageParam: undefined as string | undefined,
-    getNextPageParam: (page) => page.next_cursor ?? undefined,
+    // A cursor equal to the one just used would fetch the same page forever.
+    getNextPageParam: (page, _pages, lastPageParam) =>
+      page.next_cursor && page.next_cursor !== lastPageParam ? page.next_cursor : undefined,
     enabled: enabled && Boolean(userId),
     retry: false,
   });

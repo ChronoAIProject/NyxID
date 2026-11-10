@@ -203,6 +203,42 @@ describe("NotificationsPanel", () => {
     expect(mocks.navigate).toHaveBeenLastCalledWith({ to: "/assistant", search: { c: "nyxa-7" } });
   });
 
+  it("keeps paging reachable when a page has no visible rows but more exist", async () => {
+    const user = userEvent.setup();
+    const visible = pages.first!;
+    pages = { first: { items: [], next_cursor: "page-2", as_of: "2026-11-10T08:10:00Z" }, "page-2": { ...visible, next_cursor: null } };
+    renderPanel();
+    await screen.findByRole("button", { name: "Load more" });
+    expect(screen.queryByText("Nothing new")).not.toBeInTheDocument();
+    expect(screen.getByText("Nothing to show on this page yet.")).toHaveAttribute("role", "status");
+    expect(screen.getByRole("button", { name: "Mark all as read" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Load more" }));
+    const list = await screen.findByRole("list", { name: "Notifications" });
+    expect(within(list).getAllByRole("button")).toHaveLength(3);
+    expect(listRequests().at(-1)?.endpoint).toContain("cursor=page-2");
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Nothing new")).not.toBeInTheDocument();
+  });
+
+  it("shows the final empty state only once no pages remain, and never loops on a repeated cursor", async () => {
+    const user = userEvent.setup();
+    pages = {
+      first: { items: [], next_cursor: "loop", as_of: "2026-11-10T08:10:00Z" },
+      loop: { items: [], next_cursor: "loop", as_of: "2026-11-10T08:10:00Z" },
+    };
+    renderPanel();
+    await user.click(await screen.findByRole("button", { name: "Load more" }));
+    expect(await screen.findByText("Nothing new")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(listRequests()).toHaveLength(2);
+    cleanup();
+    pages = { first: { items: [], next_cursor: null, as_of: "2026-11-10T08:10:00Z" } };
+    renderPanel();
+    expect(await screen.findByText("Nothing new")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+  });
+
   it("shows a retryable error and an empty state", async () => {
     const user = userEvent.setup();
     listStatus = 500;
