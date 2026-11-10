@@ -1371,8 +1371,13 @@ fn org_of_conversation(conversation: &Document, user_id: &str) -> Option<String>
 }
 
 fn org_of_group(group: &AssistantGroup) -> Option<String> {
-    crate::services::org_group_service::is_org(group).then(|| group.user_id.clone())
+    (crate::services::assistant_group_kind::classify(group)
+        == crate::services::assistant_group_kind::GroupKind::Organization)
+        .then(|| group.user_id.clone())
 }
+
+/// Roles the typed `OrgMembership` deserializes; anything else is not a member.
+const MEMBER_ROLES: [&str; 3] = ["admin", "member", "viewer"];
 
 fn org_of_channel(channel: &Document) -> Option<String> {
     channel
@@ -1651,10 +1656,9 @@ async fn load_lookups(
             .await?
             .into_iter()
             .filter_map(|row| {
-                Some((
-                    row.get_str("org_user_id").ok()?.to_owned(),
-                    row.get_str("role").ok()?.to_owned(),
-                ))
+                let org = row.get_str("org_user_id").ok()?.to_owned();
+                let role = row.get_str("role").ok()?;
+                MEMBER_ROLES.contains(&role).then(|| (org, role.to_owned()))
             })
             .collect();
             let active_orgs = load_documents(
@@ -1719,17 +1723,18 @@ impl Lookups {
         }
     }
 
-    /// Group read authorization: personal owner, collaboration participant,
-    /// or organization participant with a current membership.
+    /// Group read authorization through the structural classifier: personal
+    /// owner, collaboration participant (exact marker version only), or
+    /// organization participant with a current membership. Unknown markers
+    /// are never readable.
     fn group_visible(&self, user_id: &str, group: &AssistantGroup) -> bool {
-        if group.collaboration.is_some() {
-            return group.participant_user_ids.iter().any(|id| id == user_id);
-        }
-        match org_of_group(group) {
-            Some(org) => {
-                group.participant_user_ids.iter().any(|id| id == user_id) && self.org_member(&org)
-            }
-            None => group.user_id == user_id,
+        use crate::services::assistant_group_kind::{GroupKind, classify};
+        let participant = group.participant_user_ids.iter().any(|id| id == user_id);
+        match classify(group) {
+            GroupKind::Collaboration => participant,
+            GroupKind::Organization => participant && self.org_member(&group.user_id),
+            GroupKind::Personal => group.user_id == user_id,
+            GroupKind::Unsupported => false,
         }
     }
 }
@@ -2215,10 +2220,17 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
         ]},
     ]};
     let participant = doc! {"$in": [user_id, {"$ifNull": ["$grp0.participant_user_ids", []]}]};
+    // Mirrors `assistant_group_kind::classify`: an unknown marker version is
+    // unsupported and never readable.
     let grp_ok = doc! {"$and": [
         present("$grp"),
         {"$switch": {"branches": [
-            {"case": {"$not": [missing_or_null("$grp0.collaboration")]}, "then": participant.clone()},
+            {"case": {"$not": [missing_or_null("$grp0.collaboration")]},
+             "then": {"$and": [
+                 {"$eq": ["$grp0.collaboration.version",
+                          i64::from(crate::models::assistant_group_collaboration::VERSION)]},
+                 participant.clone(),
+             ]}},
             {"case": {"$not": [missing_or_null("$grp0.created_by_user_id")]},
              "then": {"$and": [participant, org_active.clone(), member_ok.clone()]}},
         ], "default": {"$eq": ["$grp0.user_id", user_id]}}},
@@ -2327,6 +2339,7 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
                     {"$eq": ["$org_user_id", "$$org"]},
                     {"$eq": ["$member_user_id", user_id]},
                     {"$in": [{"$type": "$revoked_at"}, ["missing", "null"]]},
+                    {"$in": ["$role", MEMBER_ROLES.to_vec()]},
                 ]}}},
                 {"$project": {"role": 1}},
             ],

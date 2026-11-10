@@ -1555,6 +1555,33 @@ async fn organization_access_is_batched_and_revocation_hides_rows_before_anythin
         ),
     )
     .await;
+    // A collaboration marker of an unknown version is unsupported: hidden.
+    let unknown_group = Uuid::new_v4().to_string();
+    db.collection::<Document>(GROUPS)
+        .insert_one(
+            doc! {"_id": &unknown_group, "user_id": &f.owner, "name": "Future group",
+            "collaboration": {"version": 99, "creator_user_id": &f.owner, "membership_revision": 1},
+            "participant_user_ids": [&f.owner], "member_agent_ids": [], "lead_agent_id": "",
+            "last_recipient_ids": [], "created_by": "user", "message_count": 0,
+            "pending_agent_ids": [], "hops_remaining": 0, "followers": [],
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()},
+        )
+        .await
+        .unwrap();
+    insert_row(
+        &f,
+        &seeded(
+            &f.owner,
+            NotificationKind::GroupMention,
+            NotificationSource {
+                source_type: SourceType::CollaborationGroup,
+                id: unknown_group.clone(),
+                group_id: Some(unknown_group.clone()),
+                ..Default::default()
+            },
+        ),
+    )
+    .await;
     let personal = seed_conversation(&f, &f.owner, "Mine").await;
     insert_row(
         &f,
@@ -1615,6 +1642,12 @@ async fn organization_access_is_batched_and_revocation_hides_rows_before_anythin
     aggregates.store(0, Ordering::SeqCst);
     let listed = list(&f.state, &f.owner, &page(50)).await.unwrap();
     assert_eq!(listed.items.len(), 7);
+    assert!(
+        listed
+            .items
+            .iter()
+            .all(|item| item.source.id != unknown_group)
+    );
     // One row query plus at most one batched read per referenced collection.
     assert!(
         finds.load(Ordering::SeqCst) <= 12,
@@ -1638,10 +1671,10 @@ async fn organization_access_is_batched_and_revocation_hides_rows_before_anythin
         .unwrap();
     let after = summary(db, &f.owner).await.unwrap();
     assert_eq!(after.unread_count, 5);
-    assert_eq!(rows_of(&f, &f.owner).await.len(), 7);
+    assert_eq!(rows_of(&f, &f.owner).await.len(), 8);
     let listed = list(&f.state, &f.owner, &page(50)).await.unwrap();
     assert_eq!(listed.items.len(), 5);
-    assert_eq!(rows_of(&f, &f.owner).await.len(), 7);
+    assert_eq!(rows_of(&f, &f.owner).await.len(), 8);
     // A deactivated organization hides its rows as well.
     db.collection::<Document>(USER_ROWS)
         .update_one(doc! {"_id": &orgs[1]}, doc! {"$set": {"is_active": false}})
@@ -1655,7 +1688,7 @@ async fn organization_access_is_batched_and_revocation_hides_rows_before_anythin
         .unwrap();
     let listed = list(&f.state, &f.owner, &page(50)).await.unwrap();
     assert_eq!(listed.items.len(), 2);
-    assert_eq!(rows_of(&f, &f.owner).await.len(), 5);
+    assert_eq!(rows_of(&f, &f.owner).await.len(), 6);
 }
 
 // ---------------------------------------------------------------------------
