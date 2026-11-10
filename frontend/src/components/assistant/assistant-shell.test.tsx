@@ -246,6 +246,7 @@ it.each([
   renderCmaOperations([{ ...linkedRequest, ...patch }]);
   const requests = screen.getByRole("region", { name: "CMA requests" });
   expect(within(requests).getByRole("status")).toHaveTextContent(label);
+  expect(requests.querySelector(".animate-spin")).toBeNull();
   expect(within(requests).getByText("rsp-linked")).not.toBeVisible();
   fireEvent.click(within(requests).getByRole("button", { name: "Submission details" }));
   expect(within(requests).getByText("rsp-linked")).toBeVisible();

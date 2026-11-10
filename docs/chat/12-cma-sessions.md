@@ -11,11 +11,16 @@ The **Request status** section tracks each submitted request separately, so a
 newer queued request can appear alongside an older request still running. A
 tight shared list shows the three newest
 public actions; **Show all N actions** expands the bounded 30-action history.
-The **View execution** icon, source chat, supplied CMA link, pin, and minimise
+The **View execution** clipboard-list icon, source chat, supplied CMA link, pin, and minimise
 controls share the header. Execution access remains available while minimised.
 Each icon has a state-aware tooltip available on hover and keyboard focus.
 The compact action list and Session details use spacing without internal
 horizontal dividers.
+Motion identifies the latest reported running action while the agent is working
+or starting. Other action markers and the request rows stay static, preserving
+their reported statuses. Queued requests use a clock. The overall agent status
+provides the single busy indicator when the card is minimised or no running
+action has been reported. Reduced-motion preferences disable the spin.
 The solid **Pinned** control, filled pin icon, and unpin tooltip identify global
 monitoring. **Pin CMA session** makes that card
 available in other chats and on every other page. Assistant pages reuse the

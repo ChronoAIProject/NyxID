@@ -1,5 +1,11 @@
 import { lazy, Suspense, useRef, useState } from "react";
-import { ArrowLeft, Maximize2, Minimize2, PanelRight, X } from "lucide-react";
+import {
+  ArrowLeft,
+  ClipboardList,
+  Maximize2,
+  Minimize2,
+  X,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Sheet,
@@ -47,7 +53,7 @@ export function CmaAgentPanel({
               aria-label="View execution"
               className="shrink-0 text-foreground hover:bg-overlay-strong focus-visible:ring-2 focus-visible:ring-foreground focus-visible:ring-offset-2 focus-visible:ring-offset-card"
             >
-              <PanelRight aria-hidden="true" />
+              <ClipboardList aria-hidden="true" />
             </Button>
           </SheetTrigger>
         </TooltipTrigger>

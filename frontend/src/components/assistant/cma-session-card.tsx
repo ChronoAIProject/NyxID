@@ -211,6 +211,12 @@ function CmaSessionCard({
   );
   const detailsId = `cma-session-${session.connection.id}-${session.agentId}`;
   const scrollBody = useRef<HTMLDivElement>(null);
+  const activeActionId =
+    state.status === "working" || state.status === "starting"
+      ? [...state.actions]
+          .reverse()
+          .find((action) => action.status === "running")?.id
+      : undefined;
   return (
     <section
       aria-label={`CMA session: ${state.title}`}
@@ -336,7 +342,7 @@ function CmaSessionCard({
         </div>
       </div>
       <div ref={scrollBody} className="min-h-0 space-y-2 overflow-y-auto">
-        <SessionStatus state={state} />
+        <SessionStatus state={state} animate={collapsed || !activeActionId} />
         {collapsed && state.actions.length ? (
           <p className="truncate text-13 text-muted-foreground">
             {state.actions.at(-1)?.title}
@@ -358,7 +364,10 @@ function CmaSessionCard({
           </div>
         ) : null}
         <div id={detailsId} hidden={collapsed} className="space-y-2">
-          <SessionActivity state={state} />
+          <SessionActivity
+            state={state}
+            activeActionId={collapsed ? undefined : activeActionId}
+          />
           <CmaSessionRequests operations={operations} scrollBody={scrollBody} visible={!collapsed} />
           <SessionDetails
             session={session}
@@ -459,7 +468,13 @@ function SessionDetails({
   );
 }
 
-function SessionStatus({ state }: { readonly state: CmaSessionState }) {
+function SessionStatus({
+  state,
+  animate,
+}: {
+  readonly state: CmaSessionState;
+  readonly animate: boolean;
+}) {
   const live = state.connection === "live";
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -469,8 +484,11 @@ function SessionStatus({ state }: { readonly state: CmaSessionState }) {
         aria-label={`CMA agent status: ${STATUS_LABELS[state.status]}`}
         className="flex items-center gap-1.5 text-13 text-foreground"
       >
-        {state.status === "working" || state.status === "starting" ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary-text" />
+        {animate && (state.status === "working" || state.status === "starting") ? (
+          <Loader2
+            aria-hidden="true"
+            className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary-text"
+          />
         ) : (
           <Circle
             className={cn(
@@ -512,7 +530,13 @@ function SessionStatus({ state }: { readonly state: CmaSessionState }) {
   );
 }
 
-function SessionActivity({ state }: { readonly state: CmaSessionState }) {
+function SessionActivity({
+  state,
+  activeActionId,
+}: {
+  readonly state: CmaSessionState;
+  readonly activeActionId?: string;
+}) {
   const [expanded, setExpanded] = useState(false);
   const actions = [...state.actions].reverse();
   const historyId = useId();
@@ -554,14 +578,21 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
                 className="flex items-start gap-1.5 py-1 text-13"
               >
                 <span className="mt-0.5 shrink-0" aria-label={action.status}>
-                  {action.status === "running" ? (
+                  {action.id === activeActionId ? (
                     <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-primary-text" />
                   ) : action.status === "completed" ? (
                     <Check className="h-3 w-3 text-success" />
                   ) : action.status === "failed" ? (
                     <X className="h-3 w-3 text-destructive" />
                   ) : (
-                    <Circle className="h-3 w-3 text-text-tertiary" />
+                    <Circle
+                      className={cn(
+                        "h-3 w-3",
+                        action.status === "running"
+                          ? "text-primary-text"
+                          : "text-text-tertiary",
+                      )}
+                    />
                   )}
                 </span>
                 <span className="min-w-0 break-words text-muted-foreground">

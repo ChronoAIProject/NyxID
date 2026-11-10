@@ -254,7 +254,7 @@ When the existing two-hour watch deadline expires, the card explicitly explains
 that automatic tracking ended and CMA may still be running.
 
 When CMA execution is enabled and the operation has a verified local Agent
-reference, the **View execution** header icon opens a right-side Sheet within
+reference, the **View execution** clipboard-list header icon opens a right-side Sheet within
 the current NyxBot chat. The shared Agent view presents the continuous Conversation and
 Desktop tabs, locating the operation's response only after its Agent binding
 is verified. Closing the Sheet preserves the source chat, draft, and reading
@@ -279,7 +279,11 @@ status** describes each submitted request independently. Requests show pending
 work first and initially
 show three rows, with older rows revealed three at a time. Live cards precede
 submission history, which also initially shows three cards with an older-history
-control. Cards do not render inside replies.
+control. The live card animates only the latest running action, with the overall
+agent indicator as a fallback while minimised or before any running action is
+reported. Other action markers and request statuses stay static; queued requests
+use a clock. Reduced-motion preferences disable the spin. Cards do not render
+inside replies.
 While a watch is submitting, waiting or cancelling, the selected
 thread refreshes history every five seconds, including after its assistant reply
 settles. Server polling continues independently of the page. Cards restore from

@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState, type RefObject } from "react";
-import { Circle, ExternalLink, Loader2 } from "lucide-react";
+import { Circle, Clock3, ExternalLink, Loader2 } from "lucide-react";
 import { safeCmaUrl } from "@/lib/assistant/cma-url";
 import { Button } from "@/components/ui/button";
 import {
@@ -201,8 +201,10 @@ const LONG_REQUEST_MS = 10 * 60_000;
 /** Keep request status and notices when a live card replaces its receipt. */
 export function CmaOperationProgress({
   operation,
+  animate = true,
 }: {
   readonly operation: CmaOperation;
+  readonly animate?: boolean;
 }) {
   const observed = presentation(operation);
   const pending = isCmaOperationPending(operation);
@@ -235,10 +237,18 @@ export function CmaOperationProgress({
           aria-live="polite"
           className="flex items-center gap-1.5 text-13 text-foreground"
         >
-          {pending && tone === "active" ? (
+          {animate &&
+          pending &&
+          tone === "active" &&
+          ["Submitting", "Starting", "Working"].includes(label) ? (
             <Loader2
               aria-hidden="true"
               className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary-text"
+            />
+          ) : label === "Queued" ? (
+            <Clock3
+              aria-hidden="true"
+              className="h-3.5 w-3.5 text-text-tertiary"
             />
           ) : (
             <Circle
@@ -416,7 +426,7 @@ export function CmaSessionRequests({
                 : "Time unavailable"}
             </time>
           </p>
-          <CmaOperationProgress operation={operation} />
+          <CmaOperationProgress operation={operation} animate={false} />
           <CmaOperationDetails
             operation={operation}
             scrollBody={scrollBody}

@@ -540,6 +540,14 @@ for (const width of [1440, 390]) {
     });
     await expect(page.locator("[data-cma-operation]")).toHaveCount(0);
     const requests = live.getByRole("region", { name: "CMA requests", exact: true });
+    const activity = live.getByRole("region", { name: "CMA activity", exact: true });
+    await expect(live.locator(".animate-spin")).toHaveCount(1);
+    await expect(activity.getByRole("listitem").first().locator(".animate-spin")).toHaveCount(1);
+    await expect(requests.locator(".animate-spin")).toHaveCount(0);
+    await live.getByRole("button", { name: "Show all 5 actions", exact: true }).click();
+    await expect(activity.getByRole("listitem")).toHaveCount(5);
+    await expect(live.locator(".animate-spin")).toHaveCount(1);
+    await live.getByRole("button", { name: "Show recent actions", exact: true }).click();
     await expect(requests.locator('[data-cma-request="linked-request-0"]').getByRole("status")).toHaveText("Queued");
     await expect(requests.locator('[data-cma-request="linked-request-1"]').getByRole("status")).toHaveText("Taking longer than usual");
     await expect(live.getByRole("status", { name: "CMA agent status: Working" })).toHaveText("Working");
@@ -555,7 +563,10 @@ for (const width of [1440, 390]) {
     await live.getByRole("button", { name: "Minimise CMA session", exact: true }).click();
     await expect(execution).toBeVisible();
     await expect(requests).toHaveCount(0);
+    await expect(live.locator(".animate-spin")).toHaveCount(1);
+    await expect(live.getByRole("status", { name: "CMA agent status: Working" }).locator(".animate-spin")).toHaveCount(1);
     await live.getByRole("button", { name: "Maximise CMA session", exact: true }).click();
+    await expect(activity.getByRole("listitem").first().locator(".animate-spin")).toHaveCount(1);
     await live.getByRole("button", { name: "Pin CMA session", exact: true }).click();
     await expect(live.getByRole("button", { name: "Unpin CMA session (Pinned)" })).toHaveAttribute("aria-pressed", "true");
     const details = requests.locator('[data-cma-request="linked-request-0"]');
