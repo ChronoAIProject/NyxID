@@ -80,10 +80,7 @@ for (const width of [1280, 390]) {
     await platform.click();
     await expect(platform).toBeChecked();
     await page.getByLabel("Name", { exact: true }).fill("Keep my draft 保留");
-    await page
-      .getByRole("combobox", { name: "Language", exact: true })
-      .click();
-    await page.getByRole("option", { name: "简体中文", exact: true }).click();
+    await page.getByRole("radio", { name: "简体中文", exact: true }).click();
     await expect(
       page.getByRole("heading", { name: "创建 API 密钥", exact: true }),
     ).toBeVisible();
@@ -92,10 +89,7 @@ for (const width of [1280, 390]) {
     );
     await expect(connection).toBeChecked();
     await expect(platform).toBeChecked();
-    await page
-      .getByRole("combobox", { name: "语言", exact: true })
-      .click();
-    await page.getByRole("option", { name: "繁體中文", exact: true }).click();
+    await page.getByRole("radio", { name: "繁體中文", exact: true }).click();
     await expect(
       page.getByRole("heading", { name: "建立 API 金鑰", exact: true }),
     ).toBeVisible();
@@ -114,8 +108,8 @@ for (const width of [1280, 390]) {
     });
     await page.reload();
     await expect(
-      page.getByRole("combobox", { name: "語言", exact: true }),
-    ).toHaveText("ZH繁體中文");
+      page.getByRole("radio", { name: "繁體中文", exact: true }),
+    ).toHaveAttribute("aria-checked", "true");
     await expect(
       page.getByRole("heading", { name: "建立 API 金鑰", exact: true }),
     ).toBeVisible();

@@ -62,17 +62,19 @@ it("switches standalone wizard languages without losing form values or changing 
     target: { value: "My draft 保留" },
   });
   const user = userEvent.setup();
-  await user.click(screen.getByRole("combobox", { name: "Language" }));
-  await user.click(screen.getByRole("option", { name: "简体中文" }));
+  await user.click(screen.getByRole("radio", { name: "简体中文" }));
   expect(screen.getByRole("heading", { name: "创建 API 密钥" })).toBeVisible();
   expect(screen.getByLabelText("名称")).toHaveValue("My draft 保留");
   expect(screen.getByText("第 2 步，共 3 步 · 配置权限范围")).toBeVisible();
   expect(screen.getByLabelText("read")).toBeChecked();
   expect(screen.getByLabelText("write")).toBeChecked();
   expect(post).not.toHaveBeenCalled();
-  await act(async () => {
-    await appI18n.changeLanguage("zh-TW");
-  });
+  await user.keyboard("{ArrowRight}");
+  expect(screen.getByRole("radio", { name: "繁體中文" })).toHaveFocus();
+  expect(screen.getByRole("radio", { name: "繁體中文" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
   expect(screen.getByRole("heading", { name: "建立 API 金鑰" })).toBeVisible();
   expect(screen.getByLabelText("名稱")).toHaveValue("My draft 保留");
   expect(appI18n.hasResourceBundle("en", "app")).toBe(false);

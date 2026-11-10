@@ -44,8 +44,9 @@ The shared language preference covers first-party web interface copy:
 - Local CLI browser wizards and hosted `/cli/pair` pages: service setup, API keys,
   node tokens, service accounts, developer apps, MFA enrollment and recovery
   codes, permission pickers, validation, and completion/recovery screens. Each
-  wizard has a globe language button at the right of its header: EN for English,
-  CN for Simplified Chinese, and ZH for Traditional Chinese.
+  wizard has a segmented language control at the right of its header: EN for
+  English, CN for Simplified Chinese, and ZH for Traditional Chinese. The active
+  language has a raised background. Arrow keys, Home, and End change languages.
 - Shared controls, frontend validation, dates, numbers, and relative times using
   the selected locale. Existing schema errors revalidate when language changes;
   drafts, dirty state, and manually supplied server errors are preserved.

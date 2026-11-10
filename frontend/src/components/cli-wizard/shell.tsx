@@ -43,11 +43,13 @@ export function WizardShell({ step, context, localOrigin, children }: WizardShel
         <div className="flex items-center">
           <NyxidLogo className="h-9 w-auto" />
         </div>
-        <div className="ml-auto flex min-w-0 items-center justify-end gap-3">
         {step ? (
-          <div className="text-12 text-muted-foreground">{formatStepLabel(step, t)}</div>
+          <div className="order-last basis-full text-right text-12 text-muted-foreground sm:order-none sm:ml-auto sm:basis-auto">
+            {formatStepLabel(step, t)}
+          </div>
         ) : null}
-        <WizardLanguagePicker />
+        <div className="ml-auto shrink-0 sm:ml-0">
+          <WizardLanguagePicker />
         </div>
       </header>
       {/*
