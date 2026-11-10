@@ -29,7 +29,9 @@ use crate::{
         assistant_agent_credential_service::{self, ModelCatalogRef},
         coordination_service::TokenBucketStore,
         feature_flag_service,
-        monitoring_service::{self, CheckResult, CheckStatus, Client, ProbeResult, Source},
+        monitoring_service::{
+            self, CallerCredential, CheckResult, CheckStatus, Client, ProbeResult, Source,
+        },
         org_agent_service,
         org_service::{self, OwnerAccess},
         service_concurrency_service, user_service_service,
@@ -54,6 +56,7 @@ struct IssueFingerprint {
     actor_id: String,
     auth_method: &'static str,
     api_key_id: Option<String>,
+    api_key_credential_id: Option<String>,
     client_id: Option<String>,
     exact_user_service_id: String,
 }
@@ -84,6 +87,7 @@ impl Drop for IssueReservation {
 #[serde(rename_all = "snake_case")]
 pub enum Observation {
     Caller,
+    Agent,
     Unknown,
 }
 
@@ -164,6 +168,7 @@ pub(crate) async fn issue(
     actor_id: &str,
     auth_method: &AuthMethod,
     api_key_id: Option<&str>,
+    api_key_credential_id: Option<&str>,
     client_id: Option<&str>,
     exact_user_service_id: &str,
 ) -> AppResult<Option<IssuedHandle>> {
@@ -172,6 +177,7 @@ pub(crate) async fn issue(
         actor_id,
         auth_method,
         api_key_id,
+        api_key_credential_id,
         client_id,
         exact_user_service_id,
     ) else {
@@ -188,6 +194,7 @@ pub(crate) async fn issue(
         actor_user_id: actor_id.to_owned(),
         original_auth_method: auth_method_name(auth_method).to_owned(),
         original_api_key_id: api_key_id.map(str::to_owned),
+        original_api_key_credential_id: api_key_credential_id.map(str::to_owned),
         original_client_id: client_id.map(str::to_owned),
         exact_user_service_id: exact_user_service_id.to_owned(),
         state: InvocationDiagnosticState::Pending,
@@ -216,6 +223,7 @@ fn reserve_issue(
     actor_id: &str,
     auth_method: &AuthMethod,
     api_key_id: Option<&str>,
+    api_key_credential_id: Option<&str>,
     client_id: Option<&str>,
     exact_user_service_id: &str,
 ) -> Option<IssueReservation> {
@@ -223,6 +231,7 @@ fn reserve_issue(
         actor_id: actor_id.to_owned(),
         auth_method: auth_method_name(auth_method),
         api_key_id: api_key_id.map(str::to_owned),
+        api_key_credential_id: api_key_credential_id.map(str::to_owned),
         client_id: client_id.map(str::to_owned),
         exact_user_service_id: exact_user_service_id.to_owned(),
     };
@@ -253,7 +262,7 @@ pub(crate) async fn redeem(
     config: &AppConfig,
     auth: &AuthUser,
     handle: &str,
-    caller_token: Option<&str>,
+    caller_credential: Option<CallerCredential<'_>>,
 ) -> AppResult<RedeemResult> {
     if !valid_handle(handle) {
         return Err(not_found());
@@ -268,6 +277,7 @@ pub(crate) async fn redeem(
         &actor_id,
         &auth.auth_method,
         auth.api_key_id.as_deref(),
+        auth.api_key_credential_id.as_deref(),
         client_id,
         handle,
     );
@@ -288,9 +298,20 @@ pub(crate) async fn redeem(
         });
     }
 
-    let delegable = matches!(auth.auth_method, AuthMethod::AccessToken)
-        && client_id != Some("chrono-probe")
-        && caller_token.is_some();
+    let observation = match (&auth.auth_method, auth.api_key_purpose, caller_credential) {
+        (AuthMethod::AccessToken, _, Some(CallerCredential::Bearer(_)))
+            if client_id != Some("chrono-probe") =>
+        {
+            Some(Observation::Caller)
+        }
+        (
+            AuthMethod::ApiKey,
+            crate::models::api_key::ApiKeyPurpose::General,
+            Some(CallerCredential::ApiKey(_)),
+        ) => Some(Observation::Agent),
+        _ => None,
+    };
+    let delegable = observation.is_some();
     let execution_owner_id = auth.proxy_resolution_user_id();
     if delegable && concurrency_capacity_exhausted(db, &execution_owner_id, &service).await? {
         return Ok(RedeemResult::NotReady);
@@ -317,6 +338,7 @@ pub(crate) async fn redeem(
                 &actor_id,
                 &auth.auth_method,
                 auth.api_key_id.as_deref(),
+                auth.api_key_credential_id.as_deref(),
                 client_id,
                 handle,
             ))
@@ -338,9 +360,10 @@ pub(crate) async fn redeem(
         diagnose(
             db,
             config,
-            &actor_id,
+            auth,
             &claimed.exact_user_service_id,
-            caller_token,
+            caller_credential,
+            observation.expect("delegable diagnostics have an observation identity"),
         )
         .await
         .unwrap_or_else(|| Diagnostic::unknown(Outcome::Unavailable))
@@ -383,6 +406,7 @@ fn identity_filter(
     actor_id: &str,
     auth_method: &AuthMethod,
     api_key_id: Option<&str>,
+    api_key_credential_id: Option<&str>,
     client_id: Option<&str>,
     handle: &str,
 ) -> bson::Document {
@@ -391,6 +415,7 @@ fn identity_filter(
         "actor_user_id":actor_id,
         "original_auth_method":auth_method_name(auth_method),
         "original_api_key_id":api_key_id,
+        "original_api_key_credential_id":api_key_credential_id,
         "original_client_id":client_id,
         "expires_at":{"$gt":bson::DateTime::now()},
     }
@@ -574,27 +599,30 @@ pub(crate) fn eligible_error(error: &AppError) -> bool {
 pub(crate) fn diagnose<'a>(
     db: &'a Database,
     config: &'a AppConfig,
-    actor_id: &'a str,
+    auth: &'a AuthUser,
     exact_id: &'a str,
-    caller_token: Option<&'a str>,
+    caller_credential: Option<CallerCredential<'a>>,
+    observation: Observation,
 ) -> futures::future::BoxFuture<'a, Option<Diagnostic>> {
     // Seal the shared admission future so each large proxy/MCP handler does
     // not repeatedly expand its feature, ACL and MongoDB futures for Send.
     Box::pin(diagnose_bounded(
         db,
         config,
-        actor_id,
+        auth,
         exact_id,
-        caller_token,
+        caller_credential,
+        observation,
     ))
 }
 
 async fn diagnose_bounded(
     db: &Database,
     config: &AppConfig,
-    actor_id: &str,
+    auth: &AuthUser,
     exact_id: &str,
-    caller_token: Option<&str>,
+    caller_credential: Option<CallerCredential<'_>>,
+    observation: Observation,
 ) -> Option<Diagnostic> {
     monitoring_service::configured_base_url(config).ok()?;
     let _permit = match IN_FLIGHT.try_acquire() {
@@ -604,7 +632,15 @@ async fn diagnose_bounded(
     let attempted = AtomicBool::new(false);
     let result = match tokio::time::timeout(
         BUDGET,
-        diagnose_inner(db, config, actor_id, exact_id, caller_token, &attempted),
+        diagnose_inner(
+            db,
+            config,
+            auth,
+            exact_id,
+            caller_credential,
+            observation,
+            &attempted,
+        ),
     )
     .await
     {
@@ -621,43 +657,25 @@ async fn diagnose_bounded(
 async fn diagnose_inner(
     db: &Database,
     config: &AppConfig,
-    actor_id: &str,
+    auth: &AuthUser,
     exact_id: &str,
-    caller_token: Option<&str>,
+    caller_credential: Option<CallerCredential<'_>>,
+    observation: Observation,
     attempted: &AtomicBool,
 ) -> AppResult<Option<Diagnostic>> {
+    let actor_id = auth.user_id.to_string();
     if !feature_flag_service::personal_flag_enabled(
         db,
-        actor_id,
+        &actor_id,
         feature_flag_service::SERVICE_MONITORING_FLAG_KEY,
     )
     .await?
     {
         return Ok(None);
     }
-    let Some(service) = super::service_history::collection::<UserService>(
-        db,
-        crate::models::user_service::COLLECTION_NAME,
-    )
-    .find_one(doc! {"_id": exact_id})
-    .await?
-    else {
+    let Some(service) = authorized_service(db, auth, exact_id).await? else {
         return Ok(None);
     };
-    if !service.is_active || service.deleted_at.is_some() || service.service_type != "http" {
-        return Ok(None);
-    }
-    let access = org_service::resolve_owner_access(db, actor_id, &service.user_id).await?;
-    let usable = match &access {
-        OwnerAccess::Direct | OwnerAccess::AsOrgAdmin { .. } => true,
-        OwnerAccess::AsOrgMember { role, .. } => {
-            user_service_service::role_can_proxy_service(*role, &service)
-        }
-        OwnerAccess::Forbidden => false,
-    };
-    if !usable || !access.allows_resource(exact_id) {
-        return Ok(None);
-    }
     // No requests to the monitoring service itself, including user-named aliases.
     let Some(endpoint) = super::service_history::collection::<UserEndpoint>(
         db,
@@ -674,7 +692,7 @@ async fn diagnose_inner(
     ) {
         return Ok(None);
     }
-    let Some(token) = caller_token else {
+    let Some(credential) = caller_credential else {
         // There is deliberately no system-key fallback. The current status API
         // does not bind an observation to this credential, so it cannot prove
         // caller reachability and is not imported as secondary evidence either.
@@ -692,7 +710,7 @@ async fn diagnose_inner(
     if !admission.allowed {
         return Ok(Some(Diagnostic::unknown(Outcome::RateLimited)));
     }
-    let client = Client::for_caller(config, token, exact_id, BUDGET)?;
+    let client = Client::for_caller(config, credential, exact_id, BUDGET)?;
     // The caller probe endpoint can discover paths when none is known. Automatic
     // diagnostics only use an already configured/verified health recipe.
     attempted.store(true, Ordering::Relaxed);
@@ -704,7 +722,7 @@ async fn diagnose_inner(
     if result.health.path != status.health.path {
         return Ok(Some(Diagnostic::unknown(Outcome::Unavailable)));
     }
-    Ok(Some(project(&result)))
+    Ok(Some(project(&result, observation)))
 }
 
 fn same_origin(left: &str, right: &str) -> bool {
@@ -727,7 +745,7 @@ fn recent(check: &CheckResult) -> bool {
     })
 }
 
-fn project(result: &ProbeResult) -> Diagnostic {
+fn project(result: &ProbeResult, observation: Observation) -> Diagnostic {
     let health = &result.health;
     if !recent(health) {
         return Diagnostic::unknown(Outcome::Unavailable);
@@ -775,7 +793,7 @@ fn project(result: &ProbeResult) -> Diagnostic {
         observation: if assessment == Assessment::Unknown {
             Observation::Unknown
         } else {
-            Observation::Caller
+            observation
         },
         assessment,
         outcome: Outcome::Completed,

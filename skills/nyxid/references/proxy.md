@@ -76,7 +76,7 @@ For REST and LLM responses, read `X-NyxID-Diagnostic-Handle` and `X-NyxID-Diagno
 nyxid monitoring diagnose <handle> --output json
 ```
 
-The response contains only bounded `observation`, `assessment`, and `outcome` enums. Treat it as secondary evidence. The original invocation status, body, and error remain authoritative; a healthy caller-scoped probe does not prove that the failed operation was valid or authorized. `unknown` or `non_delegable` does not attribute the failure. Current Agent Key, bot, relay, session, delegated, and service-account identities do not produce caller-scoped evidence.
+The response contains only bounded `observation`, `assessment`, and `outcome` enums. Treat it as secondary evidence. The original invocation status, body, and error remain authoritative; a healthy caller-scoped probe does not prove that the failed operation was valid or authorized. `observation: agent` means only that the same current General Agent Key authority reached the exact backend-selected service's configured health/readiness path. It does not prove human-owner reachability. `unknown` or `non_delegable` does not attribute the failure. Unsupported Agent Key purposes, stale bot/conversation turns, relay, session, delegated, and service-account identities remain non-delegable.
 
 Redeem a NyxID-issued handle at most once. The CLI itself may retry once only after the explicit `diagnostic_not_ready` response. Do not infer or enumerate UserServices, do not retry the failed business operation automatically, and do not log, repeat, persist, or place the handle in a URL.
 

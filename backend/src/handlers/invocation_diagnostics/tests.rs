@@ -36,7 +36,40 @@ fn request() -> Request<Body> {
 }
 
 #[tokio::test]
-async fn proxy_only_agent_key_reaches_redemption_and_returns_non_delegable() {
+async fn diagnostic_probe_marker_is_stripped_and_suppresses_recursive_handles() {
+    let (state, actor, id, server) = fixture().await;
+    let mut request = request();
+    request
+        .headers_mut()
+        .insert(PROBE_HEADER, "1".parse().unwrap());
+    let invocation = HttpInvocation::start(&state, &mut request);
+    assert!(invocation.is_none());
+    assert!(!request.headers().contains_key(PROBE_HEADER));
+    Target::record_request(&request, Some(&id));
+    let result = HttpInvocation::finish(
+        invocation,
+        &state,
+        &auth(&actor),
+        Err(AppError::NodeProxyTimeout),
+    )
+    .await;
+    assert!(matches!(result, Err(AppError::NodeProxyTimeout)));
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(
+        state
+            .db
+            .collection::<mongodb::bson::Document>(
+                crate::models::invocation_diagnostic::COLLECTION_NAME,
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn proxy_only_agent_key_reaches_redemption_and_returns_agent_evidence() {
     let (state, actor, id, server) = fixture().await;
     let key = crate::services::key_service::create_api_key(
         &state.db,
@@ -57,12 +90,19 @@ async fn proxy_only_agent_key_reaches_redemption_and_returns_non_delegable() {
     )
     .await
     .unwrap();
+    crate::services::invocation_diagnostic_service::tests::mount_healthy_agent(
+        &server,
+        &id,
+        &key.full_key,
+    )
+    .await;
     let issued = crate::services::invocation_diagnostic_service::issue(
         &state.db,
         &state.config,
         &actor,
         &AuthMethod::ApiKey,
         Some(&key.id),
+        None,
         None,
         &id,
     )
@@ -87,10 +127,10 @@ async fn proxy_only_agent_key_reaches_redemption_and_returns_non_delegable() {
     assert_eq!(response.status(), StatusCode::OK);
     let body: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
-    assert_eq!(body["outcome"], "non_delegable");
-    assert_eq!(body["observation"], "unknown");
-    assert_eq!(body["assessment"], "unknown");
-    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(body["outcome"], "completed");
+    assert_eq!(body["observation"], "agent");
+    assert_eq!(body["assessment"], "operation_specific_likely");
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
     state.db.drop().await.unwrap();
 }
 
@@ -279,6 +319,7 @@ async fn redemption_rechecks_current_execution_scope_before_handle_lookup() {
         &state.config,
         &actor,
         &AuthMethod::AccessToken,
+        None,
         None,
         None,
         &id,

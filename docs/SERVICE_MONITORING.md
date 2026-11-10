@@ -38,9 +38,17 @@ saved-path behavior, also deploy [PR #12](https://github.com/ChronoAIProject/chr
 before this frontend update. It never uses the full-inventory `/status` endpoint
 or a platform probe key.
 
+Agent Key-scoped invocation diagnostics additionally require
+[chrono-probe #16](https://github.com/ChronoAIProject/chrono-probe/issues/16),
+which preserves `X-API-Key` through exact-service authorization and the caller
+probe. Deploy that companion change before enabling Agent Key redemption from
+NyxID #2241; human bearer diagnostics remain compatible with older probe
+deployments.
+
 chrono-probe must be configured to call this NyxID installation for identity,
 service inventory, and exact proxy execution. Its existing authorizer reads
-`GET /api/v1/users/me` and `GET /api/v1/keys` with the callback token.
+`GET /api/v1/users/me` and `GET /api/v1/keys` with a human callback token.
+Agent Key caller probes read only `GET /api/v1/keys` with the same Agent Key.
 
 ## Routes and permissions
 
@@ -169,9 +177,9 @@ MCP errors retain their original content first and add the same handle under
 `structuredContent.nyxid_invocation_diagnostic` and a separate text content
 block. The handle contains no UserService ID, path, token, request body or
 routing data. NyxID stores only its SHA-256 hash. The record expires after 60
-seconds and binds the original actor, authentication class, API-key identity,
-acting or OAuth client and exact execution-selected UserService, including a
-concrete pool member.
+seconds and binds the original actor, authentication class, parent API-key
+identity, child Agent Key login credential when present, acting or OAuth client
+and exact execution-selected UserService, including a concrete pool member.
 
 Clients may explicitly redeem the handle once with the current NyxID identity:
 
@@ -183,20 +191,31 @@ Content-Type: application/json
 {"handle":"nyx_diag_..."}
 ```
 
+Agent Key callers may instead use `X-API-Key: <current Agent Key>`. NyxID also
+accepts a Bearer-form Agent Key at ingress, then forwards the already classified
+credential to chrono-probe as `X-API-Key`; this avoids asking chrono-probe to
+guess whether an opaque Bearer value is a human token or an Agent Key.
+
 The handle stays in the body so access logs and route metrics do not capture it.
-NyxID requires the same bound identity, then rechecks the current API-key
-purpose and execution scope, service allowlist, live ownership or organization
-access, resource ACL, active HTTP service state and exact UserService. A
-mismatch, expiry or revoked access returns the same not-found result and does
-not reveal which check failed.
+NyxID requires the same bound identity, then rechecks the current parent and
+child credential, API-key purpose and execution scope, service allowlist, live
+ownership or organization/shared-agent access, resource ACL, active HTTP
+service state and exact UserService. Conversation keys must retain the same
+live turn authority. The caller-scoped proxy request reuses the normal Agent Key
+execution path, which enforces node allowlists, credential bindings and
+assistant operation scopes again. A mismatch, expiry or revoked access returns
+the same not-found result and does not reveal which check failed.
 
 An ordinary access token can run a caller-scoped probe using only the bearer on
-the redemption request. Agent Keys and bot/conversation keys, sessions, relay,
-delegated and service-account identities complete with `observation: unknown`
-and `outcome: non_delegable`; they never fall back to an owner, operator or
-system monitoring key. Agent Key-scoped probing requires a separate authority-
-preserving contract. There is no cached status fallback because the shared
-latest-status result is not bound to the current caller.
+the redemption request. An eligible `ApiKeyPurpose::General` Agent Key,
+including a live bot/conversation key, can run the same exact-service check with
+its current Agent Key authority and returns `observation: agent` when evidence
+is attributable. Scheduled, permission-bound, `PublicNyxbot`,
+`SharedEntryTransport`, session, relay, delegated and service-account identities
+complete with `observation: unknown` and `outcome: non_delegable`. No path falls
+back to an owner, operator or system monitoring key. There is no cached status
+fallback because the shared latest-status result is not bound to the current
+caller.
 
 Redemption atomically claims `pending` work before any probe. Concurrent
 redemptions cannot start a second probe; a completed result is retry-readable
@@ -222,6 +241,11 @@ bound. A MongoDB token bucket permits one probe per acting person and exact
 service per ten seconds across replicas; a process permits at most 32 concurrent
 probe futures. chrono-probe callbacks and services on the configured monitoring
 origin are excluded from recursive diagnostics.
+Caller-scoped chrono-probe proxy requests carry the reserved
+`X-NyxID-Invocation-Diagnostic-Probe: 1` marker. NyxID removes it before
+downstream forwarding and suppresses handle issuance for that request, including
+raw Agent Key callbacks that do not have the `chrono-probe` acting-client ID.
+The marker is advisory and grants no execution authority.
 
 The existing probe API does not atomically pin the preflight configuration. If
 an owner clears a recipe between the status read and probe, chrono-probe can
@@ -233,6 +257,12 @@ Successful redemption returns only bounded enums:
 ```json
 {"observation":"caller","assessment":"operation_specific_likely","outcome":"completed"}
 ```
+
+An attributable General Agent Key uses the same finite result shape with
+`"observation":"agent"`. This proves only that the current exact Agent Key
+authority reached the selected service's health/readiness path. It does not
+prove human-owner reachability or that the original business operation was
+valid or authorized.
 
 The projection never contains paths, raw bodies, free-text reasons, hostnames,
 tokens, keys or internal errors.

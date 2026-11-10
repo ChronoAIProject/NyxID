@@ -3774,6 +3774,7 @@ async fn service_failure_handle(
         &auth.user_id,
         &auth.auth_method,
         auth.api_key_id.as_deref(),
+        auth.api_key_credential_id.as_deref(),
         auth.acting_client_id
             .as_deref()
             .or(auth.oauth_client_id.as_deref()),
