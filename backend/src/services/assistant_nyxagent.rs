@@ -1042,6 +1042,7 @@ pub async fn require_enabled(db: &Database, user_id: &str) -> AppResult<()> {
 }
 pub async fn require_enabled_features(db: &Database, user_id: &str) -> AppResult<Vec<String>> {
     let features = feature_flag_service::resolve_personal_features(db, user_id).await?;
+    super::assistant_notification_service::cache_features(db, user_id, &features);
     if features
         .iter()
         .any(|key| key == feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY)
