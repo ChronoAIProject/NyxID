@@ -18,7 +18,8 @@ import type { AccountPanel } from "@/lib/assistant/account-panel-search";
 const Settings = lazy(() => import("@/pages/settings").then((m) => ({ default: m.SettingsPage })));
 const Billing = lazy(() => import("@/pages/billing").then((m) => ({ default: m.BillingPage })));
 const NyxBot = lazy(() => import("./nyxbot-settings-content").then((m) => ({ default: m.NyxBotSettingsContent })));
-const panels = {
+const Notifications = lazy(() => import("./notifications-panel").then((m) => ({ default: m.NotificationsPanel })));
+const panels: Record<Exclude<AccountPanel, "notifications">, { title: string; description: string; width: string }> = {
   settings: { title: "Account Settings", description: "Manage your account settings and preferences.", width: "md:max-w-3xl" },
   billing: { title: "Billing & Usage", description: "Your balance, benefits, and usage in one place.", width: "md:max-w-5xl" },
   nyxbot: { title: "NyxBot settings", description: "NyxBot runs with full access to your connected services and account; specialists use only what you or NyxBot grant them. These settings apply to all of your agents.", width: "md:max-w-2xl" },
@@ -44,6 +45,14 @@ export function AssistantAccountPanel() {
     if (ready && current.panel && !allowed) void close("replace");
   }, [ready, current.panel, allowed, close]);
   if (!render || !current.panel) return null;
+  if (current.panel === "notifications") {
+    // The feed is a sheet beside the chat, not a settings dialog.
+    return (
+      <Suspense fallback={null}>
+        <Notifications onClose={() => void close()} opener={opener} />
+      </Suspense>
+    );
+  }
   const panel = panels[current.panel];
   const grouped = current.panel !== "billing";
   const PanelDialog = grouped ? GroupedDialog : Dialog;

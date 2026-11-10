@@ -20,6 +20,7 @@ import { ChatContentLayout } from "./chat-content-layout";
 import { OfflineBanner } from "./offline-banner";
 import { ChatGripSlotContext } from "./chat-header-context";
 import { AssistantSearchButton, AssistantSearchDialog } from "./assistant-search";
+import { NotificationsBell } from "./notifications-bell";
 import { useAssistantSearchShortcut } from "@/hooks/use-assistant-search-shortcut";
 import { CmaSessionObserver } from "./cma-session-card";
 import { useMachinePaneStore } from "@/stores/machine-pane-store";
@@ -155,6 +156,7 @@ function AssistantShellLayout({
               {!desktop ? shellTitle : null}
             </div>
             {!desktop ? headerActions : null}
+            <NotificationsBell />
             <AssistantSearchButton onOpen={openSearch} />
           </header>
 
@@ -173,6 +175,7 @@ function AssistantShellLayout({
                     <NyxidIcon className="h-5 w-5" />
                   </Link>
                   <SidebarToggle hidden onToggle={() => setSidebarHidden(false)} />
+                  <NotificationsBell />
                   <AssistantSearchButton onOpen={openSearch} />
                   {desktop ? headerActions : null}
                 </div>
@@ -191,6 +194,7 @@ function AssistantShellLayout({
                     <NyxidLogo className="h-5 w-auto" />
                   </Link>
                   {desktop ? headerActions : null}
+                  <NotificationsBell />
                   <AssistantSearchButton onOpen={openSearch} />
                   <SidebarToggle hidden={false} onToggle={() => setSidebarHidden(true)} />
                 </div>

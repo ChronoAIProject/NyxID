@@ -19,6 +19,7 @@ vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: () => true }));
 vi.mock("./assistant-account-panel", () => ({ AssistantAccountPanel: () => null }));
 vi.mock("./offline-banner", () => ({ OfflineBanner: () => null }));
 vi.mock("./assistant-search", () => ({ AssistantSearchButton: () => null, AssistantSearchDialog: () => null }));
+vi.mock("./notifications-bell", () => ({ NotificationsBell: () => null }));
 vi.mock("@tanstack/react-router", () => ({
   useRouter: () => ({ subscribe: () => () => {} }),
   Link: ({ children }: { children: ReactNode }) => <a>{children}</a>,
