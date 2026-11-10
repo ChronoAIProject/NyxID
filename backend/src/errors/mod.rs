@@ -1851,7 +1851,14 @@ mod tests {
         assert_eq!(error.error_key(), "internal_error");
         assert_eq!(error.response_body().message, "An internal error occurred");
         assert!(!format!("{error:?}").contains("nyx_diag_do_not_log"));
-        assert!(std::error::Error::source(&error).unwrap().is::<AppError>());
+        let source = std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<Box<AppError>>()
+            .expect("diagnostic source retains its declared boxed error type");
+        assert!(matches!(
+            source.as_ref(),
+            AppError::Internal(message) if message == "private transport detail"
+        ));
     }
 
     #[tokio::test]
