@@ -182,3 +182,102 @@ pub(crate) async fn update_as(
     })
     .await
 }
+
+/// CMA removes its binding while retained assistant histories remain readable.
+/// Clear its feed rows atomically with the authority change.
+pub(crate) async fn remove_binding(
+    db: &Database,
+    row: &NyxbotChannel,
+    binding: &str,
+) -> AppResult<bool> {
+    let context = (db.clone(), row.clone(), binding.to_owned());
+    super::transaction_service::run_db_only(db,&context,|tx,(db,row,binding)|Box::pin(async move {
+        let changed=db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {
+            "_id":&row.id,"binding_id":binding,"route_api_key_id":&row.route_api_key_id,
+            "transport":&row.transport,"status":&row.status,"agent_api_key_id":&row.agent_api_key_id,
+            "pending_agent_api_key_id":&row.pending_agent_api_key_id,
+        },doc! {"$inc":{"execution_policy_revision":1_i64},"$unset":{"binding_id":""},
+            "$set":{"gateway_no_progress":false,"updated_at":bson::DateTime::now()}}).session(&mut *tx).await?;
+        if changed.matched_count!=1 {return Ok(false)}
+        super::assistant_notification_service::purge(db,doc! {"source.channel_id":&row.id},Some(tx)).await?;
+        Ok(true)
+    })).await
+}
+
+/// Remove the provider's exact chat, its derived delivery state and feed rows.
+/// The parent write serializes this retirement with flagged reply settlement.
+/// Per-actor organization lanes share one public channel chat.
+pub(crate) async fn remove_thread(
+    db: &Database,
+    row: &NyxbotChannel,
+    partition: &str,
+) -> AppResult<()> {
+    use futures::TryStreamExt;
+    let context = (db.clone(), row.clone(), partition.to_owned());
+    super::transaction_service::run_db_only(db, &context, |tx, (db, row, partition)| {
+        Box::pin(async move {
+            if db
+                .collection::<NyxbotChannel>(CHANNELS)
+                .update_one(
+                    doc! {
+                        "_id":&row.id,"user_id":&row.user_id,"binding_id":&row.binding_id,
+                        "route_api_key_id":&row.route_api_key_id,"transport":&row.transport,
+                        "status":&row.status,"agent_api_key_id":&row.agent_api_key_id,
+                        "pending_agent_api_key_id":&row.pending_agent_api_key_id,
+                    },
+                    doc! {"$inc":{"notification_generation":1_i64}},
+                )
+                .session(&mut *tx)
+                .await?
+                .matched_count
+                != 1
+            {
+                return Err(AppError::Conflict("Channel binding changed".into()));
+            }
+            if let Some(thread) = db
+                .collection::<crate::models::nyxbot_channel::NyxbotThread>(THREADS)
+                .find_one_and_delete(doc! {"channel_id":&row.id,"partition":partition})
+                .session(&mut *tx)
+                .await?
+            {
+                let mut cursor = db
+                    .collection::<Document>(crate::models::org_channel::LANES)
+                    .find(doc! {"channel_id":&row.id,"partition":partition})
+                    .projection(doc! {"conversation_id":1})
+                    .session(&mut *tx)
+                    .await?;
+                let lanes: Vec<Document> = cursor.stream(&mut *tx).try_collect().await?;
+                let mut conversations: Vec<String> = lanes
+                    .iter()
+                    .filter_map(|lane| lane.get_str("conversation_id").ok().map(str::to_owned))
+                    .collect();
+                conversations.extend(thread.conversation_id);
+                super::assistant_notification_service::purge(
+                    db,
+                    doc! {
+                    "source.channel_id":&row.id,"$or":[
+                        {"source.conversation_id":{"$in":conversations}},
+                        {"source.thread_id":&thread.id},
+                        {"source.id":&thread.id},
+                    ]},
+                    Some(&mut *tx),
+                )
+                .await?;
+                db.collection::<Document>(
+                    crate::models::execution_permission_channel::COLLECTION_NAME,
+                )
+                .delete_many(doc! {"task.channel_source.thread_id":&thread.id})
+                .session(&mut *tx)
+                .await?;
+            }
+            if row.gateway_source.is_some() {
+                db.collection::<Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME)
+                    .delete_many(doc! {"channel_id":&row.id,"partition":partition})
+                    .session(tx)
+                    .await?;
+            }
+            Ok(())
+        })
+    })
+    .await
+}

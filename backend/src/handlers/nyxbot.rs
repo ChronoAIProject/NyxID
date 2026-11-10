@@ -4520,20 +4520,15 @@ pub async fn delete_binding(
     if row.binding_id.as_deref() != Some(binding_id.as_str()) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    match state
-        .db
-        .collection::<NyxbotChannel>(CHANNELS)
-        .update_one(
-            doc! {"_id": &row.id, "binding_id": &binding_id,
-            "route_api_key_id": &row.route_api_key_id, "transport": &row.transport,
-            "status": &row.status, "agent_api_key_id": &row.agent_api_key_id,
-            "pending_agent_api_key_id": &row.pending_agent_api_key_id},
-            doc! {"$inc":{"execution_policy_revision":1_i64},"$unset": {"binding_id": ""}, "$set": {"gateway_no_progress": false, "updated_at": bson::DateTime::now()}},
-        )
-        .await
+    match crate::services::nyxbot_chat_settings_service::remove_binding(
+        &state.db,
+        &row,
+        &binding_id,
+    )
+    .await
     {
-        Ok(updated) if updated.matched_count == 1 => StatusCode::NO_CONTENT.into_response(),
-        Ok(_) => problem(StatusCode::CONFLICT, "binding_conflict"),
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => problem(StatusCode::CONFLICT, "binding_conflict"),
         Err(_) => problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
 }
@@ -4645,61 +4640,16 @@ pub async fn delete_conversation(
     if row.binding_id.as_deref() != Some(binding_id.as_str()) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if row.gateway_source.is_some() {
-        let db = state.db.clone();
-        let channel = row.id.clone();
-        let partition = conversation_id.clone();
-        let result: AppResult<()> = async {
-            let mut session = db.client().start_session().await?;
-            session
-                .start_transaction()
-                .and_run2(async move |session| {
-                    if let Some(thread) = db
-                        .collection::<NyxbotThread>(THREADS)
-                        .find_one_and_delete(doc! {"channel_id":&channel,"partition":&partition})
-                        .session(&mut *session)
-                        .await?
-                    {
-                        db.collection::<bson::Document>(
-                            crate::models::execution_permission_channel::COLLECTION_NAME,
-                        )
-                        .delete_many(doc! {"task.channel_source.thread_id":&thread.id})
-                        .session(&mut *session)
-                        .await?;
-                    }
-                    db.collection::<bson::Document>(
-                        crate::models::nyxbot_gateway_response::COLLECTION_NAME,
-                    )
-                    .delete_many(doc! {"channel_id":&channel,"partition":&partition})
-                    .session(&mut *session)
-                    .await?;
-                    Ok(())
-                })
-                .await?;
-            Ok(())
-        }
-        .await;
-        return match result {
-            Ok(()) => StatusCode::NO_CONTENT.into_response(),
-            Err(e) => e.into_response(),
-        };
-    }
-    // The NyxBot chat itself stays in the owner's history.
-    if let Ok(Some(thread)) = state
-        .db
-        .collection::<NyxbotThread>(THREADS)
-        .find_one_and_delete(doc! {"channel_id": &row.id, "partition": &conversation_id})
-        .await
+    match crate::services::nyxbot_chat_settings_service::remove_thread(
+        &state.db,
+        &row,
+        &conversation_id,
+    )
+    .await
     {
-        let _ = state
-            .db
-            .collection::<bson::Document>(
-                crate::models::execution_permission_channel::COLLECTION_NAME,
-            )
-            .delete_many(doc! {"task.channel_source.thread_id":&thread.id})
-            .await;
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => error.into_response(),
     }
-    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn get_event_context(

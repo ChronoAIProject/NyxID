@@ -26,6 +26,9 @@ mod routing_tests;
 #[path = "nyxbot_release_tests.rs"]
 mod release_tests;
 
+#[path = "nyxbot_notification_cleanup_tests.rs"]
+mod notification_cleanup_tests;
+
 #[path = "nyxbot_x_bus_tests.rs"]
 mod x_bus_tests;
 
@@ -571,6 +574,18 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
     assert_eq!(again.status(), StatusCode::OK);
     let conflict = bind(bearer(&agent_key), binding_body(&agent_key, OWNER), "bnd_2").await;
     assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    let removed = crate::test_utils::seed_notification_purge_probe(
+        &state.db,
+        OWNER,
+        doc! {"channel_id":&row.id},
+    )
+    .await;
+    let retained = crate::test_utils::seed_notification_purge_probe(
+        &state.db,
+        OWNER,
+        doc! {"channel_id":Uuid::new_v4().to_string()},
+    )
+    .await;
     let deleted = delete_binding(
         State(state.clone()),
         Path("bnd_1".into()),
@@ -581,6 +596,8 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
     let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert!(saved.binding_id.is_none());
     assert!(!format!("{saved:?}").contains(&agent_key));
+    crate::test_utils::assert_notification_probe(&state.db, &removed, false).await;
+    crate::test_utils::assert_notification_probe(&state.db, &retained, true).await;
     server.abort();
 }
 
