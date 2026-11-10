@@ -1190,7 +1190,12 @@ async fn outline_pages_cannot_splice_two_resolved_closures() {
         preview_with_outline(&before, Some(next), None).unwrap()["outline_changed"],
         true
     );
-    // Starting again reads the new resolution.
+    // A deferred first page fetched with the preview's fingerprint is checked
+    // too, so it can't describe different pins than that preview.
+    let deferred = preview_with_outline(&after, Some(0), Some(&print)).unwrap();
+    assert_eq!(deferred["outline_changed"], true);
+    assert!(deferred.get("content").is_none());
+    // Starting again without a fingerprint reads the new resolution.
     let restart = preview_with_outline(&after, Some(0), None).unwrap();
     assert!(
         restart["content"]

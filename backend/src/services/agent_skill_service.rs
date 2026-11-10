@@ -796,9 +796,12 @@ pub fn preview_with_outline(
             return Ok(no_outline(id, version));
         };
         let print = outline_fingerprint(&outline);
-        if offset > 0 && fingerprint != Some(print.as_str()) {
+        // A supplied fingerprint is always checked; offset 0 without one is an
+        // intentional fresh read.
+        let changed = fingerprint.is_some_and(|expected| expected != print);
+        if changed || (offset > 0 && fingerprint.is_none()) {
             return Ok(
-                json!({"skill_id":id,"version":version,"path":"outline","untrusted_guidance":true,"outline_changed":true,"complete":false,"next_offset":0,"continuation_hint":"The outline changed since the page you continued from, for example because a dependency tag moved. Read it again from outline_offset=0."}),
+                json!({"skill_id":id,"version":version,"path":"outline","untrusted_guidance":true,"outline_changed":true,"complete":false,"next_offset":0,"continuation_hint":"The outline changed since the page you continued from, for example because a dependency tag moved. Call preview_agent_skill again without outline_offset for a fresh preview."}),
             );
         }
         return outline_page_value(&outline, id, version, offset, PAGE_BUDGET, &print);
@@ -814,7 +817,7 @@ pub fn preview_with_outline(
                     &outline, id, version, 0, budget, &print,
                 )?);
             }
-            candidates.push(json!({"skill_id":id,"version":version,"path":"outline","untrusted_guidance":true,"outline_available":true,"outline_fingerprint":print,"complete":false,"next_offset":0,"continuation_hint":"The outline did not fit in this preview. Call preview_agent_skill again with outline_offset=0 for an outline-only page."}));
+            candidates.push(json!({"skill_id":id,"version":version,"path":"outline","untrusted_guidance":true,"outline_available":true,"outline_fingerprint":print,"complete":false,"next_offset":0,"continuation_hint":"The outline did not fit in this preview. Call preview_agent_skill again with outline_offset=0 and this outline_fingerprint for an outline-only page."}));
         }
         None => candidates.push(no_outline(id, version)),
     }

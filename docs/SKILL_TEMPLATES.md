@@ -134,9 +134,11 @@ NyxBot's instructions, tool list and tool results are unchanged.
   instead of carrying content; when even that notice can't fit, the result is
   the plain preview, exactly as with the flag off. Calling again with
   `outline_offset` returns an outline-only page (start at `0`). Pages after the
-  first must echo the `outline_fingerprint` of the page they continue: if a
-  dependency tag moved between calls, the continuation answers
-  `outline_changed` instead of splicing two outlines. The HTTP preview used by
+  first must echo the `outline_fingerprint` of the page they continue, and a
+  deferred first page should echo the preview's fingerprint: if a dependency
+  tag moved between calls, the answer is `outline_changed` instead of an
+  outline for different pins. Offset `0` without a fingerprint is an
+  intentional fresh read; refresh the full preview to see its resolved pins. The HTTP preview used by
   the app is unchanged.
 - **Explaining.** NyxBot's instructions ask it to read the outline before
   multi-step or changing work a skill covers, explain it in plain words, and ask
