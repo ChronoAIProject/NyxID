@@ -290,6 +290,7 @@ PODS:
   - hermes-engine (0.14.1):
     - hermes-engine/Pre-built (= 0.14.1)
   - hermes-engine/Pre-built (0.14.1)
+  - JitsiWebRTC (155.0.1)
   - libwebp (1.6.0):
     - libwebp/demux (= 1.6.0)
     - libwebp/mux (= 1.6.0)
@@ -1786,6 +1787,9 @@ PODS:
     - ReactCommon/turbomodule/core
     - ReactNativeDependencies
     - Yoga
+  - react-native-webrtc (155.0.1):
+    - JitsiWebRTC (~> 155.0.0)
+    - React-Core
   - react-native-webview (13.16.0):
     - hermes-engine
     - RCTRequired
@@ -2564,6 +2568,7 @@ DEPENDENCIES:
   - React-microtasksnativemodule (from `../node_modules/react-native/ReactCommon/react/nativemodule/microtasks`)
   - "react-native-netinfo (from `../node_modules/@react-native-community/netinfo`)"
   - react-native-safe-area-context (from `../node_modules/react-native-safe-area-context`)
+  - react-native-webrtc (from `../node_modules/react-native-webrtc`)
   - react-native-webview (from `../node_modules/react-native-webview`)
   - React-NativeModulesApple (from `../node_modules/react-native/ReactCommon/react/nativemodule/core/platform/ios`)
   - React-networking (from `../node_modules/react-native/ReactCommon/react/networking`)
@@ -2612,6 +2617,7 @@ DEPENDENCIES:
 
 SPEC REPOS:
   trunk:
+    - JitsiWebRTC
     - libwebp
     - SDWebImage
     - SDWebImageWebPCoder
@@ -2773,6 +2779,8 @@ EXTERNAL SOURCES:
     :path: "../node_modules/@react-native-community/netinfo"
   react-native-safe-area-context:
     :path: "../node_modules/react-native-safe-area-context"
+  react-native-webrtc:
+    :path: "../node_modules/react-native-webrtc"
   react-native-webview:
     :path: "../node_modules/react-native-webview"
   React-NativeModulesApple:
@@ -2900,6 +2908,7 @@ SPEC CHECKSUMS:
   EXUpdatesInterface: 39d05400a9226c438565dbaaa8447b5f0672ba45
   FBLazyVector: 061f518bbd81677ed8a8317e2ae60b8779495808
   hermes-engine: 9d1bd13e0c2d31a7047edcdb9b00d801780a4f84
+  JitsiWebRTC: a8ac2b2b54c523fb156016de4ab86b6666dc99d9
   libwebp: af5937a13536ef73f3784d69cc342b98961acf33
   RCTDeprecation: 5045f20b2cc1239bf422764004338c720684a22f
   RCTRequired: b6b9724225dd780ac2989d2e575d5513c50fe04b
@@ -2939,6 +2948,7 @@ SPEC CHECKSUMS:
   React-microtasksnativemodule: 563b4dcc8b8570814d6de4fc1196f48d2944acd4
   react-native-netinfo: f852c868bf5175e46165c7e4db48a204a95c3800
   react-native-safe-area-context: 37e680fc4cace3c0030ee46e8987d24f5d3bdab2
+  react-native-webrtc: f55aa2ad5ed12a04bb1fad72c7f57c401ada7277
   react-native-webview: 3e303e80cadb5f17118c8c1502aa398e9287e415
   React-NativeModulesApple: f3eb751b0ea23645a5283ed8c8bb8ebeeda32d15
   React-networking: af5eba8ccda3334cd2f6246b599d3b55bb73eb2e

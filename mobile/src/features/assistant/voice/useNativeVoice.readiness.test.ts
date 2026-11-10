@@ -91,8 +91,9 @@ for (const order of [
           ...options,
           clock: {
             setTimeout: (cb, ms) => {
-              assert.equal(ms, 15000);
-              expire = cb;
+              // 15 s readiness; unmount also arms End's 7 s drain deadline.
+              assert.ok(ms === 15000 || ms === 7000, `unexpected timer ${ms}`);
+              if (ms === 15000) expire = cb;
               return 1;
             },
             clearTimeout: () => {

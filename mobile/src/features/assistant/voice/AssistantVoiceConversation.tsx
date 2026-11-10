@@ -33,6 +33,8 @@ import {
   Label,
   Notice,
 } from "../../../components/workspace/WorkspaceUI";
+import { SettingsRow } from "../../../components/settings/SettingsList";
+import { WorkspaceSelectionSheet } from "../../../components/workspace/WorkspaceSelectionField";
 import {
   ScrollEdgeFades,
   useScrollEdges,
@@ -56,8 +58,16 @@ import {
 } from "./VoiceComposerShell";
 import { VoiceMediaBridge } from "./VoiceMediaBridge";
 import { voiceAuraPhase, voiceAuraStatus } from "./voiceAuraState";
-import { chooseVoiceOption, voiceElapsed } from "./voiceSelection";
-import type { VoicePreferences } from "./voiceContracts";
+import {
+  chooseVoiceOption,
+  voiceElapsed,
+  voiceOptionKey,
+} from "./voiceSelection";
+import type {
+  VoiceOption,
+  VoicePreferences,
+  VoiceSnapshot,
+} from "./voiceContracts";
 
 type Props = {
   thread: string;
@@ -66,7 +76,13 @@ type Props = {
   minimized?: boolean;
   onExpand?: () => void;
   onUpdate: () => void;
+  /** The main chat shows the call's finished words; this composer shows unsent ones. */
+  onSnapshot?: (snapshot: VoiceSnapshot | undefined) => void;
+  /** Controlled by the chat's Chat options › Voice preferences action. */
+  preferencesOpen?: boolean;
+  onPreferencesClose?: () => void;
 };
+type CallSelection = { option: VoiceOption; preferences: VoicePreferences };
 
 /**
  * Voice mode is a composer: it slides up in place of the message composer,
@@ -85,7 +101,11 @@ export function AssistantVoiceConversation(props: Props) {
     }
   });
   return setup.environment ? (
-    <VoiceConversation {...props} environment={setup.environment} />
+    <VoiceConversation
+      key={`${props.thread}:${setup.environment.epoch}`}
+      {...props}
+      environment={setup.environment}
+    />
   ) : (
     <ChatComposerFrame style={styles.frame} bounce={false}>
       <Notice message={setup.error ?? "Voice is unavailable."} tone="error" />
@@ -105,6 +125,9 @@ function VoiceConversation({
   onUpdate,
   minimized = false,
   onExpand,
+  onSnapshot,
+  preferencesOpen = false,
+  onPreferencesClose,
   environment,
 }: Props & {
   environment: ReturnType<typeof nativeVoiceEnvironment>;
@@ -138,10 +161,34 @@ function VoiceConversation({
     );
     setHelpOpen(true);
   }
+  const [now, setNow] = useState(Date.now());
+  const [voicePickerScope, setVoicePickerScope] = useState<string>();
   const [showErrorDetails, setShowErrorDetails] = useState(false);
   const [billingOpenError, setBillingOpenError] = useState(false);
-  const [now, setNow] = useState(Date.now());
+  const [preferencesError, setPreferencesError] = useState(false);
+  const [savingPreferences, setSavingPreferences] = useState(false);
+  const [modeChoice, setModeChoice] =
+    useState<VoicePreferences["input_mode"]>();
+  const [voiceChoice, setVoiceChoice] = useState<string>();
+  const [callSelection, setCallSelection] = useState<CallSelection>();
+  const [endRequested, setEndRequested] = useState(false);
+  const [endingLocal, setEndingLocal] = useState(false);
+  const [checkingLocal, setCheckingLocal] = useState(false);
   const transcript = useRef<ScrollView>(null);
+  const entry = useRef({ thread, epoch: environment.epoch, attempted: false });
+  const closed = useRef(false);
+  const mounted = useRef(true);
+  const endBusy = useRef(false);
+  const checkBusy = useRef(false);
+  const saveBusy = useRef(false);
+  const callbacks = useRef({ onSnapshot });
+  callbacks.current = { onSnapshot };
+  if (
+    entry.current.thread !== thread ||
+    entry.current.epoch !== environment.epoch
+  ) {
+    entry.current = { thread, epoch: environment.epoch, attempted: false };
+  }
   const options = useQuery({
     queryKey: ["workspace", "voice-options", environment.epoch, thread],
     queryFn: ({ signal }) => environment.api.options(thread, signal),
@@ -156,70 +203,151 @@ function VoiceConversation({
   });
   const saved = settings.data?.voice;
   const choices = options.data?.options ?? [];
-  const option = chooseVoiceOption(choices);
+  const selectionReady = options.isSuccess && settings.isSuccess;
+  const option = selectionReady ? chooseVoiceOption(choices, saved) : undefined;
   const isGrok = option?.voice.protocol === "xai_realtime";
-  const [modeChoice, setModeChoice] =
-    useState<VoicePreferences["input_mode"]>();
-  const inputMode = isGrok
+  const nextMode = isGrok
     ? "push_to_talk"
-    : (modeChoice ?? saved?.input_mode ?? "push_to_talk");
-  const voiceId =
-    option?.voice.voices.find((row) => row.id === saved?.voice)?.id ??
-    option?.voice.voices[0]?.id ??
-    null;
-  const voiceLabel = option?.voice.voices.find(
-    (row) => row.id === voiceId,
+    : (modeChoice ?? saved?.input_mode ?? "automatic");
+  const nextVoice =
+    voiceChoice ?? saved?.voice ?? option?.voice.voices[0]?.id ?? null;
+  const missingVoice =
+    !!option &&
+    !!nextVoice &&
+    !option.voice.voices.some((row) => row.id === nextVoice);
+  // A live call keeps the source and voice it started with; the header toggle
+  // can still switch its listening mode.
+  const inputMode = callSelection?.preferences.input_mode ?? nextMode;
+  const currentOption = callSelection?.option ?? option;
+  const currentVoice = callSelection?.preferences.voice ?? nextVoice;
+  const voiceLabel = currentOption?.voice.voices.find(
+    (row) => row.id === currentVoice,
   )?.label;
-  const active = voice.starting || voice.connected;
   const session = voice.snapshot?.session;
+  const sessionTerminal =
+    session?.state === "closed" || session?.state === "failed";
+  const conflictTerminal =
+    voice.conflict?.state === "closed" || voice.conflict?.state === "failed";
+  // A terminal session may retain end_requested; it has already finished.
+  // Its final snapshot also supersedes the same call's pending cleanup metadata.
+  const conflict =
+    voice.conflict &&
+    !conflictTerminal &&
+    !(sessionTerminal && voice.conflict.id === session?.id)
+      ? voice.conflict
+      : null;
+  const confirmedEnd =
+    voice.confirmedEnded &&
+    !voice.starting &&
+    !voice.connected &&
+    !conflict &&
+    !voice.conflictUnknown;
+  const terminal =
+    sessionTerminal || (!session && conflictTerminal) || confirmedEnd;
+  const active = voice.starting || voice.connected;
+  const uncertain = voice.conflictUnknown;
+  const confirmingEnd =
+    (endRequested && !terminal) ||
+    !!conflict?.end_requested ||
+    conflict?.state === "closing" ||
+    (!terminal && (session?.state === "closing" || !!session?.end_requested));
+  const checking = checkingLocal || voice.checkingConflict;
+  const ending = endingLocal || voice.endingConflict;
   const muted = session?.muted ?? false;
   const microphoneBlocked =
     muted ||
     !!session?.input_muted ||
-    !!session?.end_requested ||
+    confirmingEnd ||
     session?.state !== "active";
+  const outputActive =
+    voice.connected && levels.speaking && !voice.speakerMuted && !confirmingEnd;
   const allCaptions = voice.snapshot?.captions ?? [];
+  // Only words not yet sent show here; the chat holds everything already sent.
   const captions = allCaptions.filter(
     (caption) =>
       caption.speaker === "user" && !caption.sealed && !!caption.text.trim(),
   );
   const tasks = voice.snapshot?.tasks ?? [];
+  // Listening follows the client's actual input gate and Speaking follows
+  // playback; a stale partial caption never invents audio activity.
   const phase = voiceAuraPhase({
     starting: voice.starting,
     connected: voice.connected,
     inputMode,
     holding: voice.holding,
-    microphoneBlocked,
+    microphoneBlocked: microphoneBlocked || !voice.inputEnabled,
     muted,
-    outputActive: levels.speaking,
-    captions: allCaptions,
+    outputActive,
+    captions: allCaptions.map((caption) =>
+      caption.speaker === "assistant"
+        ? { ...caption, complete: true }
+        : caption,
+    ),
     tasks,
   });
-  const autoStarted = useRef(false);
-  const needsRetry =
-    (autoStarted.current || !!voice.error || !!voice.snapshot) && !active;
-  const status =
-    options.error || settings.error
-      ? "Unable to load voice"
-      : options.isSuccess && (!option || !option.available)
-        ? "Voice unavailable"
-        : voice.starting ||
-            (!autoStarted.current &&
-              !voice.snapshot &&
-              !voice.error &&
-              !voice.conflict)
-          ? "Connecting…"
-          : voice.connected
-            ? session?.state === "closing"
-              ? "Ending…"
-              : voiceAuraStatus(phase, inputMode)
-            : voice.recovery || (voice.error && !voice.snapshot)
-              ? "Unable to start"
-              : voice.conflict
-                ? "Call already active"
-                : voice.snapshot
-                  ? "Call ended"
-                  : "Ready to retry";
+  const hasCall =
+    active ||
+    (!!session && !terminal) ||
+    !!conflict ||
+    uncertain ||
+    confirmingEnd;
+  const canStart =
+    !!option?.available &&
+    !missingVoice &&
+    !hasCall &&
+    !conflict &&
+    !uncertain &&
+    !checking &&
+    !ending &&
+    !confirmingEnd &&
+    isConnected &&
+    focused &&
+    selectionReady;
+  const canChangePreferences =
+    selectionReady && !!option?.available && isConnected && !savingPreferences;
+  const selectionScope = JSON.stringify([
+    environment.epoch,
+    thread,
+    option ? voiceOptionKey(option) : null,
+  ]);
+  const pickerContext = useRef({ scope: selectionScope, allowed: false });
+  pickerContext.current = {
+    scope: selectionScope,
+    allowed:
+      preferencesOpen &&
+      !minimized &&
+      focused &&
+      canChangePreferences &&
+      voicePickerScope === selectionScope,
+  };
+  const status = checking
+    ? "Checking call status…"
+    : ending
+      ? "Ending…"
+      : confirmingEnd
+        ? "Finishing call…"
+        : uncertain
+          ? "Call status unconfirmed"
+          : conflict
+            ? "Call already active"
+            : !isConnected
+              ? "Offline"
+              : voice.starting
+                ? "Connecting…"
+                : voice.connected
+                  ? voiceAuraStatus(phase, inputMode)
+                  : voice.error || voice.recovery
+                    ? "Unable to start"
+                    : terminal
+                      ? "Call ended"
+                      : missingVoice
+                        ? "Choose a voice"
+                        : options.error ||
+                            settings.error ||
+                            (selectionReady && !option?.available)
+                          ? "Voice unavailable"
+                          : "Connecting…";
+  // "–" until the provider is ready, then the call clock from 00:00.
   const duration =
     voice.starting || voice.connectedAt === undefined
       ? "-"
@@ -228,42 +356,101 @@ function VoiceConversation({
           null,
           voice.disconnectedAt ?? now,
         ).padStart(5, "0");
-  const canStart =
-    !!option?.available &&
-    !active &&
-    !voice.conflict &&
-    isConnected &&
-    options.isSuccess &&
-    settings.isSuccess;
+  const needsRetry =
+    (entry.current.attempted ||
+      !!voice.error ||
+      !!voice.recovery ||
+      !!voice.snapshot) &&
+    !hasCall;
+
+  useEffect(() => {
+    mounted.current = true;
+    closed.current = false;
+    return () => {
+      mounted.current = false;
+      callbacks.current.onSnapshot?.(undefined);
+    };
+  }, [thread, environment]);
+  useEffect(() => {
+    callbacks.current.onSnapshot?.(voice.snapshot ?? undefined);
+  }, [voice.snapshot]);
+  useEffect(() => {
+    if (!active && !confirmingEnd) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active, confirmingEnd]);
+  useEffect(() => {
+    setShowErrorDetails(false);
+  }, [voice.error]);
+  useEffect(() => {
+    // A mounted live call also keeps its original source and voice while the
+    // user edits next-call preferences or the settings query refreshes.
+    if (active && !callSelection && option) {
+      const chosen = preferences(nextMode);
+      if (chosen) setCallSelection({ option, preferences: chosen });
+    }
+  }, [active, callSelection, option, nextMode]);
+  useEffect(() => {
+    // One explicit entry owns one automatic attempt. A conflict, failed start
+    // or existing call must never silently turn into a replacement call.
+    if (
+      active ||
+      voice.snapshot ||
+      voice.conflict ||
+      uncertain ||
+      voice.error ||
+      voice.recovery
+    )
+      entry.current.attempted = true;
+    if (!entry.current.attempted && canStart) {
+      entry.current.attempted = true;
+      void start();
+    }
+  }, [
+    selectionReady,
+    canStart,
+    active,
+    voice.snapshot,
+    conflict,
+    uncertain,
+    voice.error,
+    voice.recovery,
+  ]);
+  useEffect(() => {
+    if (!isConnected && active && !conflict && !uncertain) void requestEnd();
+  }, [isConnected]);
+  useEffect(() => {
+    if (!focused && active && !conflict && !uncertain) void requestEnd();
+  }, [focused]);
   useEffect(() => {
     if (
-      !canStart ||
-      !focused ||
-      autoStarted.current ||
-      voice.snapshot ||
-      voice.error
+      (endRequested || confirmedEnd) &&
+      !ending &&
+      !checking &&
+      !conflict &&
+      !uncertain &&
+      !active &&
+      terminal
     )
-      return;
-    autoStarted.current = true;
-    void start();
-  }, [canStart, focused]);
+      closeOnce();
+  }, [
+    endRequested,
+    confirmedEnd,
+    ending,
+    checking,
+    conflict,
+    uncertain,
+    active,
+    terminal,
+  ]);
   useEffect(() => {
     if (voice.holding) voice.hold(false);
     setHelpOpen(false);
   }, [minimized]);
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-  useEffect(() => {
-    if (!focused) onClose();
-  }, [focused, onClose]);
-  useEffect(() => {
-    if (!isConnected) void voice.end();
-  }, [isConnected]);
-  useEffect(() => {
-    setShowErrorDetails(false);
-  }, [voice.error]);
+    if (!preferencesOpen || !focused || minimized)
+      setVoicePickerScope(undefined);
+  }, [preferencesOpen, focused, minimized]);
 
   // Holding the microphone swells the button and lifts a soft halo around it;
   // releasing settles it back. Reduce Motion switches without animating.
@@ -301,46 +488,124 @@ function VoiceConversation({
     return () => animation.stop();
   }, []);
 
-  /** Closing voice ends the call; accepted agent tasks keep running. */
-  function close() {
-    if (voice.holding) voice.hold(false);
-    void voice.end();
+  function closeOnce() {
+    if (!mounted.current || closed.current) return;
+    closed.current = true;
     onClose();
+  }
+  function returnToText() {
+    // An explicit End keeps this media owner alive until its bounded drain
+    // finishes. Status reads may be left without ending a different call.
+    if (endBusy.current || voice.endingConflict) return;
+    closeOnce();
   }
   function preferences(
     mode: VoicePreferences["input_mode"],
+    voiceId = nextVoice,
   ): VoicePreferences | undefined {
-    if (!option) return undefined;
+    if (
+      !selectionReady ||
+      !option?.available ||
+      (voiceId && !option.voice.voices.some((row) => row.id === voiceId))
+    )
+      return;
     return {
       service_id: option.service_id,
       connection_id: option.connection_id,
       key_source: option.key_source,
       model: option.model,
       voice: voiceId,
-      input_mode: mode,
+      input_mode: isGrok ? "push_to_talk" : mode,
       language: saved?.language ?? null,
       notify_on_completion: saved?.notify_on_completion ?? false,
     };
   }
   async function start() {
-    const chosen = preferences(inputMode);
+    const chosen = preferences(nextMode);
     if (!canStart || !option || !chosen) return;
+    entry.current.attempted = true;
+    setCallSelection({ option, preferences: chosen });
     setBillingOpenError(false);
     await voice.start(chosen, option.voice.protocol);
   }
+  /** Closing voice ends the call; accepted agent tasks keep running. */
+  async function requestEnd() {
+    if (endBusy.current || checkBusy.current || (uncertain && !conflict))
+      return;
+    if (!hasCall) {
+      closeOnce();
+      return;
+    }
+    endBusy.current = true;
+    if (voice.holding) voice.hold(false);
+    setHelpOpen(false);
+    setEndRequested(true);
+    setEndingLocal(true);
+    try {
+      // Keep the media owner mounted while bounded cleanup drains the call.
+      // Returning to text does not prove that its remote slot has settled.
+      if (conflict) await voice.endConflict();
+      else await voice.end();
+    } catch {
+      // Recovery remains owned by the hook; a failed remote End must not trap
+      // the user in voice after local audio has stopped.
+    } finally {
+      endBusy.current = false;
+      if (mounted.current) setEndingLocal(false);
+      closeOnce();
+    }
+  }
+  async function checkStatus() {
+    if (endBusy.current || checkBusy.current) return;
+    checkBusy.current = true;
+    setCheckingLocal(true);
+    try {
+      // Checking is read-only. It never substitutes for an explicit End.
+      const confirmed = await voice.checkConflict();
+      if (confirmed === true) closeOnce();
+    } finally {
+      checkBusy.current = false;
+      if (mounted.current) setCheckingLocal(false);
+    }
+  }
+  async function savePreferences(
+    mode: VoicePreferences["input_mode"],
+    voiceId = nextVoice,
+  ) {
+    const chosen = preferences(mode, voiceId);
+    if (!canChangePreferences || !chosen || saveBusy.current) return;
+    saveBusy.current = true;
+    setSavingPreferences(true);
+    setPreferencesError(false);
+    try {
+      await environment.api.savePreferences(chosen);
+      if (!mounted.current) return;
+      setModeChoice(chosen.input_mode);
+      setVoiceChoice(chosen.voice ?? undefined);
+      void settings.refetch();
+    } catch {
+      if (mounted.current) setPreferencesError(true);
+    } finally {
+      saveBusy.current = false;
+      if (mounted.current) setSavingPreferences(false);
+    }
+  }
   /** Hands-free or Hold to talk, from the call itself; saved for next time. */
   function changeMode(mode: VoicePreferences["input_mode"]) {
-    if (isGrok || mode === inputMode) return;
-    if (active && !voice.setInputMode(mode)) return;
+    if (isGrok || mode === inputMode || controlsBlocked) return;
+    if (voice.connected && !voice.setInputMode(mode)) return;
     if (!reducedMotion)
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setModeChoice(mode);
-    const chosen = preferences(mode);
-    if (chosen)
-      void environment.api
-        .savePreferences(chosen)
-        .then(() => settings.refetch())
-        .catch(() => {});
+    setCallSelection((current) =>
+      current
+        ? {
+            ...current,
+            preferences: { ...current.preferences, input_mode: mode },
+          }
+        : current,
+    );
+    void savePreferences(mode);
   }
   async function openBilling() {
     setBillingOpenError(false);
@@ -351,6 +616,31 @@ function VoiceConversation({
     } catch {
       setBillingOpenError(true);
     }
+  }
+  function closePreferences() {
+    pickerContext.current.allowed = false;
+    setVoicePickerScope(undefined);
+    onPreferencesClose?.();
+  }
+  const controlsBlocked =
+    voice.starting ||
+    confirmingEnd ||
+    !!conflict ||
+    uncertain ||
+    checking ||
+    ending;
+  const returnToChat = confirmingEnd || uncertain || checking;
+  const endLabel = returnToChat
+    ? "Return to chat"
+    : conflict
+      ? "End existing call"
+      : hasCall
+        ? "End voice and close"
+        : "Close voice";
+  const holdDisabled = microphoneBlocked || !voice.connected || controlsBlocked;
+  function endVoice() {
+    if (returnToChat) returnToText();
+    else void requestEnd();
   }
   function holdControl(compact: boolean) {
     return (
@@ -395,12 +685,13 @@ function VoiceConversation({
             accessibilityLabel="Hold to talk"
             accessibilityHint={voice.holding ? "Release to send" : undefined}
             accessibilityState={{
-              disabled: microphoneBlocked || !voice.connected,
+              disabled: holdDisabled,
               selected: voice.holding,
             }}
-            disabled={microphoneBlocked || !voice.connected}
+            disabled={holdDisabled}
             onPressIn={() => voice.hold(true)}
             onPressOut={() => voice.hold(false)}
+            onResponderTerminate={() => voice.hold(false)}
             onAccessibilityAction={({ nativeEvent }) => {
               if (nativeEvent.actionName === "activate")
                 voice.hold(!voice.holding);
@@ -415,7 +706,7 @@ function VoiceConversation({
               compact ? styles.compactMain : styles.main,
               {
                 backgroundColor: main,
-                opacity: microphoneBlocked || !voice.connected ? 0.4 : 1,
+                opacity: holdDisabled ? 0.4 : 1,
               },
             ]}
           >
@@ -429,6 +720,8 @@ function VoiceConversation({
   const surface = colors.segmentTrack;
   const main = colors.textPrimary;
   const onMain = colors.bg;
+  const showRecovery =
+    !ending && (confirmingEnd || !!conflict || uncertain || checking);
   return (
     <>
       {helpOpen && !minimized ? (
@@ -498,7 +791,7 @@ function VoiceConversation({
                   label="Resume audio"
                   variant="secondary"
                   compact
-                  disabled={!voice.connected}
+                  disabled={!voice.connected || controlsBlocked}
                   onPress={() => {
                     setHelpOpen(false);
                     void voice.resumeAudio();
@@ -572,6 +865,7 @@ function VoiceConversation({
                     ).map((mode) => {
                       const selected = inputMode === mode;
                       const Icon = mode === "automatic" ? Phone : Radio;
+                      const disabled = isGrok || controlsBlocked;
                       return (
                         <Pressable
                           key={mode}
@@ -585,15 +879,15 @@ function VoiceConversation({
                             isGrok
                               ? "This voice source uses Hold to talk"
                               : mode === "automatic"
-                                ? "NyxBot listens and answers when you pause"
-                                : "NyxBot listens while you hold the microphone"
+                                ? `${agentName} listens and answers when you pause`
+                                : `${agentName} listens while you hold the microphone`
                           }
                           accessibilityState={{
                             selected,
                             checked: selected,
-                            disabled: voice.starting || isGrok,
+                            disabled,
                           }}
-                          disabled={voice.starting || isGrok}
+                          disabled={disabled}
                           onPress={() => changeMode(mode)}
                           style={[
                             styles.mode,
@@ -634,30 +928,90 @@ function VoiceConversation({
                   </View>
                 ) : null}
                 {active ? (
-                  <>
-                    <View ref={helpAnchor} collapsable={false}>
-                      <IconButton
-                        label="Voice help"
-                        selected={helpOpen}
-                        onPress={openHelp}
-                      >
-                        <CircleHelp size={18} color={colors.textPrimary} />
-                      </IconButton>
-                    </View>
-                  </>
+                  <View ref={helpAnchor} collapsable={false}>
+                    <IconButton
+                      label="Voice help"
+                      selected={helpOpen}
+                      onPress={openHelp}
+                    >
+                      <CircleHelp size={18} color={colors.textPrimary} />
+                    </IconButton>
+                  </View>
                 ) : null}
               </VoiceComposerHeader>
+              {preferencesOpen ? (
+                <View
+                  style={[
+                    styles.preferences,
+                    { borderColor: colors.composerBorder },
+                  ]}
+                >
+                  <View style={styles.preferencesHeader}>
+                    <Label>Voice preferences</Label>
+                    <IconButton
+                      label="Close voice preferences"
+                      onPress={closePreferences}
+                    >
+                      <X size={18} color={colors.textPrimary} />
+                    </IconButton>
+                  </View>
+                  {!currentOption ? (
+                    <Label muted>Voice source unavailable</Label>
+                  ) : voice.connected && currentVoice !== nextVoice ? (
+                    <Label
+                      muted
+                    >{`Current call: ${voiceLabel ?? "Default voice"}`}</Label>
+                  ) : null}
+                  {option ? (
+                    <SettingsRow
+                      label="Voice"
+                      value={
+                        option.voice.voices.find((row) => row.id === nextVoice)
+                          ?.label ??
+                        (missingVoice ? "Unavailable" : "Choose a voice")
+                      }
+                      disabled={!canChangePreferences}
+                      accessibilityHint="Choose the voice for your next call"
+                      accessibilityState={{
+                        expanded: voicePickerScope === selectionScope,
+                      }}
+                      onPress={() => {
+                        if (!canChangePreferences || !focused) return;
+                        // A held accessibility PTT toggle must not keep capturing
+                        // behind a modal that hides its release control.
+                        if (voice.holding) voice.hold(false);
+                        setVoicePickerScope(selectionScope);
+                      }}
+                    />
+                  ) : null}
+                  <Label muted style={styles.footnote}>
+                    Changes apply to your next call.
+                  </Label>
+                  {savingPreferences ? (
+                    <ActivityIndicator
+                      accessibilityLabel="Saving voice preferences"
+                      color={colors.primary}
+                    />
+                  ) : null}
+                  {preferencesError ? (
+                    <Notice
+                      message="Voice preferences could not be saved. Try again."
+                      tone="error"
+                    />
+                  ) : null}
+                </View>
+              ) : null}
               <View style={styles.waveRow}>
                 <DictationWaveform subscribe={levels.subscribeLevel} />
               </View>
               {!active ||
               captions.length > 0 ||
+              showRecovery ||
               voice.error ||
               voice.recovery ||
-              voice.conflict ||
               billingOpenError ||
               !isConnected ||
-              session?.idle_warning ? (
+              (session?.idle_warning && !terminal && !confirmingEnd) ? (
                 <View>
                   <View style={styles.transcriptFrame}>
                     <ScrollView
@@ -681,6 +1035,39 @@ function VoiceConversation({
                         });
                       }}
                     >
+                      {showRecovery ? (
+                        <View style={styles.recovery}>
+                          <Label muted>
+                            {confirmingEnd
+                              ? "The previous call is finishing. You can continue with text."
+                              : conflict
+                                ? voice.conflictThread &&
+                                  voice.conflictThread !== thread
+                                  ? "A voice call is open in another chat. You can continue with text."
+                                  : "A voice call is already open. You can continue with text."
+                                : "Check the previous call before starting voice again. You can continue with text."}
+                          </Label>
+                          <View style={styles.recoveryActions}>
+                            <ActionButton
+                              label="Check call status"
+                              variant="secondary"
+                              compact
+                              loading={checking}
+                              disabled={ending}
+                              onPress={() => void checkStatus()}
+                            />
+                            {!returnToChat ? (
+                              <ActionButton
+                                label="Return to chat"
+                                variant="secondary"
+                                compact
+                                disabled={ending}
+                                onPress={returnToText}
+                              />
+                            ) : null}
+                          </View>
+                        </View>
+                      ) : null}
                       {voice.recovery ? (
                         <Card>
                           <Notice
@@ -692,11 +1079,13 @@ function VoiceConversation({
                             variant="secondary"
                             onPress={openBilling}
                           />
-                          <ActionButton
-                            label="Continue with text"
-                            variant="secondary"
-                            onPress={close}
-                          />
+                          {!hasCall ? (
+                            <ActionButton
+                              label="Continue with text"
+                              variant="secondary"
+                              onPress={closeOnce}
+                            />
+                          ) : null}
                           <Pressable
                             accessibilityRole="button"
                             accessibilityLabel={
@@ -734,21 +1123,7 @@ function VoiceConversation({
                       {!isConnected ? (
                         <Notice message="You’re offline. Reconnect to start a voice call." />
                       ) : null}
-                      {voice.conflict ? (
-                        <Card>
-                          <Label>
-                            A voice call is already open. End it before starting
-                            another call here.
-                          </Label>
-                          <ActionButton
-                            label="End existing call"
-                            variant="danger"
-                            loading={voice.endingConflict}
-                            onPress={() => void voice.endConflict()}
-                          />
-                        </Card>
-                      ) : null}
-                      {session?.idle_warning ? (
+                      {session?.idle_warning && !terminal && !confirmingEnd ? (
                         <Notice
                           message={
                             inputMode === "automatic"
@@ -757,7 +1132,7 @@ function VoiceConversation({
                           }
                         />
                       ) : null}
-                      {!active ? (
+                      {!active && !showRecovery ? (
                         <>
                           {options.isPending || settings.isPending ? (
                             <ActivityIndicator
@@ -787,7 +1162,9 @@ function VoiceConversation({
                               />
                             </>
                           ) : null}
-                          {options.isSuccess && !choices.length ? (
+                          {selectionReady && saved && !option ? (
+                            <Notice message="Your saved voice source is no longer available for this chat. Reconnect it or update your voice source on Web before starting a call." />
+                          ) : options.isSuccess && !choices.length ? (
                             <Notice message="No voice sources are available for this chat. Voice needs an eligible connected provider or platform connection." />
                           ) : null}
                           {option && !option.available ? (
@@ -798,9 +1175,14 @@ function VoiceConversation({
                               }
                             />
                           ) : null}
+                          {missingVoice ? (
+                            <Notice
+                              message={`Your saved voice (${nextVoice}) is no longer available. Choose a voice in Voice preferences before starting a call.`}
+                            />
+                          ) : null}
                         </>
                       ) : null}
-                      {!active && !captions.length ? (
+                      {!active && !showRecovery && !captions.length ? (
                         <View style={styles.idle}>
                           <Text
                             style={[
@@ -842,32 +1224,31 @@ function VoiceConversation({
                   </View>
                 </View>
               ) : null}
+              {/* Agent tasks and their approvals are receipts in the chat above. */}
               <VoiceComposerControls>
                 <View style={styles.sideControls}>
                   {active ? (
-                    <>
-                      <IconButton
-                        label={
-                          voice.speakerMuted ? "Enable speaker" : "Mute speaker"
-                        }
-                        selected={voice.speakerMuted}
-                        disabled={voice.starting}
-                        onPress={() => voice.muteSpeaker(!voice.speakerMuted)}
-                      >
-                        {voice.speakerMuted ? (
-                          <VolumeX size={18} color={colors.textPrimary} />
-                        ) : (
-                          <Volume2 size={18} color={colors.textPrimary} />
-                        )}
-                      </IconButton>
-                    </>
+                    <IconButton
+                      label={
+                        voice.speakerMuted ? "Enable speaker" : "Mute speaker"
+                      }
+                      selected={voice.speakerMuted}
+                      disabled={controlsBlocked}
+                      onPress={() => voice.muteSpeaker(!voice.speakerMuted)}
+                    >
+                      {voice.speakerMuted ? (
+                        <VolumeX size={18} color={colors.textPrimary} />
+                      ) : (
+                        <Volume2 size={18} color={colors.textPrimary} />
+                      )}
+                    </IconButton>
                   ) : null}
                   {active && inputMode === "push_to_talk" ? (
                     <IconButton
                       large
                       label={muted ? "Unmute microphone" : "Mute microphone"}
                       selected={muted}
-                      disabled={voice.starting}
+                      disabled={controlsBlocked}
                       onPress={() => void voice.mute(!muted)}
                     >
                       {/* Always the mute symbol, so it never reads as a second mic. */}
@@ -878,17 +1259,34 @@ function VoiceConversation({
                 {!active ? (
                   <View style={styles.holdColumn}>
                     <MainButton
-                      label={needsRetry ? "Try again" : "Connecting voice"}
+                      label={
+                        needsRetry
+                          ? "Try again"
+                          : status === "Connecting…"
+                            ? "Connecting voice"
+                            : status
+                      }
                       fill={main}
                       disabled={!canStart || !needsRetry}
                       onPress={() => void start()}
                     >
-                      <Mic size={26} color={onMain} />
+                      {ending || checking ? (
+                        <ActivityIndicator color={onMain} />
+                      ) : (
+                        <Mic size={26} color={onMain} />
+                      )}
                     </MainButton>
+                    {/* The hint never claims a connection the status rules out. */}
                     <Text
                       style={[styles.holdHint, { color: colors.textSecondary }]}
                     >
-                      {needsRetry ? "Try again" : "Connecting…"}
+                      {ending
+                        ? "Ending…"
+                        : needsRetry
+                          ? "Try again"
+                          : status === "Connecting…"
+                            ? "Connecting…"
+                            : ""}
                     </Text>
                   </View>
                 ) : inputMode === "push_to_talk" ? (
@@ -912,7 +1310,7 @@ function VoiceConversation({
                     <MainButton
                       label={muted ? "Unmute microphone" : "Mute microphone"}
                       fill={muted ? colors.danger : main}
-                      disabled={voice.starting}
+                      disabled={controlsBlocked}
                       onPress={() => void voice.mute(!muted)}
                     >
                       {muted ? (
@@ -938,15 +1336,20 @@ function VoiceConversation({
                 <View style={styles.endControl}>
                   <IconButton
                     large
-                    label={active ? "End voice and close" : "Close voice"}
-                    onPress={close}
+                    label={endLabel}
+                    disabled={ending}
+                    onPress={endVoice}
                   >
-                    {active && inputMode === "automatic" ? (
+                    {hasCall && !returnToChat && inputMode === "automatic" ? (
                       <PhoneOff size={20} color={colors.danger} />
                     ) : (
                       <X
                         size={20}
-                        color={active ? colors.danger : colors.textPrimary}
+                        color={
+                          hasCall && !returnToChat
+                            ? colors.danger
+                            : colors.textPrimary
+                        }
                       />
                     )}
                   </IconButton>
@@ -961,7 +1364,7 @@ function VoiceConversation({
               liveText={captions.map((caption) => caption.text).join(" ")}
               subscribeLevel={levels.subscribeLevel}
               instruction={
-                inputMode === "push_to_talk"
+                inputMode === "push_to_talk" && active
                   ? voice.holding
                     ? "Release to send"
                     : "Hold to talk"
@@ -973,16 +1376,61 @@ function VoiceConversation({
                   : undefined
               }
               onExpand={onExpand}
-              onClose={close}
+              onClose={endVoice}
             />
           )}
         </VoiceComposerShell>
       </Animated.View>
+      {preferencesOpen &&
+      !minimized &&
+      focused &&
+      option &&
+      voicePickerScope === selectionScope ? (
+        <WorkspaceSelectionSheet
+          key={selectionScope}
+          scopeKey={selectionScope}
+          label="Voice"
+          title="Choose voice"
+          description="Changes apply to your next call."
+          options={option.voice.voices.map((row) => ({
+            value: row.id,
+            label: row.label,
+          }))}
+          value={nextVoice ? [nextVoice] : []}
+          disabled={!canChangePreferences}
+          onChange={(values) => {
+            if (
+              !mounted.current ||
+              !pickerContext.current.allowed ||
+              pickerContext.current.scope !== selectionScope ||
+              values.length !== 1
+            )
+              return;
+            void savePreferences(nextMode, values[0]);
+          }}
+          onClose={() => {
+            pickerContext.current.allowed = false;
+            setVoicePickerScope(undefined);
+          }}
+        />
+      ) : null}
     </>
   );
 }
 
 const styles = StyleSheet.create({
+  recovery: { gap: 10 },
+  recoveryActions: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  preferences: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingTop: 8,
+    gap: 6,
+  },
+  preferencesHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
   center: { textAlign: "center" },
   frame: { gap: 10, paddingHorizontal: 12, paddingTop: 12, paddingBottom: 10 },
   waveRow: { height: 22, flexDirection: "row" },

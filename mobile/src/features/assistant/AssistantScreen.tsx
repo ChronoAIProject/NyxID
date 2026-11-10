@@ -57,7 +57,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { useNavigation } from "@react-navigation/native";
+import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { useQuery } from "@tanstack/react-query";
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import * as WebBrowser from "expo-web-browser";
@@ -129,6 +129,14 @@ import { getFrontendUrl, firstPartyFrontendUrls } from "../../lib/env";
 import { useTranscriptScrollFollow } from "./useTranscriptScrollFollow";
 import { AssistantVoiceConversation } from "./voice/AssistantVoiceConversation";
 import {
+  mergeVoiceTranscript,
+  retainVoiceSnapshot,
+  voiceTranscriptLabel,
+  withoutLiveUserSpeech,
+  type VoiceTranscriptMessage,
+} from "./voice/voiceTranscript";
+import type { VoiceSnapshot } from "./voice/voiceContracts";
+import {
   NATIVE_VOICE_ENTRY_ENABLED,
   showVoiceComposer,
 } from "./voice/voiceSelection";
@@ -137,10 +145,7 @@ import { assistantUploadsApi } from "../../lib/api/assistantUploadsApi";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { safeAssistantLinkUrl } from "./assistantMarkdown";
 import { retryInput } from "./assistantState";
-import type {
-  AssistantAcknowledgement,
-  AssistantMessage,
-} from "./assistantTypes";
+import type { AssistantAcknowledgement } from "./assistantTypes";
 
 type AssistantScreenProps = {
   contextual?: boolean;
@@ -154,6 +159,7 @@ export function AssistantScreen({
   contextual = false,
 }: AssistantScreenProps) {
   const navigation = useNavigation<WorkspaceNavigationProp>();
+  const focused = useIsFocused();
   const linkHost = useContext(AssistantLinkContext);
   const { colors, mode, bubblePalette } = useTheme();
   const bubble = chatBubbleColors(mode, bubblePalette);
@@ -204,11 +210,17 @@ export function AssistantScreen({
       LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setVoiceMinimized(minimized);
   }
+  const [voicePreferencesOpen, setVoicePreferencesOpen] = useState(false);
+  const [voiceTranscript, setVoiceTranscript] = useState<{
+    thread: string;
+    epoch: number;
+    snapshot: VoiceSnapshot;
+  }>();
   const [openingVoice, setOpeningVoice] = useState(false);
   const voiceOpening = useRef<AbortController | undefined>(undefined);
   const composerPress = useRef(createAssistantComposerPressGuard());
   const [stopProtected, setStopProtected] = useState(false);
-  const transcript = useRef<FlatList<AssistantMessage>>(null);
+  const transcript = useRef<FlatList<VoiceTranscriptMessage>>(null);
   const transcriptViewport = useRef<View>(null);
   const transcriptOffset = useRef(0);
   useEffect(() => {
@@ -220,6 +232,7 @@ export function AssistantScreen({
     assistant.conversationId,
     {
       reducedMotion,
+      focused,
       loading: assistant.loading,
       historyError: !!assistant.error,
     },
@@ -295,15 +308,69 @@ export function AssistantScreen({
       (message) =>
         message.turn_id === assistant.live?.turnId && message.role === "user",
     );
-  const messages = assistant.history?.messages ?? [];
+  const historyMessages = assistant.history?.messages;
+  const voiceEpoch = getAuthEpoch();
+  const voiceSurfaceToken = useMemo(() => ({}), [voiceThread, voiceEpoch]);
+  const currentVoiceSurface = useRef(voiceSurfaceToken);
+  currentVoiceSurface.current = voiceSurfaceToken;
+  const voiceSnapshot =
+    voiceTranscript &&
+    voiceTranscript.thread === assistant.conversationId &&
+    voiceTranscript.epoch === voiceEpoch
+      ? voiceTranscript.snapshot
+      : undefined;
+  // While the voice composer is open it alone shows the user's unsent words;
+  // once it closes, the chat keeps them as a partial transcript.
+  const voiceComposerOpen =
+    !!voiceThread && voiceThread === assistant.conversationId;
+  const messages = useMemo(
+    () =>
+      mergeVoiceTranscript(
+        historyMessages ?? [],
+        voiceComposerOpen
+          ? withoutLiveUserSpeech(voiceSnapshot)
+          : voiceSnapshot,
+      ),
+    [historyMessages, voiceSnapshot, voiceComposerOpen],
+  );
+  const voiceHistory = useRef(historyMessages);
+  voiceHistory.current = historyMessages;
+  const receiveVoiceSnapshot = useCallback(
+    (snapshot: VoiceSnapshot | undefined) => {
+      // Unmounting the controls must not erase captions before history catches up.
+      if (
+        !snapshot ||
+        !voiceThread ||
+        getAuthEpoch() !== voiceEpoch ||
+        currentVoiceSurface.current !== voiceSurfaceToken
+      )
+        return;
+      if (voiceContext.current.conversationId !== voiceThread) return;
+      setVoiceTranscript((previous) => ({
+        thread: voiceThread,
+        epoch: voiceEpoch,
+        snapshot: retainVoiceSnapshot(
+          previous &&
+            previous.thread === voiceThread &&
+            previous.epoch === voiceEpoch
+            ? previous.snapshot
+            : undefined,
+          snapshot,
+          voiceHistory.current ?? [],
+        ),
+      }));
+    },
+    [voiceThread, voiceEpoch, voiceSurfaceToken],
+  );
   const stableTranscript =
     messages.length > 0 &&
     !running &&
     !assistant.inputText &&
     !assistant.inputAttachments.length;
-  const hasHistoryGap = messages.some(
+  const hasHistoryGap = (historyMessages ?? []).some(
     (item, index) =>
-      index > 0 && item.seq > (messages[index - 1]?.seq ?? item.seq) + 1,
+      index > 0 &&
+      item.seq > (historyMessages?.[index - 1]?.seq ?? item.seq) + 1,
   );
   const canCompose =
     !running &&
@@ -438,6 +505,16 @@ export function AssistantScreen({
     if (voiceThread && voiceThread !== assistant.conversationId)
       setVoiceThread(undefined);
   }, [voiceThread, assistant.conversationId]);
+  useEffect(() => {
+    setVoicePreferencesOpen(false);
+    setVoiceTranscript((previous) =>
+      previous &&
+      previous.thread === assistant.conversationId &&
+      previous.epoch === voiceEpoch
+        ? previous
+        : undefined,
+    );
+  }, [assistant.conversationId, voiceEpoch]);
 
   async function openVoice() {
     if (!canCompose || !voiceAvailable || voiceOpening.current) return;
@@ -630,8 +707,31 @@ export function AssistantScreen({
     );
   }
 
-  const headerHandlers = useRef({ newChat, openDetails });
-  headerHandlers.current = { newChat, openDetails };
+  function openChatOptions() {
+    if (!voiceThread || voiceThread !== assistant.conversationId)
+      return openDetails();
+    const current = () =>
+      getAuthEpoch() === voiceEpoch &&
+      currentVoiceSurface.current === voiceSurfaceToken &&
+      voiceContext.current.conversationId === voiceThread;
+    Alert.alert("Chat options", undefined, [
+      {
+        text: "Voice preferences",
+        onPress: () => {
+          if (current()) setVoicePreferencesOpen(true);
+        },
+      },
+      {
+        text: "Chat details",
+        onPress: () => {
+          if (current()) openDetails();
+        },
+      },
+      { text: "Cancel", style: "cancel" },
+    ]);
+  }
+  const headerHandlers = useRef({ newChat, openDetails: openChatOptions });
+  headerHandlers.current = { newChat, openDetails: openChatOptions };
   const headerOptions = useMemo<NativeStackNavigationOptions>(() => {
     const actions = () => (
       <WorkspaceHeaderVisibility>
@@ -736,10 +836,14 @@ export function AssistantScreen({
     item,
     index,
   }: {
-    item: AssistantMessage;
+    item: VoiceTranscriptMessage;
     index: number;
   }) {
     const isUser = item.role === "user";
+    const voiceLabel = voiceTranscriptLabel(
+      item,
+      voiceThread ? voiceSnapshot : undefined,
+    );
     const resetAt = Date.parse(conversation?.context_reset_at ?? "");
     const resetHere =
       Number.isFinite(resetAt) &&
@@ -777,7 +881,10 @@ export function AssistantScreen({
     // Notes about the transcript itself, never inside anyone's bubble.
     const notes = (
       <>
-        {index > 0 && item.seq > (messages[index - 1]?.seq ?? item.seq) + 1 ? (
+        {index > 0 &&
+        !item.voiceTransient &&
+        !messages[index - 1]?.voiceTransient &&
+        item.seq > (messages[index - 1]?.seq ?? item.seq) + 1 ? (
           <Notice message="Messages between these pages haven't loaded yet. Load missing messages to restore them." />
         ) : null}
         {resetHere ? (
@@ -807,12 +914,12 @@ export function AssistantScreen({
           </Label>
         ) : null}
         {isUser ? (
-          item.text ? (
+          item.text || voiceLabel ? (
             <Text
               selectable
               style={[styles.messageText, { color: bubble.foreground }]}
             >
-              {item.text}
+              {item.text || "Transcribing…"}
             </Text>
           ) : null
         ) : (
@@ -895,6 +1002,17 @@ export function AssistantScreen({
             }
           />
         )}
+        {voiceLabel && item.text ? (
+          <Label
+            muted
+            style={[
+              styles.messageLabel,
+              isUser && { color: bubble.foreground, opacity: 0.7 },
+            ]}
+          >
+            {voiceLabel}
+          </Label>
+        ) : null}
         {item.attachments
           .filter(
             (attachment) =>
@@ -951,26 +1069,27 @@ export function AssistantScreen({
     );
     // Your own messages: the bubble holds only what you sent; the time and
     // copy control sit under it in the page's quiet colour.
-    const footer = (
-      <AssistantMessageFooter
-        key={`${assistant.conversationId}:${item.id}`}
-        text={isUser ? item.text : sanitizeAssistantMessageContent(item.text)}
-        timestamp={item.created_at}
-        user={isUser}
-        report={
-          item.role === "assistant" &&
-          item.status === "completed" &&
-          assistant.conversationId
-            ? {
-                kind: "conversation",
-                id: assistant.conversationId,
-                messageId: item.id,
-                reported: isReported(item.feedback),
-              }
-            : undefined
-        }
-      />
-    );
+    const footer =
+      !item.voiceTransient && !voiceLabel ? (
+        <AssistantMessageFooter
+          key={`${assistant.conversationId}:${item.id}`}
+          text={isUser ? item.text : sanitizeAssistantMessageContent(item.text)}
+          timestamp={item.created_at}
+          user={isUser}
+          report={
+            item.role === "assistant" &&
+            item.status === "completed" &&
+            assistant.conversationId
+              ? {
+                  kind: "conversation",
+                  id: assistant.conversationId,
+                  messageId: item.id,
+                  reported: isReported(item.feedback),
+                }
+              : undefined
+          }
+        />
+      ) : null;
     return (
       <ChatMessageTurn user={isUser} notes={notes} footer={footer}>
         {body}
@@ -1201,7 +1320,7 @@ export function AssistantScreen({
                   icon={false}
                   accessibilityLabel="Loading messages"
                 />
-              ) : !assistant.sending ? (
+              ) : !assistant.sending && !voiceThread ? (
                 <View style={styles.welcome}>
                   <Text
                     style={[styles.welcomeTitle, { color: colors.textPrimary }]}
@@ -1429,7 +1548,18 @@ export function AssistantScreen({
             agentName={agentName}
             minimized={voiceMinimized}
             onExpand={() => changeVoiceSize(false)}
-            onClose={() => setVoiceThread(undefined)}
+            onClose={() => {
+              if (
+                getAuthEpoch() !== voiceEpoch ||
+                currentVoiceSurface.current !== voiceSurfaceToken
+              )
+                return;
+              setVoiceThread(undefined);
+              setVoicePreferencesOpen(false);
+            }}
+            onSnapshot={receiveVoiceSnapshot}
+            preferencesOpen={voicePreferencesOpen}
+            onPreferencesClose={() => setVoicePreferencesOpen(false)}
             onUpdate={() => void assistant.recover()}
           />
         ) : (

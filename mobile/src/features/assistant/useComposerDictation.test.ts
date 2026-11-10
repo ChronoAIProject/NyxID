@@ -671,6 +671,10 @@ test("ordinary editable dictation appends through the latest draft callback", as
 function privateAudio(f: ReturnType<typeof setup>) {
   f.h.mock("react-native", { StyleSheet: { create: (v: unknown) => v } });
   f.h.mock("react-native-webview", { WebView: "WebView" });
+  // These leases cover the WebView engine; native WebRTC is unavailable here.
+  f.h.mock("./createNativeOpenAIMedia", {
+    createNativeOpenAIMedia: () => undefined,
+  });
   const { NativeVoiceMedia } = f.h.load(
     fileURLToPath(new URL("./voice/VoiceMediaBridge.tsx", import.meta.url)),
   ) as typeof import("./voice/VoiceMediaBridge");

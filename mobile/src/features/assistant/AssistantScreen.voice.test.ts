@@ -11,8 +11,11 @@ import type { AssistantUploadedMessage } from "./AssistantUploadSession";
 import * as voiceSelection from "./voice/voiceSelection";
 import {
   acknowledgementSchema,
+  messageSchema,
   type AssistantAcknowledgement,
+  type AssistantMessage,
 } from "./assistantTypes";
+import { voiceSnapshotSchema } from "./voice/voiceContracts";
 
 // Exercise the screen's real handlers and render conditions. Native UI, network,
 // and existing assistant/upload hooks are boundaries, not reimplementations of
@@ -82,9 +85,11 @@ function setup(
   const headerModule = {};
   const draft = deferred<string>();
   const events: unknown[][] = [];
+  const alerts: { text: string; onPress?: () => void }[][] = [];
   const drafts: { agentId: string; signal: AbortSignal }[] = [];
   const featureQueries: { enabled: boolean }[] = [];
   let epoch = 7;
+  let transcriptFollowing = true;
   let features: string[] | undefined = ["assistant:voice"];
   const agent = {
     id: "agent-a",
@@ -106,7 +111,7 @@ function setup(
         last_message_at: "2026-10-28T01:00:00Z",
         message_count: 12,
       } as Record<string, any>,
-      messages: [],
+      messages: [] as AssistantMessage[],
       waiting: [],
       acknowledgements: [] as AssistantAcknowledgement[],
       approvals: [],
@@ -253,12 +258,19 @@ function setup(
         ].map((name) => [name, name]),
       ),
       Platform: { OS: platform },
-      Alert: { alert: () => {} },
+      Alert: {
+        alert: (
+          _title: string,
+          _message: unknown,
+          actions: (typeof alerts)[number],
+        ) => alerts.push(actions),
+      },
       LayoutAnimation: { configureNext() {}, Presets: { easeInEaseOut: {} } },
       Keyboard: { dismiss: () => events.push(["dismissKeyboard"]) },
       StyleSheet: { create: (value: unknown) => value },
     },
     "@react-navigation/native": {
+      useIsFocused: () => true,
       useNavigation: () => ({
         setParams: (params: Record<string, unknown>) => {
           events.push(["params", { ...params }]);
@@ -358,7 +370,7 @@ function setup(
     },
     "./useTranscriptScrollFollow": {
       useTranscriptScrollFollow: () => ({
-        following: true,
+        following: transcriptFollowing,
         listProps: {
           onLayout: (event: any) =>
             events.push(["follow-layout", event.nativeEvent.layout.height]),
@@ -497,6 +509,7 @@ function setup(
     guidance,
     props,
     events,
+    alerts,
     drafts,
     featureQueries,
     draft,
@@ -536,12 +549,230 @@ function setup(
     setEpoch: (value: number) => {
       epoch = value;
     },
+    pauseTranscript: () => {
+      transcriptFollowing = false;
+      harness.render();
+    },
     setFeatures: (value: string[] | undefined) => {
       features = value;
       harness.render();
     },
   };
 }
+
+function liveVoice(text: string, sealed = false) {
+  return voiceSnapshotSchema.parse({
+    type: "snapshot",
+    session: {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      created_at: "2026-11-09T01:00:00Z",
+      closed_at: null,
+      generation: 1,
+      state: "active",
+      muted: false,
+      input_muted: false,
+      end_requested: false,
+      control_revision: 1,
+      observed_seconds: 2,
+      reserved_until: 30,
+      final_usage_confirmed: false,
+      end_reason: null,
+      idle_warning: false,
+    },
+    captions: [
+      { id: "live-user", speaker: "user", text, sealed, complete: sealed },
+    ],
+    tasks: [],
+  });
+}
+
+test("unsent voice words stay in the voice composer and sealed history joins the chat once", async () => {
+  const x = setup(A);
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  const list = () => x.all().find((node) => node.type === "FlatList")!;
+  const originalKey = list().key;
+  // The open voice composer is the only place that shows unsent words.
+  x.voice()!.props.onSnapshot(liveVoice("上午"));
+  x.harness.flush();
+  assert.equal(list().props.data.length, 0);
+  x.voice()!.props.onSnapshot(liveVoice("上午写方案"));
+  x.harness.flush();
+  assert.equal(list().props.data.length, 0);
+  const render = () =>
+    elements(
+      expand(list().props.renderItem({ item: list().props.data[0], index: 0 })),
+    );
+  const persisted = messageSchema.parse({
+    id: "live-user",
+    seq: 1,
+    turn_id: "turn",
+    role: "user",
+    text: "上午写方案。",
+    status: "completed",
+    error_code: null,
+    created_at: "2026-11-09T01:00:00Z",
+    via: "voice",
+    voice: {
+      session_id: liveVoice("").session.id,
+      segment_id: "live-user",
+      sealed: true,
+      complete: true,
+    },
+  });
+  x.assistant.history!.messages = [persisted];
+  x.harness.render();
+  assert.equal(list().props.data.length, 1);
+  assert.equal(list().props.data[0].text, persisted.text);
+  assert.ok(render().some((node) => node.type === "AssistantMessageFooter"));
+  x.voice()!.props.onClose();
+  x.harness.flush();
+  assert.equal(list().key, originalKey);
+  assert.equal(list().props.data.length, 1);
+  x.harness.unmount();
+});
+
+test("unsent words return to the chat as a partial transcript once voice closes", async () => {
+  const x = setup(A);
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  const transcribing = () =>
+    elements(
+      expand(
+        x.all().find((node) => node.type === "FlatList")!.props
+          .ListFooterComponent,
+      ),
+    ).some(
+      (node) =>
+        node.props.accessibilityLabel === "Your speech is being transcribed",
+    );
+  x.voice()!.props.onSnapshot(liveVoice("正在说话"));
+  x.harness.flush();
+  assert.equal(transcribing(), false);
+  assert.equal(
+    x.all().find((node) => node.type === "FlatList")!.props.data.length,
+    0,
+  );
+  x.voice()!.props.onClose();
+  x.harness.flush();
+  assert.equal(transcribing(), false);
+  const list = x.all().find((node) => node.type === "FlatList")!;
+  assert.equal(list.props.data[0].text, "正在说话");
+  const retained = elements(
+    expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
+  );
+  assert.ok(
+    retained.some((node) => node.props.children.includes("Partial transcript")),
+  );
+  assert.equal(
+    retained.some((node) => node.props.children.includes("Transcribing…")),
+    false,
+  );
+  x.harness.unmount();
+});
+
+test("old voice callbacks cannot populate a different chat or account", async () => {
+  for (const accountChange of [false, true]) {
+    const x = setup(A);
+    x.button("Open voice call")!.props.onPress();
+    await x.harness.settle();
+    const stale = x.voice()!.props;
+    if (accountChange) x.setEpoch(8);
+    else x.assistant.openConversation(B);
+    x.harness.render();
+    stale.onSnapshot(liveVoice("old account words"));
+    x.harness.flush();
+    assert.equal(
+      x.all().find((node) => node.type === "FlatList")!.props.data.length,
+      0,
+    );
+    x.harness.unmount();
+  }
+});
+
+test("voice preferences are reached through header More and ordinary chat still opens Details directly", async () => {
+  const x = setup(A);
+  x.options();
+  assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  x.options();
+  assert.deepEqual(
+    Array.from(x.alerts.at(-1)!, (action) => action.text),
+    ["Voice preferences", "Chat details", "Cancel"],
+  );
+  x.alerts.at(-1)![0]!.onPress!();
+  x.harness.flush();
+  assert.equal(x.voice()!.props.preferencesOpen, true);
+  x.voice()!.props.onPreferencesClose();
+  x.harness.flush();
+  assert.equal(x.voice()!.props.preferencesOpen, false);
+  x.harness.unmount();
+});
+
+test("closed voice surface callbacks and native menu actions cannot affect a newly opened call", async () => {
+  const x = setup(A);
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  const stale = x.voice()!.props;
+  x.options();
+  const oldMenu = x.alerts.at(-1)!;
+  stale.onClose();
+  x.harness.flush();
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  stale.onSnapshot(liveVoice("old call"));
+  stale.onClose();
+  oldMenu[0]!.onPress!();
+  oldMenu[1]!.onPress!();
+  x.harness.flush();
+  assert.ok(x.voice());
+  assert.equal(x.voice()!.props.preferencesOpen, false);
+  assert.equal(
+    x.all().find((node) => node.type === "FlatList")!.props.data.length,
+    0,
+  );
+  assert.equal(
+    x.events.some((event) => event[0] === "push"),
+    false,
+  );
+  x.harness.unmount();
+});
+
+test("reading voice history retains native row anchoring when older messages are prepended", async () => {
+  const x = setup(A);
+  const row = (id: string, seq: number) =>
+    messageSchema.parse({
+      id,
+      seq,
+      turn_id: "turn",
+      role: "user",
+      text: id,
+      status: "completed",
+      error_code: null,
+      created_at: "2026-11-09T01:00:00Z",
+    });
+  const visible = row("visible", 20);
+  x.assistant.history!.messages = [visible];
+  x.harness.render();
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  x.pauseTranscript();
+  const list = () => x.all().find((node) => node.type === "FlatList")!;
+  assert.equal(
+    list().props.maintainVisibleContentPosition?.minIndexForVisible,
+    0,
+  );
+  x.assistant.history!.messages = [row("older", 19), visible];
+  x.harness.render();
+  assert.equal(
+    list().props.maintainVisibleContentPosition?.minIndexForVisible,
+    0,
+  );
+  assert.equal(list().props.data[1], visible);
+  assert.ok(x.voice());
+  x.harness.unmount();
+});
 
 test("eligible native composers expose distinct attachments, dictation and voice actions", () => {
   for (const id of [undefined, A]) {
