@@ -144,11 +144,15 @@ platform source, without attributing the generic upstream error to a particular
 account policy or claiming it affects every OpenAI account.
 
 The current official [Live create reference](https://developers.openai.com/api/reference/resources/live/methods/create)
-lists31 built-in voices, omits `aube` and spells `shida` rather than the historical
-seed's `shitan`. The corrected default list follows that contract. Startup
-backfill repairs only an exact historical voice array on a non-admin-modified
-OpenAI catalog row; the atomic predicate and voices-only update preserve admin
-edits, custom arrays, models, delegation, pricing and other metadata. This code
+lists 31 built-in voices, omits `aube` and spells `shida` rather than the historical
+seed's `shitan`. The subsequent compatibility review requires preserving all 32
+historically seeded IDs, labels and order, with `shida` appended as choice 33.
+Startup backfill only appends new choices to an exact historical voice array on
+a non-admin-modified OpenAI catalog row; it never removes a saved voice. The
+atomic predicate and voices-only update preserve admin edits, custom arrays,
+models, delegation, pricing and other metadata. Keeping legacy IDs selectable
+does not establish provider support or fix the observed upstream Aube refusal;
+the person can explicitly choose Marin or another available voice. This code
 requires backend deployment; the production catalog has not been edited here.
 
 Native calls and Voice Settings now retain the exact saved service, connection,
@@ -848,3 +852,71 @@ the broader route/layout gaps recorded above remain outside these checks.
 
 All source changes in this increment are mobile-only. The six preexisting
 backend/chat-document diffs remain unchanged and are excluded from the commit.
+
+## 2026-11-10 — additive catalog and stable voice picker/reopen state
+
+The backend keeps the original 32 OpenAI voice IDs, labels and order and appends
+`shida`. The exact-legacy startup update uses an append, preserving admin/custom
+choices and sibling metadata. Saved voice IDs continue to pass NyxID selection;
+provider acceptance of a historical voice is a separate question. No NyxAgent
+model, execution policy, provider adapter, pricing or server call-slot rule changes.
+
+The chat voice picker uses an opaque `overFullScreen` modal and keeps its opening
+choices and selected voice across same-source query refreshes. A transient
+refetch error, offline state or pending save disables Apply while preserving
+the modal, draft and controls. Account, chat and source changes still invalidate
+callbacks, and Apply rechecks the current available choices. Other selection
+sheets retain their existing presentation and disabled-dismiss behavior.
+
+Backgrounding still silences and ends local voice but does not manufacture an
+error notification. On re-entry, active or unknown retained call metadata now
+receives the existing bounded foreground status checks, including exact terminal
+readback. The app clears blockers only on verified terminal/empty state; checking
+does not create, reconnect or end a provider call. A real active call in another
+chat remains protected by the existing one-live-call-per-person server fence.
+Automatic status checks preserve genuine provider and billing failures, while
+refreshing status diagnostics and stale 409 hints. An actionable billing failure
+is not auto-dismissed just because the old call was confirmed finished.
+
+Focused regression checks reproduced the pre-fix failures for changing picker
+content/presentation, retained active/unknown state not being refreshed, transient
+disable/refetch dismissals, hidden provider diagnostics and overwritten/dismissed
+billing recovery. Automated verification is recorded in the implementation
+report: the final mobile suite passed 2,193 tests, with no failures, skips or
+cancellations; package typecheck, formatting of the eight changed TypeScript
+files, Rust formatting and diff whitespace checks passed. The independent
+Opus 5.5 rereview passed with 322 focused tests. The Rust compatibility tests
+have been updated but were not compiled or run after these edits; fresh CI is
+still required.
+
+Voice re-entry now waits for the same chat's acknowledged closing call and
+shows “Disconnecting previous call…” then “Starting new call…” for exactly one
+new attempt after terminal/empty-slot verification. A separate explicit “End
+previous call and start here” action may replace a confirmed active call.
+The queued intent binds the old session and the current account/chat/source,
+voice and mode, expires after 30 seconds, and owns read-only checks every two
+seconds within that deadline. Scope/focus/network loss, backgrounding, another
+discovered call and real errors cancel it. A terminal snapshot with a reason
+other than `user_ended` leaves an explanatory notice and requires an explicit
+new start. A start refused by the hook's final guards also leaves a retry
+notice. Merely foregrounding the app never starts the microphone.
+
+Actual simulator checks on the frozen source used the full Debug App with its
+existing native WebRTC framework, loaded from this worktree's Metro server, on
+iPad Pro 13-inch M5 / iOS 26.2 in portrait. A real Marin/Hands-free call reached
+Listening. The opaque picker stayed full-screen while searching Cedar and
+changing the draft; its title and Cancel coordinates stayed identical. Cancel
+kept the saved Marin preference, and the call stayed live underneath. Home and
+relaunch returned to text with a real ended-call receipt and no manufactured
+inactive-app error. An explicit new call then reached Listening with a reset
+clock, and explicit End returned to the text composer. All test calls were
+ended. Native screenshots and a recording are retained locally, outside git.
+
+The provider closed quickly in this run, so a prolonged closing state and the
+delayed restart transition were not reproduced natively; regression tests
+cover those states, deadlines and cancellation paths. Search used the
+simulator's hardware keyboard; software keyboard geometry, landscape, physical
+devices, Android, acoustic input/output quality and cross-device replacement
+remain unverified for this increment. No production catalog or provider
+configuration was edited. The simulator run did create ordinary voice calls
+and their receipts through the existing API.

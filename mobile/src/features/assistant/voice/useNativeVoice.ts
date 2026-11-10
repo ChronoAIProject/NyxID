@@ -29,7 +29,8 @@ type RecoveryTarget = {
 // Only safe session metadata survives the surface. A new account or explicit
 // recovery action fences late completions from an older client.
 let retainedRecovery:
-  (RecoveryTarget & { epoch: number; owner: object }) | undefined;
+  | (RecoveryTarget & { epoch: number; owner: object })
+  | undefined;
 const recoveryListeners = new Set<() => void>();
 
 export function useNativeVoice(
@@ -82,6 +83,9 @@ export function useNativeVoice(
   const permissionAttempt = useRef<number | undefined>(undefined);
   const pending = useRef<AbortController | undefined>(undefined);
   const update = useRef(onUpdate);
+  const errorOrigin = useRef<"call" | "status" | "playback" | undefined>(
+    undefined,
+  );
   update.current = onUpdate;
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
@@ -104,9 +108,19 @@ export function useNativeVoice(
   // need the full scope.
   const quieting = (open: boolean) => (open ? sameScope() : sameChat());
 
-  function reportError(message?: string, nextRecovery?: VoiceStartRecovery) {
+  function reportError(
+    message?: string,
+    nextRecovery?: VoiceStartRecovery,
+    origin: "call" | "status" | "playback" = "call",
+  ) {
+    errorOrigin.current = message || nextRecovery ? origin : undefined;
     setError(message);
     setRecovery(nextRecovery);
+  }
+
+  function reportStatusError(message?: string) {
+    if (errorOrigin.current === "call") return;
+    reportError(message, undefined, "status");
   }
 
   function claimRecovery() {
@@ -237,15 +251,12 @@ export function useNativeVoice(
       }
       // System permission prompts may briefly inactivate the app before any
       // microphone is acquired. Actual background always cancels the attempt.
-      if (!(
-        state === "inactive" && permissionAttempt.current === ticket.current
-      )) {
+      if (
+        !(state === "inactive" && permissionAttempt.current === ticket.current)
+      ) {
         const hadVoiceWork = busy.current || current.current !== null;
         stopRef.current();
-        if (hadVoiceWork)
-          reportError(
-            "Voice ended while the app was inactive. Start a new call to continue.",
-          );
+        if (hadVoiceWork) reportError();
       }
     });
     return () => {
@@ -269,8 +280,7 @@ export function useNativeVoice(
       (!conflict ||
         (conflict.id === snapshot.session.id && conflictThread === thread));
     if (
-      (!(conflict?.end_requested || conflict?.state === "closing") &&
-        !ownedDisconnected) ||
+      (!conflict && !conflictUnknown && !ownedDisconnected) ||
       conflictChecks.current >= 6
     )
       return;
@@ -288,6 +298,7 @@ export function useNativeVoice(
   }, [
     conflict,
     conflictThread,
+    conflictUnknown,
     conflictCheckAttempt,
     starting,
     connected,
@@ -298,11 +309,11 @@ export function useNativeVoice(
   async function start(preferences: VoicePreferences, protocol: VoiceProtocol) {
     // A new explicit attempt can wait for the old client's bounded teardown.
     // Recheck all chat/account guards after that asynchronous boundary.
-    if (!sameScope()) return;
+    if (!sameScope()) return false;
     const waitingTicket = ticket.current;
     if (draining.current) {
       await draining.current;
-      if (ticket.current !== waitingTicket) return;
+      if (ticket.current !== waitingTicket) return false;
     }
     if (
       !sameScope() ||
@@ -318,7 +329,7 @@ export function useNativeVoice(
         (retainedRecovery.session || retainedRecovery.unknown)) ||
       conflictBusy.current
     )
-      return;
+      return false;
     busy.current = true;
     const generation = ++ticket.current;
     const controller = new AbortController();
@@ -383,9 +394,12 @@ export function useNativeVoice(
           const previous = latestSnapshot.current;
           latestSnapshot.current = value;
           if (
-            connectedOnce &&
-            value.session.state === "closed" &&
-            value.session.end_reason === "idle"
+            (errorOrigin.current === "playback" &&
+              (value.session.state === "closed" ||
+                value.session.state === "failed")) ||
+            (connectedOnce &&
+              value.session.state === "closed" &&
+              value.session.end_reason === "idle")
           )
             reportError();
           if (
@@ -416,8 +430,13 @@ export function useNativeVoice(
         onInputChanged: (enabled) => {
           if (valid() && current.current === next) setInputEnabled(enabled);
         },
-        onError: (message, nextRecovery) => {
-          if (valid()) reportError(message, nextRecovery);
+        onError: (message, nextRecovery, kind) => {
+          if (valid())
+            reportError(
+              message,
+              nextRecovery,
+              kind === "conflict" ? "status" : (kind ?? "call"),
+            );
         },
         onConflict: (session, conversationId, unknown = false) => {
           if (!valid()) return;
@@ -482,6 +501,7 @@ export function useNativeVoice(
         if (!current.current) setStarting(false);
       }
     }
+    return true;
   }
 
   async function end(): Promise<boolean> {
@@ -527,9 +547,10 @@ export function useNativeVoice(
       retainedRecovery?.epoch === environment.epoch &&
       retainedRecovery.pendingStart
     ) {
-      reportError(
-        "The previous voice start is still settling. Check again shortly.",
-      );
+      if (manual)
+        reportStatusError(
+          "The previous voice start is still settling. Check again shortly.",
+        );
       return false;
     }
     conflictBusy.current = true;
@@ -607,7 +628,7 @@ export function useNativeVoice(
                 latestSnapshot.current = terminal;
                 setSnapshot(terminal);
               }
-              reportError();
+              reportStatusError();
               refresh();
               return true;
             }
@@ -631,13 +652,13 @@ export function useNativeVoice(
           owner,
         );
         setConfirmedEnded(!call);
-        reportError();
+        reportStatusError();
         return !call;
       });
     } catch {
       if (ownsOperation()) {
         remember({ ...priorTarget, unknown: true }, owner);
-        reportError(
+        reportStatusError(
           "Call status could not be verified. Check status again before starting voice.",
         );
       }
@@ -693,6 +714,7 @@ export function useNativeVoice(
           if (next.id !== conflict.id) throw new Error("Voice session changed");
           if (valid()) {
             const terminal = next.state === "closed" || next.state === "failed";
+            setConfirmedEnded(terminal);
             remember(
               {
                 session: terminal ? null : next,
@@ -718,6 +740,7 @@ export function useNativeVoice(
               controller.signal,
             );
             if (valid()) {
+              setConfirmedEnded(!active);
               remember(
                 {
                   session: active?.session ?? null,

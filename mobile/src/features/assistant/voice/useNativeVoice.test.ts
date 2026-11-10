@@ -799,6 +799,28 @@ test("a confirmed quiet-call end replaces a media-first error with the terminal 
   assert.equal(e.clients.length, 1);
 });
 
+test("a confirmed ended call clears an obsolete playback hint without clearing a provider failure", async (context) => {
+  const e = setup(context);
+  await e.connect();
+  const client = e.clients[0]!;
+  client.options.onError(
+    "Tap Resume audio to hear the assistant.",
+    undefined,
+    "playback",
+  );
+  client.options.onSnapshot(
+    snapshot({ state: "closed", end_reason: "time_limit" }),
+  );
+  assert.equal(e.harness.flush().error, undefined);
+  client.options.onError("Voice provider rejected the session", creditRecovery);
+  client.options.onSnapshot(
+    snapshot({ state: "closed", end_reason: "time_limit" }),
+  );
+  assert.equal(e.harness.flush().error, "Voice provider rejected the session");
+  assert.deepEqual(e.harness.value().recovery, creditRecovery);
+  assert.equal(e.clients.length, 1);
+});
+
 test("late quiet-call terminal callbacks cannot replace another account or chat", async (context) => {
   const e = setup(context);
   await e.connect();
@@ -835,9 +857,124 @@ test("backgrounding an active call ends media and cannot restart through late ca
   assert.equal(client.ends, 1);
   assert.equal(state.connected, false);
   assert.equal(state.holding, false);
+  assert.equal(
+    state.error,
+    undefined,
+    "normal app backgrounding is not a voice failure",
+  );
   client.options.onSnapshot(snapshot({ generation: 2 }));
   assert.equal(e.harness.flush().connected, false);
   assert.equal(e.clients.length, 1);
+});
+
+test("reopening voice automatically verifies retained active metadata and releases a finished call", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(session(), secondThread);
+    client.closed();
+  };
+  await e.start();
+  e.harness.unmount();
+  assert.equal(e.remount().conflict?.id, firstId);
+  e.responses.status = async () => session({ state: "closed" });
+  context.mock.timers.tick(1000);
+  await e.harness.settle();
+  assert.equal(e.statusReads.length, 1);
+  assert.equal(e.statusReads[0]?.thread, secondThread);
+  assert.equal(e.harness.value().conflict, null);
+  assert.equal(e.harness.value().confirmedEnded, true);
+  assert.equal(e.harness.value().error, undefined);
+  assert.deepEqual(
+    e.controls,
+    [],
+    "verification never ends another chat's call",
+  );
+  assert.equal(
+    e.clients.length,
+    1,
+    "verification never creates a replacement call",
+  );
+  e.responses.start = async () => {};
+  await e.start();
+  assert.equal(
+    e.clients.length,
+    2,
+    "a verified finished call permits an explicit fresh start",
+  );
+});
+
+test("returning to the app automatically resolves unknown retained state without creating or ending a call", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(null, undefined, true);
+    client.closed();
+  };
+  await e.start();
+  e.appState("background");
+  context.mock.timers.tick(1000);
+  await e.harness.settle();
+  assert.deepEqual(e.activeReads, []);
+  e.appState("active");
+  context.mock.timers.tick(1000);
+  await e.harness.settle();
+  assert.equal(e.activeReads.length, 1);
+  assert.equal(e.harness.value().conflictUnknown, false);
+  assert.equal(e.harness.value().confirmedEnded, true);
+  assert.equal(e.clients.length, 1);
+  assert.deepEqual(e.controls, []);
+});
+
+test("automatic recovery preserves a genuinely active call in another chat", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(session(), secondThread);
+    client.closed();
+  };
+  await e.start();
+  Object.assign(e.api, {
+    accountActive: async () => ({
+      session: session(),
+      conversation_id: secondThread,
+    }),
+  });
+  context.mock.timers.tick(1000);
+  await e.harness.settle();
+  assert.equal(e.statusReads.length, 1);
+  assert.equal(e.harness.value().conflict?.id, firstId);
+  assert.equal(e.harness.value().conflictThread, secondThread);
+  await e.start();
+  assert.equal(e.clients.length, 1);
+  assert.deepEqual(e.controls, []);
+});
+
+test("automatic status failures and empty discovery preserve the original billing recovery", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context);
+  e.responses.start = async (client) => {
+    client.options.onConflict?.(null, undefined, true);
+    client.options.onError("Insufficient voice credits", creditRecovery);
+    client.closed();
+  };
+  await e.start();
+  e.responses.active = async () => {
+    throw new Error("network");
+  };
+  context.mock.timers.tick(1000);
+  await e.harness.settle();
+  assert.equal(e.harness.value().error, "Insufficient voice credits");
+  assert.deepEqual(e.harness.value().recovery, creditRecovery);
+  e.responses.active = async () => ({ session: null });
+  context.mock.timers.tick(1000);
+  await e.harness.settle();
+  assert.equal(e.harness.value().confirmedEnded, true);
+  assert.equal(e.harness.value().error, "Insufficient voice credits");
+  assert.deepEqual(e.harness.value().recovery, creditRecovery);
+  e.responses.start = async () => {};
+  await e.start();
+  assert.equal(e.harness.value().recovery, undefined);
 });
 
 test("unmount aborts pending permission, removes app listeners and fences late construction", async (context) => {
@@ -1331,7 +1468,7 @@ test("foreground resumes an owned closing call after its polling timer fired in 
   e.appState("background");
   await e.harness.settle();
   assert.equal(client.ends, 1);
-  assert.match(e.harness.value().error ?? "", /inactive/);
+  assert.equal(e.harness.value().error, undefined);
   client.options.onCleanup?.(null, false);
   assert.equal(e.harness.flush().conflict, null);
   context.mock.timers.tick(10_000);
@@ -2071,7 +2208,11 @@ test("verified closing discovery replaces the stale another-call diagnostic", as
   const e = setup(context);
   e.responses.start = async (client) => {
     client.options.onConflict?.(session());
-    client.options.onError("Another voice call is active");
+    client.options.onError(
+      "Another voice call is active",
+      undefined,
+      "conflict",
+    );
     client.closed();
   };
   await e.start();

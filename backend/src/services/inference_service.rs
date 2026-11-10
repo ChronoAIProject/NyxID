@@ -110,7 +110,8 @@ pub fn default_inference(slug: &str) -> Option<ServiceInference> {
 }
 
 /// Frozen original seed, including its labels and order. Only that exact list
-/// may be repaired automatically; an edited catalog remains the admin's choice.
+/// receives appended choices automatically; an edited catalog remains the
+/// admin's choice.
 fn legacy_openai_voice_choices() -> Vec<VoiceChoice> {
     [
         "marin", "alloy", "ash", "aube", "ballad", "beacon", "bossa", "brise", "cedar", "cinder",
@@ -143,24 +144,33 @@ pub async fn backfill(db: &mongodb::Database) -> AppResult<()> {
         ).await?;
         if let Some(voice) = super::inference_voice::default_voice(slug) {
             if slug == "llm-openai" {
-                // Match the entire historical array atomically, including
-                // labels/order, so a concurrent admin edit invalidates the
-                // predicate. Preserve all sibling inference/voice metadata.
-                db.collection::<DownstreamService>(COLLECTION_NAME)
-                    .update_many(
-                        doc! {
-                            "slug": slug,
-                            "inference.voice.protocol": "openai_live",
-                            "inference_admin_modified": { "$ne": true },
-                            "inference.voice.voices": bson::to_bson(&legacy_openai_voice_choices())
-                                .expect("legacy voice choices serialization"),
-                        },
-                        doc! { "$set": {
-                            "inference.voice.voices": bson::to_bson(&voice.voices)
-                                .expect("voice choices serialization"),
-                        } },
-                    )
-                    .await?;
+                // Additive only: append the seed's new choices to the exact
+                // historical array (labels/order included), so a concurrent
+                // admin edit invalidates the predicate and no stored choice is
+                // ever removed or reordered. Sibling metadata is untouched.
+                let legacy = legacy_openai_voice_choices();
+                let appended: Vec<_> = voice
+                    .voices
+                    .iter()
+                    .filter(|choice| !legacy.iter().any(|old| old.id == choice.id))
+                    .collect();
+                if !appended.is_empty() {
+                    db.collection::<DownstreamService>(COLLECTION_NAME)
+                        .update_many(
+                            doc! {
+                                "slug": slug,
+                                "inference.voice.protocol": "openai_live",
+                                "inference_admin_modified": { "$ne": true },
+                                "inference.voice.voices": bson::to_bson(&legacy)
+                                    .expect("legacy voice choices serialization"),
+                            },
+                            doc! { "$push": { "inference.voice.voices": {
+                                "$each": bson::to_bson(&appended)
+                                    .expect("voice choices serialization"),
+                            } } },
+                        )
+                        .await?;
+                }
             }
             // Do not replace an existing inference block or resurrect an admin clear.
             db.collection::<DownstreamService>(COLLECTION_NAME).update_many(

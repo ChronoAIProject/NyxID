@@ -1143,7 +1143,13 @@ Startup seeds OpenAI `gpt-live-1` and xAI `grok-voice-think-fast-2.0`, plus thei
 documented voice IDs, without any prices. A separate null-guarded update fills
 only `inference.voice` on existing inference blocks. Both seed paths skip
 `inference_admin_modified:true`, including whole-block and voice null clears.
-Admin edits preserve this marker. Unknown fields remain readable by old replicas.
+Admin edits preserve this marker. Seeded voice choices are append-only and never
+removed, so saved preferences, live revalidation, recovery/close and dictation
+keep accepting every previously seeded voice. A third, voices-only update
+appends newly seeded choices (currently `shida`) to an unmodified `llm-openai`
+row only while its list exactly equals the original 32-choice seed, including
+labels and order; any edited or custom list is left as is, and reruns are
+no-ops. Unknown fields remain readable by old replicas.
 IDs/labels are bounded to 128 bytes, model lists to 32, voices to 64, metrics to
 six unique duration/token units; IDs cannot contain URLs and at most one model
 is default. The first listed voice is the fallback when no voice is selected.

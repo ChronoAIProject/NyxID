@@ -203,6 +203,7 @@ function setup() {
   }[] = [];
   const cancels: { thread: string; id: string }[] = [];
   const errors: string[] = [];
+  const errorKinds: ("conflict" | "playback" | undefined)[] = [];
   const recoveries: (VoiceStartRecovery | undefined)[] = [];
   const conflicts: (VoiceSession | null)[] = [];
   const conflictThreads: (string | undefined)[] = [];
@@ -269,8 +270,9 @@ function setup() {
       ready++;
     },
     onInputChanged: (enabled) => inputChanges.push(enabled),
-    onError: (value, recovery) => {
+    onError: (value, recovery, kind) => {
       errors.push(value);
+      errorKinds.push(kind);
       recoveries.push(recovery);
     },
     onConflict: (value, thread, unknown) => {
@@ -311,6 +313,7 @@ function setup() {
     controls,
     cancels,
     errors,
+    errorKinds,
     recoveries,
     conflicts,
     conflictThreads,
@@ -727,6 +730,7 @@ test("HTTP billing rejection forwards recovery while disposing media without ret
     "Insufficient voice credits (billing_reservation · code 11300)",
   ]);
   assert.equal(e.recoveries[0]?.kind, "credits");
+  assert.equal(e.errorKinds[0], undefined);
   assert.match(e.recoveries[0]!.message, /initial voice reservation/);
   assert.equal(e.starts.length, 1);
   assert.equal(e.media.input, false);
@@ -799,6 +803,7 @@ test("a 409 observes the active call without deleting it or retrying session cre
   assert.deepEqual(e.conflicts, [other]);
   assert.deepEqual(e.controls, []);
   assert.match(e.errors[0]!, /Another voice call/);
+  assert.equal(e.errorKinds[0], "conflict");
 });
 
 test("a cross-chat 409 preserves the verified account call and its conversation without ending it", async () => {
@@ -1372,6 +1377,7 @@ test("blocked playback offers local resume without ending or recreating the conn
   const lateMedia = [...e.media.listeners][0]!;
   e.media.emit({ type: "playback-blocked" });
   assert.deepEqual(e.errors, ["Tap Resume audio to hear the assistant."]);
+  assert.equal(e.errorKinds[0], "playback");
   assert.equal(e.client.isClosed, false);
   assert.equal(e.media.input, true);
   assert.equal(e.count().ready, 1);

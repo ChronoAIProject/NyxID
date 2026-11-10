@@ -129,11 +129,14 @@ function setup(
   let focused = true;
   let online = true;
   const keyboard = new Map<string, (event: any) => void>();
+  const appListeners = new Set<(state: string) => void>();
+  const intervals = new Map<object, () => void>();
   let browserFails = false;
   let saveFails = false;
   let endResult: Promise<boolean> = Promise.resolve(true);
   let checkResult: Promise<boolean> = Promise.resolve(false);
   let endConflictResult: Promise<boolean> = Promise.resolve(false);
+  let onStart: () => unknown = () => {};
   const savedPreferences: VoicePreferences[] = [];
   const snapshots: (VoiceSnapshot | undefined)[] = [];
   const listeners = new Set<(event: VoiceMediaEvent) => void>();
@@ -183,6 +186,7 @@ function setup(
     confirmedEnded: false,
     start: async (preferences: VoicePreferences, protocol: string) => {
       events.push(["start", preferences, protocol]);
+      return onStart();
     },
     end: () => {
       events.push(["end"]);
@@ -193,8 +197,8 @@ function setup(
       events.push(["endConflict"]);
       return endConflictResult;
     },
-    checkConflict: () => {
-      events.push(["checkConflict"]);
+    checkConflict: (manual = true) => {
+      events.push(manual ? ["checkConflict"] : ["checkConflict", false]);
       return checkResult;
     },
     hold: (value: boolean) => {
@@ -263,155 +267,177 @@ function setup(
       props.preferencesOpen = false;
     },
   };
-  const harness = hookHarness<Element>({
-    "../../../components/workspace/useNativeSheetDismiss": {
-      useNativeSheetDismiss: (onClose: () => void) => ({
-        modalProps: { visible: true, animationType: "slide" },
-        close: () => onClose(),
-      }),
-    },
-    "../../../lib/accessibility/useReducedMotion": {
-      useReducedMotion: () => input.reducedMotion ?? false,
-    },
-    "react/jsx-runtime": {
-      Fragment: "Fragment",
-      jsx: (type: unknown, props: unknown, key?: unknown) => ({
-        type,
-        props,
-        keyboard,
-        key,
-      }),
-      jsxs: (type: unknown, props: unknown, key?: unknown) => ({
-        type,
-        props,
-        keyboard,
-        key,
-      }),
-    },
-    "react-native": {
-      ...Object.fromEntries(
+  const harness = hookHarness<Element>(
+    {
+      "../../../components/workspace/useNativeSheetDismiss": {
+        useNativeSheetDismiss: (onClose: () => void) => ({
+          modalProps: { visible: true, animationType: "slide" },
+          close: () => onClose(),
+        }),
+      },
+      "../../../lib/accessibility/useReducedMotion": {
+        useReducedMotion: () => input.reducedMotion ?? false,
+      },
+      "react/jsx-runtime": {
+        Fragment: "Fragment",
+        jsx: (type: unknown, props: unknown, key?: unknown) => ({
+          type,
+          props,
+          keyboard,
+          key,
+        }),
+        jsxs: (type: unknown, props: unknown, key?: unknown) => ({
+          type,
+          props,
+          keyboard,
+          key,
+        }),
+      },
+      "react-native": {
+        ...Object.fromEntries(
+          [
+            "ActivityIndicator",
+            "Modal",
+            "Pressable",
+            "ScrollView",
+            "Text",
+            "TextInput",
+            "View",
+          ].map((name) => [name, name]),
+        ),
+        Keyboard: {
+          addListener: (name: string, callback: (event: any) => void) => {
+            keyboard.set(name, callback);
+            return { remove: () => keyboard.delete(name) };
+          },
+        },
+        AppState: {
+          currentState: "active",
+          addEventListener: (
+            _name: string,
+            callback: (state: string) => void,
+          ) => {
+            appListeners.add(callback);
+            return { remove: () => appListeners.delete(callback) };
+          },
+        },
+        LayoutAnimation: {
+          configureNext: (preset: unknown) => layoutAnimations.push(preset),
+          Presets: { easeInEaseOut: "easeInEaseOut" },
+        },
+        StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
+        useWindowDimensions: () =>
+          input.viewport ?? { width: 390, height: 844, fontScale: 1 },
+        Animated: {
+          View: "Animated.View",
+          Value: class {
+            setValue() {}
+            interpolate() {
+              return 0;
+            }
+          },
+          spring: () => ({ start() {}, stop() {} }),
+          timing: () => ({ start() {}, stop() {} }),
+        },
+      },
+      "react-native-safe-area-context": {
+        useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }),
+      },
+      "@react-navigation/native": { useIsFocused: () => focused },
+      "expo-web-browser": {
+        openBrowserAsync: async (url: string) => {
+          events.push(["billing", url]);
+          if (browserFails) throw new Error("private device error");
+        },
+      },
+      "@tanstack/react-query": {
+        useQuery: ({ queryKey }: { queryKey: unknown[] }) =>
+          queryKey.includes("voice-options") ? query.options : query.settings,
+      },
+      "expo-linear-gradient": { LinearGradient: "LinearGradient" },
+      "lucide-react-native": Object.fromEntries(
         [
-          "ActivityIndicator",
-          "Modal",
-          "Pressable",
-          "ScrollView",
-          "Text",
-          "TextInput",
-          "View",
+          "ChevronDown",
+          "ChevronLeft",
+          "ChevronUp",
+          "MessageSquareText",
+          "X",
+          "Mic",
+          "MicOff",
+          "CircleHelp",
+          "Phone",
+          "Radio",
+          "PhoneOff",
+          "Volume2",
+          "VolumeX",
         ].map((name) => [name, name]),
       ),
-      Keyboard: {
-        addListener: (name: string, callback: (event: any) => void) => {
-          keyboard.set(name, callback);
-          return { remove: () => keyboard.delete(name) };
+      "../ChatComposer": { ChatComposerFrame: "ComposerFrame" },
+      "../../../components/workspace/ScrollEdgeFades": {
+        ScrollEdgeFades: "ScrollEdgeFades",
+        useScrollEdges: () => ({
+          edges: { start: false, end: false },
+          layout() {},
+          content() {},
+          scroll() {},
+        }),
+      },
+      "../../../components/workspace/WorkspaceSheetSurface": {
+        WorkspaceSheetSurface: "SheetSurface",
+      },
+      "../../../components/workspace/WorkspaceUI": {
+        ActionButton: "ActionButton",
+        Card: "Card",
+        Label: "Text",
+        Notice: "Notice",
+      },
+      "../../../components/settings/SettingsList": {
+        SettingsRow: "SettingsRow",
+      },
+      "../../../components/workspace/WorkspaceSelectionField": {
+        // The shared sheet owns its searchable draft and one-shot Apply action;
+        // these tests exercise the voice screen's persistence boundary.
+        WorkspaceSelectionSheet: "WorkspaceSelectionSheet",
+      },
+      "../../../lib/api/assistantVoiceApi": {
+        nativeVoiceEnvironment: () => environment,
+      },
+      "../../../hooks/useNetworkStatus": {
+        useNetworkStatus: () => ({ isConnected: online }),
+      },
+      "../../../theme/ThemeContext": {
+        useTheme: () => ({
+          colors: {
+            primaryTone: { bg: "pink", border: "pink" },
+            warningTone: { bg: "amber", text: "amber-text" },
+            dangerTone: { bg: "red", text: "red-text" },
+          },
+        }),
+      },
+      "../../../theme/designTokens": { fonts: {} },
+      "./useNativeVoice": { useNativeVoice: () => voice },
+      "./useVoiceLevels": {
+        useVoiceLevels: (media: unknown) => {
+          levels.media = media;
+          return levels;
         },
       },
-      LayoutAnimation: {
-        configureNext: (preset: unknown) => layoutAnimations.push(preset),
-        Presets: { easeInEaseOut: "easeInEaseOut" },
+      "../DictationWaveform": { DictationWaveform: "DictationWaveform" },
+      "../composerGeometry": { composerInputMinHeight, composerVoiceMinHeight },
+      "./VoiceComposerAura": { VoiceComposerAura: "VoiceAura" },
+      "./VoiceMediaBridge": { VoiceMediaBridge: "VoiceMediaBridge" },
+    },
+    {
+      setInterval: (callback: () => void) => {
+        const token = {};
+        intervals.set(token, callback);
+        return token;
       },
-      StyleSheet: { create: (styles: unknown) => styles, hairlineWidth: 1 },
-      useWindowDimensions: () =>
-        input.viewport ?? { width: 390, height: 844, fontScale: 1 },
-      Animated: {
-        View: "Animated.View",
-        Value: class {
-          setValue() {}
-          interpolate() {
-            return 0;
-          }
-        },
-        spring: () => ({ start() {}, stop() {} }),
-        timing: () => ({ start() {}, stop() {} }),
+      clearInterval: (token: object) => {
+        intervals.delete(token);
       },
     },
-    "react-native-safe-area-context": {
-      useSafeAreaInsets: () => ({ top: 47, bottom: 34, left: 0, right: 0 }),
-    },
-    "@react-navigation/native": { useIsFocused: () => focused },
-    "expo-web-browser": {
-      openBrowserAsync: async (url: string) => {
-        events.push(["billing", url]);
-        if (browserFails) throw new Error("private device error");
-      },
-    },
-    "@tanstack/react-query": {
-      useQuery: ({ queryKey }: { queryKey: unknown[] }) =>
-        queryKey.includes("voice-options") ? query.options : query.settings,
-    },
-    "expo-linear-gradient": { LinearGradient: "LinearGradient" },
-    "lucide-react-native": Object.fromEntries(
-      [
-        "ChevronDown",
-        "ChevronLeft",
-        "ChevronUp",
-        "MessageSquareText",
-        "X",
-        "Mic",
-        "MicOff",
-        "CircleHelp",
-        "Phone",
-        "Radio",
-        "PhoneOff",
-        "Volume2",
-        "VolumeX",
-      ].map((name) => [name, name]),
-    ),
-    "../ChatComposer": { ChatComposerFrame: "ComposerFrame" },
-    "../../../components/workspace/ScrollEdgeFades": {
-      ScrollEdgeFades: "ScrollEdgeFades",
-      useScrollEdges: () => ({
-        edges: { start: false, end: false },
-        layout() {},
-        content() {},
-        scroll() {},
-      }),
-    },
-    "../../../components/workspace/WorkspaceSheetSurface": {
-      WorkspaceSheetSurface: "SheetSurface",
-    },
-    "../../../components/workspace/WorkspaceUI": {
-      ActionButton: "ActionButton",
-      Card: "Card",
-      Label: "Text",
-      Notice: "Notice",
-    },
-    "../../../components/settings/SettingsList": {
-      SettingsRow: "SettingsRow",
-    },
-    "../../../components/workspace/WorkspaceSelectionField": {
-      // The shared sheet owns its searchable draft and one-shot Apply action;
-      // these tests exercise the voice screen's persistence boundary.
-      WorkspaceSelectionSheet: "WorkspaceSelectionSheet",
-    },
-    "../../../lib/api/assistantVoiceApi": {
-      nativeVoiceEnvironment: () => environment,
-    },
-    "../../../hooks/useNetworkStatus": {
-      useNetworkStatus: () => ({ isConnected: online }),
-    },
-    "../../../theme/ThemeContext": {
-      useTheme: () => ({
-        colors: {
-          primaryTone: { bg: "pink", border: "pink" },
-          warningTone: { bg: "amber", text: "amber-text" },
-          dangerTone: { bg: "red", text: "red-text" },
-        },
-      }),
-    },
-    "../../../theme/designTokens": { fonts: {} },
-    "./useNativeVoice": { useNativeVoice: () => voice },
-    "./useVoiceLevels": {
-      useVoiceLevels: (media: unknown) => {
-        levels.media = media;
-        return levels;
-      },
-    },
-    "../DictationWaveform": { DictationWaveform: "DictationWaveform" },
-    "../composerGeometry": { composerInputMinHeight, composerVoiceMinHeight },
-    "./VoiceComposerAura": { VoiceComposerAura: "VoiceAura" },
-    "./VoiceMediaBridge": { VoiceMediaBridge: "VoiceMediaBridge" },
-  });
+  );
   harness.mock(
     "./VoiceComposerShell",
     harness.load(
@@ -439,6 +465,14 @@ function setup(
     harness,
     props,
     keyboard,
+    appState: (state: string) => {
+      for (const listener of appListeners) listener(state);
+      harness.flush();
+    },
+    runIntervals: () => {
+      for (const callback of [...intervals.values()]) callback();
+      harness.flush();
+    },
     events,
     layoutAnimations,
     voice,
@@ -488,6 +522,9 @@ function setup(
     },
     setEndConflict: (result: Promise<boolean>) => {
       endConflictResult = result;
+    },
+    setStart: (callback: () => unknown) => {
+      onStart = callback;
     },
     modal: () => one((row) => row.type === "Modal").props,
     aura: () => one((row) => row.type === "VoiceAura").props,
@@ -2105,6 +2142,101 @@ test("browsing and cancelling the voice picker never saves or changes the curren
   f.harness.unmount();
 });
 
+test("an open voice picker keeps its presentation, choices and selection stable during query refreshes", () => {
+  const f = setup({ active: true });
+  f.openPreferences();
+  f.button("Voice").props.onPress();
+  const picker = f.voicePicker()!;
+  assert.equal(picker.props.presentationStyle, "overFullScreen");
+  const openingOptions = structuredClone(picker.props.options);
+  const openingValue = structuredClone(picker.props.value);
+  f.query.options.data = {
+    options: [
+      {
+        ...source,
+        voice: {
+          ...source.voice,
+          voices: [{ id: "marin", label: "Updated Marin" }],
+        },
+      },
+    ],
+  };
+  f.query.settings.data = { voice: { ...saved, voice: "marin" } };
+  f.voice.snapshot = {
+    ...snapshot,
+    tasks: [],
+    captions: [
+      {
+        id: "live",
+        speaker: "user",
+        text: "Still talking",
+        sealed: false,
+        complete: false,
+      },
+    ],
+  };
+  f.harness.render();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(f.voicePicker()!.props.options)),
+    openingOptions,
+  );
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(f.voicePicker()!.props.value)),
+    openingValue,
+  );
+  assert.equal(f.voicePicker()!.key, picker.key);
+  assert.equal(f.voice.connected, true);
+  assert.equal(f.savedPreferences.length, 0);
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("the voice picker stays open with Apply disabled through a failed refetch or temporary offline state", () => {
+  const f = setup({ active: true });
+  f.openPreferences();
+  f.button("Voice").props.onPress();
+  const opening = f.voicePicker()!;
+  f.query.options.isSuccess = false;
+  f.query.options.error = new Error("temporary network failure");
+  f.harness.render();
+  assert.ok(f.voicePicker(), "cached source identity keeps the picker mounted");
+  assert.equal(f.voicePicker()!.props.disabled, true);
+  assert.equal(f.voicePicker()!.props.keepOpenWhenDisabled, true);
+  assert.equal(f.voicePicker()!.props.options, opening.props.options);
+  f.query.options.isSuccess = true;
+  f.query.options.error = null;
+  f.setOnline(false);
+  assert.ok(f.voicePicker());
+  assert.equal(f.voicePicker()!.props.disabled, true);
+  f.setOnline(true);
+  assert.equal(f.voicePicker()!.props.disabled, false);
+  assert.equal(f.savedPreferences.length, 0);
+  f.harness.unmount();
+});
+
+test("a real provider error remains visible while the failed call is closing", () => {
+  const f = setup({
+    conflict: { ...snapshot.session, state: "closing", end_requested: true },
+    error: "Voice audio could not be verified.",
+  });
+  assert.ok(f.notices().includes("Voice audio could not be verified."));
+  assert.match(f.text(), /previous call is finishing/);
+  f.harness.unmount();
+});
+
+test("verified empty discovery does not dismiss an actionable billing failure", async () => {
+  const f = setup({ ...creditFailure, conflictUnknown: true });
+  f.voice.conflictUnknown = false;
+  f.voice.confirmedEnded = true;
+  f.harness.render();
+  await f.harness.settle();
+  assert.deepEqual(f.events, []);
+  assert.ok(f.button("Review billing on Web"));
+  assert.ok(f.button("Try again"));
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
 test("applying a voice persists once and preserves the selected source and live call", async () => {
   const f = setup({ active: true });
   f.openPreferences();
@@ -2684,4 +2816,285 @@ test("offline and focus loss finish local cleanup and return to text without cla
     assert.equal(f.voice.confirmedEnded, false);
     f.harness.unmount();
   }
+});
+
+test("re-entering this chat during a requested disconnection starts exactly one new call after terminal proof", async () => {
+  const f = setup({
+    conflict: { ...snapshot.session, state: "closing", end_requested: true },
+    conflictThread: thread,
+  });
+  f.setStart(() => {
+    f.voice.starting = true;
+  });
+  assert.match(f.text(), /Disconnecting previous call/);
+  assert.match(f.text(), /new call will start once disconnection is confirmed/);
+  assert.equal(f.starts().length, 0);
+  f.voice.conflict = null;
+  f.voice.confirmedEnded = true;
+  f.voice.snapshot = {
+    ...snapshot,
+    session: {
+      ...snapshot.session,
+      state: "closed",
+      end_requested: true,
+      end_reason: "user_ended",
+    },
+  };
+  f.harness.render();
+  await f.harness.settle();
+  assert.match(f.text(), /Starting new call/);
+  assert.equal(f.starts().length, 1);
+  assert.equal(
+    f.events.some(([event]) => event === "close"),
+    false,
+  );
+  f.harness.render();
+  await f.harness.settle();
+  assert.equal(f.starts().length, 1);
+  f.voice.starting = false;
+  f.voice.connected = true;
+  f.voice.confirmedEnded = false;
+  f.voice.snapshot = {
+    ...snapshot,
+    session: { ...snapshot.session, id: "new-session" },
+  };
+  f.harness.render();
+  assert.doesNotMatch(
+    f.text(),
+    /Disconnecting previous call|Starting new call/,
+  );
+  f.harness.unmount();
+});
+
+test("replacing another chat's call requires the explicit action and waits for confirmed disconnection", async () => {
+  const other = `nyxa-${"b".repeat(32)}`;
+  const pending = deferred<boolean>();
+  const f = setup({ conflict: snapshot.session, conflictThread: other });
+  f.setStart(() => {
+    f.voice.starting = true;
+  });
+  f.setEndConflict(pending.promise);
+  assert.equal(f.starts().length, 0);
+  assert.doesNotMatch(f.text(), /Disconnecting previous call/);
+  f.button("End previous call and start here").props.onPress();
+  f.harness.flush();
+  assert.match(f.text(), /Disconnecting previous call/);
+  assert.deepEqual(f.events, [["endConflict"]]);
+  f.voice.conflict = {
+    ...snapshot.session,
+    state: "closing",
+    end_requested: true,
+  };
+  pending.resolve(false);
+  await f.harness.settle();
+  assert.equal(f.starts().length, 0);
+  assert.equal(
+    f.events.some(([event]) => event === "close"),
+    false,
+  );
+  f.voice.conflict = null;
+  f.voice.confirmedEnded = true;
+  f.harness.render();
+  await f.harness.settle();
+  assert.equal(f.starts().length, 1);
+  assert.equal(
+    f.events.some(([event]) => event === "close"),
+    false,
+  );
+  f.harness.unmount();
+});
+
+test("a queued restart is cancelled by background, focus, network, source, voice, return-to-text, or a newly discovered call", async () => {
+  for (const change of [
+    "background",
+    "focus",
+    "network",
+    "source",
+    "voice",
+    "return",
+    "replacement",
+  ] as const) {
+    const f = setup({
+      conflict: { ...snapshot.session, state: "closing", end_requested: true },
+      conflictThread: thread,
+    });
+    assert.match(f.text(), /Disconnecting previous call/, change);
+    if (change === "background") f.appState("background");
+    if (change === "focus") f.setFocused(false);
+    if (change === "network") f.setOnline(false);
+    if (change === "source") {
+      f.query.options.data = {
+        options: [{ ...source, connection_id: "another-source" }],
+      };
+      f.harness.render();
+    }
+    if (change === "voice") {
+      f.query.settings.data!.voice = { ...saved, voice: "marin" };
+      f.harness.render();
+    }
+    if (change === "return") f.button("Return to chat").props.onPress();
+    if (change === "replacement") {
+      f.voice.conflict = { ...snapshot.session, id: "new-call" };
+      f.harness.render();
+    }
+    f.voice.conflict = null;
+    f.voice.confirmedEnded = true;
+    f.setFocused(true);
+    f.setOnline(true);
+    f.harness.render();
+    await f.harness.settle();
+    assert.equal(f.starts().length, 0, change);
+    f.harness.unmount();
+  }
+});
+
+test("provider, billing, idle, time-limit, and unknown terminal reasons cannot restart a queued call", async () => {
+  for (const failure of [
+    "provider",
+    "billing",
+    "idle",
+    "time_limit",
+    null,
+  ] as const) {
+    const f = setup({
+      conflict: { ...snapshot.session, state: "closing", end_requested: true },
+      conflictThread: thread,
+    });
+    f.voice.conflict = null;
+    f.voice.confirmedEnded = true;
+    if (failure === "provider") f.voice.error = "Provider could not connect";
+    else if (failure === "billing")
+      f.voice.recovery = {
+        kind: "credits",
+        message: "Add credits",
+      } as VoiceStartRecovery;
+    else
+      f.voice.snapshot = {
+        ...snapshot,
+        session: { ...snapshot.session, state: "closed", end_reason: failure },
+      };
+    f.harness.render();
+    await f.harness.settle();
+    assert.equal(f.starts().length, 0, String(failure));
+    assert.equal(
+      f.events.some(([event]) => event === "close"),
+      false,
+    );
+    if (failure !== "provider" && failure !== "billing")
+      assert.match(f.notices().join(" "), /previous call ended/i);
+    f.harness.unmount();
+  }
+});
+
+test("a queued restart expires without making a new call or restarting after a later confirmation", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = setup({
+    conflict: { ...snapshot.session, state: "closing", end_requested: true },
+    conflictThread: thread,
+  });
+  context.mock.timers.tick(30_000);
+  f.harness.flush();
+  assert.match(f.text(), /still disconnecting.*try again shortly/i);
+  assert.doesNotMatch(f.text(), /new call will start once/);
+  f.voice.conflict = null;
+  f.voice.confirmedEnded = true;
+  f.harness.render();
+  await f.harness.settle();
+  assert.equal(f.starts().length, 0);
+  f.harness.unmount();
+});
+
+test("a retained closing call waits for late settings before arming its one restart", async () => {
+  const f = setup({
+    conflict: { ...snapshot.session, state: "closing", end_requested: true },
+    conflictThread: thread,
+    settingsPending: true,
+  });
+  assert.doesNotMatch(f.text(), /new call will start once/);
+  f.query.settings.data = { voice: saved };
+  f.query.settings.isSuccess = true;
+  f.query.settings.isPending = false;
+  f.harness.render();
+  assert.match(f.text(), /Disconnecting previous call/);
+  f.setStart(() => {
+    f.voice.starting = true;
+  });
+  f.voice.conflict = null;
+  f.voice.confirmedEnded = true;
+  f.harness.render();
+  await f.harness.settle();
+  assert.equal(f.starts().length, 1);
+  f.harness.unmount();
+});
+
+test("a requested restart keeps reading status within its deadline after ordinary automatic checks finish", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = setup({
+    conflict: { ...snapshot.session, state: "closing", end_requested: true },
+    conflictThread: thread,
+  });
+  for (let i = 0; i < 8; i++) {
+    f.runIntervals();
+    await f.harness.settle();
+  }
+  assert.equal(
+    f.events.filter(
+      ([event, manual]) => event === "checkConflict" && manual === false,
+    ).length,
+    8,
+  );
+  assert.equal(f.starts().length, 0);
+  context.mock.timers.tick(30_000);
+  f.harness.flush();
+  f.runIntervals();
+  assert.equal(
+    f.events.filter(([event]) => event === "checkConflict").length,
+    8,
+  );
+  f.harness.unmount();
+});
+
+test("a restart waiting for local teardown stays visible until the new call becomes ready", async () => {
+  const waiting = deferred<void>();
+  const f = setup({
+    conflict: { ...snapshot.session, state: "closing", end_requested: true },
+    conflictThread: thread,
+  });
+  f.setStart(() => waiting.promise);
+  f.voice.conflict = null;
+  f.voice.confirmedEnded = true;
+  f.harness.render();
+  await f.harness.settle();
+  assert.match(f.text(), /Starting new call/);
+  assert.equal(
+    f.events.some(([event]) => event === "close"),
+    false,
+  );
+  f.voice.starting = true;
+  waiting.resolve();
+  f.harness.render();
+  await f.harness.settle();
+  assert.match(f.text(), /Starting new call/);
+  assert.equal(f.starts().length, 1);
+  f.harness.unmount();
+});
+
+test("a restart rejected by the hook's final guards shows a retry message instead of waiting indefinitely", async () => {
+  const f = setup({
+    conflict: { ...snapshot.session, state: "closing", end_requested: true },
+    conflictThread: thread,
+  });
+  f.setStart(() => false);
+  f.voice.conflict = null;
+  f.voice.confirmedEnded = true;
+  f.harness.render();
+  await f.harness.settle();
+  assert.match(f.notices().join(" "), /new call did not start/i);
+  assert.doesNotMatch(f.text(), /Starting new call/);
+  assert.equal(f.starts().length, 1);
+  assert.equal(
+    f.events.some(([event]) => event === "close"),
+    false,
+  );
+  f.harness.unmount();
 });

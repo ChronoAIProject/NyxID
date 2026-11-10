@@ -2,6 +2,7 @@ import { useReducedMotion } from "../../../lib/accessibility/useReducedMotion";
 import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  AppState,
   Animated,
   LayoutAnimation,
   Modal,
@@ -184,6 +185,10 @@ function VoiceConversation({
   }
   const [now, setNow] = useState(Date.now());
   const [voicePickerScope, setVoicePickerScope] = useState<string>();
+  const voicePickerContent = useRef<{
+    options: { value: string; label: string }[];
+    value: string[];
+  }>({ options: [], value: [] });
   const [showErrorDetails, setShowErrorDetails] = useState(false);
   const [billingOpenError, setBillingOpenError] = useState(false);
   const [preferencesError, setPreferencesError] = useState(false);
@@ -195,6 +200,17 @@ function VoiceConversation({
   const [endRequested, setEndRequested] = useState(false);
   const [endingLocal, setEndingLocal] = useState(false);
   const [checkingLocal, setCheckingLocal] = useState(false);
+  type Restart = {
+    scope: string;
+    sessionId: string;
+    thread: string;
+    phase: "disconnecting" | "starting";
+  };
+  const [restart, setRestart] = useState<Restart>();
+  const restartIntent = useRef<Restart | undefined>(undefined);
+  const restartConsidered = useRef(false);
+  const [restartExpired, setRestartExpired] = useState(false);
+  const [restartNotice, setRestartNotice] = useState<string>();
   const transcript = useRef<ScrollView>(null);
   const entry = useRef({ thread, epoch: environment.epoch, attempted: false });
   const closed = useRef(false);
@@ -225,7 +241,11 @@ function VoiceConversation({
   const saved = settings.data?.voice;
   const choices = options.data?.options ?? [];
   const selectionReady = options.isSuccess && settings.isSuccess;
-  const option = selectionReady ? chooseVoiceOption(choices, saved) : undefined;
+  const cachedOption =
+    options.data && settings.data
+      ? chooseVoiceOption(choices, saved)
+      : undefined;
+  const option = selectionReady ? cachedOption : undefined;
   const isGrok = option?.voice.protocol === "xai_realtime";
   const nextMode = isGrok
     ? "push_to_talk"
@@ -344,8 +364,23 @@ function VoiceConversation({
   const selectionScope = JSON.stringify([
     environment.epoch,
     thread,
-    option ? voiceOptionKey(option) : null,
+    cachedOption ? voiceOptionKey(cachedOption) : null,
   ]);
+  const restartScope = JSON.stringify([selectionScope, nextVoice, nextMode]);
+  const restarting = restart?.scope === restartScope;
+  const canReplaceCall =
+    !!conflict &&
+    !uncertain &&
+    !checking &&
+    !ending &&
+    canChangePreferences &&
+    !missingVoice &&
+    focused;
+  const restartContext = useRef({
+    scope: restartScope,
+    allowed: canReplaceCall,
+  });
+  restartContext.current = { scope: restartScope, allowed: canReplaceCall };
   const pickerContext = useRef({ scope: selectionScope, allowed: false });
   pickerContext.current = {
     scope: selectionScope,
@@ -356,33 +391,37 @@ function VoiceConversation({
       canChangePreferences &&
       voicePickerScope === selectionScope,
   };
-  const status = checking
-    ? "Checking call status…"
-    : ending
-      ? "Ending…"
-      : confirmingEnd
-        ? "Finishing call…"
-        : uncertain
-          ? "Call status unconfirmed"
-          : conflict
-            ? "Call already active"
-            : !isConnected
-              ? "Offline"
-              : voice.starting
-                ? "Connecting…"
-                : voice.connected
-                  ? voiceAuraStatus(phase, inputMode)
-                  : voice.error || voice.recovery
-                    ? "Unable to start"
-                    : terminal
-                      ? "Call ended"
-                      : missingVoice
-                        ? "Choose a voice"
-                        : options.error ||
-                            settings.error ||
-                            (selectionReady && !option?.available)
-                          ? "Voice unavailable"
-                          : "Connecting…";
+  const status = restarting
+    ? restart.phase === "starting"
+      ? "Starting new call…"
+      : "Disconnecting previous call…"
+    : checking
+      ? "Checking call status…"
+      : ending
+        ? "Ending…"
+        : confirmingEnd
+          ? "Finishing call…"
+          : uncertain
+            ? "Call status unconfirmed"
+            : conflict
+              ? "Call already active"
+              : !isConnected
+                ? "Offline"
+                : voice.starting
+                  ? "Connecting…"
+                  : voice.connected
+                    ? voiceAuraStatus(phase, inputMode)
+                    : voice.error || voice.recovery
+                      ? "Unable to start"
+                      : terminal
+                        ? "Call ended"
+                        : missingVoice
+                          ? "Choose a voice"
+                          : options.error ||
+                              settings.error ||
+                              (selectionReady && !option?.available)
+                            ? "Voice unavailable"
+                            : "Connecting…";
   // "–" until the provider is ready, then the call clock from 00:00.
   const duration =
     voice.starting || voice.connectedAt === undefined
@@ -427,6 +466,121 @@ function VoiceConversation({
     }
   }, [active, callSelection, option, nextMode]);
   useEffect(() => {
+    // Entering voice may wait for this chat's already requested End. An active
+    // call, unknown slot, or previous failed attempt requires an explicit action.
+    if (!restartConsidered.current && conflict) {
+      if (
+        !conflict.end_requested ||
+        voice.conflictThread !== thread ||
+        voice.snapshot ||
+        voice.error ||
+        voice.recovery ||
+        endRequested
+      ) {
+        restartConsidered.current = true;
+      } else if (focused && isConnected && selectionReady) {
+        restartConsidered.current = true;
+        queueRestart(conflict.id, thread);
+      }
+    }
+  }, [conflict, voice.conflictThread, selectionReady, focused, isConnected]);
+  useEffect(() => {
+    const intent = restartIntent.current;
+    if (!intent) return;
+    const replaced =
+      conflict &&
+      (conflict.id !== intent.sessionId ||
+        voice.conflictThread !== intent.thread);
+    const endedForAnotherReason =
+      sessionTerminal &&
+      session?.id === intent.sessionId &&
+      session.end_reason !== "user_ended";
+    if (
+      !focused ||
+      !isConnected ||
+      intent.scope !== restartScope ||
+      endRequested ||
+      uncertain ||
+      voice.error ||
+      voice.recovery ||
+      replaced ||
+      endedForAnotherReason
+    ) {
+      if (endedForAnotherReason)
+        setRestartNotice(
+          "The previous call ended. Start a new call when ready.",
+        );
+      cancelRestart();
+      return;
+    }
+    if (intent.phase === "starting") {
+      if (voice.connected) cancelRestart();
+      return;
+    }
+    if (confirmedEnd && canStart && !closed.current) {
+      const starting = { ...intent, phase: "starting" as const };
+      restartIntent.current = starting;
+      setRestart(starting);
+      void start().then((accepted) => {
+        if (accepted === false && restartIntent.current === starting) {
+          cancelRestart();
+          setRestartNotice("The new call did not start. Try again when ready.");
+        }
+      });
+    }
+  }, [
+    restart,
+    restartScope,
+    focused,
+    isConnected,
+    endRequested,
+    uncertain,
+    voice.error,
+    voice.recovery,
+    conflict,
+    voice.conflictThread,
+    session,
+    confirmedEnd,
+    canStart,
+    voice.connected,
+    voice.starting,
+  ]);
+  useEffect(() => {
+    if (!restart || restart.phase !== "disconnecting") return;
+    // The ordinary six-check budget may finish before the provider closes.
+    // An explicit restart owns additional read-only checks only until this deadline.
+    const interval = setInterval(() => {
+      if (
+        restartIntent.current === restart &&
+        AppState.currentState === "active" &&
+        !endBusy.current
+      )
+        void voice.checkConflict(false);
+    }, 2_000);
+    const timer = setTimeout(() => {
+      if (restartIntent.current !== restart) return;
+      cancelRestart();
+      setRestartExpired(true);
+    }, 30_000);
+    return () => {
+      clearTimeout(timer);
+      clearInterval(interval);
+    };
+  }, [restart]);
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (
+        state === "background" ||
+        (state !== "active" && restartIntent.current?.phase === "disconnecting")
+      )
+        cancelRestart();
+    });
+    return () => {
+      subscription.remove();
+      restartIntent.current = undefined;
+    };
+  }, []);
+  useEffect(() => {
     // One explicit entry owns one automatic attempt. A conflict, failed start
     // or existing call must never silently turn into a replacement call.
     if (
@@ -460,7 +614,13 @@ function VoiceConversation({
   }, [focused]);
   useEffect(() => {
     if (
-      (endRequested || confirmedEnd) &&
+      (endRequested ||
+        (confirmedEnd &&
+          !restartIntent.current &&
+          !restarting &&
+          !restartNotice &&
+          !voice.error &&
+          !voice.recovery)) &&
       !ending &&
       !checking &&
       !conflict &&
@@ -478,6 +638,10 @@ function VoiceConversation({
     uncertain,
     active,
     terminal,
+    voice.error,
+    voice.recovery,
+    restarting,
+    restartNotice,
   ]);
   useEffect(() => {
     if (voice.holding) voice.hold(false);
@@ -527,7 +691,46 @@ function VoiceConversation({
   function closeOnce() {
     if (!mounted.current || closed.current) return;
     closed.current = true;
+    cancelRestart();
     onClose();
+  }
+  function cancelRestart() {
+    restartIntent.current = undefined;
+    setRestart(undefined);
+  }
+  function queueRestart(sessionId: string, previousThread: string) {
+    const intent: Restart = {
+      scope: restartScope,
+      sessionId,
+      thread: previousThread,
+      phase: "disconnecting",
+    };
+    restartIntent.current = intent;
+    setRestart(intent);
+    setRestartExpired(false);
+    setRestartNotice(undefined);
+    entry.current.attempted = true;
+  }
+  async function replaceCall() {
+    if (
+      !conflict ||
+      endBusy.current ||
+      checkBusy.current ||
+      !restartContext.current.allowed ||
+      restartContext.current.scope !== restartScope
+    )
+      return;
+    queueRestart(conflict.id, voice.conflictThread ?? thread);
+    endBusy.current = true;
+    setEndingLocal(true);
+    try {
+      await voice.endConflict();
+    } catch {
+      cancelRestart();
+    } finally {
+      endBusy.current = false;
+      if (mounted.current) setEndingLocal(false);
+    }
   }
   function returnToText() {
     // An explicit End keeps this media owner alive until its bounded drain
@@ -558,14 +761,16 @@ function VoiceConversation({
   }
   async function start() {
     const chosen = preferences(nextMode);
-    if (!canStart || !option || !chosen) return;
+    if (!canStart || !option || !chosen) return false;
     entry.current.attempted = true;
     setCallSelection({ option, preferences: chosen });
     setBillingOpenError(false);
-    await voice.start(chosen, option.voice.protocol);
+    setRestartNotice(undefined);
+    return voice.start(chosen, option.voice.protocol);
   }
   /** Closing voice ends the call; accepted agent tasks keep running. */
   async function requestEnd() {
+    cancelRestart();
     if (endBusy.current || checkBusy.current || (uncertain && !conflict))
       return;
     if (!hasCall) {
@@ -598,7 +803,7 @@ function VoiceConversation({
     try {
       // Checking is read-only. It never substitutes for an explicit End.
       const confirmed = await voice.checkConflict();
-      if (confirmed === true) closeOnce();
+      if (confirmed === true && !restartIntent.current) closeOnce();
     } finally {
       checkBusy.current = false;
       if (mounted.current) setCheckingLocal(false);
@@ -952,7 +1157,7 @@ function VoiceConversation({
                 name={agentName}
                 status={status}
                 duration={duration}
-                error={!!voice.error && !voice.connected}
+                error={!!voice.error && !voice.connected && !showRecovery}
               >
                 {option ? (
                   <View
@@ -1085,6 +1290,13 @@ function VoiceConversation({
                         // A held accessibility PTT toggle must not keep capturing
                         // behind a modal that hides its release control.
                         if (voice.holding) voice.hold(false);
+                        voicePickerContent.current = {
+                          options: option.voice.voices.map((row) => ({
+                            value: row.id,
+                            label: row.label,
+                          })),
+                          value: nextVoice ? [nextVoice] : [],
+                        };
                         setVoicePickerScope(selectionScope);
                       }}
                     />
@@ -1143,16 +1355,30 @@ function VoiceConversation({
                       {showRecovery ? (
                         <View style={styles.recovery}>
                           <Label muted>
-                            {confirmingEnd
-                              ? "The previous call is finishing. You can continue with text."
-                              : conflict
-                                ? voice.conflictThread &&
-                                  voice.conflictThread !== thread
-                                  ? "A voice call is open in another chat. You can continue with text."
-                                  : "A voice call is already open. You can continue with text."
-                                : "Check the previous call before starting voice again. You can continue with text."}
+                            {restarting
+                              ? "Disconnecting the previous call. Your new call will start once disconnection is confirmed."
+                              : restartExpired
+                                ? "The previous call is still disconnecting. Check its status and try again shortly."
+                                : checking
+                                  ? "Checking whether the previous call has ended. This does not reconnect your microphone."
+                                  : confirmingEnd
+                                    ? "The previous call is finishing. A new call can start once it closes. You can continue with text."
+                                    : conflict
+                                      ? voice.conflictThread &&
+                                        voice.conflictThread !== thread
+                                        ? "A voice call is open in another chat. Only one voice call can run at a time. End that call to start a new one here, or continue with text."
+                                        : "A voice call is already open. Only one voice call can run at a time. End it to start a new one, or continue with text."
+                                      : "The previous call's status has not been confirmed. Check whether it has ended before starting a new call, or continue with text."}
                           </Label>
                           <View style={styles.recoveryActions}>
+                            {conflict && !restarting ? (
+                              <ActionButton
+                                label="End previous call and start here"
+                                compact
+                                disabled={!canReplaceCall}
+                                onPress={() => void replaceCall()}
+                              />
+                            ) : null}
                             <ActionButton
                               label="Check call status"
                               variant="secondary"
@@ -1218,6 +1444,9 @@ function VoiceConversation({
                         </Card>
                       ) : voice.error ? (
                         <Notice message={voice.error} tone="error" />
+                      ) : null}
+                      {restartNotice ? (
+                        <Notice message={restartNotice} />
                       ) : null}
                       {billingOpenError ? (
                         <Notice
@@ -1554,19 +1783,17 @@ function VoiceConversation({
       {preferencesOpen &&
       !minimized &&
       focused &&
-      option &&
       voicePickerScope === selectionScope ? (
         <WorkspaceSelectionSheet
           key={selectionScope}
           scopeKey={selectionScope}
           label="Voice"
           title="Choose voice"
+          presentationStyle="overFullScreen"
+          keepOpenWhenDisabled
           description="Changes apply to your next call."
-          options={option.voice.voices.map((row) => ({
-            value: row.id,
-            label: row.label,
-          }))}
-          value={nextVoice ? [nextVoice] : []}
+          options={voicePickerContent.current.options}
+          value={voicePickerContent.current.value}
           disabled={!canChangePreferences}
           onChange={(values) => {
             if (

@@ -99,7 +99,11 @@ export interface AssistantVoiceClientOptions {
   onReady?(): void;
   /** Mirrors the capture gate applied to the media adapter, independently of readiness. */
   onInputChanged?(enabled: boolean): void;
-  onError(message: string, recovery?: VoiceStartRecovery): void;
+  onError(
+    message: string,
+    recovery?: VoiceStartRecovery,
+    kind?: "conflict" | "playback",
+  ): void;
   onClosed?(): void;
   /** Durable cleanup ownership; may settle after this view has unmounted. */
   onCleanup?(
@@ -278,6 +282,7 @@ export class AssistantVoiceClient {
               ? simulatorMicrophoneMessage
               : voiceStartError(error, step),
           conflict ? undefined : voiceStartRecovery(error, step),
+          conflict ? "conflict" : undefined,
         );
       }
     } finally {
@@ -375,7 +380,11 @@ export class AssistantVoiceClient {
       this.updateInput();
       this.notifyReady();
     } else if (event.type === "playback-blocked") {
-      this.options.onError("Tap Resume audio to hear the assistant.");
+      this.options.onError(
+        "Tap Resume audio to hear the assistant.",
+        undefined,
+        "playback",
+      );
     } else if (event.type === "error") {
       // Media exception strings may include device/provider details. Keep UI bounded.
       this.fail(
@@ -656,7 +665,11 @@ export class AssistantVoiceClient {
       await this.options.media.resume();
     } catch {
       if (!this.closed)
-        this.options.onError("Tap Resume audio to hear the assistant.");
+        this.options.onError(
+          "Tap Resume audio to hear the assistant.",
+          undefined,
+          "playback",
+        );
     }
   }
 
@@ -841,9 +854,13 @@ export class AssistantVoiceClient {
     );
   }
 
-  private fail(message: string, recovery?: VoiceStartRecovery) {
+  private fail(
+    message: string,
+    recovery?: VoiceStartRecovery,
+    kind?: "conflict",
+  ) {
     if (this.closed) return;
-    this.options.onError(message, recovery);
+    this.options.onError(message, recovery, kind);
     // Device/transport faults require immediate local teardown. A human End
     // preserves quiet transport briefly; a failed transport cannot drain it.
     void this.endCall(false);

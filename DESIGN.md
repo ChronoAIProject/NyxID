@@ -1133,6 +1133,25 @@ voice entry starts the connection immediately using the saved voice and mode.
 The timer shows “-” until connected, then counts from 00:00 in both modes.
 Private voice requires both the verified active control snapshot and provider
 readiness before reporting connected or starting its clock.
+The private voice picker uses an opaque `overFullScreen` selection overlay,
+keeping the underlying media host mounted and avoiding native page-sheet
+detent changes. Its opening choices and selected voice stay fixed while it is
+open; settings/options refreshes apply on the next opening, and Apply still
+checks the live account, chat, source and available choice. Normal app
+backgrounding ends local voice quietly. On reopening, bounded read-only
+checks verify retained active or unknown call metadata before showing it as a
+continuing blocker. Closing and unverified calls are distinct from a verified
+active call; only one live call per person is allowed, and a verified terminal
+or empty account slot permits a fresh explicit start. Checking never ends
+another call or reconnects the microphone. When a person enters voice while
+this chat's acknowledged End is still closing, show “Disconnecting previous
+call…” and wait up to 30 seconds with bounded read-only checks. A confirmed
+user-ended call or empty slot permits one “Starting new call…” attempt using
+the current preferences. A verified active call requires the explicit “End
+previous call and start here” action. Leaving, backgrounding, going offline,
+changing account/chat/source/voice, a different active session, or a real error
+cancels the queued restart. Idle, time-limit and other terminal reasons require
+an explicit new start. App foregrounding alone never reconnects the microphone.
 Hands-free listens automatically; Hold to talk retains its explicit microphone
 control and release-to-send instruction. Holding swells the microphone and
 lifts a soft halo (still under Reduce Motion).

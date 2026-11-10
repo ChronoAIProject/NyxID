@@ -17,12 +17,13 @@ pub fn default_voice(slug: &str) -> Option<VoiceInference> {
             "gpt-live-1",
             "GPT-Live 1",
             VoiceUsageSource::ProviderReported,
-            // https://developers.openai.com/api/reference/resources/live/methods/create
+            // Additive only: every previously seeded ID stays selectable so saved
+            // preferences, live calls and recovery keep validating. New IDs append.
             vec![
-                "marin", "alloy", "ash", "ballad", "beacon", "bossa", "brise", "cedar", "cinder",
-                "coral", "delta", "echo", "flitz", "gleam", "harema", "juni", "meridian", "nira",
-                "noeul", "nuri", "quartz", "ripple", "sage", "shimmer", "shida", "sillage",
-                "stone", "tempo", "verse", "vesper", "willow",
+                "marin", "alloy", "ash", "aube", "ballad", "beacon", "bossa", "brise", "cedar",
+                "cinder", "coral", "delta", "echo", "flitz", "gleam", "harema", "juni", "meridian",
+                "nira", "noeul", "nuri", "quartz", "ripple", "sage", "shimmer", "shitan",
+                "sillage", "stone", "tempo", "verse", "vesper", "willow", "shida",
             ],
             vec![
                 VoiceSeconds,

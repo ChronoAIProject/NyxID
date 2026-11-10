@@ -44,6 +44,7 @@ type SelectionProps = {
   allowEmpty?: boolean;
   children?: ReactNode;
   surfaceColors?: ThemeColors;
+  presentationStyle?: "pageSheet" | "overFullScreen";
 };
 const signature = (value: readonly string[]) =>
   JSON.stringify([...new Set(value)].sort());
@@ -128,7 +129,12 @@ export function WorkspaceSelectionSheet({
   allowEmpty = multiple,
   children,
   surfaceColors,
-}: SelectionProps & { onClose: () => void }) {
+  presentationStyle = "pageSheet",
+  keepOpenWhenDisabled = false,
+}: SelectionProps & {
+  onClose: () => void;
+  keepOpenWhenDisabled?: boolean;
+}) {
   const theme = useTheme();
   const colors = surfaceColors ?? theme.colors;
   const sheet = useNativeSheetDismiss(onClose);
@@ -149,8 +155,8 @@ export function WorkspaceSelectionSheet({
     sheet.close();
   };
   useEffect(() => {
-    if (stale || (disabled && !readOnly)) onClose();
-  }, [stale, disabled, readOnly, onClose]);
+    if (stale || (disabled && !readOnly && !keepOpenWhenDisabled)) onClose();
+  }, [stale, disabled, readOnly, keepOpenWhenDisabled, onClose]);
   const known = new Map<string, WorkspaceSelectionOption>();
   for (const option of options)
     if (!known.has(option.value)) known.set(option.value, option);
@@ -204,7 +210,7 @@ export function WorkspaceSelectionSheet({
   return (
     <Modal
       {...sheet.modalProps}
-      presentationStyle="pageSheet"
+      presentationStyle={presentationStyle}
       onRequestClose={close}
     >
       <SafeAreaProvider>

@@ -47,10 +47,36 @@ fn legacy_openai_voice_choices() -> Vec<VoiceChoice> {
     .collect()
 }
 
+/// The corrected seed: the frozen legacy list unchanged, then appended choices.
+fn expected_openai_voice_choices() -> Vec<VoiceChoice> {
+    let mut choices = legacy_openai_voice_choices();
+    choices.push(VoiceChoice {
+        id: "shida".into(),
+        label: "Shida".into(),
+    });
+    choices
+}
+
+/// Every historically seeded choice must keep validating, which is what call
+/// admission, live revalidation, recovery and dictation all rely on.
+fn assert_legacy_choices_selectable(metadata: &VoiceInference, context: &str) {
+    for old in legacy_openai_voice_choices() {
+        assert_eq!(
+            super::voice::selected_voice(metadata, &metadata.models[0].id, Some(&old.id))
+                .unwrap_or_else(|_| panic!("{context}: legacy voice {} rejected", old.id)),
+            old.id,
+            "{context}"
+        );
+    }
+}
+
 #[test]
-fn openai_voice_seed_matches_provider_choices_without_restricting_admin_additions() {
+fn openai_voice_seed_appends_choices_and_keeps_every_legacy_choice_selectable() {
     let mut metadata = voice::default_voice("llm-openai").unwrap();
-    assert_eq!(metadata.voices.len(), 31);
+    // Additive: the exact legacy list (IDs, labels, order) is a prefix.
+    assert_eq!(metadata.voices, expected_openai_voice_choices());
+    assert_eq!(metadata.voices.len(), 33);
+    assert_eq!(metadata.voices[..32], legacy_openai_voice_choices()[..]);
     assert_eq!(metadata.voices[0].id, "marin");
     assert_eq!(metadata.voices[0].label, "Marin");
     assert_eq!(
@@ -60,19 +86,12 @@ fn openai_voice_seed_matches_provider_choices_without_restricting_admin_addition
             .map(|choice| &choice.id)
             .collect::<std::collections::HashSet<_>>()
             .len(),
-        31
+        33
     );
-    assert!(
-        metadata
-            .voices
-            .iter()
-            .any(|choice| { choice.id == "shida" && choice.label == "Shida" })
-    );
-    for removed in ["aube", "shitan"] {
-        assert!(!metadata.voices.iter().any(|choice| choice.id == removed));
-        assert!(
-            super::voice::selected_voice(&metadata, &metadata.models[0].id, Some(removed)).is_err()
-        );
+    voice::validate(&metadata).unwrap();
+    assert_legacy_choices_selectable(&metadata, "seed");
+    for kept in ["aube", "shitan"] {
+        assert!(metadata.voices.iter().any(|choice| choice.id == kept));
     }
     assert_eq!(
         super::voice::selected_voice(&metadata, &metadata.models[0].id, None).unwrap(),
@@ -96,12 +115,16 @@ fn openai_voice_seed_matches_provider_choices_without_restricting_admin_addition
 }
 
 #[tokio::test]
-async fn voice_backfill_repairs_only_exact_unmodified_legacy_openai_choices() {
+async fn voice_backfill_appends_only_to_exact_unmodified_legacy_openai_choices() {
     let db = crate::test_utils::connect_transaction_test_database("voice_choices_repair").await;
     let rows = db.collection::<bson::Document>(COLLECTION_NAME);
     let legacy = legacy_openai_voice_choices();
     assert_eq!(legacy.len(), 32);
-    let corrected = bson::to_bson(&voice::default_voice("llm-openai").unwrap().voices).unwrap();
+    let corrected = bson::to_bson(&expected_openai_voice_choices()).unwrap();
+    assert_eq!(
+        corrected,
+        bson::to_bson(&voice::default_voice("llm-openai").unwrap().voices).unwrap()
+    );
     let mut fixtures = Vec::new();
     for (id, should_migrate) in [
         ("legacy-unmodified", true),
@@ -209,6 +232,55 @@ async fn voice_backfill_repairs_only_exact_unmodified_legacy_openai_choices() {
             untouched_after, untouched_before,
             "only inference.voice.voices may change for {id}"
         );
+
+        // Regression: read the updated row through the typed path used by call
+        // admission/revalidation/recovery and re-run the live voice selector.
+        // No previously stored choice may stop validating, on any fixture.
+        let stored_before: Vec<VoiceChoice> = bson::from_bson(
+            before
+                .get_document("inference")
+                .unwrap()
+                .get_document("voice")
+                .unwrap()
+                .get("voices")
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let typed = db
+            .collection::<DownstreamService>(COLLECTION_NAME)
+            .find_one(doc! {"_id":*id})
+            .await
+            .unwrap()
+            .unwrap();
+        let metadata = typed.inference.unwrap().voice.unwrap();
+        assert_eq!(
+            metadata.voices[..stored_before.len()],
+            stored_before[..],
+            "stored choices must keep their IDs, labels and order for {id}"
+        );
+        for old in &stored_before {
+            assert_eq!(
+                super::voice::selected_voice(&metadata, &metadata.models[0].id, Some(&old.id))
+                    .unwrap_or_else(|_| panic!("{id}: stored voice {} rejected", old.id)),
+                old.id
+            );
+        }
+        if *should_migrate {
+            assert_eq!(metadata.voices, expected_openai_voice_choices());
+            assert_legacy_choices_selectable(&metadata, id);
+            assert_eq!(
+                super::voice::selected_voice(&metadata, &metadata.models[0].id, Some("shida"))
+                    .unwrap(),
+                "shida"
+            );
+            assert_eq!(
+                super::voice::selected_voice(&metadata, &metadata.models[0].id, None).unwrap(),
+                "marin"
+            );
+        } else {
+            assert_eq!(metadata.voices, stored_before, "{id} must stay untouched");
+        }
         after_first.push((*id, after));
     }
 
