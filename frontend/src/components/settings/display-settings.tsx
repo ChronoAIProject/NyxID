@@ -1,7 +1,15 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { useRef, useState, type ReactNode } from "react";
 import { Check, RotateCcw, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useResolvedTheme } from "@/hooks/use-theme";
 import {
@@ -28,19 +36,19 @@ import {
 } from "@/stores/theme-store";
 
 const THEME_OPTIONS: readonly { value: ThemeMode; label: string }[] = [
-  { value: "system", label: "System" },
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
+  { value: "system", get label() { return translateUi("System"); } },
+  { value: "light", get label() { return translateUi("Light"); } },
+  { value: "dark", get label() { return translateUi("Dark"); } },
 ];
 
 const MOTION_OPTIONS: readonly { value: MotionPreference; label: string }[] = [
-  { value: "system", label: "Follow system" },
-  { value: "reduce", label: "Reduce" },
+  { value: "system", get label() { return translateUi("Follow system"); } },
+  { value: "reduce", get label() { return translateUi("Reduce"); } },
 ];
 
 const COLOR_MODE_OPTIONS: readonly { value: ColorMode; label: string }[] = [
-  { value: "light", label: "Light" },
-  { value: "dark", label: "Dark" },
+  { value: "light", get label() { return translateUi("Light"); } },
+  { value: "dark", get label() { return translateUi("Dark"); } },
 ];
 
 function SegmentedChoice<T extends string | number>({
@@ -54,8 +62,13 @@ function SegmentedChoice<T extends string | number>({
   readonly value: T;
   readonly onChange: (value: T) => void;
 }) {
+  const { t } = useAppTranslation();
   return (
-    <div role="radiogroup" aria-label={label} className="flex flex-wrap gap-1 rounded-lg border border-hairline p-0.5">
+    <div
+      role="radiogroup"
+      aria-label={label}
+      className="flex flex-wrap gap-1 rounded-lg border border-hairline p-0.5"
+    >
       {options.map((option) => (
         <button
           key={option.value}
@@ -70,7 +83,7 @@ function SegmentedChoice<T extends string | number>({
               : "text-muted-foreground hover:text-foreground",
           )}
         >
-          {option.label}
+          {t(option.label)}
         </button>
       ))}
     </div>
@@ -107,6 +120,7 @@ function HexField({
   readonly value: string;
   readonly onCommit: (value: string) => void;
 }) {
+  const { t } = useAppTranslation();
   const [draft, setDraft] = useState(value);
   const [synced, setSynced] = useState(value);
   if (value !== synced) {
@@ -118,7 +132,7 @@ function HexField({
 
   return (
     <Input
-      aria-label={`${label} hex value`}
+      aria-label={t("{{label}} hex value", { label })}
       aria-invalid={invalid || undefined}
       value={draft}
       maxLength={7}
@@ -138,12 +152,19 @@ function HexField({
 }
 
 const SIDEBAR_MODE_OPTIONS: readonly { value: SidebarMode; label: string }[] = [
-  { value: "expanded", label: "Expanded" },
-  { value: "collapsed", label: "Collapsed" },
-  { value: "hover", label: "Expand on hover" },
+  { value: "expanded", get label() { return translateUi("Expanded"); } },
+  { value: "collapsed", get label() { return translateUi("Collapsed"); } },
+  { value: "hover", get label() { return translateUi("Expand on hover"); } },
 ];
 
-function SidebarWidthControl({ sidebar, label }: { readonly sidebar: SidebarId; readonly label: string }) {
+function SidebarWidthControl({
+  sidebar,
+  label,
+}: {
+  readonly sidebar: SidebarId;
+  readonly label: string;
+}) {
+  const { t } = useAppTranslation();
   const width = useThemeStore((s) => s.sidebarWidths[sidebar]);
   const setSidebarWidth = useThemeStore((s) => s.setSidebarWidth);
   return (
@@ -158,12 +179,15 @@ function SidebarWidthControl({ sidebar, label }: { readonly sidebar: SidebarId; 
         onChange={(e) => setSidebarWidth(sidebar, Number(e.target.value))}
         className="w-40 accent-primary"
       />
-      <span className="w-12 text-right font-mono text-11 text-muted-foreground">{width}px</span>
+      <span className="w-12 text-right font-mono text-11 text-muted-foreground">
+        {width}
+        {t("px")}
+      </span>
       <Button
         variant="ghost"
         size="icon"
-        aria-label={`Reset ${label.toLowerCase()}`}
-        title="Reset to default"
+        aria-label={t("Reset {{label}}", { label: label.toLowerCase() })}
+        title={t("Reset to default")}
         disabled={width === SIDEBAR_WIDTH.default}
         onClick={() => setSidebarWidth(sidebar, SIDEBAR_WIDTH.default)}
         className={cn(width === SIDEBAR_WIDTH.default && "invisible")}
@@ -174,7 +198,12 @@ function SidebarWidthControl({ sidebar, label }: { readonly sidebar: SidebarId; 
   );
 }
 
-function ScaleControl({ id, label, scale, onChange }: {
+function ScaleControl({
+  id,
+  label,
+  scale,
+  onChange,
+}: {
   readonly id: string;
   readonly label: string;
   readonly scale: number;
@@ -185,7 +214,9 @@ function ScaleControl({ id, label, scale, onChange }: {
   const value = draft ?? scale;
   const multiplier = `${value}×`;
   const defaultPosition =
-    ((DISPLAY_SCALE_DEFAULT - DISPLAY_SCALE_MIN) / (DISPLAY_SCALE_MAX - DISPLAY_SCALE_MIN)) * 100;
+    ((DISPLAY_SCALE_DEFAULT - DISPLAY_SCALE_MIN) /
+      (DISPLAY_SCALE_MAX - DISPLAY_SCALE_MIN)) *
+    100;
 
   return (
     <div className="flex w-full max-w-full flex-wrap items-center gap-3 sm:w-auto">
@@ -227,13 +258,25 @@ function ScaleControl({ id, label, scale, onChange }: {
             }}
             className="block h-6 w-full cursor-pointer rounded accent-primary focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ring"
           />
-          <div className="relative flex justify-between text-11 text-muted-foreground" aria-hidden="true">
+          <div
+            className="relative flex justify-between text-11 text-muted-foreground"
+            aria-hidden="true"
+          >
             <span>{DISPLAY_SCALE_MIN}×</span>
-            <span className="absolute -translate-x-1/2" style={{ left: `${defaultPosition}%` }}>{DISPLAY_SCALE_DEFAULT}×</span>
+            <span
+              className="absolute -translate-x-1/2"
+              style={{ left: `${defaultPosition}%` }}
+            >
+              {DISPLAY_SCALE_DEFAULT}×
+            </span>
             <span>{DISPLAY_SCALE_MAX}×</span>
           </div>
         </div>
-        <output htmlFor={id} aria-live="off" className="min-h-6 min-w-[5ch] shrink-0 text-right font-mono text-11 text-muted-foreground">
+        <output
+          htmlFor={id}
+          aria-live="off"
+          className="min-h-6 min-w-[5ch] shrink-0 text-right font-mono text-11 text-muted-foreground"
+        >
           {multiplier}
         </output>
       </div>
@@ -242,30 +285,50 @@ function ScaleControl({ id, label, scale, onChange }: {
 }
 
 function SidebarSettings() {
+  const { t } = useAppTranslation();
   const sidebarMode = useThemeStore((s) => s.sidebarMode);
   const setSidebarMode = useThemeStore((s) => s.setSidebarMode);
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Sidebar</CardTitle>
+        <CardTitle>{t("Sidebar")}</CardTitle>
         <CardDescription>
-          Drag a sidebar&apos;s edge to resize it, or set the width here. Double-click the edge to reset.
+          {t(
+            "Drag a sidebar's edge to resize it, or set the width here. Double-click the edge to reset.",
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5">
-        <SettingRow title="Main sidebar" description="Expanded, icons only, or icons that expand on hover.">
+        <SettingRow
+          title={t("Main sidebar")}
+          description={t(
+            "Expanded, icons only, or icons that expand on hover.",
+          )}
+        >
           <SegmentedChoice
-            label="Main sidebar"
+            label={t("Main sidebar")}
             options={SIDEBAR_MODE_OPTIONS}
             value={sidebarMode}
             onChange={setSidebarMode}
           />
         </SettingRow>
-        <SettingRow title="Main sidebar width" description="Used when the main sidebar is expanded.">
-          <SidebarWidthControl sidebar="dashboard" label="Main sidebar width" />
+        <SettingRow
+          title={t("Main sidebar width")}
+          description={t("Used when the main sidebar is expanded.")}
+        >
+          <SidebarWidthControl
+            sidebar="dashboard"
+            label={t("Main sidebar width")}
+          />
         </SettingRow>
-        <SettingRow title="Assistant sidebar width" description="The agents and chats list in the assistant.">
-          <SidebarWidthControl sidebar="assistant" label="Assistant sidebar width" />
+        <SettingRow
+          title={t("Assistant sidebar width")}
+          description={t("The agents and chats list in the assistant.")}
+        >
+          <SidebarWidthControl
+            sidebar="assistant"
+            label={t("Assistant sidebar width")}
+          />
         </SettingRow>
       </CardContent>
     </Card>
@@ -273,6 +336,7 @@ function SidebarSettings() {
 }
 
 function ColorEditor() {
+  const { t } = useAppTranslation();
   const resolved = useResolvedTheme();
   const setMode = useThemeStore((s) => s.setMode);
   const customColors = useThemeStore((s) => s.customColors);
@@ -287,53 +351,72 @@ function ColorEditor() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Colors</CardTitle>
+        <CardTitle>{t("Colors")}</CardTitle>
         <CardDescription>
-          Customize the colors of each theme. Changes apply immediately and are saved in this browser.
+          {t(
+            "Customize the colors of each theme. Changes apply immediately and are saved in this browser.",
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <SegmentedChoice
-            label="Theme to edit"
+            label={t("Theme to edit")}
             options={COLOR_MODE_OPTIONS}
             value={editMode}
             onChange={setEditMode}
           />
           {editMode !== resolved && (
-            <Button variant="outline" size="sm" onClick={() => setMode(editMode)}>
-              Switch to {editMode} theme to preview
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setMode(editMode)}
+            >
+              {t("Switch to {{theme}} theme to preview", {
+                theme: t(editMode),
+              })}
             </Button>
           )}
         </div>
 
-        <ul className="grid gap-x-8 gap-y-2 sm:grid-cols-2" aria-label={`${editMode} theme colors`}>
+        <ul
+          className="grid gap-x-8 gap-y-2 sm:grid-cols-2"
+          aria-label={t("{{theme}} theme colors", {
+            theme: t(editMode === "dark" ? "Dark" : "Light").toLowerCase(),
+          })}
+        >
           {EDITABLE_COLORS.map(({ key, label }) => {
             const value = color(key);
             const customized = key in overrides;
             return (
               <li key={key} className="flex items-center gap-2">
                 <span className="min-w-0 flex-1 text-12">
-                  {label}
-                  {customized && <span className="ml-2 text-11 text-text-tertiary">Customized</span>}
+                  {t(label)}
+                  {customized && (
+                    <span className="ml-2 text-11 text-text-tertiary">
+                      {t("Customized")}
+                    </span>
+                  )}
                 </span>
                 <input
                   type="color"
-                  aria-label={`${label} color`}
+                  aria-label={t("{{label}} color", { label: t(label) })}
                   value={value.toLowerCase()}
-                  onChange={(e) => setCustomColor(editMode, key, e.target.value)}
+                  onChange={(e) =>
+                    setCustomColor(editMode, key, e.target.value)
+                  }
                   className="h-7 w-9 cursor-pointer rounded-md border border-input bg-transparent p-0.5"
                 />
                 <HexField
-                  label={label}
+                  label={t(label)}
                   value={value}
                   onCommit={(next) => setCustomColor(editMode, key, next)}
                 />
                 <Button
                   variant="ghost"
                   size="icon"
-                  aria-label={`Reset ${label}`}
-                  title="Reset to default"
+                  aria-label={t("Reset {{label}}", { label: t(label) })}
+                  title={t("Reset to default")}
                   disabled={!customized}
                   onClick={() => resetCustomColors(editMode, key)}
                   className={cn(!customized && "invisible")}
@@ -346,21 +429,37 @@ function ColorEditor() {
         </ul>
 
         <div className="space-y-1.5">
-          <p className="text-12 font-medium">Readability</p>
-          <ul className="space-y-1" aria-label="Contrast checks">
+          <p className="text-12 font-medium">{t("Readability")}</p>
+          <ul className="space-y-1" aria-label={t("Contrast checks")}>
             {CONTRAST_CHECKS.map((check) => {
               const ratio = contrastRatio(color(check.fg), color(check.bg));
               const ok = ratio >= check.target;
               return (
-                <li key={check.label} className="flex items-center gap-2 text-12">
+                <li
+                  key={check.label}
+                  className="flex items-center gap-2 text-12"
+                >
                   {ok ? (
-                    <Check className="size-3.5 shrink-0 text-success" aria-hidden />
+                    <Check
+                      className="size-3.5 shrink-0 text-success"
+                      aria-hidden
+                    />
                   ) : (
-                    <TriangleAlert className="size-3.5 shrink-0 text-warning" aria-hidden />
+                    <TriangleAlert
+                      className="size-3.5 shrink-0 text-warning"
+                      aria-hidden
+                    />
                   )}
-                  <span className="flex-1 text-muted-foreground">{check.label}</span>
-                  <span className={cn("font-mono text-11", ok ? "text-muted-foreground" : "text-warning")}>
-                    {ratio.toFixed(1)}:1 {ok ? "" : `(needs ${check.target}:1)`}
+                  <span className="flex-1 text-muted-foreground">
+                    {t(check.label)}
+                  </span>
+                  <span
+                    className={cn(
+                      "font-mono text-11",
+                      ok ? "text-muted-foreground" : "text-warning",
+                    )}
+                  >
+                    {ratio.toFixed(1)}:1 {ok ? "" : t("(needs {{target}}:1)", { target: check.target })}
                   </span>
                 </li>
               );
@@ -376,7 +475,7 @@ function ColorEditor() {
             onClick={() => resetCustomColors(editMode)}
           >
             <RotateCcw className="size-3" />
-            Reset {editMode} colors
+            {t("Reset {{theme}} colors", { theme: t(editMode) })}
           </Button>
         </div>
       </CardContent>
@@ -385,6 +484,7 @@ function ColorEditor() {
 }
 
 export function DisplaySettings() {
+  const { t } = useAppTranslation();
   const mode = useThemeStore((s) => s.mode);
   const setMode = useThemeStore((s) => s.setMode);
   const textScale = useThemeStore((s) => s.textScale);
@@ -399,30 +499,68 @@ export function DisplaySettings() {
     <div className="space-y-6">
       <Card>
         <CardHeader>
-          <CardTitle>Display</CardTitle>
+          <CardTitle>{t("Display")}</CardTitle>
           <CardDescription>
-            Choose how NyxID looks in this browser. Other devices keep their own settings.
+            {t(
+              "Choose how NyxID looks in this browser. Other devices keep their own settings.",
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="space-y-5">
-            <SettingRow title="Theme" description="System follows your device's light or dark setting.">
-              <SegmentedChoice label="Theme" options={THEME_OPTIONS} value={mode} onChange={setMode} />
+            <SettingRow
+              title={t("Theme")}
+              description={t(
+                "System follows your device's light or dark setting.",
+              )}
+            >
+              <SegmentedChoice
+                label={t("Theme")}
+                options={THEME_OPTIONS}
+                value={mode}
+                onChange={setMode}
+              />
             </SettingRow>
-            <SettingRow title="Text size" description="Scales all text in 0.01× steps.">
-              <ScaleControl id="text-size" label="Text size" scale={textScale} onChange={setTextScale} />
+            <SettingRow
+              title={t("Text size")}
+              description={t("Scales all text in 0.01× steps.")}
+            >
+              <ScaleControl
+                id="text-size"
+                label={t("Text size")}
+                scale={textScale}
+                onChange={setTextScale}
+              />
             </SettingRow>
-            <SettingRow title="Spacing" description="Adjust space between and inside elements in 0.01× steps.">
-              <ScaleControl id="spacing" label="Spacing" scale={density} onChange={setDensity} />
+            <SettingRow
+              title={t("Spacing")}
+              description={t(
+                "Adjust space between and inside elements in 0.01× steps.",
+              )}
+            >
+              <ScaleControl
+                id="spacing"
+                label={t("Spacing")}
+                scale={density}
+                onChange={setDensity}
+              />
             </SettingRow>
-            <SettingRow title="Motion" description="Reduce turns off animations and transitions.">
-              <SegmentedChoice label="Motion" options={MOTION_OPTIONS} value={motion} onChange={setMotion} />
+            <SettingRow
+              title={t("Motion")}
+              description={t("Reduce turns off animations and transitions.")}
+            >
+              <SegmentedChoice
+                label={t("Motion")}
+                options={MOTION_OPTIONS}
+                value={motion}
+                onChange={setMotion}
+              />
             </SettingRow>
           </div>
           <div className="mt-4 flex justify-end">
             <Button variant="ghost" size="sm" onClick={resetDisplay}>
               <RotateCcw className="size-3" />
-              Reset display settings
+              {t("Reset display settings")}
             </Button>
           </div>
         </CardContent>

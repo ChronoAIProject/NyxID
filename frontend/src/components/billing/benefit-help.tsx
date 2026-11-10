@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState, type ReactNode } from "react";
 import { Info } from "lucide-react";
 import {
@@ -14,6 +16,7 @@ export function BenefitHelp({
   label: string;
   children: ReactNode;
 }) {
+  const { t } = useUiTranslation();
   const [open, setOpen] = useState(false);
   return (
     <Tooltip open={open} onOpenChange={setOpen} delayDuration={150}>
@@ -21,7 +24,7 @@ export function BenefitHelp({
         <button
           type="button"
           className="benefit-help-trigger"
-          aria-label={`About ${label.toLowerCase()}`}
+          aria-label={t("About {{value}}", { value: label.toLowerCase() })}
           onClick={(event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -54,21 +57,21 @@ function allowanceCadence(balances: readonly UserAllowanceBalance[]) {
   if (cadences.length === 1 && cadences[0] === "daily") {
     const resets = [...new Set(balances.map((row) => row.period_end))];
     if (resets.length === 1 && resets[0]) {
-      const time = new Intl.DateTimeFormat(undefined, {
+      const time = new Intl.DateTimeFormat(getFormattingLocale(), {
         timeZoneName: "short",
         hour: "2-digit",
         minute: "2-digit",
         hour12: false,
       }).format(new Date(resets[0]));
-      return `Your allowances reset daily at ${time}. Unused units do not roll over.`;
+      return translateUi("Your allowances reset daily at {{time}}. Unused units do not roll over.", { time });
     }
-    return "Your allowances reset daily. Open Details for each reset time. Unused units do not roll over.";
+    return translateUi("Your allowances reset daily. Open Details for each reset time. Unused units do not roll over.");
   }
   if (cadences.length === 1 && cadences[0] === "one_time")
-    return "Your allowances are one-time allocations and do not reset.";
+    return translateUi("Your allowances are one-time allocations and do not reset.");
   if (cadences.length === 1)
-    return `Your allowances reset ${cadences[0]}. Unused units do not roll over. Open Details for each reset time.`;
-  return "These allowances have different reset schedules. Open Details for each allowance's recurrence and expiry.";
+    return translateUi("Your allowances reset {{recurrence}}. Unused units do not roll over. Open Details for each reset time.", { recurrence: translateUi(cadences[0]!) });
+  return translateUi("These allowances have different reset schedules. Open Details for each allowance's recurrence and expiry.");
 }
 
 export function FreeUsageHelp({
@@ -76,18 +79,12 @@ export function FreeUsageHelp({
 }: {
   balances: readonly UserAllowanceBalance[];
 }) {
+  const { t } = useUiTranslation();
   return (
-    <BenefitHelp label="Free usage">
+    <BenefitHelp label={t("Free usage")}>
+      <p>{t("Included units for this service's platform usage. Each token class, image, or request allowance has its own limit and cannot cover another unit. Matching free usage is applied before credit grants and your wallet.")}</p>
       <p>
-        Included units for this service's platform usage. Each token class,
-        image, or request allowance has its own limit and cannot cover another
-        unit. Matching free usage is applied before credit grants and your
-        wallet.
-      </p>
-      <p>
-        {allowanceCadence(balances)} After an allowance is exhausted, eligible
-        grants or wallet credits cover further charges.
-      </p>
+        {allowanceCadence(balances)}{t(" After an allowance is exhausted, eligible grants or wallet credits cover further charges.")}</p>
     </BenefitHelp>
   );
 }

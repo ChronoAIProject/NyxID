@@ -1,3 +1,4 @@
+import { useWizardTranslation } from "@/i18n/wizard";
 /**
  * Text input with inline Zod validation + optional helper hint.
  *
@@ -54,6 +55,7 @@ export function NameInput({
   autoComplete = "off",
   id: idProp,
 }: NameInputProps) {
+  const { t } = useWizardTranslation();
   const reactId = useId()
   const id = idProp ?? reactId
 
@@ -93,7 +95,7 @@ export function NameInput({
       />
       {effectiveError ? (
         <p id={errorId} className="text-xs text-destructive">
-          {effectiveError}
+          {t(effectiveError)}
         </p>
       ) : hint ? (
         <p id={hintId} className="text-xs text-muted-foreground">

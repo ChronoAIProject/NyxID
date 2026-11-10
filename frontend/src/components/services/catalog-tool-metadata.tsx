@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useAuthStore } from "@/stores/auth-store";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -22,6 +24,7 @@ export function CatalogToolMetadata({
 }: {
   service: DownstreamService;
 }) {
+  const { t } = useUiTranslation();
   const admin = useAuthStore((state) => state.user?.is_admin) ?? false;
   const { data: topics = [] } = useToolTopics();
   const mutation = useCatalogToolMutation();
@@ -88,9 +91,9 @@ export function CatalogToolMetadata({
             },
           });
           form.reset(values);
-          toast.success("Tool metadata saved");
+          toast.success(translateUi("Tool metadata saved"));
         } catch {
-          toast.error("Metadata update failed");
+          toast.error(translateUi("Metadata update failed"));
         }
       })}
     >
@@ -105,56 +108,42 @@ export function CatalogToolMetadata({
                   serviceId: service.id,
                   body: { icon_url: "" },
                 });
-                toast.success("Tool icon removed");
+                toast.success(translateUi("Tool icon removed"));
               } catch {
-                toast.error("Icon removal failed");
+                toast.error(translateUi("Icon removal failed"));
               }
             }}
-          >
-            Remove icon
-          </Button>
+          >{t("Remove icon")}</Button>
         )}
         <div className="grid gap-3 sm:grid-cols-2">
-          <label className="text-12">
-            Name
-            <Input {...form.register("name")} />
+          <label className="text-12">{t("Name")}<Input {...form.register("name")} />
           </label>
-          <label className="text-12">
-            Supplier
-            <Input {...form.register("supplier")} />
+          <label className="text-12">{t("Supplier")}<Input {...form.register("supplier")} />
           </label>
-          <label className="text-12">
-            Description
-            <Input {...form.register("description")} />
+          <label className="text-12">{t("Description")}<Input {...form.register("description")} />
           </label>
           {admin && (
-            <label className="text-12">
-              Offering kind
-              <Select
+            <label className="text-12">{t("Offering kind")}<Select
                 value={form.watch("offering_kind")}
                 onValueChange={(value) =>
                   form.setValue("offering_kind", value as "ai_service" | "tool")
                 }
               >
-                <SelectTrigger aria-label="Offering kind">
+                <SelectTrigger aria-label={t("Offering kind")}>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="ai_service">AI Service</SelectItem>
-                  <SelectItem value="tool">Tool</SelectItem>
+                  <SelectItem value="ai_service">{t("AI Service")}</SelectItem>
+                  <SelectItem value="tool">{t("Tool")}</SelectItem>
                 </SelectContent>
               </Select>
             </label>
           )}
-          <label className="text-12">
-            OpenAPI spec URL
-            <Input {...form.register("openapi_spec_url")} />
+          <label className="text-12">{t("OpenAPI spec URL")}<Input {...form.register("openapi_spec_url")} />
           </label>
         </div>
         <details className="space-y-3">
-          <summary className="cursor-pointer text-12">
-            Documentation and operational notes
-          </summary>
+          <summary className="cursor-pointer text-12">{t("Documentation and operational notes")}</summary>
           <div className="grid gap-3 sm:grid-cols-2">
             {(
               [
@@ -172,22 +161,18 @@ export function CatalogToolMetadata({
               </label>
             ))}
           </div>
-          <label className="block text-12">
-            Required permissions
-            <Input
-              placeholder="read:api, write:data"
+          <label className="block text-12">{t("Required permissions")}<Input
+              placeholder={t("read:api, write:data")}
               {...form.register("required_permissions")}
             />
           </label>
           {form.formState.errors.required_permissions && (
             <p role="alert" className="text-11 text-destructive">
-              {form.formState.errors.required_permissions.message}
+              {translateUi(form.formState.errors.required_permissions.message ?? "")}
             </p>
           )}
-          <p className="text-11 text-text-tertiary">
-            Comma-separated vendor permissions required for the operations.
-          </p>
-          <p className="text-12 font-medium">Capabilities</p>
+          <p className="text-11 text-text-tertiary">{t("Comma-separated vendor permissions required for the operations.")}</p>
+          <p className="text-12 font-medium">{t("Capabilities")}</p>
           <div className="grid gap-2 sm:grid-cols-2">
             {(
               [
@@ -217,7 +202,7 @@ export function CatalogToolMetadata({
             ))}
           </div>
         </details>
-        <p className="text-12">Topics</p>
+        <p className="text-12">{t("Topics")}</p>
         <div className="flex flex-wrap gap-1">
           {topics.map((topic) => (
             <Button
@@ -244,10 +229,9 @@ export function CatalogToolMetadata({
           ))}
         </div>
         {service.import_source && (
-          <p className="text-11 text-text-tertiary">
-            Imported from {service.import_source.kind}:{" "}
+          <p className="text-11 text-text-tertiary">{t("Imported from ")}{service.import_source.kind}:{" "}
             {service.import_source.reference} ·{" "}
-            {service.import_source.version ?? "Unversioned"}
+            {service.import_source.version ?? t("Unversioned")}
           </p>
         )}
         <div className="flex justify-end">
@@ -256,9 +240,7 @@ export function CatalogToolMetadata({
             type="submit"
             disabled={!form.formState.isDirty}
             isLoading={mutation.isPending}
-          >
-            Save metadata
-          </Button>
+          >{t("Save metadata")}</Button>
         </div>
       </fieldset>
     </form>

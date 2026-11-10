@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useId, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,6 +25,7 @@ export function PoolOperationCheck({
   operation: PoolOperation | null;
   onChange: (operation: PoolOperation | null) => void;
 }) {
+  const { t } = useUiTranslation();
   const id = useId();
   const [method, setMethod] = useState(operation?.method ?? "POST");
   const [path, setPath] = useState(operation?.path ?? "");
@@ -38,16 +41,10 @@ export function PoolOperationCheck({
   }
   return (
     <div className="space-y-2">
-      <p className="text-12 text-muted-foreground">
-        Check which connections allow a particular request. Enter the path
-        relative to each connection’s base URL, for example /chat/completions.
-        This does not send a request to the provider.
-      </p>
+      <p className="text-12 text-muted-foreground">{t("Check which connections allow a particular request. Enter the path relative to each connection’s base URL, for example /chat/completions. This does not send a request to the provider.")}</p>
       <div className="flex flex-wrap items-end gap-2">
         <div className="w-24 space-y-1">
-          <label htmlFor={`${id}-method`} className="text-12">
-            Method
-          </label>
+          <label htmlFor={`${id}-method`} className="text-12">{t("Method")}</label>
           <Select
             value={method}
             onValueChange={(v) => {
@@ -70,9 +67,7 @@ export function PoolOperationCheck({
           </Select>
         </div>
         <div className="min-w-36 flex-1 space-y-1">
-          <label htmlFor={`${id}-path`} className="text-12">
-            Operation path
-          </label>
+          <label htmlFor={`${id}-path`} className="text-12">{t("Operation path")}</label>
           <Input
             id={`${id}-path`}
             value={path}
@@ -91,9 +86,7 @@ export function PoolOperationCheck({
             }}
           />
         </div>
-        <Button type="button" onClick={check}>
-          Check operation
-        </Button>
+        <Button type="button" onClick={check}>{t("Check operation")}</Button>
       </div>
       {error && (
         <p
@@ -101,13 +94,12 @@ export function PoolOperationCheck({
           role="alert"
           className="text-12 text-destructive"
         >
-          {error}
+          {translateUi(error)}
         </p>
       )}
       {operation && (
         <div className="flex flex-wrap items-center justify-between gap-2 text-12">
-          <span className="text-muted-foreground">
-            Showing results for{" "}
+          <span className="text-muted-foreground">{t("Showing results for")}{" "}
             <code>
               {operation.method} {operation.path}
             </code>
@@ -119,9 +111,7 @@ export function PoolOperationCheck({
               onChange(null);
               setError(undefined);
             }}
-          >
-            Clear operation check
-          </Button>
+          >{t("Clear operation check")}</Button>
         </div>
       )}
     </div>

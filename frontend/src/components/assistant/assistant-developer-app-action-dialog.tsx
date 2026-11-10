@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { AppWindow, ShieldAlert } from "lucide-react";
 import { z } from "zod";
@@ -75,6 +77,7 @@ export function AssistantDeveloperAppActionDialog({
   readonly params: Record<string, unknown>;
   readonly onComplete: (clientId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const [name, setName] = useState(textParam(params, "name"));
   const [redirectUris, setRedirectUris] = useState(
     Array.isArray(params.redirectUris) ? params.redirectUris.join("\n") : "",
@@ -235,21 +238,21 @@ export function AssistantDeveloperAppActionDialog({
           </DialogTitle>
           <DialogDescription>
             {result?.secret
-              ? "Save this secret now. It will not be shown again."
+              ? t("Save this secret now. It will not be shown again.")
               : result?.unavailable
-                ? "The one-time secret was unavailable and was not captured by this browser. Rotate the secret again to receive a new value."
+                ? t("The one-time secret was unavailable and was not captured by this browser. Rotate the secret again to receive a new value.")
                 : result
-                  ? "The canonical developer-app projection confirms the change."
+                  ? t("The canonical developer-app projection confirms the change.")
                   : destructive
-                    ? "Deleting the app revokes OAuth access and must be confirmed every time."
-                    : "NyxID keeps client secrets out of chat."}
+                    ? t("Deleting the app revokes OAuth access and must be confirmed every time.")
+                    : t("NyxID keeps client secrets out of chat.")}
           </DialogDescription>
         </DialogHeader>
         {result ? (
           <div className="space-y-3 border-y border-border py-4">
             {result.secret ? (
               <div className="space-y-2">
-                <Label htmlFor="developer-secret">One-time client secret</Label>
+                <Label htmlFor="developer-secret">{t("One-time client secret")}</Label>
                 <Input
                   id="developer-secret"
                   readOnly
@@ -267,7 +270,7 @@ export function AssistantDeveloperAppActionDialog({
             {action === "create" || action === "update" ? (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="developer-name">Application name</Label>
+                  <Label htmlFor="developer-name">{t("Application name")}</Label>
                   <Input
                     id="developer-name"
                     value={name}
@@ -275,7 +278,7 @@ export function AssistantDeveloperAppActionDialog({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="developer-redirects">Redirect URIs</Label>
+                  <Label htmlFor="developer-redirects">{t("Redirect URIs")}</Label>
                   <textarea
                     id="developer-redirects"
                     value={redirectUris}
@@ -296,16 +299,14 @@ export function AssistantDeveloperAppActionDialog({
                   onCheckedChange={(value) => setConfirmed(value === true)}
                 />
                 <span className="flex items-center gap-1">
-                  <ShieldAlert className="size-3" />I understand this revokes
-                  OAuth access.
-                </span>
+                  <ShieldAlert className="size-3" />{t("I understand this revokes OAuth access.")}</span>
               </label>
             ) : null}
           </div>
         )}
         {error ? (
           <p role="alert" className="text-xs text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
         <DialogFooter>
@@ -317,13 +318,11 @@ export function AssistantDeveloperAppActionDialog({
                 close();
               }}
             >
-              {result.unavailable ? "Acknowledge" : "Done"}
+              {result.unavailable ? t("Acknowledge") : t("Done")}
             </Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
               <Button
                 type="button"
                 variant={destructive ? "destructive" : "primary"}
@@ -331,7 +330,7 @@ export function AssistantDeveloperAppActionDialog({
                 disabled={pending || (destructive && !confirmed)}
                 onClick={() => void submit()}
               >
-                {destructive ? "Delete app" : "Continue"}
+                {destructive ? t("Delete app") : t("Continue")}
               </Button>
             </>
           )}

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { Button, ButtonIcon } from "@/components/ui/button";
@@ -57,6 +58,7 @@ export function ApprovalPolicyEditor({
   rules,
   onSave,
 }: ApprovalPolicyEditorProps) {
+  const { t } = useUiTranslation();
   const [draftRules, setDraftRules] = useState<readonly ApprovalRule[]>(rules);
   const [draftDefaultEffect, setDraftDefaultEffect] =
     useState<ApprovalEffect>(defaultEffect ?? "auto_allow");
@@ -113,7 +115,7 @@ export function ApprovalPolicyEditor({
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs text-muted-foreground">Default:</span>
+        <span className="text-xs text-muted-foreground">{t("Default:")}</span>
         <Select
           value={draftDefaultEffect}
           onValueChange={(value) =>
@@ -124,19 +126,15 @@ export function ApprovalPolicyEditor({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="auto_allow">Auto allow unmatched</SelectItem>
-            <SelectItem value="require_approval">
-              Require approval unmatched
-            </SelectItem>
-            <SelectItem value="deny">Deny unmatched</SelectItem>
+            <SelectItem value="auto_allow">{t("Auto allow unmatched")}</SelectItem>
+            <SelectItem value="require_approval">{t("Require approval unmatched")}</SelectItem>
+            <SelectItem value="deny">{t("Deny unmatched")}</SelectItem>
           </SelectContent>
         </Select>
       </div>
 
       {draftRules.length === 0 ? (
-        <div className="rounded-lg bg-overlay px-3 py-2 text-xs text-muted-foreground">
-          No advanced rules configured.
-        </div>
+        <div className="rounded-lg bg-overlay px-3 py-2 text-xs text-muted-foreground">{t("No advanced rules configured.")}</div>
       ) : (
         <div className="space-y-3">
           {draftRules.map((rule, index) => (
@@ -145,22 +143,21 @@ export function ApprovalPolicyEditor({
               className="space-y-3 rounded-lg border border-border p-3"
             >
               <div className="flex items-center justify-between gap-3">
-                <span className="text-12 font-medium">
-                  Rule {index + 1}
+                <span className="text-12 font-medium">{t("Rule ")}{index + 1}
                 </span>
                 <Button
                   variant="ghost"
                   size="icon"
                   onClick={() => removeRule(index)}
                   disabled={disabled}
-                  title="Remove rule"
+                  title={t("Remove rule")}
                 >
                   <Trash2 className="h-4 w-4 text-muted-foreground" />
                 </Button>
               </div>
 
               <div className="space-y-2">
-                <span className="text-xs text-muted-foreground">Methods</span>
+                <span className="text-xs text-muted-foreground">{t("Methods")}</span>
                 <div className="flex flex-wrap gap-2">
                   {approvalMethods.map((method) => (
                     <label
@@ -181,9 +178,7 @@ export function ApprovalPolicyEditor({
               </div>
 
               <div className="space-y-2">
-                <label className="text-xs text-muted-foreground">
-                  Resource pattern
-                </label>
+                <label className="text-xs text-muted-foreground">{t("Resource pattern")}</label>
                 <Input
                   value={rule.resource_pattern}
                   onChange={(event) =>
@@ -243,8 +238,8 @@ export function ApprovalPolicyEditor({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="per_request">Per request</SelectItem>
-                      <SelectItem value="grant">Time-based grant</SelectItem>
+                      <SelectItem value="per_request">{t("Per request")}</SelectItem>
+                      <SelectItem value="grant">{t("Time-based grant")}</SelectItem>
                     </SelectContent>
                   </Select>
                 )}
@@ -263,17 +258,13 @@ export function ApprovalPolicyEditor({
         >
           <ButtonIcon>
             <Plus className="h-3.5 w-3.5" />
-          </ButtonIcon>
-          Add Rule
-        </Button>
+          </ButtonIcon>{t("Add Rule")}</Button>
         <Button
           variant="primary"
           className="h-8 text-xs"
           onClick={() => onSave(draftRules, draftDefaultEffect)}
           disabled={disabled}
-        >
-          Save Rules
-        </Button>
+        >{t("Save Rules")}</Button>
       </div>
     </div>
   );

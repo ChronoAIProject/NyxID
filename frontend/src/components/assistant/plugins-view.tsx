@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
@@ -90,6 +92,7 @@ function PluginCard({
   readonly actionLabel: string;
   readonly onActivate?: () => void;
 }) {
+  const { t } = useUiTranslation();
   const interactive = Boolean(onActivate);
 
   return (
@@ -149,9 +152,9 @@ function PluginCard({
                 a working way in, so the neutral Disabled badge replaces it
                 rather than sitting beside it. */}
             {item.disabled ? (
-              <Badge variant="secondary">Disabled</Badge>
+              <Badge variant="secondary">{t("Disabled")}</Badge>
             ) : (
-              <Badge variant="success">{addedBadge}</Badge>
+              <Badge variant="success">{t(addedBadge)}</Badge>
             )}
             {addedMeta && (
               <span className="truncate font-mono text-10 text-text-tertiary">
@@ -197,8 +200,9 @@ function CardGrid({ children }: { readonly children: React.ReactNode }) {
 }
 
 function LoadingGrid() {
+  const { t } = useUiTranslation();
   return (
-    <div role="status" aria-label="Loading the plugin catalog">
+    <div role="status" aria-label={t("Loading the plugin catalog")}>
       <CardGrid>
         {Array.from({ length: 6 }, (_, i) => (
           <Skeleton key={i} className={`${CARD_HEIGHT} rounded-xl`} />
@@ -236,6 +240,7 @@ function ConnectorCard({
 }
 
 function ConnectorsTab({ query }: { readonly query: string }) {
+  const { t } = useUiTranslation();
   const keysQuery = useKeys();
   const catalogQuery = useCatalog();
   const [manageCardId, setManageCardId] = useState<string | null>(null);
@@ -267,7 +272,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
   const loadFailed = Boolean(keysQuery.error ?? catalogQuery.error);
   useEffect(() => {
     if (!loadFailed) return;
-    toast.error("Could not load plugins", {
+    toast.error(translateUi("Could not load plugins"), {
       id: "assistant-plugins-load-failed",
       description:
         "The assistant backend did not respond. Showing what has already loaded — retry below.",
@@ -284,9 +289,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
 
   if (searching && added.length === 0 && available.length === 0) {
     return (
-      <p className="py-14 text-center text-11 text-text-tertiary">
-        No plugins match this search.
-      </p>
+      <p className="py-14 text-center text-11 text-text-tertiary">{t("No plugins match this search.")}</p>
     );
   }
 
@@ -294,9 +297,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
     <>
       {loadFailed ? (
         <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-4 py-2.5">
-          <p className="text-12 text-muted-foreground">
-            Some plugins may be missing until the catalog loads.
-          </p>
+          <p className="text-12 text-muted-foreground">{t("Some plugins may be missing until the catalog loads.")}</p>
           <Button
             type="button"
             variant="outline"
@@ -306,14 +307,12 @@ function ConnectorsTab({ query }: { readonly query: string }) {
               void catalogQuery.refetch();
             }}
           >
-            <RefreshCw />
-            Retry
-          </Button>
+            <RefreshCw />{t("Retry")}</Button>
         </div>
       ) : null}
       {(added.length > 0 || !searching) && (
         <>
-          <SectionHeading>Added</SectionHeading>
+          <SectionHeading>{t("Added")}</SectionHeading>
           {added.length > 0 ? (
             <div className="mb-7">
               <CardGrid>
@@ -330,8 +329,8 @@ function ConnectorsTab({ query }: { readonly query: string }) {
           ) : (
             <p className="mb-7 rounded-xl border border-dashed border-border px-4 py-6 text-center text-12 text-muted-foreground">
               {loadFailed
-                ? "Connected services could not be loaded right now."
-                : "No connected services yet. Connect one below and your assistant can call it through the NyxID proxy."}
+                ? t("Connected services could not be loaded right now.")
+                : t("No connected services yet. Connect one below and your assistant can call it through the NyxID proxy.")}
             </p>
           )}
         </>
@@ -339,7 +338,7 @@ function ConnectorsTab({ query }: { readonly query: string }) {
 
       {available.length > 0 && (
         <>
-          <SectionHeading>Available to add</SectionHeading>
+          <SectionHeading>{t("Available to add")}</SectionHeading>
           <CardGrid>
             {available.map((item) => (
               <ConnectorCard
@@ -421,12 +420,11 @@ function SkillAgentPicker({
   readonly value: string;
   readonly onChange: (id: string) => void;
 }) {
+  const { t } = useUiTranslation();
   return (
-    <label className="flex max-w-[300px] flex-col gap-1 text-11 text-text-tertiary">
-      Agent
-      <Select value={value} onValueChange={onChange}>
-        <SelectTrigger aria-label="Agent for skills">
-          <SelectValue placeholder="Choose an agent" />
+    <label className="flex max-w-[300px] flex-col gap-1 text-11 text-text-tertiary">{t("Agent")}<Select value={value} onValueChange={onChange}>
+        <SelectTrigger aria-label={t("Agent for skills")}>
+          <SelectValue placeholder={t("Choose an agent")} />
         </SelectTrigger>
         <SelectContent>
           {agents.map((agent) => (
@@ -447,6 +445,7 @@ function SkillsTab({
   readonly query: string;
   readonly agentId?: string;
 }) {
+  const { t } = useUiTranslation();
   const agents = useNyxBotAgents();
   // Destroyed agents and agents the owner cannot maintain keep their skills.
   const manageable = (agents.data?.agents ?? []).filter(
@@ -496,7 +495,7 @@ function SkillsTab({
                 if (busy || !attached.data) return;
                 if (full) {
                   toast.info(
-                    "This agent already has 16 skills. Detach one first.",
+                    translateUi("This agent already has 16 skills. Detach one first."),
                   );
                   return;
                 }
@@ -512,9 +511,7 @@ function SkillsTab({
       {agents.isPending ? (
         <Skeleton className="h-8 w-[300px]" />
       ) : manageable.length === 0 && !agents.error ? (
-        <p className="text-12 text-muted-foreground">
-          No agent you can maintain is available.
-        </p>
+        <p className="text-12 text-muted-foreground">{t("No agent you can maintain is available.")}</p>
       ) : agent ? (
         <SkillAgentPicker
           agents={manageable}
@@ -524,18 +521,16 @@ function SkillsTab({
       ) : null}
       {errors.map((error, index) => (
         <p key={index} role="alert" className="text-12 text-destructive">
-          {error.message}
+          {translateUi(error.message ?? "")}
         </p>
       ))}
       {agent && attached.data ? (
-        <section aria-label="Attached skills" className="space-y-2">
+        <section aria-label={t("Attached skills")} className="space-y-2">
           <SectionHeading>
-            {`Attached to ${agentTitle(agent)} · ${pins.length}/16`}
+            {t("Attached to {{value}} · {{length}}/16", { value: agentTitle(agent), length: pins.length })}
           </SectionHeading>
           {pins.length === 0 ? (
-            <p className="text-12 text-muted-foreground">
-              No skills attached. Search the catalog to attach one.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("No skills attached. Search the catalog to attach one.")}</p>
           ) : (
             <ul className="space-y-2">
               {pins.map((pin) => (
@@ -549,7 +544,7 @@ function SkillsTab({
                       {pin.version}
                     </span>
                     {pin.disabled ? (
-                      <span className="text-text-tertiary"> · Disabled</span>
+                      <span className="text-text-tertiary">{t(" · Disabled")}</span>
                     ) : null}
                   </span>
                   <Button
@@ -565,25 +560,21 @@ function SkillsTab({
                       })
                     }
                   >
-                    {`Detach ${pin.name}`}
+                    {t("Detach {{name}}", { name: pin.name })}
                   </Button>
                 </li>
               ))}
             </ul>
           )}
-          <p className="text-11 text-text-tertiary">
-            Versions, tests and edits live in the agent&apos;s settings.
-          </p>
+          <p className="text-11 text-text-tertiary">{t("Versions, tests and edits live in the agent's settings.")}</p>
         </section>
       ) : null}
       {query.trim() && items.length === 0 && search.data ? (
-        <p className="py-14 text-center text-11 text-text-tertiary">
-          No plugins match this search.
-        </p>
+        <p className="py-14 text-center text-11 text-text-tertiary">{t("No plugins match this search.")}</p>
       ) : null}
       {items.length > 0 && (
         <div>
-          <SectionHeading>Ornn catalog</SectionHeading>
+          <SectionHeading>{t("Ornn catalog")}</SectionHeading>
           <CardGrid>{items.map(card)}</CardGrid>
         </div>
       )}
@@ -592,31 +583,26 @@ function SkillsTab({
 }
 
 export function PluginsView({ agentId }: { readonly agentId?: string } = {}) {
+  const { t } = useUiTranslation();
   const [tab, setTab] = useState<PluginKind>("connector");
   const [query, setQuery] = useState("");
 
   return (
     <div className="h-full min-h-0 overflow-y-auto overscroll-contain">
       <div className="px-5 pt-6 sm:px-8">
-        <h1 className="text-22 font-bold tracking-[-0.03em] sm:text-28">
-          Plugins
-        </h1>
-        <p className="mt-1 max-w-2xl text-12 text-muted-foreground">
-          Plugins are connectors to services, MCP servers, and data sources;
-          skills teach your assistant new workflows. Installing provisions the
-          endpoint, credential, and proxy route in one step.
-        </p>
+        <h1 className="text-22 font-bold tracking-[-0.03em] sm:text-28">{t("Plugins")}</h1>
+        <p className="mt-1 max-w-2xl text-12 text-muted-foreground">{t("Plugins are connectors to services, MCP servers, and data sources; skills teach your assistant new workflows. Installing provisions the endpoint, credential, and proxy route in one step.")}</p>
         <div className="mt-4 flex flex-wrap items-center gap-4">
           <label className="flex h-8 w-full max-w-[300px] items-center gap-2 rounded-lg border border-hairline px-3 transition-colors focus-within:border-hairline-strong">
             <Search className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search the catalog..."
+              placeholder={t("Search the catalog...")}
               className="min-w-0 flex-1 bg-transparent text-12 text-foreground outline-none placeholder:text-text-tertiary"
             />
           </label>
-          <div className="flex h-8" role="tablist" aria-label="Plugin type">
+          <div className="flex h-8" role="tablist" aria-label={t("Plugin type")}>
             {(
               [
                 ["connector", "Connectors"],

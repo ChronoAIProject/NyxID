@@ -1,3 +1,4 @@
+import { useWizardTranslation } from "@/i18n/wizard";
 import { useId } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -28,30 +29,25 @@ export function PlatformServiceScope({
   readonly orgOwned?: boolean;
   readonly disabled?: boolean;
 }) {
+  const { t } = useWizardTranslation();
   const prefix = useId();
   if (orgOwned && !services.some((service) => service.auto_connected)) {
     return (
-      <p className="text-12 text-muted-foreground">
-        This org-owned key cannot use platform services from your personal account.
-      </p>
+      <p className="text-12 text-muted-foreground">{t("This org-owned key cannot use platform services from your personal account.")}</p>
     );
   }
   return (
     <section
-      aria-label="Auto-connected platform services"
+      aria-label={t("Auto-connected platform services")}
       className="space-y-2 border-t border-border/50 pt-3"
     >
-      <p className="text-12 font-medium">
-        Auto-connected platform services
-      </p>
+      <p className="text-12 font-medium">{t("Auto-connected platform services")}</p>
       <Label className="flex items-start gap-2 text-12">
         <Checkbox
           checked={allowAll}
           disabled={disabled}
           onCheckedChange={(value) => onAllowAllChange(value === true)}
-        />
-        Allow all auto-connected platform services (includes ones added later)
-      </Label>
+        />{t("Allow all auto-connected platform services (includes ones added later)")}</Label>
       {services
         .filter((service) => service.auto_connected)
         .map((service) => {
@@ -70,7 +66,7 @@ export function PlatformServiceScope({
               />
               {service.label || service.name || service.slug || service.id}
               {service.platform_grant_eligible === false &&
-                " (Organization; select individually)"}
+                t(" (Organization; select individually)")}
             </Label>
           );
         })}

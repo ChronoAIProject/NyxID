@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -36,6 +38,7 @@ export function RemoteMachineAgentAccess({
   readonly node?: NodeInfo;
   readonly machineId: string;
 }) {
+  const { t } = useUiTranslation();
   const agents = useNyxBotAgents();
   const userId = useAuthStore((s) => s.user?.id);
   const [agentId, setAgentId] = useState<string>();
@@ -49,38 +52,29 @@ export function RemoteMachineAgentAccess({
   const selected = options.find((agent) => agent.id === agentId);
   return (
     <div className="space-y-4 px-4 py-3">
-      <p className="text-12 text-muted-foreground">
-        NyxBot and specialist access uses the existing Agent assignment policy.
-        It remains bound to an owner turn; guests cannot use this machine. A
-        grant does not bypass a paused runtime or funding requirement.
-      </p>
+      <p className="text-12 text-muted-foreground">{t("NyxBot and specialist access uses the existing Agent assignment policy. It remains bound to an owner turn; guests cannot use this machine. A grant does not bypass a paused runtime or funding requirement.")}</p>
       {node ? (
         <OwnerConfirmation
           key={`${node.id}:${node.machine_confirm}`}
           node={node}
         />
       ) : (
-        <p className="text-12 text-muted-foreground">
-          Confirmation settings will be available when the Node record can be
-          loaded.
-        </p>
+        <p className="text-12 text-muted-foreground">{t("Confirmation settings will be available when the Node record can be loaded.")}</p>
       )}
       {agents.error ? (
         <ErrorBanner
-          message="Agent assignments could not be loaded."
+          message={t("Agent assignments could not be loaded.")}
           onRetry={() => void agents.refetch()}
         />
       ) : agents.isPending ? (
-        <p role="status" className="text-12">
-          Loading agents…
-        </p>
+        <p role="status" className="text-12">{t("Loading agents…")}</p>
       ) : (
         <>
           <label className="block space-y-2 text-12">
-            <span>Agent</span>
+            <span>{t("Agent")}</span>
             <Select value={selected?.id ?? ""} onValueChange={setAgentId}>
-              <SelectTrigger aria-label="Agent for machine access">
-                <SelectValue placeholder="Choose an existing agent" />
+              <SelectTrigger aria-label={t("Agent for machine access")}>
+                <SelectValue placeholder={t("Choose an existing agent")} />
               </SelectTrigger>
               <SelectContent>
                 {options.map((agent) => (
@@ -92,9 +86,7 @@ export function RemoteMachineAgentAccess({
             </Select>
           </label>
           {!options.length ? (
-            <p className="text-12 text-muted-foreground">
-              No eligible personal agents are available.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("No eligible personal agents are available.")}</p>
           ) : null}
           {selected ? (
             <AgentAssignment
@@ -110,6 +102,7 @@ export function RemoteMachineAgentAccess({
 }
 
 function OwnerConfirmation({ node }: { readonly node: NodeInfo }) {
+  const { t } = useUiTranslation();
   const mutation = useMachineSettings(node.id);
   const form = useAppForm<z.infer<typeof confirmSchema>>({
     resolver: zodResolver(confirmSchema),
@@ -118,7 +111,7 @@ function OwnerConfirmation({ node }: { readonly node: NodeInfo }) {
   const [error, setError] = useState<string>();
   return (
     <form
-      aria-label="Remote machine owner confirmation"
+      aria-label={t("Remote machine owner confirmation")}
       className="space-y-3 rounded-lg border border-border p-3"
       onSubmit={form.handleSubmit(async (data) => {
         setError(undefined);
@@ -139,7 +132,7 @@ function OwnerConfirmation({ node }: { readonly node: NodeInfo }) {
       })}
     >
       <label className="block space-y-2 text-12">
-        <span>Owner confirmation policy</span>
+        <span>{t("Owner confirmation policy")}</span>
         <Select
           value={form.watch("confirm")}
           onValueChange={(value) =>
@@ -149,35 +142,27 @@ function OwnerConfirmation({ node }: { readonly node: NodeInfo }) {
             )
           }
         >
-          <SelectTrigger aria-label="Remote machine owner confirmation policy">
+          <SelectTrigger aria-label={t("Remote machine owner confirmation policy")}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="none">
-              No machine-specific confirmation
-            </SelectItem>
-            <SelectItem value="changes">Confirm changes</SelectItem>
-            <SelectItem value="all">Confirm every operation</SelectItem>
+            <SelectItem value="none">{t("No machine-specific confirmation")}</SelectItem>
+            <SelectItem value="changes">{t("Confirm changes")}</SelectItem>
+            <SelectItem value="all">{t("Confirm every operation")}</SelectItem>
           </SelectContent>
         </Select>
       </label>
-      <p className="text-12 text-muted-foreground">
-        Only the owner changes this policy. Other applicable Assistant
-        confirmation rules still apply. External work requiring confirmation
-        must remain blocked until the server supports it.
-      </p>
+      <p className="text-12 text-muted-foreground">{t("Only the owner changes this policy. Other applicable Assistant confirmation rules still apply. External work requiring confirmation must remain blocked until the server supports it.")}</p>
       {error ? (
         <p role="alert" className="text-12 text-destructive">
-          {error}
+          {translateUi(error)}
         </p>
       ) : null}
       <Button
         type="submit"
         disabled={mutation.isPending || !form.formState.isDirty}
         isLoading={mutation.isPending}
-      >
-        Save confirmation policy
-      </Button>
+      >{t("Save confirmation policy")}</Button>
     </form>
   );
 }
@@ -189,6 +174,7 @@ function AgentAssignment({
   readonly agent: AssistantAgent;
   readonly machineId: string;
 }) {
+  const { t } = useUiTranslation();
   const mutation = useSetNyxBotAgentGrants();
   const query = useMachineAccess(agent.id);
   const form = useAppForm<z.infer<typeof membershipSchema>>({
@@ -200,14 +186,11 @@ function AgentAssignment({
   return (
     <div className="space-y-3">
       {agent.kind === "nyxbot" ? (
-        <p className="text-12 text-muted-foreground">
-          NyxBot has owner machine membership. Its capability policy and the
-          live owner-turn gate still apply.
-        </p>
+        <p className="text-12 text-muted-foreground">{t("NyxBot has owner machine membership. Its capability policy and the live owner-turn gate still apply.")}</p>
       ) : (
         <form
           className="space-y-3"
-          aria-label="Specialist machine membership"
+          aria-label={t("Specialist machine membership")}
           onSubmit={form.handleSubmit(async (data) => {
             setError(undefined);
             try {
@@ -236,17 +219,12 @@ function AgentAssignment({
               onCheckedChange={(value) =>
                 form.setValue("assigned", value === true)
               }
-            />
-            Assign this machine to {agent.display_name ?? agent.name}
+            />{t("Assign this machine to ")}{agent.display_name ?? agent.name}
           </label>
-          <p className="text-12 text-muted-foreground">
-            With capability editing enabled, new assignments start with
-            capabilities off. Review the current policy after assigning.
-            Removing membership cancels this agent’s work on this machine.
-          </p>
+          <p className="text-12 text-muted-foreground">{t("With capability editing enabled, new assignments start with capabilities off. Review the current policy after assigning. Removing membership cancels this agent’s work on this machine.")}</p>
           {error ? (
             <p role="alert" className="text-12 text-destructive">
-              {error}
+              {translateUi(error)}
             </p>
           ) : null}
           <Button
@@ -257,14 +235,12 @@ function AgentAssignment({
               agent.can_maintain === false
             }
             isLoading={mutation.isPending}
-          >
-            Save assignment
-          </Button>
+          >{t("Save assignment")}</Button>
         </form>
       )}
       {query.error ? (
         <ErrorBanner
-          message="Could not load the current capability revision."
+          message={t("Could not load the current capability revision.")}
           onRetry={() => void query.refetch()}
         />
       ) : assignment ? (
@@ -274,9 +250,7 @@ function AgentAssignment({
           machine={assignment}
         />
       ) : (
-        <p className="text-12 text-muted-foreground">
-          Capabilities are not yet available from this Node.
-        </p>
+        <p className="text-12 text-muted-foreground">{t("Capabilities are not yet available from this Node.")}</p>
       )}
     </div>
   );
@@ -289,22 +263,14 @@ function HostedCapabilities({
   readonly agentId: string;
   readonly machine: MachineAccess;
 }) {
+  const { t } = useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.MACHINE_CAPABILITIES);
   return (
-    <section aria-label="Hosted agent capabilities" className="space-y-3">
-      <p className="text-12">Policy revision {machine.revision}</p>
-      <p className="text-12 text-muted-foreground">
-        Saving cancels this agent’s current work on this machine. Browser is
-        required for Computer and Developer browser. Turning off Browser also
-        removes Computer and Developer browser; other grants are preserved.
-        External OAuth and Agent Key clients remain restricted to their existing
-        shell/file tools and do not gain Browser or Computer access here.
-      </p>
+    <section aria-label={t("Hosted agent capabilities")} className="space-y-3">
+      <p className="text-12">{t("Policy revision ")}{machine.revision}</p>
+      <p className="text-12 text-muted-foreground">{t("Saving cancels this agent’s current work on this machine. Browser is required for Computer and Developer browser. Turning off Browser also removes Computer and Developer browser; other grants are preserved. External OAuth and Agent Key clients remain restricted to their existing shell/file tools and do not gain Browser or Computer access here.")}</p>
       {!enabled || !machine.protocol_v2 ? (
-        <p role="status" className="text-12 text-muted-foreground">
-          Capability editing is unavailable until the account feature and Node
-          protocol support are enabled.
-        </p>
+        <p role="status" className="text-12 text-muted-foreground">{t("Capability editing is unavailable until the account feature and Node protocol support are enabled.")}</p>
       ) : null}
       <MachineCapabilityForm
         machine={machine}
@@ -312,10 +278,7 @@ function HostedCapabilities({
         disabled={!enabled}
       />
       {machine.revocation_pending ? (
-        <p role="status" className="text-12 text-warning">
-          Revocation delivery is pending; this is not proof of physical runtime
-          stop.
-        </p>
+        <p role="status" className="text-12 text-warning">{t("Revocation delivery is pending; this is not proof of physical runtime stop.")}</p>
       ) : null}
     </section>
   );

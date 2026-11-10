@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useCallback, useEffect, useState } from "react";
 import { useIsMutating } from "@tanstack/react-query";
@@ -17,6 +18,7 @@ export function TelegramNewConnect({
   onConnected,
   renderFields,
 }: ChannelBotConnectProps) {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const link = useChannelConnectLinkContext();
   const search = useSearch({ strict: false });
@@ -117,8 +119,8 @@ export function TelegramNewConnect({
         disabled: Boolean(request) || configuration.isPending || pending,
         scopeDescription: request
           ? fullPage || request.status === "provisioning" || request.status === "connected"
-            ? "These details are saved. You can manage the bot once it is connected."
-            : "These details are saved. To change them, choose Cancel setup below."
+            ? t("These details are saved. You can manage the bot once it is connected.")
+            : t("These details are saved. To change them, choose Cancel setup below.")
           : undefined,
       })}
       <TelegramNew

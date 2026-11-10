@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
@@ -77,6 +78,7 @@ function QuantityPanel({
   comparison: Dimension;
   onChooseMetrics: () => void;
 }) {
+  const { t } = useUiTranslation();
   const [page, setPage] = useState(0);
   const empty = metrics.length === 0;
   const totals = metricTotals(rows);
@@ -90,7 +92,7 @@ function QuantityPanel({
       ? totals.map(([metric, quantity]) => ({
           key: metric,
           name: billingMetricLabel(metric),
-          tick: tickLabels[metric] ?? billingMetricLabel(metric),
+          tick: tickLabels[metric] ? t(tickLabels[metric]) : billingMetricLabel(metric),
           quantity,
           values: { quantity } as Record<string, number | null>,
         }))
@@ -113,7 +115,7 @@ function QuantityPanel({
           });
   const plottedSeries =
     comparison === "metric" && !empty
-      ? [{ key: "quantity", label: "Period quantity", color: colors[0]! }]
+      ? [{ key: "quantity", label: t("Period quantity"), color: colors[0]! }]
       : series;
   const chartConfig = Object.fromEntries(
     plottedSeries.map((item) => [
@@ -127,7 +129,7 @@ function QuantityPanel({
     currentPage * POINTS_PER_PAGE,
     (currentPage + 1) * POINTS_PER_PAGE,
   );
-  const label = empty ? "Quantity" : billingMetricLabel(unit);
+  const label = empty ? t("Quantity") : billingMetricLabel(unit);
   const yMax = Math.max(
     1,
     ...points.flatMap((point) =>
@@ -135,7 +137,7 @@ function QuantityPanel({
     ),
   );
   return (
-    <section className="quantity-unit-panel" aria-label={`${label} comparison`}>
+    <section className="quantity-unit-panel" aria-label={t("{{label}} comparison", { label: label })}>
       {!empty && (
         <dl className="quantity-chart-totals">
           {series.map((item) => (
@@ -165,8 +167,8 @@ function QuantityPanel({
           role="img"
           aria-label={
             empty
-              ? `Empty quantity graph by ${dimensions[comparison].toLowerCase()}: ${visiblePoints.map((point) => point.name).join("; ")}. No metrics selected.`
-              : `${label} by ${dimensions[comparison].toLowerCase()} for the selected period: ${visiblePoints.map((point) => `${point.name}: ${plottedSeries.map((item) => `${item.label} ${point.values[item.key] == null ? "not recorded" : number(point.values[item.key]!)}`).join(", ")}`).join("; ")}`
+              ? t("Empty quantity graph by {{value}}: {{value1}}. No metrics selected.", { value: dimensions[comparison].toLowerCase(), value1: visiblePoints.map((point) => point.name).join("; ") })
+              : t("{{label}} by {{value}} for the selected period: {{value2}}", { label: label, value: dimensions[comparison].toLowerCase(), value2: visiblePoints.map((point) => `${point.name}: ${plottedSeries.map((item) => `${item.label} ${point.values[item.key] == null ? t("not recorded") : number(point.values[item.key]!)}`).join(", ")}`).join("; ") })
           }
         >
           <ChartContainer
@@ -233,15 +235,9 @@ function QuantityPanel({
         {empty && (
           <div className="pointer-events-none absolute inset-x-4 top-3 bottom-8 flex items-center justify-center">
             <div className="pointer-events-auto max-w-xs space-y-2 rounded-lg border border-border bg-card p-3 text-center shadow-sm">
-              <p className="text-12 font-medium text-foreground">
-                Select metrics to display usage
-              </p>
-              <p className="text-11 text-muted-foreground">
-                Use the Metrics filter to select one or more metrics.
-              </p>
-              <Button variant="outline" size="sm" onClick={onChooseMetrics}>
-                Choose metrics
-              </Button>
+              <p className="text-12 font-medium text-foreground">{t("Select metrics to display usage")}</p>
+              <p className="text-11 text-muted-foreground">{t("Use the Metrics filter to select one or more metrics.")}</p>
+              <Button variant="outline" size="sm" onClick={onChooseMetrics}>{t("Choose metrics")}</Button>
             </div>
           </div>
         )}
@@ -251,25 +247,20 @@ function QuantityPanel({
         <div className="quantity-chart-pagination">
           <span>
             {currentPage * POINTS_PER_PAGE + 1}–
-            {Math.min((currentPage + 1) * POINTS_PER_PAGE, points.length)} of{" "}
-            {points.length} categories
-          </span>
+            {Math.min((currentPage + 1) * POINTS_PER_PAGE, points.length)}{t(" of")}{" "}
+            {points.length}{t(" categories")}</span>
           <Button
             variant="outline"
             size="sm"
             disabled={currentPage === 0}
             onClick={() => setPage(currentPage - 1)}
-          >
-            Previous categories
-          </Button>
+          >{t("Previous categories")}</Button>
           <Button
             variant="outline"
             size="sm"
             disabled={currentPage === lastPage}
             onClick={() => setPage(currentPage + 1)}
-          >
-            Next categories
-          </Button>
+          >{t("Next categories")}</Button>
         </div>
       )}
     </section>
@@ -285,6 +276,7 @@ export function BillingQuantityChart({
   catalog: BillingCatalog;
   overview?: boolean;
 }) {
+  const { t } = useUiTranslation();
   const totals = metricTotals(rows);
   const metrics = totals.map(([metric]) => metric);
   const defaultMetric =
@@ -307,8 +299,8 @@ export function BillingQuantityChart({
     <div className="usage-quantity-chart">
       <header>
         <div>
-          <h4>Quantity overview</h4>
-          <p className="fine-print">Totals for the selected billing period</p>
+          <h4>{t("Quantity overview")}</h4>
+          <p className="fine-print">{t("Totals for the selected billing period")}</p>
         </div>
       </header>
       <BillingMetricPicker
@@ -319,11 +311,11 @@ export function BillingQuantityChart({
         options={totals.map(([metric, quantity]) => ({
           id: metric,
           label: billingMetricLabel(metric),
-          detail: `${number(quantity)} in this period`,
+          detail: t("{{quantity}} in this period", { quantity: number(quantity) }),
         }))}
       >
         <AnalyticsSelect
-          label="Compare quantities by"
+          label={t("Compare quantities by")}
           inline
           value={comparison}
           onChange={(value) => setComparison(value as Dimension)}
@@ -368,11 +360,8 @@ export function BillingQuantityChart({
         })
       )}
       {selected.length > 0 && (
-        <p className="fine-print">
-          Each point is a period total for one{" "}
-          {dimensions[comparison].toLowerCase()}. Token metrics can overlap;
-          each metric is shown separately. Different units use separate graphs.
-        </p>
+        <p className="fine-print">{t("Each point is a period total for one")}{" "}
+          {dimensions[comparison].toLowerCase()}{t(". Token metrics can overlap; each metric is shown separately. Different units use separate graphs.")}</p>
       )}
       <details className="quantity-exact-values">
         <summary>
@@ -380,9 +369,7 @@ export function BillingQuantityChart({
             size={12}
             className="disclosure-arrow"
             aria-hidden="true"
-          />
-          Exact quantities
-        </summary>
+          />{t("Exact quantities")}</summary>
         <dl>
           {totals.map(([metric, quantity]) => (
             <div key={metric}>

@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -44,16 +46,17 @@ export function AccessModeBadge({
   readonly overridden?: boolean;
   readonly className?: string;
 }) {
+  const { t } = useUiTranslation();
   return (
     <Badge
       variant={mode === "autopilot" ? "warning" : "secondary"}
       className={cn("gap-1", className)}
       title={ACCESS_MODE_DESCRIPTION[mode]}
-      aria-label={`Access mode: ${ACCESS_MODE_LABEL[mode]}${overridden ? " (this agent)" : ""}`}
+      aria-label={t("Access mode: {{value}}{{value1}}", { value: ACCESS_MODE_LABEL[mode], value1: overridden ? t(" (this agent)") : "" })}
     >
       <ShieldCheck aria-hidden="true" className="h-3 w-3" />
       {ACCESS_MODE_LABEL[mode]}
-      {overridden ? " · agent" : ""}
+      {overridden ? t(" · agent") : ""}
     </Badge>
   );
 }
@@ -67,6 +70,7 @@ export function AccessModeSwitcher({
   readonly agentOverride?: NyxAgentAccessMode | null;
   readonly disabled?: boolean;
 }) {
+  const { t } = useUiTranslation();
   const settings = useNyxBotSettings();
   const update = useUpdateNyxBotSettings();
   const [error, setError] = useState<string>();
@@ -89,7 +93,7 @@ export function AccessModeSwitcher({
             });
         }}
       >
-        <SelectTrigger aria-label="Access mode" className="h-7 w-auto gap-1 px-2 text-11">
+        <SelectTrigger aria-label={t("Access mode")} className="h-7 w-auto gap-1 px-2 text-11">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -102,7 +106,7 @@ export function AccessModeSwitcher({
       </Select>
       {error ? (
         <span role="alert" className="text-11 text-destructive">
-          {error}
+          {translateUi(error)}
         </span>
       ) : null}
     </div>
@@ -132,7 +136,7 @@ export function ModelSelect({
   value,
   onChange,
   disabled,
-  label = "Model",
+  label: labelLocaleDefault,
   className,
 }: {
   readonly value: string | undefined;
@@ -141,17 +145,19 @@ export function ModelSelect({
   readonly label?: string;
   readonly className?: string;
 }) {
+  const label = labelLocaleDefault === undefined ? translateUi("Model") : labelLocaleDefault;
+  const { t } = useUiTranslation();
   const models = useNyxAgentModels();
   const options = modelOptions(models.data, value);
   return (
     <Select value={value ?? ""} disabled={disabled || models.isPending} onValueChange={onChange}>
       <SelectTrigger aria-label={label} className={className}>
-        <SelectValue placeholder={models.isPending ? "Loading models..." : "Choose a model"} />
+        <SelectValue placeholder={models.isPending ? t("Loading models...") : t("Choose a model")} />
       </SelectTrigger>
       <SelectContent>
         {options.map((row) => (
           <SelectItem key={row.id} value={row.id} disabled={!row.available}>
-            {row.available ? modelDisplayName(row) : `${modelDisplayName(row)} (unavailable)`}
+            {row.available ? modelDisplayName(row) : t("{{value}} (unavailable)", { value: modelDisplayName(row) })}
           </SelectItem>
         ))}
       </SelectContent>
@@ -169,6 +175,7 @@ export function ThreadModelSelect({
   readonly model: string | undefined;
   readonly disabled?: boolean;
 }) {
+  useUiTranslation();
   const change = useChangeNyxAgentModel();
   const [error, setError] = useState<string>();
   return (
@@ -187,7 +194,7 @@ export function ThreadModelSelect({
       />
       {error ? (
         <span role="alert" className="text-11 text-destructive">
-          {error}
+          {translateUi(error)}
         </span>
       ) : null}
     </div>

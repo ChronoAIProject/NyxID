@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useNavigate } from "@tanstack/react-router";
 import type { DownstreamService } from "@/types/api";
 import {
@@ -30,6 +31,7 @@ export function ServiceCard({
   onDelete,
   isDeleting,
 }: ServiceCardProps) {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   // Issue #416: surface the viewer's node binding for this catalog row
   // so admins can see at a glance which service routes through which
@@ -71,7 +73,7 @@ export function ServiceCard({
           disabled={isDeleting}
         >
           <Trash2 className="h-3.5 w-3.5 text-destructive" />
-          <span className="sr-only">Delete service</span>
+          <span className="sr-only">{t("Delete service")}</span>
         </Button>
       )}
 
@@ -96,11 +98,9 @@ export function ServiceCard({
           </Badge>
           {service.visibility === "private" && (
             <Badge variant="secondary">
-              <Lock className="mr-1 h-2.5 w-2.5" />
-              Private
-            </Badge>
+              <Lock className="mr-1 h-2.5 w-2.5" />{t("Private")}</Badge>
           )}
-          {isOidcService(service) && <Badge variant="accent">OIDC</Badge>}
+          {isOidcService(service) && <Badge variant="accent">{t("OIDC")}</Badge>}
           {service.service_type === "http" && (
             <Badge variant="info">{getAuthTypeLabel(service)}</Badge>
           )}
@@ -127,14 +127,13 @@ export function ServiceCard({
                   className="gap-1"
                 >
                   <Router className="h-2.5 w-2.5" />
-                  <span>&rarr; {nodeLabel}</span>
+                  <span>{t("→ ")}{nodeLabel}</span>
                 </Badge>
               </span>
             </TooltipTrigger>
             <TooltipContent>
-              <p className="text-xs">
-                Your routing: {node?.name ?? service.node_id}
-                {node?.status ? ` (${node.status})` : ""}
+              <p className="text-xs">{t("Your routing: ")}{node?.name ?? service.node_id}
+                {node?.status ? t(" ({{status}})", { status: node.status }) : ""}
               </p>
             </TooltipContent>
           </Tooltip>

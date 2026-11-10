@@ -1,3 +1,5 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite } from "@/types/api";
@@ -27,6 +29,7 @@ import {
 } from "@/components/ui/table";
 
 export function AdminOwnershipPage() {
+  const { t } = useUiTranslation();
   const user = useAuthStore((state) => state.user);
   const allowed = canAdminWrite(user);
   const [kind, setKind] = useState<OwnershipResourceKind>("service");
@@ -36,16 +39,13 @@ export function AdminOwnershipPage() {
   const resources = useOwnershipResources(kind, search, offset, allowed);
   if (!allowed)
     return (
-      <p>
-        NyxID admin access is required to browse all assets. Owners can transfer
-        their assets from the asset settings.
-      </p>
+      <p>{t("NyxID admin access is required to browse all assets. Owners can transfer their assets from the asset settings.")}</p>
     );
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Ownership transfers"
-        description="Reassign catalog services and channel bots between people and organizations."
+        title={t("Ownership transfers")}
+        description={t("Reassign catalog services and channel bots between people and organizations.")}
       />
       <div className="flex flex-wrap gap-3">
         <Select
@@ -56,18 +56,18 @@ export function AdminOwnershipPage() {
             setSelected(null);
           }}
         >
-          <SelectTrigger aria-label="Resource type" className="w-52">
+          <SelectTrigger aria-label={t("Resource type")} className="w-52">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="service">Catalog services</SelectItem>
-            <SelectItem value="channel_bot">Channel bots</SelectItem>
+            <SelectItem value="service">{t("Catalog services")}</SelectItem>
+            <SelectItem value="channel_bot">{t("Channel bots")}</SelectItem>
           </SelectContent>
         </Select>
         <Input
-          aria-label="Search resources"
+          aria-label={t("Search resources")}
           className="max-w-sm"
-          placeholder="Search name, slug or ID"
+          placeholder={t("Search name, slug or ID")}
           value={search}
           onChange={(event) => {
             setSearch(event.target.value);
@@ -77,19 +77,19 @@ export function AdminOwnershipPage() {
       </div>
       {resources.error && (
         <p role="alert" className="text-destructive">
-          {resources.error.message}
+          {translateUi(resources.error.message ?? "")}
         </p>
       )}
       {resources.isLoading ? (
-        <p>Loading resources…</p>
+        <p>{t("Loading resources…")}</p>
       ) : (
         <div className="overflow-x-auto rounded-md border">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Resource</TableHead>
-                <TableHead>Current owner</TableHead>
-                <TableHead className="text-right">Action</TableHead>
+                <TableHead>{t("Resource")}</TableHead>
+                <TableHead>{t("Current owner")}</TableHead>
+                <TableHead className="text-right">{t("Action")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -122,9 +122,7 @@ export function AdminOwnershipPage() {
                     <Button
                       variant="outline"
                       onClick={() => setSelected(resource)}
-                    >
-                      Transfer ownership
-                      <span className="sr-only"> of {resource.name}</span>
+                    >{t("Transfer ownership")}<span className="sr-only">{t(" of ")}{resource.name}</span>
                     </Button>
                   </TableCell>
                 </TableRow>
@@ -134,9 +132,7 @@ export function AdminOwnershipPage() {
                   <TableCell
                     colSpan={3}
                     className="py-8 text-center text-muted-foreground"
-                  >
-                    No matching resources.
-                  </TableCell>
+                  >{t("No matching resources.")}</TableCell>
                 </TableRow>
               )}
             </TableBody>
@@ -148,16 +144,12 @@ export function AdminOwnershipPage() {
           variant="outline"
           disabled={offset === 0 || resources.isFetching}
           onClick={() => setOffset((current) => Math.max(0, current - 50))}
-        >
-          Previous
-        </Button>
+        >{t("Previous")}</Button>
         <Button
           variant="outline"
           disabled={resources.data?.next_offset == null || resources.isFetching}
           onClick={() => setOffset(resources.data?.next_offset ?? offset)}
-        >
-          Next
-        </Button>
+        >{t("Next")}</Button>
       </div>
       {selected && (
         <OwnershipTransferDialog

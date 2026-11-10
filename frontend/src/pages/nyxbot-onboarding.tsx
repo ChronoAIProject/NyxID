@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { I18nextProvider, useTranslation } from "react-i18next";
@@ -136,7 +137,7 @@ function ConnectedDataSource({
         <OnboardingNotice error>
           {t("googleConnectFailed")}
           {flow.connectGoogle.error instanceof ApiError && (
-            <p>{flow.connectGoogle.error.message}</p>
+            <p>{translateUi(flow.connectGoogle.error.message ?? "")}</p>
           )}
         </OnboardingNotice>
       )}
@@ -243,7 +244,7 @@ export function NyxbotOnboardingPage() {
   returnUrl.searchParams.set("step", "source");
   if (search.channel) returnUrl.searchParams.set("channel", search.channel);
   return (
-    <I18nextProvider i18n={nyxbotI18n}>
+    <I18nextProvider i18n={nyxbotI18n} defaultNS="onboarding">
       {authLoading && !authenticated ? (
         <OnboardingLoading />
       ) : !search.step ? (

@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useMemo } from "react";
 import { Plus, Trash2, Info } from "lucide-react";
 import { Button, ButtonIcon } from "@/components/ui/button";
@@ -66,6 +68,7 @@ export function DefaultHeadersEditor({
   fromCatalog = false,
   errors,
 }: DefaultHeadersEditorProps) {
+  const { t } = useUiTranslation();
   const canAdd = !readOnly && !disabled && value.length < MAX_DEFAULT_HEADERS;
 
   const rowWarnings = useMemo<ReadonlyArray<string | null>>(() => {
@@ -115,29 +118,27 @@ export function DefaultHeadersEditor({
   return (
     <div className="space-y-2">
       {value.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
-          No default headers configured.
-        </div>
+        <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">{t("No default headers configured.")}</div>
       ) : (
         <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="w-[28%]">Name</TableHead>
-                <TableHead className="w-[38%]">Value</TableHead>
+                <TableHead className="w-[28%]">{t("Name")}</TableHead>
+                <TableHead className="w-[38%]">{t("Value")}</TableHead>
                 <TableHead className="w-[12%]">
                   <FlagHeader
-                    label="Overridable"
-                    hint="If checked, a caller-supplied value wins. Default: the admin value always wins."
+                    label={t("Overridable")}
+                    hint={t("If checked, a caller-supplied value wins. Default: the admin value always wins.")}
                   />
                 </TableHead>
                 <TableHead className="w-[12%]">
                   <FlagHeader
-                    label="Sensitive"
-                    hint="Redact the value in API responses. v1 stores values plaintext — do not use for real secrets. Use the service auth method instead."
+                    label={t("Sensitive")}
+                    hint={t("Redact the value in API responses. v1 stores values plaintext — do not use for real secrets. Use the service auth method instead.")}
                   />
                 </TableHead>
-                <TableHead className="w-[10%] text-right">Actions</TableHead>
+                <TableHead className="w-[10%] text-right">{t("Actions")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -148,11 +149,11 @@ export function DefaultHeadersEditor({
                   <TableRow key={idx}>
                     <TableCell className="align-top">
                       <Input
-                        aria-label={`Header ${String(idx + 1)} name`}
+                        aria-label={t("Header {{value}} name", { value: String(idx + 1) })}
                         aria-invalid={warning ? true : undefined}
                         value={row.name}
                         onChange={(e) => updateRow(idx, { name: e.target.value })}
-                        placeholder="X-Api-Version"
+                        placeholder={"X-Api-Version"}
                         maxLength={256}
                         disabled={disabled}
                         className="font-mono text-xs"
@@ -165,7 +166,7 @@ export function DefaultHeadersEditor({
                     </TableCell>
                     <TableCell className="align-top">
                       <Input
-                        aria-label={`Header ${String(idx + 1)} value`}
+                        aria-label={t("Header {{value}} value", { value: String(idx + 1) })}
                         aria-invalid={valueError ? true : undefined}
                         value={row.value}
                         onChange={(e) => updateRow(idx, { value: e.target.value })}
@@ -177,14 +178,14 @@ export function DefaultHeadersEditor({
                       />
                       {valueError && (
                         <p className="mt-1 text-11 text-destructive">
-                          {valueError}
+                          {translateUi(valueError)}
                         </p>
                       )}
                     </TableCell>
                     <TableCell className="align-top">
                       <div className="flex h-9 items-center">
                         <Checkbox
-                          aria-label={`Header ${String(idx + 1)} overridable`}
+                          aria-label={t("Header {{value}} overridable", { value: String(idx + 1) })}
                           checked={row.overridable}
                           onCheckedChange={(checked) =>
                             updateRow(idx, { overridable: checked === true })
@@ -196,7 +197,7 @@ export function DefaultHeadersEditor({
                     <TableCell className="align-top">
                       <div className="flex h-9 items-center">
                         <Checkbox
-                          aria-label={`Header ${String(idx + 1)} sensitive`}
+                          aria-label={t("Header {{value}} sensitive", { value: String(idx + 1) })}
                           checked={row.sensitive}
                           onCheckedChange={(checked) =>
                             updateRow(idx, { sensitive: checked === true })
@@ -212,7 +213,7 @@ export function DefaultHeadersEditor({
                         size="icon"
                         onClick={() => removeRow(idx)}
                         disabled={disabled}
-                        aria-label={`Remove header ${String(idx + 1)}`}
+                        aria-label={t("Remove header {{value}}", { value: String(idx + 1) })}
                       >
                         <Trash2 className="h-4 w-4 text-destructive" />
                       </Button>
@@ -227,9 +228,7 @@ export function DefaultHeadersEditor({
 
       <div className="flex items-center justify-between">
         <p className="text-11 text-muted-foreground">
-          {value.length} / {MAX_DEFAULT_HEADERS} headers. Values stored in
-          plaintext; do not place real secrets here.
-        </p>
+          {value.length} / {MAX_DEFAULT_HEADERS}{t(" headers. Values stored in plaintext; do not place real secrets here.")}</p>
         <Button
           type="button"
           variant="outline"
@@ -237,9 +236,7 @@ export function DefaultHeadersEditor({
           onClick={addRow}
           disabled={!canAdd}
         >
-          <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>
-          Add Header
-        </Button>
+          <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>{t("Add Header")}</Button>
       </div>
     </div>
   );
@@ -252,6 +249,7 @@ function FlagHeader({
   readonly label: string;
   readonly hint: string;
 }) {
+  const { t } = useUiTranslation();
   return (
     <span className="inline-flex items-center gap-1">
       {label}
@@ -260,7 +258,7 @@ function FlagHeader({
           <button
             type="button"
             className="inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground transition-colors duration-300 hover:text-foreground"
-            aria-label={`${label} info`}
+            aria-label={t("{{label}} info", { label: label })}
           >
             <Info className="h-3 w-3" />
           </button>
@@ -284,12 +282,13 @@ function ReadOnlyHeadersList({
   readonly value: ReadonlyArray<DefaultRequestHeader>;
   readonly fromCatalog: boolean;
 }) {
+  const { t } = useUiTranslation();
   if (value.length === 0) {
     return (
       <p className="text-xs text-muted-foreground">
         {fromCatalog
-          ? "No admin-configured defaults for this service."
-          : "No default headers configured."}
+          ? t("No admin-configured defaults for this service.")
+          : t("No default headers configured.")}
       </p>
     );
   }
@@ -298,9 +297,9 @@ function ReadOnlyHeadersList({
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead className="w-[28%]">Name</TableHead>
-            <TableHead className="w-[52%]">Value</TableHead>
-            <TableHead className="w-[20%]">Flags</TableHead>
+            <TableHead className="w-[28%]">{t("Name")}</TableHead>
+            <TableHead className="w-[52%]">{t("Value")}</TableHead>
+            <TableHead className="w-[20%]">{t("Flags")}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -316,19 +315,13 @@ function ReadOnlyHeadersList({
               </TableCell>
               <TableCell className="space-x-1">
                 {row.overridable && (
-                  <Badge variant="secondary" className="text-10">
-                    overridable
-                  </Badge>
+                  <Badge variant="secondary" className="text-10">{t("overridable")}</Badge>
                 )}
                 {row.sensitive && (
-                  <Badge variant="secondary" className="text-10">
-                    sensitive
-                  </Badge>
+                  <Badge variant="secondary" className="text-10">{t("sensitive")}</Badge>
                 )}
                 {fromCatalog && (
-                  <Badge variant="secondary" className="text-10">
-                    from catalog
-                  </Badge>
+                  <Badge variant="secondary" className="text-10">{t("from catalog")}</Badge>
                 )}
               </TableCell>
             </TableRow>

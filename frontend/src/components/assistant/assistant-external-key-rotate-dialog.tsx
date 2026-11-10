@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -125,6 +127,7 @@ export function AssistantExternalKeyRotateDialog({
   readonly params: AssistantExternalKeyRotateParams;
   readonly onComplete: (externalKeyId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -250,20 +253,20 @@ export function AssistantExternalKeyRotateDialog({
         <DialogHeader>
           <DialogTitle>
             {result?.replayed
-              ? "External credential already rotated"
-              : "Rotate external credential"}
+              ? t("External credential already rotated")
+              : t("Rotate external credential")}
           </DialogTitle>
           <DialogDescription>
             {result
-              ? "NyxID verified the stored credential through its authorization evidence. The replacement secret never leaves this browser."
-              : "Paste the replacement secret here. NyxID stores it; the assistant receives only the external-key reference."}
+              ? t("NyxID verified the stored credential through its authorization evidence. The replacement secret never leaves this browser.")
+              : t("Paste the replacement secret here. NyxID stores it; the assistant receives only the external-key reference.")}
           </DialogDescription>
         </DialogHeader>
 
         {!result ? (
           <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">External key</span>
+              <span className="text-muted-foreground">{t("External key")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -272,9 +275,7 @@ export function AssistantExternalKeyRotateDialog({
               </Badge>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="assistant-external-key-rotate-secret">
-                Replacement credential
-              </Label>
+              <Label htmlFor="assistant-external-key-rotate-secret">{t("Replacement credential")}</Label>
               <Input
                 id="assistant-external-key-rotate-secret"
                 type="password"
@@ -288,31 +289,25 @@ export function AssistantExternalKeyRotateDialog({
 
         {error ? (
           <p role="alert" className="text-11 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
 
         {verified ? (
-          <p className="text-11 text-success">
-            External credential rotation verified.
-          </p>
+          <p className="text-11 text-success">{t("External credential rotation verified.")}</p>
         ) : null}
 
         <DialogFooter>
           {!result ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
               <Button
                 type="button"
                 variant="primary"
                 isLoading={submitting}
                 disabled={submitting || !credential.trim()}
                 onClick={() => void rotateKey()}
-              >
-                Rotate credential
-              </Button>
+              >{t("Rotate credential")}</Button>
             </>
           ) : (
             <>
@@ -328,9 +323,7 @@ export function AssistantExternalKeyRotateDialog({
                     )
                   }
                 >
-                  <RefreshCw />
-                  Retry verification
-                </Button>
+                  <RefreshCw />{t("Retry verification")}</Button>
               ) : null}
               <Button
                 type="button"
@@ -340,9 +333,7 @@ export function AssistantExternalKeyRotateDialog({
                   onComplete(result.resource.externalKeyId);
                   close();
                 }}
-              >
-                Report rotation
-              </Button>
+              >{t("Report rotation")}</Button>
             </>
           )}
         </DialogFooter>

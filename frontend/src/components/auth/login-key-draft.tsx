@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
 import { Form, useAppForm } from "@/components/ui/form";
@@ -56,6 +59,7 @@ export function LoginKeyDraft({
   initialRequested: RequestedPermissions;
   onRequestedChange: (value: RequestedPermissions) => void;
 }) {
+  const { t } = useUiTranslation();
   const form = useAppForm<CreateApiKeyFormData>({
     resolver: zodResolver(createApiKeySchema),
     defaultValues: initial,
@@ -91,9 +95,7 @@ export function LoginKeyDraft({
             kind="new"
             customize={
               <>
-                <h4 className="text-12 font-semibold">
-                  Requested access filters
-                </h4>
+                <h4 className="text-12 font-semibold">{t("Requested access filters")}</h4>
                 <LoginPermissionPicker
                   options={permissionOptions(inventory)}
                   value={requested}
@@ -111,9 +113,7 @@ export function LoginKeyDraft({
                 />
                 <ApiKeyNameField form={form} />
                 {inventory.options.orgs.length > 0 && (
-                  <label className="block space-y-2">
-                    Owner
-                    <Select
+                  <label className="block space-y-2">{t("Owner")}<Select
                       disabled={disabled}
                       value={data.target_org_id ?? "personal"}
                       onValueChange={(value) => {
@@ -128,11 +128,11 @@ export function LoginKeyDraft({
                         form.setValue("allow_all_nodes", false);
                       }}
                     >
-                      <SelectTrigger aria-label="Owner">
+                      <SelectTrigger aria-label={t("Owner")}>
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="personal">Personal</SelectItem>
+                        <SelectItem value="personal">{t("Personal")}</SelectItem>
                         {inventory.options.orgs.map((org) => (
                           <SelectItem key={org.id} value={org.id}>
                             {org.name}
@@ -157,22 +157,18 @@ export function LoginKeyDraft({
                   disabled={disabled || data.allow_all_services}
                 />
                 <ApiKeyExpiryField form={form} />
-                <p className="text-11 text-muted-foreground">
-                  Dates expire at the end of the selected day (23:59:59 UTC).
-                  {summary.expires_at && (
+                <p className="text-11 text-muted-foreground">{t("Dates expire at the end of the selected day (23:59:59 UTC).")}{summary.expires_at && (
                     <span className="block">
-                      {new Date(summary.expires_at).toLocaleString()}
+                      {new Date(summary.expires_at).toLocaleString(getFormattingLocale())}
                     </span>
                   )}
                 </p>
-                <label className="block space-y-2">
-                  Platform
-                  <Select
+                <label className="block space-y-2">{t("Platform")}<Select
                     disabled={disabled}
                     value={data.platform ?? "generic"}
                     onValueChange={(value) => form.setValue("platform", value)}
                   >
-                    <SelectTrigger aria-label="Platform">
+                    <SelectTrigger aria-label={t("Platform")}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -193,9 +189,7 @@ export function LoginKeyDraft({
                       form.setValue("allow_all_services", v === true);
                       form.setValue("allowed_service_ids", []);
                     }}
-                  />
-                  All current and future services
-                </label>
+                  />{t("All current and future services")}</label>
                 <label className="flex items-center gap-2">
                   <Checkbox
                     checked={data.allow_all_nodes}
@@ -203,9 +197,7 @@ export function LoginKeyDraft({
                       form.setValue("allow_all_nodes", v === true);
                       form.setValue("allowed_node_ids", []);
                     }}
-                  />
-                  All current and future nodes
-                </label>
+                  />{t("All current and future nodes")}</label>
                 {inventory.options.nodes
                   .filter(
                     (n) =>
@@ -214,7 +206,7 @@ export function LoginKeyDraft({
                   .map((node) => (
                     <label key={node.id} className="flex items-center gap-2">
                       <Checkbox
-                        aria-label={`Grant node ${node.name}`}
+                        aria-label={t("Grant node {{name}}", { name: node.name })}
                         disabled={data.allow_all_nodes}
                         checked={data.allowed_node_ids?.includes(node.id)}
                         onCheckedChange={(v) =>
@@ -235,19 +227,19 @@ export function LoginKeyDraft({
                   (name) => (
                     <label key={name} className="block">
                       {name === "rate_limit_burst"
-                        ? "Burst"
-                        : "Requests per second"}
+                        ? t("Burst")
+                        : t("Requests per second")}
                       <Input
                         aria-label={
                           name === "rate_limit_burst"
-                            ? "Burst"
-                            : "Requests per second"
+                            ? t("Burst")
+                            : t("Requests per second")
                         }
                         className="mt-2 block h-8 w-full rounded-lg border border-input bg-background px-3"
                         type="number"
                         min="1"
                         max="4294967295"
-                        placeholder="Default"
+                        placeholder={t("Default")}
                         value={data[name] ?? ""}
                         onChange={(e) =>
                           form.setValue(
@@ -260,7 +252,7 @@ export function LoginKeyDraft({
                       />
                       {form.formState.errors[name] && (
                         <span className="text-destructive">
-                          {form.formState.errors[name]?.message}
+                          {translateUi(form.formState.errors[name]?.message ?? "")}
                         </span>
                       )}
                     </label>
@@ -271,10 +263,7 @@ export function LoginKeyDraft({
             actions={
               <div className="space-y-3">
                 {!comparison.matches && (
-                  <p role="alert" className="text-12 text-warning">
-                    Complete the highlighted access selections, or edit the
-                    filters in Customize.
-                  </p>
+                  <p role="alert" className="text-12 text-warning">{t("Complete the highlighted access selections, or edit the filters in Customize.")}</p>
                 )}
                 <LoginActions onDeny={onDeny} disabled={disabled}>
                   <Button
@@ -287,9 +276,7 @@ export function LoginKeyDraft({
                       !createApiKeySchema.safeParse(data).success
                     }
                     isLoading={disabled}
-                  >
-                    Create &amp; continue
-                  </Button>
+                  >{t("Create & continue")}</Button>
                 </LoginActions>
               </div>
             }

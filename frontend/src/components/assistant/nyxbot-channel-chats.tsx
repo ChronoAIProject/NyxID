@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { ChannelThreads } from "./nyxbot-channel-threads";
 import { useState } from "react";
 import { ChevronRight, Megaphone, User, Users } from "lucide-react";
@@ -88,6 +91,7 @@ function ChatRow({
   readonly botAgentName: string;
   readonly onError: (message: string | undefined) => void;
 }) {
+  const { t } = useUiTranslation();
   const update = useUpdateNyxBotChannelChat();
   const [notice, setNotice] = useState<string>();
   const title = channelChatTitle(chat.kind, chat.title, channel.platform);
@@ -142,9 +146,9 @@ function ChatRow({
       <div className="grid grid-cols-[auto_1fr] @max-[480px]/channel-bots:grid-cols-1 items-center gap-x-3 gap-y-1.5 text-11 text-muted-foreground">
         {group ? (
           <>
-            <span>Answers</span>
+            <span>{t("Answers")}</span>
             <SettingSelect
-              label={`Replies in ${title}`}
+              label={t("Replies in {{title}}", { title: title })}
               value={chat.reply_mode}
               disabled={update.isPending}
               options={[
@@ -154,14 +158,14 @@ function ChatRow({
               onChange={(reply_mode) => void change({ reply_mode })}
             />
             {chat.thread_capabilities?.thread_follow ? <>
-              <span>Threads</span>
-              <SettingSelect label={`Thread follow in ${title}`} value={chat.threads ?? "off"} disabled={update.isPending}
+              <span>{t("Threads")}</span>
+              <SettingSelect label={t("Thread follow in {{title}}", { title: title })} value={chat.threads ?? "off"} disabled={update.isPending}
                 options={[{ value: "follow", label: "Follow when addressed" }, { value: "off", label: "Off" }]}
                 onChange={(threads) => void change({ threads })} />
             </> : null}
-            <span>Who can talk</span>
+            <span>{t("Who can talk")}</span>
             <SettingSelect
-              label={`Who can talk in ${title}`}
+              label={t("Who can talk in {{title}}", { title: title })}
               value={chat.members_setting ?? "default"}
               disabled={update.isPending}
               options={[
@@ -176,9 +180,9 @@ function ChatRow({
             />
           </>
         ) : null}
-        <span>Answered by</span>
+        <span>{t("Answered by")}</span>
         <SettingSelect
-          label={`Agent for ${title}`}
+          label={t("Agent for {{title}}", { title: title })}
           value={chat.agent_id ?? "default"}
           disabled={update.isPending}
           options={[
@@ -187,11 +191,11 @@ function ChatRow({
           ]}
           onChange={(agent_id) => void change({ agent_id })}
         />
-        <span>Posts on its own</span>
+        <span>{t("Posts on its own")}</span>
         <Switch
           checked={chat.allow_posts}
           disabled={update.isPending}
-          aria-label={`Let the agent post in ${title} on its own`}
+          aria-label={t("Let the agent post in {{title}} on its own", { title: title })}
           onCheckedChange={(allow_posts) => void change({ allow_posts })}
         />
       </div>
@@ -215,6 +219,7 @@ export function ChannelChats({
   readonly agents: readonly AssistantAgent[];
   readonly botAgentName: string;
 }) {
+  const { t } = useUiTranslation();
   const [open, setOpen] = useState(false);
   const [shown, setShown] = useState(CHATS_SHOWN);
   const [error, setError] = useState<string>();
@@ -243,15 +248,13 @@ export function ChannelChats({
         <ChevronRight
           aria-hidden="true"
           className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
-        />
-        Chats and who can talk
-      </button>
+        />{t("Chats and who can talk")}</button>
       {open ? (
         <div className="space-y-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-11 text-muted-foreground">Private chats with the bot</span>
+            <span className="text-11 text-muted-foreground">{t("Private chats with the bot")}</span>
             <SettingSelect
-              label={`Who can talk to ${channel.bot_label} in private chats`}
+              label={t("Who can talk to {{bot_label}} in private chats", { bot_label: channel.bot_label })}
               value={channel.private_chats}
               disabled={access.isPending}
               options={[
@@ -261,27 +264,21 @@ export function ChannelChats({
               onChange={(value) => void setAccess(value)}
             />
           </div>
-          <p className="text-11 text-text-tertiary">
-            People other than you talk to the agent as guests: it never acts on your account for
-            them, NyxBot uses none of your services for them, and a chat&apos;s own specialist
-            only reads with its services. Members of a group can talk to it once you have talked
-            to the bot there. In groups it answers when mentioned or replied to unless set to
-            every message.
-          </p>
+          <p className="text-11 text-text-tertiary">{t("People other than you talk to the agent as guests: it never acts on your account for them, NyxBot uses none of your services for them, and a chat's own specialist only reads with its services. Members of a group can talk to it once you have talked to the bot there. In groups it answers when mentioned or replied to unless set to every message.")}</p>
           {error ? (
             <p role="alert" className="text-11 text-destructive">
-              {error}
+              {translateUi(error)}
             </p>
           ) : null}
           {chats.error ? (
             <ErrorBanner
-              message={`Could not load chats. ${chats.error.message}`}
+              message={t("Could not load chats. {{message}}", { message: translateErrorMessage(chats.error.message) })}
               onRetry={() => void chats.refetch()}
             />
           ) : chats.isPending ? (
-            <p className="text-11 text-text-tertiary">Loading chats...</p>
+            <p className="text-11 text-text-tertiary">{t("Loading chats...")}</p>
           ) : rows.length ? (
-            <ul aria-label={`Chats of ${channel.bot_label}`} className="space-y-1.5">
+            <ul aria-label={t("Chats of {{bot_label}}", { bot_label: channel.bot_label })} className="space-y-1.5">
               {roots.slice(0, shown).map((chat) => (
                 <li key={chat.id}>
                 <ChatRow
@@ -293,25 +290,21 @@ export function ChannelChats({
                   onError={setError}
                 />
                 {rows.filter((child) => child.parent_chat_id === chat.id).map((child) => <div key={child.id} className="ml-3 mt-1 border-l border-hairline pl-2">
-                  <p className="mb-1 text-11 text-text-tertiary">Earlier thread settings</p>
+                  <p className="mb-1 text-11 text-text-tertiary">{t("Earlier thread settings")}</p>
                   <ChatRow channel={channel} chat={child} agents={agents} botAgentName={botAgentName} onError={setError} />
                 </div>)}
                 </li>
               ))}
             </ul>
           ) : (
-            <p className="text-11 text-text-tertiary">
-              No chats yet. Message the bot, or add it to a group and mention it.
-            </p>
+            <p className="text-11 text-text-tertiary">{t("No chats yet. Message the bot, or add it to a group and mention it.")}</p>
           )}
           {roots.length > shown ? (
             <Button
               size="sm"
               variant="ghost"
               onClick={() => setShown((value) => value + CHATS_SHOWN * 2)}
-            >
-              Show {Math.min(roots.length - shown, CHATS_SHOWN * 2)} more
-            </Button>
+            >{t("Show ")}{Math.min(roots.length - shown, CHATS_SHOWN * 2)}{t(" more")}</Button>
           ) : null}
         </div>
       ) : null}

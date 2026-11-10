@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -197,6 +200,7 @@ function DetailRow({
 /** Inline credential replacement — the one rotation path a plugin user needs,
  *  kept in this modal so managing a connection never leaves it. */
 function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
+  const { t } = useUiTranslation();
   const [open, setOpen] = useState(false);
   const [credential, setCredential] = useState("");
   const updateApiKey = useUpdateExternalApiKey();
@@ -208,15 +212,15 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
       { keyId: apiKeyId, credential: next },
       {
         onSuccess: () => {
-          toast.success("Credential replaced");
+          toast.success(translateUi("Credential replaced"));
           setCredential("");
           setOpen(false);
         },
         onError: (error) =>
           toast.error(
-            error instanceof ApiError
+            translateErrorMessage(error instanceof ApiError
               ? error.message
-              : "Could not replace the credential.",
+              : "Could not replace the credential."),
           ),
       },
     );
@@ -226,28 +230,22 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
     return (
       <div className="flex items-center justify-between gap-4 py-2.5">
         <div>
-          <p className="text-12 font-medium text-foreground">Credential</p>
-          <p className="text-11 text-text-tertiary">
-            Paste a new secret to replace the stored one.
-          </p>
+          <p className="text-12 font-medium text-foreground">{t("Credential")}</p>
+          <p className="text-11 text-text-tertiary">{t("Paste a new secret to replace the stored one.")}</p>
         </div>
         <Button
           type="button"
           variant="outline"
           size="sm"
           onClick={() => setOpen(true)}
-        >
-          Replace
-        </Button>
+        >{t("Replace")}</Button>
       </div>
     );
   }
 
   return (
     <div className="space-y-2 py-2.5">
-      <p className="text-12 font-medium text-foreground">
-        Replace credential
-      </p>
+      <p className="text-12 font-medium text-foreground">{t("Replace credential")}</p>
       <Input
         type="password"
         autoFocus
@@ -259,8 +257,8 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
             submit();
           }
         }}
-        placeholder="New credential"
-        aria-label="New credential"
+        placeholder={t("New credential")}
+        aria-label={t("New credential")}
       />
       <div className="flex justify-end gap-2">
         <Button
@@ -271,9 +269,7 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
             setCredential("");
             setOpen(false);
           }}
-        >
-          Cancel
-        </Button>
+        >{t("Cancel")}</Button>
         <Button
           type="button"
           variant="primary"
@@ -281,9 +277,7 @@ function ReplaceCredential({ apiKeyId }: { readonly apiKeyId: string }) {
           disabled={!credential.trim()}
           isLoading={updateApiKey.isPending}
           onClick={submit}
-        >
-          Save
-        </Button>
+        >{t("Save")}</Button>
       </div>
     </div>
   );
@@ -304,6 +298,7 @@ function ConnectionPanel({
   readonly showLabel: boolean;
   readonly onRevoked: () => void;
 }) {
+  const { t } = useUiTranslation();
   const { data: key, isLoading, error, refetch } = useKey(keyId);
   const { data: catalogEntry } = useCatalogEntry(
     key?.catalog_service_slug ?? null,
@@ -324,7 +319,7 @@ function ConnectionPanel({
           toast.success(
             nextActive ? "Connection enabled" : "Connection disabled",
           ),
-        onError: () => toast.error("Could not update the connection."),
+        onError: () => toast.error(translateUi("Could not update the connection.")),
       },
     );
   }
@@ -359,7 +354,7 @@ function ConnectionPanel({
           setConfirmingRevoke(false);
           return;
         }
-        toast.error("Could not delete the connection.");
+        toast.error(translateUi("Could not delete the connection."));
       },
     });
   }
@@ -375,17 +370,13 @@ function ConnectionPanel({
   if (error || !key) {
     return (
       <div className="flex h-40 flex-col items-center justify-center gap-3 text-center">
-        <p className="text-12 text-muted-foreground">
-          Couldn't load this connection.
-        </p>
+        <p className="text-12 text-muted-foreground">{t("Couldn't load this connection.")}</p>
         <Button
           type="button"
           variant="outline"
           size="sm"
           onClick={() => void refetch()}
-        >
-          Try again
-        </Button>
+        >{t("Try again")}</Button>
       </div>
     );
   }
@@ -421,9 +412,7 @@ function ConnectionPanel({
               <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
                 <div className="min-w-0 flex-1 space-y-1.5">
-                  <p className="text-12 text-warning">
-                    The stored credential is missing. Reconnect or delete this service.
-                  </p>
+                  <p className="text-12 text-warning">{t("The stored credential is missing. Reconnect or delete this service.")}</p>
                   {reconnectable && (
                     <Button
                       type="button"
@@ -431,9 +420,7 @@ function ConnectionPanel({
                       size="sm"
                       onClick={() => setReconnectOpen(true)}
                     >
-                      <RefreshCw />
-                      Reconnect
-                    </Button>
+                      <RefreshCw />{t("Reconnect")}</Button>
                   )}
                 </div>
               </div>
@@ -453,17 +440,17 @@ function ConnectionPanel({
           {/* Multi-connection panels carry status beside their label; a lone
             connection has no label row, so it reads as a field instead. */}
           {!showLabel && (
-            <DetailRow label="Status">
+            <DetailRow label={t("Status")}>
               <Badge variant={statusMeta.variant}>{statusMeta.label}</Badge>
             </DetailRow>
           )}
-          <DetailRow label="Credential">
+          <DetailRow label={t("Credential")}>
             {key.credential_missing
-              ? "Missing - reconnect or delete"
+              ? t("Missing - reconnect or delete")
               : key.credential_type.replaceAll("_", " ")}
           </DetailRow>
           {grantedScopes && grantedScopes.length > 0 && (
-            <DetailRow label="Scopes">
+            <DetailRow label={t("Scopes")}>
               <span className="flex flex-wrap justify-end gap-1">
                 {grantedScopes.map((scope) => (
                   <span
@@ -477,12 +464,12 @@ function ConnectionPanel({
             </DetailRow>
           )}
           {key.proxy_url && (
-            <DetailRow label="Proxy URL">
+            <DetailRow label={t("Proxy URL")}>
               <button
                 type="button"
                 onClick={() => {
                   void navigator.clipboard?.writeText(key.proxy_url ?? "");
-                  toast.success("Proxy URL copied");
+                  toast.success(translateUi("Proxy URL copied"));
                 }}
                 className="inline-flex max-w-full items-center gap-1.5 font-mono text-11 text-muted-foreground transition-colors hover:text-foreground"
               >
@@ -491,20 +478,15 @@ function ConnectionPanel({
               </button>
             </DetailRow>
           )}
-          <DetailRow label="Last used">
-            {key.last_used_at ? formatDate(key.last_used_at) : "Never"}
+          <DetailRow label={t("Last used")}>
+            {key.last_used_at ? formatDate(key.last_used_at) : t("Never")}
           </DetailRow>
           {modifiable ? (
             <>
               <div className="flex items-center justify-between gap-4 py-2.5">
                 <div>
-                  <p className="text-12 font-medium text-foreground">
-                    Enabled
-                  </p>
-                  <p className="text-11 text-text-tertiary">
-                    Disable to stop the assistant using this connection. Your
-                    credential is kept — you can enable it again any time.
-                  </p>
+                  <p className="text-12 font-medium text-foreground">{t("Enabled")}</p>
+                  <p className="text-11 text-text-tertiary">{t("Disable to stop the assistant using this connection. Your credential is kept — you can enable it again any time.")}</p>
                 </div>
                 <Switch
                   checked={key.is_active}
@@ -513,7 +495,7 @@ function ConnectionPanel({
                     (Boolean(key.credential_missing) && !key.is_active)
                   }
                   onCheckedChange={toggleActive}
-                  aria-label="Toggle connection enabled"
+                  aria-label={t("Toggle connection enabled")}
                 />
               </div>
               {canReplaceCredential(key) && !key.credential_missing && (
@@ -530,9 +512,7 @@ function ConnectionPanel({
 
         <div className="flex flex-wrap items-center justify-between gap-2 pt-2.5">
           <Button asChild variant="ghost" size="sm">
-            <Link to="/keys/$keyId" params={{ keyId: key.id }}>
-              Advanced settings
-              <ExternalLink />
+            <Link to="/keys/$keyId" params={{ keyId: key.id }}>{t("Advanced settings")}<ExternalLink />
             </Link>
           </Button>
           {modifiable && (
@@ -541,9 +521,7 @@ function ConnectionPanel({
               size="sm"
               className="text-destructive hover:text-destructive"
               onClick={() => setConfirmingRevoke(true)}
-            >
-              Delete
-            </Button>
+            >{t("Delete")}</Button>
           )}
         </div>
       </section>
@@ -603,6 +581,7 @@ export function ManageConnectionModal({
   readonly iconUrl?: string | null;
   readonly onClose: () => void;
 }) {
+  const { t } = useUiTranslation();
   const multiple = keyIds.length > 1;
 
   return (
@@ -620,13 +599,10 @@ export function ManageConnectionModal({
             <span className="min-w-0 truncate">{serviceName}</span>
             {multiple && (
               <Badge variant="secondary" className="ml-1">
-                {keyIds.length} connections
-              </Badge>
+                {keyIds.length}{t(" connections")}</Badge>
             )}
           </DialogTitle>
-          <DialogDescription className="sr-only">
-            Manage the credentials this service is connected with.
-          </DialogDescription>
+          <DialogDescription className="sr-only">{t("Manage the credentials this service is connected with.")}</DialogDescription>
         </DialogHeader>
 
         <div className="divide-y divide-border">

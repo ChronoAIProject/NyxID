@@ -21,6 +21,7 @@ import {
   summarizeBillingModel,
 } from "@/lib/service-insights";
 import { configuredBilling } from "@/lib/service-insights-compat";
+import { appI18n } from "@/i18n";
 import { api } from "@/lib/api-client";
 import { ServiceConnectionTable } from "./service-connection-table";
 
@@ -183,12 +184,35 @@ function mount(
     </QueryClientProvider>,
   );
 }
-afterEach(() => {
+afterEach(async () => {
   cleanup();
   vi.restoreAllMocks();
+  await appI18n.changeLanguage("en");
 });
 
 describe("service card billing and caller details", () => {
+  it("keeps billing classification and supplied names intact in Chinese", async () => {
+    for (const [language, partial] of [
+      ["zh-CN", "部分计费信息未提供"],
+      ["zh-TW", "部分計費資訊未提供"],
+    ]) {
+      await appI18n.changeLanguage(language);
+      expect(summarizeBillingModel("ready", [insight, undefined])).toBe(partial);
+      expect(
+        credentialLabel(connection, {
+          ...insight.billing!,
+          context: "configuration",
+          credential_label: "Profile",
+        }),
+      ).toBe("Profile");
+      expect(
+        billingAccountLabel({
+          ...insight.billing!,
+          account: { id: "org", kind: "organization", name: "Profile" },
+        }),
+      ).toContain("Profile");
+    }
+  });
   it("shows the recorded layer even when today's connection binding is different", () => {
     mount({
       ...insight,

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState, type ReactNode } from "react";
 import { Check, ChevronDown, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -35,7 +36,7 @@ export interface BillingMultiSelectProps {
 export function BillingMultiSelect({
   label,
   itemLabel,
-  emptyLabel = "None",
+  emptyLabel: emptyLabelProp,
   description,
   disabled = false,
   limit,
@@ -48,6 +49,7 @@ export function BillingMultiSelect({
   open: controlledOpen,
   onOpenChange,
 }: BillingMultiSelectProps) {
+  const { t } = useUiTranslation();
   const [internalOpen, setInternalOpen] = useState(false);
   const [search, setSearch] = useState("");
   const open = controlledOpen ?? internalOpen;
@@ -72,28 +74,28 @@ export function BillingMultiSelect({
           <PopoverTrigger asChild>
             <Button
               variant="outline"
-              aria-label={`Filter ${label.toLowerCase()}`}
+              aria-label={t("Filter {{value}}", { value: label.toLowerCase() })}
               disabled={disabled}
               className="min-w-40 justify-between gap-6"
             >
               <span>{label}</span>
               <span className="ml-auto text-muted-foreground">
-                {values.length ? `${values.length} selected` : emptyLabel}
+                {values.length ? t("{{length}} selected", { length: values.length }) : (emptyLabelProp === undefined ? t("None") : emptyLabelProp)}
               </span>
               <ChevronDown className="size-3" aria-hidden="true" />
             </Button>
           </PopoverTrigger>
           <PopoverContent
             align="start"
-            aria-label={`Choose ${label.toLowerCase()}`}
+            aria-label={t("Choose {{value}}", { value: label.toLowerCase() })}
             className="w-72 space-y-3 p-3"
           >
             {description && (
               <p className="text-11 text-muted-foreground">{description}</p>
             )}
             <Input
-              aria-label={`Search ${label.toLowerCase()}`}
-              placeholder={`Search ${label.toLowerCase()}…`}
+              aria-label={t("Search {{value}}", { value: label.toLowerCase() })}
+              placeholder={t("Search {{value}}…", { value: label.toLowerCase() })}
               value={search}
               onChange={(event) => setSearch(event.target.value)}
             />
@@ -148,8 +150,7 @@ export function BillingMultiSelect({
                 );
               })}
               {!filtered.length && (
-                <p className="p-2 text-12 text-muted-foreground">
-                  No matching {label.toLowerCase()}.
+                <p className="p-2 text-12 text-muted-foreground">{t("No matching ")}{label.toLowerCase()}.
                 </p>
               )}
             </div>
@@ -159,16 +160,12 @@ export function BillingMultiSelect({
                 size="sm"
                 disabled={!values.length}
                 onClick={() => onChange([])}
-              >
-                Clear
-              </Button>
+              >{t("Clear")}</Button>
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => setOpen(false)}
-              >
-                Done
-              </Button>
+              >{t("Done")}</Button>
             </div>
           </PopoverContent>
         </Popover>
@@ -177,7 +174,7 @@ export function BillingMultiSelect({
       {values.length > 0 && (
         <div
           className="flex flex-wrap items-center gap-1.5"
-          aria-label={`Selected ${label.toLowerCase()}`}
+          aria-label={t("Selected {{value}}", { value: label.toLowerCase() })}
         >
           {values.map((value) => (
             <div
@@ -187,7 +184,7 @@ export function BillingMultiSelect({
               <button
                 type="button"
                 className="min-w-0 rounded text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                aria-label={`Edit ${itemLabel.toLowerCase()} filter: ${nameOf(value)}`}
+                aria-label={t("Edit {{value}} filter: {{value1}}", { value: itemLabel.toLowerCase(), value1: nameOf(value) })}
                 onClick={() => setOpen(true)}
               >
                 <span className="text-muted-foreground">{itemLabel}:</span>{" "}
@@ -198,7 +195,7 @@ export function BillingMultiSelect({
               <button
                 type="button"
                 className="shrink-0 rounded p-1 text-muted-foreground hover:bg-overlay-strong hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-                aria-label={`Remove ${itemLabel.toLowerCase()}: ${nameOf(value)}`}
+                aria-label={t("Remove {{value}}: {{value1}}", { value: itemLabel.toLowerCase(), value1: nameOf(value) })}
                 onClick={() => remove(value)}
               >
                 <X className="size-3" aria-hidden="true" />
@@ -210,9 +207,7 @@ export function BillingMultiSelect({
             size="sm"
             className="text-muted-foreground"
             onClick={() => onChange([])}
-          >
-            Clear filters
-          </Button>
+          >{t("Clear filters")}</Button>
         </div>
       )}
     </div>

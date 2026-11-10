@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
@@ -9,8 +11,8 @@ import {
 import { cn } from "@/lib/utils";
 
 const LEVEL_OPTIONS: readonly { value: AccessLevel; label: string }[] = [
-  { value: "off", label: "Off" },
-  { value: "allow", label: "Allow" },
+  { value: "off", get label() { return translateUi("Off"); } },
+  { value: "allow", get label() { return translateUi("Allow"); } },
 ];
 
 function LevelControl({
@@ -110,6 +112,7 @@ export function ServiceAccessTable({
   onLevelChange,
   className,
 }: ServiceAccessTableProps) {
+  const { t } = useUiTranslation();
   const [query, setQuery] = useState("");
   const allowsFutureServices =
     defaultLevel === "allow" &&
@@ -131,16 +134,10 @@ export function ServiceAccessTable({
         <h2
           id="oauth-service-access"
           className="text-15 font-semibold text-foreground"
-        >
-          Service access
-        </h2>
+        >{t("Service access")}</h2>
         <code className="text-11 text-muted-foreground">proxy</code>
       </div>
-      <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
-        Allow lets {clientName} read data and take actions, including creating,
-        updating or deleting data, using that service. Approval prompts depend
-        on your configured policies.
-      </p>
+      <p className="mt-1 text-12 leading-relaxed text-muted-foreground">{t("Allow lets ")}{clientName}{t(" read data and take actions, including creating, updating or deleting data, using that service. Approval prompts depend on your configured policies.")}</p>
 
       {rows.length > 0 && (
         <div className="relative mt-3">
@@ -152,8 +149,8 @@ export function ServiceAccessTable({
             type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder={`Search ${rows.length} services`}
-            aria-label="Search services"
+            placeholder={t("Search {{length}} services", { length: rows.length })}
+            aria-label={t("Search services")}
             className="h-8 pl-8 text-12"
           />
         </div>
@@ -162,36 +159,31 @@ export function ServiceAccessTable({
       <div className="mt-2 overflow-hidden rounded-lg border border-border/60">
         <div className="flex flex-wrap items-center justify-between gap-3 bg-overlay px-3 py-2">
           <div className="min-w-0">
-            <p className="text-13 font-medium text-foreground">All services</p>
+            <p className="text-13 font-medium text-foreground">{t("All services")}</p>
             <p className="text-11 text-text-tertiary">
               {allowsFutureServices
-                ? "Also applies to services you connect later"
-                : "New services stay off unless all services are allowed"}
+                ? t("Also applies to services you connect later")
+                : t("New services stay off unless all services are allowed")}
             </p>
           </div>
           <LevelControl
-            label="All services"
+            label={t("All services")}
             value={defaultLevel}
             onChange={onDefaultLevelChange}
           />
         </div>
         <div
           role="region"
-          aria-label="Service permissions"
+          aria-label={t("Service permissions")}
           tabIndex={0}
           className="h-75 max-h-[20dvh] min-h-25 divide-y divide-border/60 overflow-y-auto overscroll-contain border-t border-border/60 focus-visible:outline-2 focus-visible:outline-ring"
         >
           {loading ? (
-            <p className="px-3 py-2.5 text-12 text-muted-foreground">
-              Loading services...
-            </p>
+            <p className="px-3 py-2.5 text-12 text-muted-foreground">{t("Loading services...")}</p>
           ) : rows.length === 0 ? (
-            <p className="px-3 py-2.5 text-12 text-muted-foreground">
-              No services connected yet. New ones follow the setting above.
-            </p>
+            <p className="px-3 py-2.5 text-12 text-muted-foreground">{t("No services connected yet. New ones follow the setting above.")}</p>
           ) : visibleRows.length === 0 ? (
-            <p className="px-3 py-2.5 text-12 text-muted-foreground">
-              No services match &ldquo;{query.trim()}&rdquo;.
+            <p className="px-3 py-2.5 text-12 text-muted-foreground">{t("No services match “")}{query.trim()}&rdquo;.
             </p>
           ) : (
             visibleRows.map((row) => (
@@ -209,8 +201,8 @@ export function ServiceAccessTable({
                   {(row.orgName || row.requiredByApp || row.secondary) && (
                     <p className="truncate text-11 text-text-tertiary">
                       {[
-                        row.orgName && `Org · ${row.orgName}`,
-                        row.requiredByApp ? "Requested by app" : row.secondary,
+                        row.orgName && t("Org · {{orgName}}", { orgName: row.orgName }),
+                        row.requiredByApp ? t("Requested by app") : row.secondary,
                       ]
                         .filter(Boolean)
                         .join(" · ")}
@@ -230,8 +222,7 @@ export function ServiceAccessTable({
       </div>
 
       <p className="mt-2 text-11 leading-relaxed text-text-tertiary">
-        {clientName} can discover the services you allow. NyxID supplies
-        credentials to those services without sharing them with {clientName}.
+        {clientName}{t(" can discover the services you allow. NyxID supplies credentials to those services without sharing them with ")}{clientName}.
       </p>
     </section>
   );

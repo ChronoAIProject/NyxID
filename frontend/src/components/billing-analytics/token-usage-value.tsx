@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import type { AdminUsageStats } from "@/types/admin";
 import { MEASURE_LABELS, formatAnalyticsValue } from "@/lib/usage-analytics";
@@ -15,13 +17,14 @@ export function TokenUsageValue({
   usage: AdminUsageStats;
   selected: readonly TokenMetric[];
 }) {
+  const { t } = useUiTranslation();
   const [open, setOpen] = useState(false);
   const totalSelected = selected.includes("total_tokens");
   const value = sumTokenMetrics(usage, selected);
   const parts = totalSelected
     ? (["prompt_tokens", "completion_tokens"] as const)
     : selected;
-  const number = (value: number) => value.toLocaleString();
+  const number = (value: number) => value.toLocaleString(getFormattingLocale());
   const details = [
     { label: "Image input", value: usage.image_input_tokens },
     { label: "Image output", value: usage.image_output_tokens },
@@ -34,7 +37,7 @@ export function TokenUsageValue({
       <TooltipTrigger asChild>
         <button
           type="button"
-          aria-label={`Token count breakdown: ${number(value)} tokens`}
+          aria-label={t("Token count breakdown: {{value}} tokens", { value: number(value) })}
           onClick={(event) => {
             // Radix closes tooltips on click; keep the breakdown visible after a tap.
             event.preventDefault();
@@ -51,7 +54,7 @@ export function TokenUsageValue({
       >
         <div>
           <p className="font-medium">
-            {totalSelected ? "Total tokens" : "Selected token counts"}
+            {totalSelected ? t("Total tokens") : t("Selected token counts")}
           </p>
           <p className="mt-1 font-mono text-11 tabular-nums">
             {parts.map((metric) => number(usage[metric])).join(" + ")} ={" "}
@@ -72,7 +75,7 @@ export function TokenUsageValue({
           <div className="space-y-1.5 border-t border-border pt-2">
             {details.length > 0 && (
               <>
-                <p className="font-medium">Included in input / output</p>
+                <p className="font-medium">{t("Included in input / output")}</p>
                 <dl className="space-y-1.5">
                   {details.map((detail) => (
                     <div
@@ -86,25 +89,17 @@ export function TokenUsageValue({
                 </dl>
               </>
             )}
-            <p className="text-11 leading-relaxed text-muted-foreground">
-              Image and voice tokens are included in the total when reported.
-              {details.length === 0 &&
+            <p className="text-11 leading-relaxed text-muted-foreground">{t("Image and voice tokens are included in the total when reported.")}{details.length === 0 &&
                 " No separate image or voice breakdown was recorded for this selection."}
             </p>
             {(usage.cached_tokens > 0 || usage.cache_creation_tokens > 0) && (
-              <p className="text-11 leading-relaxed text-muted-foreground">
-                Cache read {number(usage.cached_tokens)} · cache write{" "}
-                {number(usage.cache_creation_tokens)}. These can overlap input
-                counts and are not added to the total.
-              </p>
+              <p className="text-11 leading-relaxed text-muted-foreground">{t("Cache read ")}{number(usage.cached_tokens)}{t(" · cache write")}{" "}
+                {number(usage.cache_creation_tokens)}{t(". These can overlap input counts and are not added to the total.")}</p>
             )}
           </div>
         )}
         {!totalSelected && selected.length > 1 && (
-          <p className="text-11 leading-relaxed text-muted-foreground">
-            Selected counts are added together. Cache counts can overlap input;
-            use Total tokens for the input + output total.
-          </p>
+          <p className="text-11 leading-relaxed text-muted-foreground">{t("Selected counts are added together. Cache counts can overlap input; use Total tokens for the input + output total.")}</p>
         )}
       </TooltipContent>
     </Tooltip>

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Ban,
@@ -55,11 +56,10 @@ function ScopeChip({ children }: { readonly children: ReactNode }) {
  * three facts scan independently.
  */
 function ScopeRow({ block }: { readonly block: ApprovalCardContentBlock }) {
+  const { t } = useUiTranslation();
   return (
     <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-      <span className="text-10 font-semibold uppercase tracking-[1px] text-muted-foreground">
-        Scope
-      </span>
+      <span className="text-10 font-semibold uppercase tracking-[1px] text-muted-foreground">{t("Scope")}</span>
       <ScopeChip>
         <ServiceIcon slug={`api-${block.service_slug}`} size="2xs" />
         <span className="truncate">{block.service_slug}</span>
@@ -70,8 +70,8 @@ function ScopeRow({ block }: { readonly block: ApprovalCardContentBlock }) {
       </ScopeChip>
       <ScopeChip>
         {block.approval_mode === "per_request"
-          ? "per-request approval"
-          : `grant · ${grantDurationLabel(block.grant_duration_sec)}`}
+          ? t("per-request approval")
+          : t("grant · {{value}}", { value: grantDurationLabel(block.grant_duration_sec) })}
       </ScopeChip>
     </div>
   );
@@ -110,6 +110,7 @@ function DecidedIcon({ decision }: { readonly decision: ApprovalDecision }) {
 }
 
 function DecidedCard({ block }: { readonly block: ApprovalCardContentBlock }) {
+  const { t } = useUiTranslation();
   const decision = block.decision;
   if (decision === null) return null;
   const style = DECIDED_STYLE[decision];
@@ -120,8 +121,7 @@ function DecidedCard({ block }: { readonly block: ApprovalCardContentBlock }) {
         <DecidedIcon decision={decision} />
         <span>{style.title}</span>
         {block.decision_channel && (
-          <Badge variant="secondary" className="ml-auto">
-            via {block.decision_channel}
+          <Badge variant="secondary" className="ml-auto">{t("via ")}{block.decision_channel}
           </Badge>
         )}
       </div>
@@ -129,20 +129,16 @@ function DecidedCard({ block }: { readonly block: ApprovalCardContentBlock }) {
         {block.body}
       </p>
       {decision !== "approved" && (
-        <p className="mt-1.5 text-11 text-text-tertiary">
-          Nothing was sent.
-        </p>
+        <p className="mt-1.5 text-11 text-text-tertiary">{t("Nothing was sent.")}</p>
       )}
       {decision === "expired" && (
         <div className="mt-3">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button type="button" variant="secondary" size="sm">
-                <RotateCcw />
-                Request again
-              </Button>
+                <RotateCcw />{t("Request again")}</Button>
             </TooltipTrigger>
-            <TooltipContent>Wired in the API pass</TooltipContent>
+            <TooltipContent>{t("Wired in the API pass")}</TooltipContent>
           </Tooltip>
         </div>
       )}
@@ -155,19 +151,16 @@ function SubmittedCard({
 }: {
   readonly block: ApprovalCardContentBlock;
 }) {
+  const { t } = useUiTranslation();
   if (!block.decision_submission) return null;
   return (
     <section className="rounded-xl border border-warning/30 bg-warning/[0.06] p-4">
       <div className="flex items-center gap-2 text-12 font-semibold text-foreground">
-        <Loader2 className="h-4 w-4 animate-spin text-warning" />
-        Decision sent
-      </div>
+        <Loader2 className="h-4 w-4 animate-spin text-warning" />{t("Decision sent")}</div>
       <p className="mt-2 text-12 leading-relaxed text-muted-foreground">
         {block.body}
       </p>
-      <p className="mt-1.5 text-11 text-text-tertiary">
-        Waiting for the committed {block.decision_submission} decision.
-      </p>
+      <p className="mt-1.5 text-11 text-text-tertiary">{t("Waiting for the committed ")}{block.decision_submission}{t(" decision.")}</p>
     </section>
   );
 }
@@ -181,6 +174,7 @@ export function ApprovalCard({
   readonly disabled?: boolean;
   readonly onDecide: (approved: boolean) => Promise<void> | void;
 }) {
+  const { t } = useUiTranslation();
   const [pendingAction, setPendingAction] = useState<"approve" | "deny" | null>(
     null,
   );
@@ -236,15 +230,11 @@ export function ApprovalCard({
           <ShieldAlert className="h-4 w-4 text-nyx-secondary-400" />
         </div>
         <div className="min-w-0 flex-1">
-          <h3 className="text-13 font-semibold text-foreground">
-            Approval required
-          </h3>
-          <p className="mt-0.5 text-11 leading-relaxed text-muted-foreground">
-            Review the destination and access scope before this action runs.
-          </p>
+          <h3 className="text-13 font-semibold text-foreground">{t("Approval required")}</h3>
+          <p className="mt-0.5 text-11 leading-relaxed text-muted-foreground">{t("Review the destination and access scope before this action runs.")}</p>
         </div>
         <div className="flex shrink-0 flex-col items-end gap-1.5">
-          <Badge variant="accent">Pending</Badge>
+          <Badge variant="accent">{t("Pending")}</Badge>
           <span
             className={`flex items-center gap-1 font-mono text-10 ${
               expired || urgent
@@ -266,11 +256,7 @@ export function ApprovalCard({
         <ScopeRow block={block} />
 
         {block.approval_mode === "grant" && (
-          <p className="mt-2.5 text-11 leading-relaxed text-muted-foreground">
-            Approving also allows repeat {block.service_slug} writes for the
-            next {grantDurationLabel(block.grant_duration_sec)} without asking
-            again.
-          </p>
+          <p className="mt-2.5 text-11 leading-relaxed text-muted-foreground">{t("Approving also allows repeat ")}{block.service_slug}{t(" writes for the next ")}{grantDurationLabel(block.grant_duration_sec)}{t(" without asking again.")}</p>
         )}
       </div>
 
@@ -285,9 +271,7 @@ export function ApprovalCard({
             <Loader2 className="h-3 w-3 animate-spin light:text-success" />
           ) : (
             <Check className="h-3 w-3 light:text-success" />
-          )}
-          Approve and send
-        </button>
+          )}{t("Approve and send")}</button>
         <button
           type="button"
           disabled={busy || disabled}
@@ -298,12 +282,8 @@ export function ApprovalCard({
             <Loader2 className="h-3 w-3 animate-spin light:text-destructive" />
           ) : (
             <X className="h-3 w-3 light:text-destructive" />
-          )}
-          Deny
-        </button>
-        <span className="ml-auto text-10 text-muted-foreground">
-          Nothing is sent until you decide.
-        </span>
+          )}{t("Deny")}</button>
+        <span className="ml-auto text-10 text-muted-foreground">{t("Nothing is sent until you decide.")}</span>
       </div>
     </section>
   );

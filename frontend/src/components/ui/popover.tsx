@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import * as React from "react";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
 import { OverlayLayer } from "@/components/ui/overlay-layer";
@@ -11,6 +12,7 @@ const PopoverContent = React.forwardRef<
   React.ComponentRef<typeof PopoverPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof PopoverPrimitive.Content>
 >(({ className, align = "center", sideOffset = 4, style, ...props }, ref) => {
+  useUiTranslation();
   const layer = useOverlayLayer();
   return (
   <OverlayLayer layer={layer}>

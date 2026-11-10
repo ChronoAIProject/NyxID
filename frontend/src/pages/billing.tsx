@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { billingPanelSearch, type AccountPanelParams } from "@/lib/assistant/account-panel-search";
 import { useEffect, useEffectEvent, useState } from "react";
@@ -42,6 +45,7 @@ export function BillingPage({
 }: {
   readonly presentation?: "page" | "panel";
 } = {}) {
+  const { t } = useUiTranslation();
   const account = useAccountPanel();
   const locationSearch: Record<string, unknown> = useSearch({ strict: false });
   const rawSearch = presentation === "panel" ? billingPanelSearch(account.current) : locationSearch;
@@ -134,9 +138,9 @@ export function BillingPage({
   async function handleProvisionWallet() {
     try {
       await provisionWallet.mutateAsync({});
-      toast.success("Billing wallet provisioned");
+      toast.success(translateUi("Billing wallet provisioned"));
     } catch (error) {
-      toast.error(errorMessage(error, "Failed to provision billing wallet"));
+      toast.error(translateErrorMessage(errorMessage(error, "Failed to provision billing wallet")));
     }
   }
 
@@ -148,15 +152,15 @@ export function BillingPage({
       });
       openExternal(checkout.checkout_url);
     } catch (error) {
-      toast.error(errorMessage(error, "Failed to create top-up checkout"));
+      toast.error(translateErrorMessage(errorMessage(error, "Failed to create top-up checkout")));
     }
   }
 
   return (
     <div className="billing-page space-y-6">
       {presentation === "page" && <PageHeader
-        title="Billing & Usage"
-        description="Your balance, benefits, and usage in one place."
+        title={t("Billing & Usage")}
+        description={t("Your balance, benefits, and usage in one place.")}
       />}
       <Tabs
         value={tab}
@@ -165,19 +169,17 @@ export function BillingPage({
         }
         className="tabbed-billing"
       >
-        <TabsList aria-label="Billing and usage">
-          <TabsTrigger value="billing">Billing</TabsTrigger>
-          <TabsTrigger value="usage">Usage</TabsTrigger>
+        <TabsList aria-label={t("Billing and usage")}>
+          <TabsTrigger value="billing">{t("Billing")}</TabsTrigger>
+          <TabsTrigger value="usage">{t("Usage")}</TabsTrigger>
         </TabsList>
         {billingCapability && !billingReady && (
-          <div className="mt-6 rounded-lg border border-warning/20 bg-warning/5 px-4 py-3 text-12 text-warning">
-            Billing is not available on this deployment.
-          </div>
+          <div className="mt-6 rounded-lg border border-warning/20 bg-warning/5 px-4 py-3 text-12 text-warning">{t("Billing is not available on this deployment.")}</div>
         )}
         {catalogQuery.isError && (
           <div className="mt-6">
             <ErrorBanner
-              message="Service display names could not be loaded."
+              message={t("Service display names could not be loaded.")}
               onRetry={() => void catalogQuery.refetch()}
             />
           </div>
@@ -185,18 +187,14 @@ export function BillingPage({
         <TabsContent value="billing" className="mt-6 space-y-6">
           {usageQuery.isError && (
             <ErrorBanner
-              message="Billing availability could not be verified. Retry to enable wallet actions."
+              message={t("Billing availability could not be verified. Retry to enable wallet actions.")}
               onRetry={() => void usageQuery.refetch()}
             />
           )}
           <BillingWalletCard
             titleHelp={
-              <BenefitHelp label="Wallet">
-                <p>
-                  Credits available for paid usage after free allowances and
-                  eligible grants. The available balance excludes reservations,
-                  unsettled charges, and expiry holds. 1 credit = 1 USD.
-                </p>
+              <BenefitHelp label={t("Wallet")}>
+                <p>{t("Credits available for paid usage after free allowances and eligible grants. The available balance excludes reservations, unsettled charges, and expiry holds. 1 credit = 1 USD.")}</p>
               </BenefitHelp>
             }
             wallet={wallet}
@@ -276,12 +274,13 @@ function UsageFilters({
   period: BillingUsagePeriod;
   onPeriodChange: (period: BillingUsagePeriod) => void;
 }) {
+  const { t } = useUiTranslation();
   return (
     <BillingMultiSelect
-      label="Services"
-      itemLabel="Service"
-      emptyLabel="All"
-      description="Services with recorded usage in this period."
+      label={t("Services")}
+      itemLabel={t("Service")}
+      emptyLabel={t("All")}
+      description={t("Services with recorded usage in this period.")}
       className="rounded-xl border border-border/50 bg-card px-4 py-3"
       disabled={disabled}
       values={values}
@@ -295,7 +294,7 @@ function UsageFilters({
     >
       <div className="ml-auto min-w-0">
         <AnalyticsSelect
-          label="Time range"
+          label={t("Time range")}
           inline
           value={period}
           onChange={(value) => onPeriodChange(value as BillingUsagePeriod)}

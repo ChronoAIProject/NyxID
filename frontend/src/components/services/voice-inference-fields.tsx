@@ -1,3 +1,5 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,13 +16,12 @@ export function VoiceInferenceFields({
   value?: VoiceMetadata | null;
   onChange: (voice: VoiceMetadata | null) => void;
 }) {
+  const { t } = useUiTranslation();
   const validation = value ? voiceMetadataSchema.safeParse(value) : null;
   return (
     <div className="space-y-3 rounded-lg border p-3">
-      <label className="block text-xs">
-        Voice protocol
-        <select
-          aria-label="Voice protocol"
+      <label className="block text-xs">{t("Voice protocol")}<select
+          aria-label={t("Voice protocol")}
           className="ml-2 rounded border bg-background p-1"
           value={value?.protocol ?? "none"}
           onChange={(e) => {
@@ -45,9 +46,9 @@ export function VoiceInferenceFields({
             );
           }}
         >
-          <option value="none">No voice metadata</option>
-          <option value="openai_live">OpenAI Live</option>
-          <option value="xai_realtime">xAI Realtime</option>
+          <option value="none">{t("No voice metadata")}</option>
+          <option value="openai_live">{t("OpenAI Live")}</option>
+          <option value="xai_realtime">{t("xAI Realtime")}</option>
         </select>
       </label>
       {value && (
@@ -55,15 +56,15 @@ export function VoiceInferenceFields({
           {(["models", "voices"] as const).map((field) => (
             <fieldset key={field} className="space-y-2">
               <legend className="text-xs font-medium">
-                {field === "models" ? "Voice models" : "Provider voices"}
+                {field === "models" ? t("Voice models") : t("Provider voices")}
               </legend>
               {value[field].map((item, index) => (
                 <div key={index} className="flex flex-wrap items-center gap-2">
                   <Input
-                    aria-label={`${field} ${index + 1} ID`}
+                    aria-label={t("{{field}} {{value}} ID", { field: field, value: index + 1 })}
                     value={item.id}
                     maxLength={128}
-                    placeholder="Provider ID"
+                    placeholder={t("Provider ID")}
                     className="w-44"
                     onChange={(e) =>
                       onChange({
@@ -75,10 +76,10 @@ export function VoiceInferenceFields({
                     }
                   />
                   <Input
-                    aria-label={`${field} ${index + 1} label`}
+                    aria-label={t("{{field}} {{value}} label", { field: field, value: index + 1 })}
                     value={item.label}
                     maxLength={128}
-                    placeholder="Label"
+                    placeholder={t("Label")}
                     className="w-44"
                     onChange={(e) =>
                       onChange({
@@ -94,7 +95,7 @@ export function VoiceInferenceFields({
                       <input
                         type="radio"
                         name="default-voice-model"
-                        aria-label={`Default model ${index + 1}`}
+                        aria-label={t("Default model {{value}}", { value: index + 1 })}
                         checked={value.models[index]?.default ?? false}
                         onChange={() =>
                           onChange({
@@ -105,9 +106,7 @@ export function VoiceInferenceFields({
                             })),
                           })
                         }
-                      />{" "}
-                      Default
-                    </label>
+                      />{" "}{t("Default")}</label>
                   )}
                   <Button
                     type="button"
@@ -118,8 +117,7 @@ export function VoiceInferenceFields({
                         [field]: value[field].filter((_, i) => i !== index),
                       })
                     }
-                  >
-                    Remove {field === "models" ? "model" : "voice"}
+                  >{t("Remove ")}{field === "models" ? t("model") : t("voice")}
                   </Button>
                 </div>
               ))}
@@ -142,15 +140,12 @@ export function VoiceInferenceFields({
                     ],
                   })
                 }
-              >
-                Add {field === "models" ? "voice model" : "provider voice"}
+              >{t("Add ")}{field === "models" ? t("voice model") : t("provider voice")}
               </Button>
             </fieldset>
           ))}
-          <label className="block text-xs">
-            Usage source
-            <select
-              aria-label="Voice usage source"
+          <label className="block text-xs">{t("Usage source")}<select
+              aria-label={t("Voice usage source")}
               className="ml-2 rounded border bg-background p-1"
               value={value.usage_source}
               onChange={(e) =>
@@ -160,14 +155,12 @@ export function VoiceInferenceFields({
                 })
               }
             >
-              <option value="provider_reported">
-                Provider reported (OpenAI)
-              </option>
-              <option value="server_measured">Server measured (xAI)</option>
+              <option value="provider_reported">{t("Provider reported (OpenAI)")}</option>
+              <option value="server_measured">{t("Server measured (xAI)")}</option>
             </select>
           </label>
           <fieldset className="flex flex-wrap gap-3 text-xs">
-            <legend>Reported billing units</legend>
+            <legend>{t("Reported billing units")}</legend>
             {VOICE_BILLING_METRICS.map((metric) => (
               <label key={metric}>
                 <input
@@ -187,13 +180,10 @@ export function VoiceInferenceFields({
               </label>
             ))}
           </fieldset>
-          <p className="text-xs text-muted-foreground">
-            Models and voices must be available at the provider. Prices are
-            configured separately below.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("Models and voices must be available at the provider. Prices are configured separately below.")}</p>
           {validation && !validation.success && (
             <p role="alert" className="text-xs text-destructive">
-              {validation.error.issues[0]?.message}
+              {translateUi(validation.error.issues[0]?.message ?? "")}
             </p>
           )}
         </>

@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useAuthStore } from "@/stores/auth-store";
 import { PublicationOperations } from "@/components/services/tool-publication";
 import { useChangeReview } from "@/components/shared/change-review-dialog";
@@ -52,6 +54,7 @@ function EndpointListEditor({
   service,
   canWrite = true,
 }: EndpointListProps) {
+  const { t } = useUiTranslation();
   const admin = useAuthStore((state) => state.user?.is_admin) ?? false;
   const { data: endpoints, isLoading } = useEndpoints(serviceId);
   const createMutation = useCreateEndpoint();
@@ -87,9 +90,9 @@ function EndpointListEditor({
         serviceId: targetServiceId,
         endpointId,
       });
-      toast.success("Endpoint deleted");
+      toast.success(translateUi("Endpoint deleted"));
     } catch {
-      toast.error("Failed to delete endpoint");
+      toast.error(translateUi("Failed to delete endpoint"));
       throw new Error("Failed to delete endpoint");
     } finally {
       setDeletingId(null);
@@ -108,10 +111,10 @@ function EndpointListEditor({
         patch,
         data,
       });
-      toast.success("Endpoint updated");
+      toast.success(translateUi("Endpoint updated"));
     } else {
       await createMutation.mutateAsync({ serviceId, data });
-      toast.success("Endpoint created");
+      toast.success(translateUi("Endpoint created"));
     }
   }
 
@@ -120,7 +123,7 @@ function EndpointListEditor({
       const result = await discoverMutation.mutateAsync(serviceId);
       toast.success(result.message);
     } catch {
-      toast.error("Failed to discover endpoints");
+      toast.error(translateUi("Failed to discover endpoints"));
     }
   }
 
@@ -139,7 +142,7 @@ function EndpointListEditor({
     <div className="space-y-3">
       {deletion.dialog}
       <div className="flex items-center gap-2">
-        {canWrite && <AddCtaButton label="Add Endpoint" onClick={handleAdd} />}
+        {canWrite && <AddCtaButton label={t("Add Endpoint")} onClick={handleAdd} />}
         {canWrite && hasApiSpecUrl && (
           <Button
             variant="outline"
@@ -148,20 +151,17 @@ function EndpointListEditor({
           >
             <ButtonIcon>
               <Wand2 className="h-3 w-3" />
-            </ButtonIcon>
-            Auto-discover from OpenAPI
-          </Button>
+            </ButtonIcon>{t("Auto-discover from OpenAPI")}</Button>
         )}
       </div>
 
       {!endpoints || endpoints.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-8">
           <PowerBoltIcon className="h-48 w-48 text-muted-foreground/30" />
-          <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
-            No endpoints configured.{" "}
+          <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">{t("No endpoints configured.")}{" "}
             {hasApiSpecUrl
-              ? "Use auto-discover or add one manually."
-              : "Add one manually or set an OpenAPI spec URL to auto-discover."}
+              ? t("Use auto-discover or add one manually.")
+              : t("Add one manually or set an OpenAPI spec URL to auto-discover.")}
           </div>
         </div>
       ) : (
@@ -169,18 +169,10 @@ function EndpointListEditor({
           <table className="w-full text-12">
             <thead>
               <tr className="border-b bg-muted/50">
-                <th className="px-3 py-2 text-left font-medium text-muted-foreground">
-                  Name
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-muted-foreground">
-                  Method
-                </th>
-                <th className="px-3 py-2 text-left font-medium text-muted-foreground">
-                  Path
-                </th>
-                <th className="w-[80px] px-3 py-2 text-right font-medium text-muted-foreground">
-                  Actions
-                </th>
+                <th className="px-3 py-2 text-left font-medium text-muted-foreground">{t("Name")}</th>
+                <th className="px-3 py-2 text-left font-medium text-muted-foreground">{t("Method")}</th>
+                <th className="px-3 py-2 text-left font-medium text-muted-foreground">{t("Path")}</th>
+                <th className="w-[80px] px-3 py-2 text-right font-medium text-muted-foreground">{t("Actions")}</th>
               </tr>
             </thead>
             <tbody>
@@ -196,12 +188,10 @@ function EndpointListEditor({
                             : "secondary"
                         }
                       >
-                        {ep.publication ?? "published"}
+                        {ep.publication ?? t("published")}
                       </Badge>
                       {!ep.is_active && (
-                        <Badge variant="secondary" className="text-10">
-                          Inactive
-                        </Badge>
+                        <Badge variant="secondary" className="text-10">{t("Inactive")}</Badge>
                       )}
                     </div>
                   </td>
@@ -228,7 +218,7 @@ function EndpointListEditor({
                         onClick={() => handleEdit(ep)}
                       >
                         <Pencil className="h-3 w-3" />
-                        <span className="sr-only">Edit endpoint</span>
+                        <span className="sr-only">{t("Edit endpoint")}</span>
                       </Button>
                       {canWrite &&
                         (service?.offering_kind !== "tool" || admin) && (
@@ -248,7 +238,7 @@ function EndpointListEditor({
                         disabled={deletingId === ep.id}
                       >
                         <Trash2 className="h-3 w-3 text-destructive" />
-                        <span className="sr-only">Delete endpoint</span>
+                        <span className="sr-only">{t("Delete endpoint")}</span>
                       </Button>
                         )}
                     </div>

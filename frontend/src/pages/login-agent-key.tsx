@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useCallback, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { DeviceApproval } from "@/components/auth/device-approval";
@@ -29,6 +30,7 @@ import { draftSummary } from "@/lib/login-permissions";
 import { useAuthStore } from "@/stores/auth-store";
 
 function MintLoginCodePage() {
+  const { t } = useUiTranslation();
   const { user, isAuthenticated, logout } = useAuthStore();
   const options = useAgentKeyLoginOptions("agent-key", true);
   const mint = useMintLoginCode();
@@ -111,7 +113,7 @@ function MintLoginCodePage() {
     <LoginDeviceShell>
       <header className="space-y-3 text-center">
         <NyxidIcon className="mx-auto size-10" />
-        <h1 className="text-22 font-bold">One-time login code</h1>
+        <h1 className="text-22 font-bold">{t("One-time login code")}</h1>
       </header>
       {error && <ErrorBanner message={error} />}
       {issued ? (
@@ -130,9 +132,7 @@ function MintLoginCodePage() {
         />
       ) : !isAuthenticated ? (
         <Button asChild>
-          <Link to="/login" search={{ return_to: "/login/code" }}>
-            Approve on this computer
-          </Link>
+          <Link to="/login" search={{ return_to: "/login/code" }}>{t("Approve on this computer")}</Link>
         </Button>
       ) : (
         <div className="space-y-4">
@@ -142,16 +142,11 @@ function MintLoginCodePage() {
               variant="link"
               disabled={busy}
               onClick={() => void run(logout)}
-            >
-              Sign out of this browser
-            </Button>
+            >{t("Sign out of this browser")}</Button>
           </div>
           {step === "review" && (
             <div className="space-y-3">
-              <p className="text-12 text-muted-foreground">
-                Anyone with this code can redeem the selected access once,
-                within five minutes. Restricted Agent Key access is recommended.
-              </p>
+              <p className="text-12 text-muted-foreground">{t("Anyone with this code can redeem the selected access once, within five minutes. Restricted Agent Key access is recommended.")}</p>
               <Button
                 disabled={busy}
                 onClick={() =>
@@ -160,39 +155,26 @@ function MintLoginCodePage() {
                     setStep("options");
                   })
                 }
-              >
-                Restricted Agent Key
-              </Button>
-              <Button disabled={busy} onClick={() => setStep("account")}>
-                Full account session
-              </Button>
+              >{t("Restricted Agent Key")}</Button>
+              <Button disabled={busy} onClick={() => setStep("account")}>{t("Full account session")}</Button>
             </div>
           )}
           {step === "account" && (
             <section className="space-y-4">
-              <h2 className="text-15 font-semibold">
-                Confirm full account access
-              </h2>
-              <p className="text-12 text-muted-foreground">
-                This code grants a refreshable account session with your
-                account, services, credentials, and organization permissions.
-              </p>
-              <Button disabled={busy} onClick={() => setStep("review")}>
-                Back
-              </Button>
+              <h2 className="text-15 font-semibold">{t("Confirm full account access")}</h2>
+              <p className="text-12 text-muted-foreground">{t("This code grants a refreshable account session with your account, services, credentials, and organization permissions.")}</p>
+              <Button disabled={busy} onClick={() => setStep("review")}>{t("Back")}</Button>
               <Button
                 variant="primary"
                 disabled={busy}
                 isLoading={busy}
                 onClick={() => void generate()}
-              >
-                Generate account login code
-              </Button>
+              >{t("Generate account login code")}</Button>
             </section>
           )}
           {step === "options" && options.data && (
             <section className="space-y-4">
-              <h2 className="text-15 font-semibold">Choose an Agent Key</h2>
+              <h2 className="text-15 font-semibold">{t("Choose an Agent Key")}</h2>
               <fieldset disabled={busy} className="space-y-3">
                 {options.data.keys.map((key) => (
                   <label
@@ -219,14 +201,12 @@ function MintLoginCodePage() {
                     checked={choice === "new"}
                     onChange={() => setChoice("new")}
                     className="accent-primary"
-                  />
-                  Create a new key
-                </label>
+                  />{t("Create a new key")}</label>
               </fieldset>
               {choice === "new" ? (
                 <AgentKeyCreateForm
                   options={options.data}
-                  label="CLI Agent"
+                  label={t("CLI Agent")}
                   initialValues={draft}
                   disabled={busy}
                   onReview={reviewNew}
@@ -241,24 +221,18 @@ function MintLoginCodePage() {
                     setSummary(key);
                     setStep("confirm");
                   }}
-                >
-                  Review permissions
-                </Button>
+                >{t("Review permissions")}</Button>
               )}
             </section>
           )}
           {step === "confirm" && summary && (
             <section className="space-y-4">
-              <h2 className="text-15 font-semibold">
-                Confirm effective permissions
-              </h2>
+              <h2 className="text-15 font-semibold">{t("Confirm effective permissions")}</h2>
               <AgentKeyPermissions apiKey={summary} />
               <AgentKeyIssuanceNotice
                 existing={selection?.kind === "existing"}
               />
-              <label className="block space-y-2 text-12">
-                Login credential expiry (optional)
-                <Input
+              <label className="block space-y-2 text-12">{t("Login credential expiry (optional)")}<Input
                   type="datetime-local"
                   value={credentialExpiry}
                   disabled={busy}
@@ -266,12 +240,8 @@ function MintLoginCodePage() {
                 />
               </label>
               <div className="flex flex-wrap justify-end gap-2">
-                <Button disabled={busy} onClick={() => setStep("options")}>
-                  Back
-                </Button>
-                <Button disabled={busy} onClick={() => setStep("review")}>
-                  Cancel
-                </Button>
+                <Button disabled={busy} onClick={() => setStep("options")}>{t("Back")}</Button>
+                <Button disabled={busy} onClick={() => setStep("review")}>{t("Cancel")}</Button>
                 <Button
                   variant="primary"
                   isLoading={busy}
@@ -285,9 +255,7 @@ function MintLoginCodePage() {
                             Date.parse(summary.expires_at))))
                   }
                   onClick={() => void generate()}
-                >
-                  Generate restricted login code
-                </Button>
+                >{t("Generate restricted login code")}</Button>
               </div>
             </section>
           )}
@@ -301,5 +269,6 @@ export function LoginAgentKeyPage({
   flow = "agent-key",
   mint = false,
 }: { flow?: LoginFlow; mint?: boolean } = {}) {
+  useUiTranslation();
   return mint ? <MintLoginCodePage /> : <DeviceApproval flow={flow} />;
 }

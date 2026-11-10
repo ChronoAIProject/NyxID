@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
@@ -31,28 +33,22 @@ export function AgentOperationScopes({
   readonly agentId: string;
   readonly disabled?: boolean;
 }) {
+  const { t } = useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.AGENT_OPERATION_SCOPES);
   const query = useAgentOperations(agentId, enabled && !disabled);
   if (!enabled) {
     return (
-      <p role="status" className="text-12 text-muted-foreground">
-        Operation scope configuration is not enabled yet. Existing operation limits still apply.
-      </p>
+      <p role="status" className="text-12 text-muted-foreground">{t("Operation scope configuration is not enabled yet. Existing operation limits still apply.")}</p>
     );
   }
   return (
-    <div className="space-y-3" aria-label="Service operations">
-      <p className="text-12 text-muted-foreground">
-        Limit each granted service to the operations this specialist needs.
-        Guest access and confirmations still apply.
-      </p>
+    <div className="space-y-3" aria-label={t("Service operations")}>
+      <p className="text-12 text-muted-foreground">{t("Limit each granted service to the operations this specialist needs. Guest access and confirmations still apply.")}</p>
       {query.isLoading ? (
-        <p className="text-12 text-muted-foreground">Loading operations…</p>
+        <p className="text-12 text-muted-foreground">{t("Loading operations…")}</p>
       ) : null}
       {query.error ? (
-        <p role="alert" className="text-12 text-destructive">
-          Could not load operation scopes.
-        </p>
+        <p role="alert" className="text-12 text-destructive">{t("Could not load operation scopes.")}</p>
       ) : null}
       {query.data?.map((service) => (
         <ServiceOperationForm
@@ -100,6 +96,7 @@ export function OperationSelectionForm({
   readonly isSaving: boolean;
   readonly save: (selection: OperationSelection) => Promise<unknown>;
 }) {
+  const { t } = useUiTranslation();
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string>();
   const form = useAppForm<OperationSelection>({
@@ -138,7 +135,7 @@ export function OperationSelectionForm({
   }
   return (
     <form
-      aria-label={`${service.service_name} operations`}
+      aria-label={t("{{service_name}} operations", { service_name: service.service_name })}
       onSubmit={form.handleSubmit(save)}
       className="space-y-3 rounded-xl border border-border/50 bg-card p-3"
     >
@@ -146,7 +143,7 @@ export function OperationSelectionForm({
         <span className="text-13 font-semibold">
           {service.service_name}
         </span>
-        <Badge variant="secondary">Revision {service.revision}</Badge>
+        <Badge variant="secondary">{t("Revision ")}{service.revision}</Badge>
       </div>
       <Select
         value={all ? "all" : "selected"}
@@ -155,12 +152,12 @@ export function OperationSelectionForm({
           form.setValue("all_operations", value === "all")
         }
       >
-        <SelectTrigger aria-label={`${service.service_name} operation access`}>
+        <SelectTrigger aria-label={t("{{service_name}} operation access", { service_name: service.service_name })}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="all">All operations</SelectItem>
-          <SelectItem value="selected">Selected operations</SelectItem>
+          <SelectItem value="all">{t("All operations")}</SelectItem>
+          <SelectItem value="selected">{t("Selected operations")}</SelectItem>
         </SelectContent>
       </Select>
       {!all ? (
@@ -168,15 +165,14 @@ export function OperationSelectionForm({
           {service.operations.length ? (
             <>
               <Input
-                aria-label={`Search ${service.service_name} operations`}
-                placeholder="Search method, path or summary"
+                aria-label={t("Search {{service_name}} operations", { service_name: service.service_name })}
+                placeholder={t("Search method, path or summary")}
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
               />
               <div className="flex items-center justify-between gap-2">
                 <span className="text-11 text-muted-foreground">
-                  {selected.length} selected
-                </span>
+                  {selected.length}{t(" selected")}</span>
                 <Button
                   type="button"
                   size="sm"
@@ -190,9 +186,7 @@ export function OperationSelectionForm({
                         .map((op) => op.endpoint_id),
                     )
                   }
-                >
-                  Select all reads
-                </Button>
+                >{t("Select all reads")}</Button>
               </div>
               <div className="assistant-scrollbar max-h-64 space-y-2 overflow-auto">
                 {operations.map((operation) => (
@@ -203,7 +197,7 @@ export function OperationSelectionForm({
                     <Checkbox
                       checked={selected.includes(operation.endpoint_id)}
                       disabled={disabled}
-                      aria-label={`${operation.method} ${operation.path}`}
+                      aria-label={t("{{method}} {{path}}", { method: operation.method, path: operation.path })}
                       onCheckedChange={(checked) =>
                         form.setValue(
                           "endpoint_ids",
@@ -224,31 +218,26 @@ export function OperationSelectionForm({
                       </span>
                       <span className="flex gap-1">
                         {operation.read_only ? (
-                          <Badge variant="success">Read only</Badge>
+                          <Badge variant="success">{t("Read only")}</Badge>
                         ) : null}
                         {operation.changes_existing ? (
-                          <Badge variant="warning">Changes existing</Badge>
+                          <Badge variant="warning">{t("Changes existing")}</Badge>
                         ) : null}
                         {savedInputs[operation.endpoint_id] ? (
-                          <Badge variant="secondary">Value limits</Badge>
+                          <Badge variant="secondary">{t("Value limits")}</Badge>
                         ) : null}
                       </span>
                     </span>
                   </label>
                 ))}
                 {!operations.length ? (
-                  <p className="text-12 text-muted-foreground">
-                    No matching operations.
-                  </p>
+                  <p className="text-12 text-muted-foreground">{t("No matching operations.")}</p>
                 ) : null}
               </div>
             </>
           ) : service.allows_explicit_rules ? (
             <>
-              <p className="text-12 text-muted-foreground">
-                No catalog operations. Add exact methods and paths; a variable
-                such as {"{id}"} matches one segment.
-              </p>
+              <p className="text-12 text-muted-foreground">{t("No catalog operations. Add exact methods and paths; a variable such as ")}{"{id}"}{t(" matches one segment.")}</p>
               {rules.map((rule, index) => (
                 <div key={index} className="flex gap-2">
                   <Select
@@ -263,7 +252,7 @@ export function OperationSelectionForm({
                   >
                     <SelectTrigger
                       className="w-28"
-                      aria-label={`Rule ${index + 1} method`}
+                      aria-label={t("Rule {{value}} method", { value: index + 1 })}
                     >
                       <SelectValue />
                     </SelectTrigger>
@@ -284,7 +273,7 @@ export function OperationSelectionForm({
                     </SelectContent>
                   </Select>
                   <Input
-                    aria-label={`Rule ${index + 1} path`}
+                    aria-label={t("Rule {{value}} path", { value: index + 1 })}
                     {...form.register(`rules.${index}.path_template`)}
                     disabled={disabled}
                   />
@@ -298,9 +287,7 @@ export function OperationSelectionForm({
                         rules.filter((_, i) => i !== index),
                       )
                     }
-                  >
-                    Remove
-                  </Button>
+                  >{t("Remove")}</Button>
                 </div>
               ))}
               <Button
@@ -313,20 +300,15 @@ export function OperationSelectionForm({
                     { method: "GET", path_template: "/" },
                   ])
                 }
-              >
-                Add rule
-              </Button>
+              >{t("Add rule")}</Button>
             </>
           ) : (
-            <p className="text-12 text-muted-foreground">
-              No active catalog operations.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("No active catalog operations.")}</p>
           )}
           {selected.some(
             (id) => !service.operations.some((op) => op.endpoint_id === id),
           ) ? (
-            <p role="status" className="text-12 text-muted-foreground">
-              Some selected operations are unavailable.{" "}
+            <p role="status" className="text-12 text-muted-foreground">{t("Some selected operations are unavailable.")}{" "}
               <Button
                 type="button"
                 size="sm"
@@ -339,25 +321,18 @@ export function OperationSelectionForm({
                   )
                 }
                 disabled={disabled}
-              >
-                Remove unavailable selections
-              </Button>
+              >{t("Remove unavailable selections")}</Button>
             </p>
           ) : null}
-          <p className="text-11 text-muted-foreground">
-            An empty selection blocks every operation.
-          </p>
+          <p className="text-11 text-muted-foreground">{t("An empty selection blocks every operation.")}</p>
         </>
       ) : null}
       {Object.keys(form.formState.errors).length ? (
-        <p role="alert" className="text-12 text-destructive">
-          Check the selection: paths must start with / and at most 256
-          operations may be selected.
-        </p>
+        <p role="alert" className="text-12 text-destructive">{t("Check the selection: paths must start with / and at most 256 operations may be selected.")}</p>
       ) : null}
       {error ? (
         <p role="alert" className="text-12 text-destructive">
-          {error}
+          {translateUi(error)}
         </p>
       ) : null}
       <div className="flex justify-end gap-2">
@@ -369,18 +344,14 @@ export function OperationSelectionForm({
             form.reset();
             setError(undefined);
           }}
-        >
-          Cancel
-        </Button>
+        >{t("Cancel")}</Button>
         <Button
           type="submit"
           variant="primary"
           size="sm"
           disabled={disabled || !form.formState.isDirty}
           isLoading={isSaving}
-        >
-          Save operations
-        </Button>
+        >{t("Save operations")}</Button>
       </div>
     </form>
   );

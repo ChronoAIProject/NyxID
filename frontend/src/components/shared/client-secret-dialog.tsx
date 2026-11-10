@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -24,10 +26,11 @@ export function ClientSecretDialog({
   clientId,
   clientSecret,
 }: ClientSecretDialogProps) {
+  const { t } = useUiTranslation();
   function handleCopy(value: string, label: string) {
     void copyToClipboard(value)
-      .then(() => toast.success(`${label} copied`))
-      .catch(() => toast.error(`Failed to copy ${label}`));
+      .then(() => toast.success(translateUi("{{label}} copied", { label: label })))
+      .catch(() => toast.error(translateUi("Failed to copy {{label}}", { label: label })));
   }
 
   return (
@@ -35,18 +38,14 @@ export function ClientSecretDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {clientId ? "Save Client Secret" : "New Client Secret"}
+            {clientId ? t("Save Client Secret") : t("New Client Secret")}
           </DialogTitle>
-          <DialogDescription>
-            This secret is shown only once. Copy and store it securely now.
-          </DialogDescription>
+          <DialogDescription>{t("This secret is shown only once. Copy and store it securely now.")}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
           {clientId && (
             <div className="space-y-2">
-              <p className="text-xs uppercase tracking-wide text-text-tertiary">
-                Client ID
-              </p>
+              <p className="text-xs uppercase tracking-wide text-text-tertiary">{t("Client ID")}</p>
               <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
                 <p className="min-w-0 flex-1 truncate font-mono text-xs">
                   {clientId}
@@ -64,9 +63,7 @@ export function ClientSecretDialog({
             </div>
           )}
           <div className="space-y-2">
-            <p className="text-xs uppercase tracking-wide text-text-tertiary">
-              Client Secret
-            </p>
+            <p className="text-xs uppercase tracking-wide text-text-tertiary">{t("Client Secret")}</p>
             <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
               <p className="min-w-0 flex-1 truncate font-mono text-xs">
                 {clientSecret}
@@ -83,15 +80,10 @@ export function ClientSecretDialog({
             </div>
           </div>
           <p className="text-xs text-muted-foreground">
-            <strong>Lost it?</strong> If you don&apos;t copy this now,
-            you&apos;ll need to rotate the credential to get a new one. (Old
-            value stops working immediately on rotate.)
-          </p>
+            <strong>{t("Lost it?")}</strong>{t(" If you don't copy this now, you'll need to rotate the credential to get a new one. (Old value stops working immediately on rotate.)")}</p>
         </div>
         <DialogFooter>
-          <Button variant="primary" type="button" onClick={() => onOpenChange(false)}>
-            I have saved it
-          </Button>
+          <Button variant="primary" type="button" onClick={() => onOpenChange(false)}>{t("I have saved it")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { appI18n } from "@/i18n";
 import {
   cn,
   formatDate,
@@ -95,6 +96,31 @@ describe("formatRelativeTime", () => {
   it("returns N/A for invalid date", () => {
     expect(formatRelativeTime("garbage")).toBe("N/A");
   });
+});
+
+describe("localized date and relative time formatting", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2024-06-15T12:00:00Z"));
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    await appI18n.changeLanguage("en");
+  });
+
+  it.each([
+    ["zh-CN", "2024年6月15日", "15 分钟前", "3 小时后"],
+    ["zh-TW", "2024年6月15日", "15 分鐘前", "3 小時後"],
+  ])(
+    "uses %s immediately after switching language",
+    async (language, date, past, future) => {
+      await appI18n.changeLanguage(language);
+      expect(formatDate("2024-06-15T12:00:00Z")).toBe(date);
+      expect(formatRelativeTime("2024-06-15T11:45:00Z")).toBe(past);
+      expect(formatTimeDistance("2024-06-15T15:00:00Z")).toBe(future);
+    },
+  );
 });
 
 describe("formatTimeDistance", () => {

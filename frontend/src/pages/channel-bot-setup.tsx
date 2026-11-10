@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import {
   Link,
@@ -32,9 +33,10 @@ function setupUrl(platform: ChannelPlatform) {
 }
 
 function SetupLoading() {
+  const { t } = useUiTranslation();
   return (
     <div role="status" className="space-y-4">
-      <span className="sr-only">Loading channel setup...</span>
+      <span className="sr-only">{t("Loading channel setup...")}</span>
       <Skeleton className="h-8 w-48" />
       <Skeleton className="h-64 w-full rounded-xl" />
     </div>
@@ -42,6 +44,7 @@ function SetupLoading() {
 }
 
 export function ChannelBotSetupLinksPage() {
+  const { t } = useUiTranslation();
   const catalog = useChannelPlatformViews();
   const platforms =
     catalog.data?.platforms.filter((platform) => platform.enabled) ?? [];
@@ -50,14 +53,12 @@ export function ChannelBotSetupLinksPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Channel setup links"
-        description="Open a channel's setup page or share its link as part of bot onboarding."
+        title={t("Channel setup links")}
+        description={t("Open a channel's setup page or share its link as part of bot onboarding.")}
         actions={
           <Button variant="outline" asChild>
             <Link to="/channel-bots">
-              <ArrowLeft aria-hidden="true" />
-              Channel Bots
-            </Link>
+              <ArrowLeft aria-hidden="true" />{t("Channel Bots")}</Link>
           </Button>
         }
       />
@@ -65,13 +66,11 @@ export function ChannelBotSetupLinksPage() {
         <SetupLoading />
       ) : catalog.isError ? (
         <ErrorBanner
-          message="Unable to load supported channels."
+          message={t("Unable to load supported channels.")}
           onRetry={catalog.refetch}
         />
       ) : platforms.length === 0 ? (
-        <p className="text-xs text-muted-foreground">
-          No channels are currently available for setup.
-        </p>
+        <p className="text-xs text-muted-foreground">{t("No channels are currently available for setup.")}</p>
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {platforms.map((platform) => (
@@ -83,15 +82,14 @@ export function ChannelBotSetupLinksPage() {
                 {platform.display_name}
               </h3>
               <CopyableUrlCallout
-                label={`${platform.display_name} setup link`}
+                label={t("{{display_name}} setup link", { display_name: platform.display_name })}
                 url={setupUrl(platform.platform)}
               />
               <Button variant="outline" asChild className="self-start">
                 <Link
                   to="/channel-bots/connect/$platform"
                   params={{ platform: platform.platform }}
-                >
-                  Set up {platform.display_name}
+                >{t("Set up ")}{platform.display_name}
                   <ArrowRight aria-hidden="true" />
                 </Link>
               </Button>
@@ -113,6 +111,7 @@ export function ChannelBotSetupPage() {
 }
 
 function ChannelSetupConnection({ platform }: { readonly platform: string }) {
+  const { t } = useUiTranslation();
   const catalog = useChannelPlatformViews();
   const email = useAuthStore((state) => state.user?.email);
   const [complete, setComplete] = useState(false);
@@ -140,30 +139,30 @@ function ChannelSetupConnection({ platform }: { readonly platform: string }) {
     >
       {returnTo && !complete ? (
         <Button variant="outline" asChild>
-          <Link to="/assistant" search={returnTo.startsWith("nyxg-") ? { g: returnTo } : { c: returnTo }}>Back to chat</Link>
+          <Link to="/assistant" search={returnTo.startsWith("nyxg-") ? { g: returnTo } : { c: returnTo }}>{t("Back to chat")}</Link>
         </Button>
       ) : null}
       {catalog.isPending ? (
         <SetupLoading />
       ) : catalog.isError ? (
         <ErrorBanner
-          message="Unable to load channel setup."
+          message={t("Unable to load channel setup.")}
           onRetry={catalog.refetch}
         />
       ) : !descriptor?.enabled ? (
         <div className="space-y-4 text-center">
           <p role="status" className="text-xs text-muted-foreground">
             {descriptor
-              ? `${descriptor.display_name} setup is currently unavailable.`
-              : "This channel is not supported."}
+              ? t("{{display_name}} setup is currently unavailable.", { display_name: descriptor.display_name })
+              : t("This channel is not supported.")}
           </p>
           <Button variant="outline" asChild>
-            <Link to="/channel-bots/connect">Choose another channel</Link>
+            <Link to="/channel-bots/connect">{t("Choose another channel")}</Link>
           </Button>
         </div>
       ) : (
         <section
-          aria-label={`${descriptor.display_name} setup`}
+          aria-label={t("{{display_name}} setup", { display_name: descriptor.display_name })}
           className="space-y-5"
         >
           <PrefilledChannelBotSetup

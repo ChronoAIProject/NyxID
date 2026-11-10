@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useRef } from "react";
 import {
   type WsFrameInjection,
@@ -125,6 +126,7 @@ export function WsFrameInjectionsEditor({
   errorMessage,
   errors,
 }: WsFrameInjectionsEditorProps) {
+  const { t } = useUiTranslation();
   const updateRule = (index: number, patch: Partial<WsFrameInjection>) => {
     onChange(
       value.map((rule, idx) => (idx === index ? { ...rule, ...patch } : rule)),
@@ -152,9 +154,7 @@ export function WsFrameInjectionsEditor({
         hasErrors ? "border-destructive" : "border-border/50",
       )}
     >
-      <summary className="cursor-pointer text-13 font-semibold text-foreground">
-        WebSocket auth frames
-      </summary>
+      <summary className="cursor-pointer text-13 font-semibold text-foreground">{t("WebSocket auth frames")}</summary>
       <div className="mt-4 space-y-3">
         <div className="flex flex-wrap items-center gap-2">
           <Button
@@ -163,17 +163,13 @@ export function WsFrameInjectionsEditor({
             disabled={value.length >= 4}
             onClick={() => onChange([...value, cloneRule(emptyWsFrameRule)])}
           >
-            <Plus />
-            Add Rule
-          </Button>
+            <Plus />{t("Add Rule")}</Button>
           <Button
             type="button"
             variant="secondary"
             onClick={() => onChange([cloneRule(homeAssistantWsFrameRule)])}
           >
-            <Wand2 />
-            Home Assistant Preset
-          </Button>
+            <Wand2 />{t("Home Assistant Preset")}</Button>
           <Badge variant="secondary">{value.length}/4</Badge>
         </div>
 
@@ -206,12 +202,12 @@ export function WsFrameInjectionsEditor({
               )}
             >
               <div className="flex items-center justify-between gap-3">
-                <p className="text-xs font-medium">Rule {index + 1}</p>
+                <p className="text-xs font-medium">{t("Rule ")}{index + 1}</p>
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon"
-                  aria-label={`Remove WebSocket auth frame rule ${index + 1}`}
+                  aria-label={t("Remove WebSocket auth frame rule {{value}}", { value: index + 1 })}
                   onClick={() =>
                     onChange(value.filter((_, idx) => idx !== index))
                   }
@@ -226,7 +222,7 @@ export function WsFrameInjectionsEditor({
 
               <div className="grid gap-3 sm:grid-cols-3">
                 <div className="space-y-1.5">
-                  <Label>Trigger</Label>
+                  <Label>{t("Trigger")}</Label>
                   <Select
                     value={triggerType}
                     onValueChange={(next) =>
@@ -239,21 +235,15 @@ export function WsFrameInjectionsEditor({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="first_frame_from_downstream">
-                        First downstream frame
-                      </SelectItem>
-                      <SelectItem value="json_field_equals">
-                        JSON field equals
-                      </SelectItem>
-                      <SelectItem value="frame_index_from_downstream">
-                        Downstream frame index
-                      </SelectItem>
+                      <SelectItem value="first_frame_from_downstream">{t("First downstream frame")}</SelectItem>
+                      <SelectItem value="json_field_equals">{t("JSON field equals")}</SelectItem>
+                      <SelectItem value="frame_index_from_downstream">{t("Downstream frame index")}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
 
                 <div className="space-y-1.5">
-                  <Label>Trigger direction</Label>
+                  <Label>{t("Trigger direction")}</Label>
                   <Select
                     value={rule.direction}
                     onValueChange={(next) =>
@@ -266,14 +256,14 @@ export function WsFrameInjectionsEditor({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="downstream">From service</SelectItem>
-                      <SelectItem value="upstream">From client</SelectItem>
+                      <SelectItem value="downstream">{t("From service")}</SelectItem>
+                      <SelectItem value="upstream">{t("From client")}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
 
                 <div className="space-y-1.5">
-                  <Label>Frame kind</Label>
+                  <Label>{t("Frame kind")}</Label>
                   <Select
                     value={rule.frame_kind}
                     onValueChange={(next) =>
@@ -286,8 +276,8 @@ export function WsFrameInjectionsEditor({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="text">Text</SelectItem>
-                      <SelectItem value="binary">Binary</SelectItem>
+                      <SelectItem value="text">{t("Text")}</SelectItem>
+                      <SelectItem value="binary">{t("Binary")}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -296,10 +286,10 @@ export function WsFrameInjectionsEditor({
               {triggerType === "json_field_equals" && (
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="space-y-1.5">
-                    <Label>JSON path</Label>
+                    <Label>{t("JSON path")}</Label>
                     <Input
                       value={jsonField.path}
-                      placeholder="$.type"
+                      placeholder={t("$.type")}
                       onChange={(event) =>
                         updateRule(index, {
                           trigger: {
@@ -313,10 +303,10 @@ export function WsFrameInjectionsEditor({
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <Label>Expected value</Label>
+                    <Label>{t("Expected value")}</Label>
                     <Input
                       value={formatTriggerValue(jsonField.value)}
-                      placeholder="auth_required"
+                      placeholder={"auth_required"}
                       onChange={(event) =>
                         updateRule(index, {
                           trigger: {
@@ -334,7 +324,7 @@ export function WsFrameInjectionsEditor({
 
               {triggerType === "frame_index_from_downstream" && (
                 <div className="space-y-1.5">
-                  <Label>Downstream frame index</Label>
+                  <Label>{t("Downstream frame index")}</Label>
                   <Input
                     type="number"
                     min={0}
@@ -368,18 +358,16 @@ export function WsFrameInjectionsEditor({
                 <Label
                   htmlFor={`ws-consume-trigger-${index}`}
                   className="text-12 font-normal"
-                >
-                  Consume trigger frame
-                </Label>
+                >{t("Consume trigger frame")}</Label>
               </div>
 
               <div className="space-y-1.5">
-                <Label>Injected frame template</Label>
+                <Label>{t("Injected frame template")}</Label>
                 <textarea
                   className="flex min-h-[96px] w-full rounded-lg border border-input bg-transparent px-3 py-2 font-mono text-xs placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
                   value={rule.template}
                   maxLength={4096}
-                  placeholder='{"type":"auth","access_token":"${credential}"}'
+                  placeholder={"{\"type\":\"auth\",\"access_token\":\"${credential}\"}"}
                   onChange={(event) =>
                     updateRule(index, {
                       template: event.target.value,

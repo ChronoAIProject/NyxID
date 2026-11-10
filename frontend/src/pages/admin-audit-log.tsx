@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useAdminAuditLog } from "@/hooks/use-admin";
@@ -82,52 +84,52 @@ const COLUMN_PREFERENCES_KEY = "nyxid.table.admin-audit-log.columns.v1";
 const AUDIT_LOG_COLUMNS: readonly DataTableColumn<AdminAuditLogSortField>[] = [
   {
     field: "created_at",
-    label: "Created",
+    get label() { return translateUi("Created"); },
     defaultWidth: 190,
     cellClassName: "whitespace-nowrap text-sm text-muted-foreground",
   },
   {
     field: "event_type",
-    label: "Event",
+    get label() { return translateUi("Event"); },
     defaultWidth: 240,
   },
   {
     field: "service",
-    label: "Service",
+    get label() { return translateUi("Service"); },
     defaultWidth: 200,
   },
   {
     field: "api_key_name",
-    label: "Agent",
+    get label() { return translateUi("Agent"); },
     defaultWidth: 180,
   },
   {
     field: "status",
-    label: "Status",
+    get label() { return translateUi("Status"); },
     // Wide enough that the label still reads in full alongside the header's
     // drag, sort, and freeze controls.
     defaultWidth: 150,
   },
   {
     field: "user_id",
-    label: "User",
+    get label() { return translateUi("User"); },
     defaultWidth: 300,
   },
   {
     field: "api_key_id",
-    label: "API Key ID",
+    get label() { return translateUi("API Key ID"); },
     defaultWidth: 300,
     cellClassName: "font-mono text-11 text-muted-foreground",
   },
   {
     field: "ip_address",
-    label: "IP",
+    get label() { return translateUi("IP"); },
     defaultWidth: 150,
     cellClassName: "font-mono text-11",
   },
   {
     field: "user_agent",
-    label: "User Agent",
+    get label() { return translateUi("User Agent"); },
     defaultWidth: 280,
     cellClassName: "text-muted-foreground",
   },
@@ -207,6 +209,7 @@ function statusVariant(
 }
 
 export function AdminAuditLogPage() {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const routeSearch = useSearch({
     strict: false,
@@ -418,7 +421,7 @@ export function AdminAuditLogPage() {
         nextValues,
       );
       if (!encoded) {
-        toast.error("Search supports up to 8 values per field and 32 overall");
+        toast.error(translateUi("Search supports up to 8 values per field and 32 overall"));
         return;
       }
       nextScopedSearch = encoded;
@@ -518,7 +521,7 @@ export function AdminAuditLogPage() {
             <span className="line-clamp-2 break-words text-sm font-medium text-foreground" title={entry.event_type}>{entry.event_type}</span>
             {entry.event_type === "service_change_recorded" && typeof entry.event_data?.service_id === "string"
               && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(entry.event_data.service_id)
-              && <button type="button" className="mt-1 text-xs text-primary-text underline underline-offset-2" onClick={() => void navigate({ to: "/keys/$keyId", params: { keyId: entry.event_data!.service_id as string } })}>View service history</button>}
+              && <button type="button" className="mt-1 text-xs text-primary-text underline underline-offset-2" onClick={() => void navigate({ to: "/keys/$keyId", params: { keyId: entry.event_data!.service_id as string } })}>{t("View service history")}</button>}
           </div>
         );
       case "service": {
@@ -622,13 +625,13 @@ export function AdminAuditLogPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Audit Log"
-        description="Search, filter, and sort audit activity across users and agent API keys."
+        title={t("Audit Log")}
+        description={t("Search, filter, and sort audit activity across users and agent API keys.")}
       />
 
       <section
         className="m-0 overflow-hidden rounded-lg border border-border/60 bg-card"
-        aria-label="Audit log"
+        aria-label={t("Audit log")}
       >
         <DataTableControls
           search={
@@ -637,7 +640,7 @@ export function AdminAuditLogPage() {
               value={searchDraft}
               selectedField={selectedSearchField}
               inputRef={searchInputRef}
-              ariaLabel="Search audit log"
+              ariaLabel={translateUi("Search audit log")}
               onValueChange={setSearchDraft}
               onFieldChange={setSelectedSearchField}
               onApply={applySearchDraft}
@@ -676,7 +679,7 @@ export function AdminAuditLogPage() {
                   className="h-3.5 w-3.5 animate-spin"
                   aria-hidden="true"
                 />
-                <span>Updating results</span>
+                <span>{t("Updating results")}</span>
               </div>
             ) : null
           }
@@ -706,9 +709,7 @@ export function AdminAuditLogPage() {
           >
             <div className="flex items-center gap-2 text-destructive">
               <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
-              <span>
-                Results may be out of date because the refresh failed.
-              </span>
+              <span>{t("Results may be out of date because the refresh failed.")}</span>
             </div>
             <Button
               type="button"
@@ -716,9 +717,7 @@ export function AdminAuditLogPage() {
               size="sm"
               disabled={isFetching}
               onClick={() => void refetch()}
-            >
-              Retry
-            </Button>
+            >{t("Retry")}</Button>
           </div>
         )}
 
@@ -728,7 +727,7 @@ export function AdminAuditLogPage() {
             role="status"
             aria-live="polite"
             aria-label={
-              isLoading ? "Loading audit log" : "Updating audit log"
+              isLoading ? t("Loading audit log") : t("Updating audit log")
             }
           >
             {Array.from({ length: 6 }).map((_, i) => (
@@ -747,17 +746,13 @@ export function AdminAuditLogPage() {
               className="h-8 w-8 text-destructive"
               aria-hidden="true"
             />
-            <p className="text-sm font-medium text-destructive">
-              Failed to load audit log
-            </p>
+            <p className="text-sm font-medium text-destructive">{t("Failed to load audit log")}</p>
             <Button
               type="button"
               variant="outline"
               size="sm"
               onClick={() => void refetch()}
-            >
-              Retry
-            </Button>
+            >{t("Retry")}</Button>
           </div>
         ) : entries.length === 0 ? (
           <div className="flex min-h-56 flex-col items-center justify-center gap-3 px-4 py-14 text-center">
@@ -765,13 +760,13 @@ export function AdminAuditLogPage() {
             <div>
               <p className="text-sm font-medium text-foreground">
                 {hasActiveFilters
-                  ? "No events match these filters"
-                  : "No audit events"}
+                  ? t("No events match these filters")
+                  : t("No audit events")}
               </p>
               <p className="text-xs text-muted-foreground">
                 {hasActiveFilters
-                  ? "Adjust or clear the current filters."
-                  : "Audit activity will appear here."}
+                  ? t("Adjust or clear the current filters.")
+                  : t("Audit activity will appear here.")}
               </p>
               {hasActiveFilters && (
                 <Button
@@ -780,9 +775,7 @@ export function AdminAuditLogPage() {
                   size="sm"
                   className="mt-3"
                   onClick={clearSearchAndFilters}
-                >
-                  Clear search and filters
-                </Button>
+                >{t("Clear search and filters")}</Button>
               )}
             </div>
           </div>
@@ -847,11 +840,9 @@ export function AdminAuditLogPage() {
             </div>
 
             <div className="flex flex-col gap-3 border-t border-border/60 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-              <p className="text-11 text-text-tertiary">
-                Showing {String((displayedPage - 1) * displayedPerPage + 1)}-
-                {String(Math.min(displayedPage * displayedPerPage, total))} of{" "}
-                {String(total)} events
-              </p>
+              <p className="text-11 text-text-tertiary">{t("Showing ")}{String((displayedPage - 1) * displayedPerPage + 1)}-
+                {String(Math.min(displayedPage * displayedPerPage, total))}{t(" of")}{" "}
+                {String(total)}{t(" events")}</p>
               <div className="flex flex-wrap items-center gap-2">
                 {!isDefaultColumnLayout && (
                   <Button
@@ -860,9 +851,7 @@ export function AdminAuditLogPage() {
                     size="sm"
                     onClick={resetColumnLayout}
                   >
-                    <RotateCcw className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
-                    Reset columns
-                  </Button>
+                    <RotateCcw className="mr-2 h-3.5 w-3.5" aria-hidden="true" />{t("Reset columns")}</Button>
                 )}
                 <Select
                   value={String(listParams.per_page)}
@@ -878,7 +867,7 @@ export function AdminAuditLogPage() {
                   }
                 >
                   <SelectTrigger
-                    aria-label="Rows per page"
+                    aria-label={t("Rows per page")}
                     className="w-[112px]"
                   >
                     <SelectValue />
@@ -886,8 +875,7 @@ export function AdminAuditLogPage() {
                   <SelectContent>
                     {ADMIN_AUDIT_LOG_PER_PAGE_OPTIONS.map((rows) => (
                       <SelectItem key={rows} value={String(rows)}>
-                        {String(rows)} rows
-                      </SelectItem>
+                        {String(rows)}{t(" rows")}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -900,12 +888,11 @@ export function AdminAuditLogPage() {
                   onClick={() =>
                     updateListSearch({ page: Math.max(1, listParams.page - 1) })
                   }
-                  aria-label="Previous page"
+                  aria-label={t("Previous page")}
                 >
                   <ChevronLeft />
                 </Button>
-                <span className="min-w-[84px] text-center text-11 text-text-tertiary">
-                  Page {String(displayedPage)} of {String(displayedTotalPages)}
+                <span className="min-w-[84px] text-center text-11 text-text-tertiary">{t("Page ")}{String(displayedPage)}{t(" of ")}{String(displayedTotalPages)}
                 </span>
                 <Button
                   type="button"
@@ -914,7 +901,7 @@ export function AdminAuditLogPage() {
                   className="h-11 w-11 md:h-8 md:w-8"
                   disabled={listParams.page >= totalPages || isFetching}
                   onClick={() => updateListSearch({ page: listParams.page + 1 })}
-                  aria-label="Next page"
+                  aria-label={t("Next page")}
                 >
                   <ChevronRight />
                 </Button>

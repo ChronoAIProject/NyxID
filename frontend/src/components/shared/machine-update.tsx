@@ -1,3 +1,5 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import {
   useStartMachineUpdate,
@@ -20,6 +22,7 @@ export function MachineUpdate({
   readonly name: string;
   readonly status: MachineUpdateStatus;
 }) {
+  const { t } = useUiTranslation();
   const start = useStartMachineUpdate(status.node_id);
   const updater = useVerifiedUpdaterImage();
   const [confirming, setConfirming] = useState(false);
@@ -52,19 +55,17 @@ export function MachineUpdate({
   }
   return (
     <div className="min-w-0 space-y-3">
-      <p>
-        Installed: {status.current_version} · Latest: {status.target_version}
+      <p>{t("Installed: ")}{status.current_version}{t(" · Latest: ")}{status.target_version}
       </p>
       {legacy ? (
-        <p role="status">Updater predates self-update. Replace it once</p>
+        <p role="status">{t("Updater predates self-update. Replace it once")}</p>
       ) : status.updater ? (
         <div className="min-w-0 space-y-2">
-          <p>Updater: {status.updater.version}</p>
+          <p>{t("Updater: ")}{status.updater.version}</p>
           {status.updater.phase !== "current" ? (
-            <p role="status" className="break-words">
-              Updater update {status.updater.phase}
-              {status.updater.target_version ? ` (${status.updater.target_version})` : ""}
-              {status.updater.code ? ` — ${status.updater.code}` : ""}
+            <p role="status" className="break-words">{t("Updater update ")}{status.updater.phase}
+              {status.updater.target_version ? t(" ({{target_version}})", { target_version: status.updater.target_version }) : ""}
+              {status.updater.code ? t(" — {{code}}", { code: status.updater.code }) : ""}
             </p>
           ) : null}
           {status.updater_guidance ? (
@@ -72,23 +73,21 @@ export function MachineUpdate({
           ) : null}
           {status.updater.digest ? (
             <details>
-              <summary className="cursor-pointer">Updater image digest</summary>
+              <summary className="cursor-pointer">{t("Updater image digest")}</summary>
               <code className="block break-all pt-2 text-xs">{status.updater.digest}</code>
             </details>
           ) : null}
         </div>
       ) : status.installation === "container" && status.updater_ready ? (
-        <p>Updater: version unavailable</p>
+        <p>{t("Updater: version unavailable")}</p>
       ) : null}
       {status.update_available ? (
-        <Badge variant="warning">
-          Update available ({status.target_version})
+        <Badge variant="warning">{t("Update available (")}{status.target_version})
         </Badge>
       ) : null}
       {status.phase !== "idle" ? (
-        <p role="status" className="break-words">
-          Update: {status.phase.replaceAll("_", " ")}
-          {status.code ? ` — ${status.code}` : ""}
+        <p role="status" className="break-words">{t("Update: ")}{status.phase.replaceAll("_", " ")}
+          {status.code ? t(" — {{code}}", { code: status.code }) : ""}
         </p>
       ) : null}
       {status.guidance ? <p role="alert" className="break-words">{status.guidance}</p> : null}
@@ -98,58 +97,40 @@ export function MachineUpdate({
             <>
               <p>
                 {legacy
-                  ? "Replace only the updater on the computer running Docker. Keep the machine container and update volume."
-                  : "Run once on the computer running Docker. No pairing token needed."}
+                  ? t("Replace only the updater on the computer running Docker. Keep the machine container and update volume.")
+                  : t("Run once on the computer running Docker. No pairing token needed.")}
               </p>
-              <label className="block space-y-1">
-                Docker container name
-                <Input
+              <label className="block space-y-1">{t("Docker container name")}<Input
                   value={container}
                   onChange={(event) => setContainer(event.target.value)}
                 />
               </label>
               {command ? (
                 <CopyableField
-                  label={legacy ? "Replace updater on the Docker host" : "Run on the Docker host"}
+                  label={legacy ? t("Replace updater on the Docker host") : t("Run on the Docker host")}
                   value={command}
                 />
               ) : (
                 <p role="status">
                   {updater.data?.image
-                    ? "Enter a valid container name."
-                    : "Verifying the updater image, try again shortly."}
+                    ? t("Enter a valid container name.")
+                    : t("Verifying the updater image, try again shortly.")}
                 </p>
               )}
               <details>
-                <summary className="cursor-pointer text-foreground">
-                  How updates work
-                </summary>
-                <p className="pt-2">
-                  The command preserves your container’s identity, workspace and
-                  settings. The updater has Docker socket access (host root). It
-                  verifies official NyxID images and restores the old container
-                  if reconnection fails.
-                </p>
+                <summary className="cursor-pointer text-foreground">{t("How updates work")}</summary>
+                <p className="pt-2">{t("The command preserves your container’s identity, workspace and settings. The updater has Docker socket access (host root). It verifies official NyxID images and restores the old container if reconnection fails.")}</p>
               </details>
             </>
           ) : (
             <>
-              <p>
-                On this machine, update NyxID with{" "}
-                <code>nyxid update --version {status.target_version}</code>,
-                then run <code>nyxid node machine-updater install</code> as the
-                supervisor user. For a separated VM, add <code>--system</code>;
-                for a named profile, add <code>--profile</code> with that
-                profile's name. For a custom configuration directory, add{" "}
-                <code>--config</code> with its path. The command restarts the
-                node daemon.
-              </p>
+              <p>{t("On this machine, update NyxID with")}{" "}
+                <code>nyxid update --version {status.target_version}</code>{t(", then run ")}<code>nyxid node machine-updater install</code>{t(" as the supervisor user. For a separated VM, add ")}<code>--system</code>{t("; for a named profile, add ")}<code>--profile</code>{t(" with that profile's name. For a custom configuration directory, add")}{" "}
+                <code>--config</code>{t(" with its path. The command restarts the node daemon.")}</p>
             </>
           )}
-          <p>
-            Paste the command in that computer’s terminal and wait. Start guided
-            update to let your agent watch{" "}
-            {legacy ? "the new updater report its version" : "reconnection"}.
+          <p>{t("Paste the command in that computer’s terminal and wait. Start guided update to let your agent watch")}{" "}
+            {legacy ? t("the new updater report its version") : t("reconnection")}.
           </p>
         </div>
       ) : null}
@@ -157,8 +138,8 @@ export function MachineUpdate({
         <div className="space-y-2 rounded-lg border border-border p-3">
           <p>
             {legacy
-              ? `Watch the one-time updater replacement for ${status.target_version}? Run the pinned host command above; the machine stays running.`
-              : `Update to ${status.target_version}? The machine restarts and interrupts its current work.`}
+              ? t("Watch the one-time updater replacement for {{target_version}}? Run the pinned host command above; the machine stays running.", { target_version: status.target_version })
+              : t("Update to {{target_version}}? The machine restarts and interrupts its current work.", { target_version: status.target_version })}
           </p>
           <div className="flex flex-wrap gap-2">
             <Button
@@ -169,12 +150,8 @@ export function MachineUpdate({
                   onSuccess: () => setConfirming(false),
                 });
               }}
-            >
-              Confirm update
-            </Button>
-            <Button type="button" onClick={() => setConfirming(false)}>
-              Cancel
-            </Button>
+            >{t("Confirm update")}</Button>
+            <Button type="button" onClick={() => setConfirming(false)}>{t("Cancel")}</Button>
           </div>
         </div>
       ) : (
@@ -183,12 +160,12 @@ export function MachineUpdate({
           disabled={busy || start.isPending}
           onClick={() => setConfirming(true)}
         >
-          {manual ? "Start guided update" : "Update machine"}
+          {manual ? t("Start guided update") : t("Update machine")}
         </Button>
       )}
       {start.error ? (
         <p role="alert" className="text-destructive">
-          {start.error.message}
+          {translateUi(start.error.message ?? "")}
         </p>
       ) : null}
       {start.data?.reason ? <p role="alert">{start.data.reason}</p> : null}

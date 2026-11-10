@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -70,14 +73,14 @@ const filtersSchema = z
 function subjectText(subject: RemoteMachineSubject) {
   if (subject.kind === "assistant")
     return subject.agent_id
-      ? `Assistant Agent ${subject.agent_id}`
-      : "Assistant or legacy principal; Agent identity not reported";
+      ? translateUi("Assistant Agent {{id}}", { id: subject.agent_id })
+      : translateUi("Assistant or legacy principal; Agent identity not reported");
   if (subject.kind === "oauth")
-    return `OAuth client ${subject.oauth_client_id}`;
-  return `Parent Key ${subject.api_key_id}${subject.api_key_credential_id ? ` · Child ${subject.api_key_credential_id}` : ""}`;
+    return translateUi("OAuth client {{id}}", { id: subject.oauth_client_id });
+  return translateUi("Parent Key {{id}}", { id: subject.api_key_id }) + (subject.api_key_credential_id ? translateUi(" · Child {{id}}", { id: subject.api_key_credential_id }) : "");
 }
 const when = (value: string | null) =>
-  value ? new Date(value).toLocaleString() : "Not reported";
+  value ? new Date(value).toLocaleString(getFormattingLocale()) : translateUi("Not reported");
 const active = (job: RemoteMachineJob) =>
   ["accepted", "queued", "running", "starting"].includes(job.status);
 
@@ -86,6 +89,7 @@ export function RemoteMachineJobs({
 }: {
   readonly machineId: string;
 }) {
+  const { t } = useUiTranslation();
   const ownerId = useAuthStore((state) => state.user?.id);
   const form = useAppForm<z.infer<typeof filtersSchema>>({
     resolver: zodResolver(filtersSchema),
@@ -135,11 +139,7 @@ export function RemoteMachineJobs({
   });
   return (
     <div className="space-y-4">
-      <p className="text-12 text-muted-foreground">
-        Find jobs by status and creation time without a known job ID. Metadata
-        remains for 30 days after termination. Commands, input, environment
-        values and full output are not stored in this history.
-      </p>
+      <p className="text-12 text-muted-foreground">{t("Find jobs by status and creation time without a known job ID. Metadata remains for 30 days after termination. Commands, input, environment values and full output are not stored in this history.")}</p>
       <Form {...form}>
         <form onSubmit={apply} className="grid gap-3 sm:grid-cols-2">
           <FormField
@@ -147,7 +147,7 @@ export function RemoteMachineJobs({
             name="status"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Status</FormLabel>
+                <FormLabel>{t("Status")}</FormLabel>
                 <Select value={field.value} onValueChange={field.onChange}>
                   <FormControl>
                     <SelectTrigger>
@@ -166,7 +166,7 @@ export function RemoteMachineJobs({
                     ].map((status) => (
                       <SelectItem key={status} value={status}>
                         {status === "all"
-                          ? "All statuses"
+                          ? t("All statuses")
                           : status.replaceAll("_", " ")}
                       </SelectItem>
                     ))}
@@ -184,7 +184,7 @@ export function RemoteMachineJobs({
               render={({ field }) => (
                 <FormItem>
                   <FormLabel>
-                    {name === "from" ? "Created from" : "Created to"}
+                    {name === "from" ? t("Created from") : t("Created to")}
                   </FormLabel>
                   <FormControl>
                     <Input type="datetime-local" {...field} />
@@ -195,49 +195,34 @@ export function RemoteMachineJobs({
             />
           ))}
           <div className="flex items-end gap-2">
-            <Button type="submit" disabled={!form.formState.isDirty}>
-              Apply filters
-            </Button>
-            <Button type="button" onClick={() => void query.refetch()}>
-              Refresh
-            </Button>
+            <Button type="submit" disabled={!form.formState.isDirty}>{t("Apply filters")}</Button>
+            <Button type="button" onClick={() => void query.refetch()}>{t("Refresh")}</Button>
           </div>
         </form>
       </Form>
-      <p className="text-12 text-muted-foreground">
-        Date filters use your local timezone and are sent as absolute
-        timestamps.
-      </p>
+      <p className="text-12 text-muted-foreground">{t("Date filters use your local timezone and are sent as absolute timestamps.")}</p>
       {cancelNotice && (
         <p role="status" className="text-12 text-muted-foreground">
           {cancelNotice}
         </p>
       )}
       {query.isPending && (
-        <p role="status" className="text-12">
-          Loading jobs…
-        </p>
+        <p role="status" className="text-12">{t("Loading jobs…")}</p>
       )}
       {query.error &&
         (missing ? (
           <p
             role="status"
             className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground"
-          >
-            Job history is unavailable on this server. This does not mean the
-            machine has no jobs. The owner job-list API must be connected before
-            status, cancellation, and output can be reviewed here.
-          </p>
+          >{t("Job history is unavailable on this server. This does not mean the machine has no jobs. The owner job-list API must be connected before status, cancellation, and output can be reviewed here.")}</p>
         ) : (
           <ErrorBanner
-            message={`Job history could not be loaded. ${query.error.message}`}
+            message={t("Job history could not be loaded. {{message}}", { message: translateErrorMessage(query.error.message) })}
             onRetry={() => void query.refetch()}
           />
         ))}
       {!query.isPending && !query.error && !jobs.length && (
-        <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
-          No jobs match these filters.
-        </p>
+        <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">{t("No jobs match these filters.")}</p>
       )}
       <div className="flex flex-col gap-3 md:hidden">
         {jobs.map((job) => (
@@ -252,18 +237,17 @@ export function RemoteMachineJobs({
               <Badge variant={active(job) ? "warning" : "secondary"}>
                 {job.status}
               </Badge>
-              <Badge variant="secondary">
-                Output {job.output_availability}
+              <Badge variant="secondary">{t("Output ")}{job.output_availability}
               </Badge>
             </div>
             <p className="break-all text-11 text-muted-foreground">
               {subjectText(job.subject)}
             </p>
             <p className="text-11 text-text-tertiary">
-              {when(job.started_at ?? job.created_at)} · Generation{" "}
-              {job.runtime_generation ?? "Not reported"}
+              {when(job.started_at ?? job.created_at)}{t(" · Generation")}{" "}
+              {job.runtime_generation ?? t("Not reported")}
             </p>
-            <Button onClick={() => setSelectedId(job.id)}>View job</Button>
+            <Button onClick={() => setSelectedId(job.id)}>{t("View job")}</Button>
           </article>
         ))}
       </div>
@@ -272,11 +256,11 @@ export function RemoteMachineJobs({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Job / principal</TableHead>
-                <TableHead>Status / generation</TableHead>
-                <TableHead>Time</TableHead>
-                <TableHead>Output</TableHead>
-                <TableHead>Details</TableHead>
+                <TableHead>{t("Job / principal")}</TableHead>
+                <TableHead>{t("Status / generation")}</TableHead>
+                <TableHead>{t("Time")}</TableHead>
+                <TableHead>{t("Output")}</TableHead>
+                <TableHead>{t("Details")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -290,9 +274,8 @@ export function RemoteMachineJobs({
                   </TableCell>
                   <TableCell>
                     {job.status}
-                    <p className="text-11 text-text-tertiary">
-                      Generation {job.runtime_generation ?? "Not reported"}
-                      {job.exit_code !== null ? ` · Exit ${job.exit_code}` : ""}
+                    <p className="text-11 text-text-tertiary">{t("Generation ")}{job.runtime_generation ?? t("Not reported")}
+                      {job.exit_code !== null ? t(" · Exit {{exit_code}}", { exit_code: job.exit_code }) : ""}
                     </p>
                   </TableCell>
                   <TableCell>
@@ -300,9 +283,7 @@ export function RemoteMachineJobs({
                   </TableCell>
                   <TableCell>{job.output_availability}</TableCell>
                   <TableCell>
-                    <Button onClick={() => setSelectedId(job.id)}>
-                      View job
-                    </Button>
+                    <Button onClick={() => setSelectedId(job.id)}>{t("View job")}</Button>
                   </TableCell>
                 </TableRow>
               ))}
@@ -317,9 +298,7 @@ export function RemoteMachineJobs({
             setCursors((values) => values.slice(0, -1));
             setSelectedId(null);
           }}
-        >
-          Previous jobs
-        </Button>
+        >{t("Previous jobs")}</Button>
         <Button
           disabled={!query.data?.next_cursor || query.isFetching}
           onClick={() => {
@@ -327,41 +306,37 @@ export function RemoteMachineJobs({
             if (next) setCursors((values) => [...values, next]);
             setSelectedId(null);
           }}
-        >
-          Next jobs
-        </Button>
+        >{t("Next jobs")}</Button>
       </div>
       {selected && !query.error && (
         <div className="space-y-4">
           <DetailSection
-            title="Selected job"
+            title={t("Selected job")}
             action={
-              <Button variant="ghost" onClick={() => setSelectedId(null)}>
-                Close job
-              </Button>
+              <Button variant="ghost" onClick={() => setSelectedId(null)}>{t("Close job")}</Button>
             }
           >
-            <DetailRow label="Job ID" value={selected.id} mono copyable />
+            <DetailRow label={t("Job ID")} value={selected.id} mono copyable />
             <DetailRow
-              label="Principal"
+              label={t("Principal")}
               value={subjectText(selected.subject)}
               mono
             />
             <DetailRow
-              label="Acting person"
+              label={t("Acting person")}
               value={selected.subject.user_id}
               mono
             />
             <DetailRow
-              label="Grant"
+              label={t("Grant")}
               value={selected.grant_id ?? "Assistant assignment"}
               mono
             />
-            <DetailRow label="Status" value={selected.status} />
-            <DetailRow label="Created" value={when(selected.created_at)} />
-            <DetailRow label="Started" value={when(selected.started_at)} />
+            <DetailRow label={t("Status")} value={selected.status} />
+            <DetailRow label={t("Created")} value={when(selected.created_at)} />
+            <DetailRow label={t("Started")} value={when(selected.started_at)} />
             <DetailRow
-              label="Duration"
+              label={t("Duration")}
               value={
                 selected.duration_ms == null
                   ? "Not reported"
@@ -369,15 +344,15 @@ export function RemoteMachineJobs({
               }
             />
             <DetailRow
-              label="History retained until"
+              label={t("History retained until")}
               value={when(selected.retain_until ?? null)}
             />
             <DetailRow
-              label="Cancellation requested"
+              label={t("Cancellation requested")}
               value={when(selected.cancellation_requested_at ?? null)}
             />
             <DetailRow
-              label="Cancellation requester"
+              label={t("Cancellation requester")}
               value={
                 selected.cancellation_requested_by?.kind === "human_owner"
                   ? `Human owner ${selected.cancellation_requested_by.user_id}`
@@ -388,13 +363,13 @@ export function RemoteMachineJobs({
                       : "Not reported"
               }
             />
-            <DetailRow label="Finished" value={when(selected.finished_at)} />
+            <DetailRow label={t("Finished")} value={when(selected.finished_at)} />
             <DetailRow
-              label="Authority expires"
+              label={t("Authority expires")}
               value={when(selected.expires_at)}
             />
             <DetailRow
-              label="Exit code"
+              label={t("Exit code")}
               value={
                 selected.exit_code === null
                   ? "Not reported"
@@ -402,11 +377,11 @@ export function RemoteMachineJobs({
               }
             />
             <DetailRow
-              label="Stop / cancellation reason"
+              label={t("Stop / cancellation reason")}
               value={selected.stop_reason ?? "Not reported"}
             />
             <DetailRow
-              label="Runtime generation"
+              label={t("Runtime generation")}
               value={
                 selected.runtime_generation === null
                   ? "Not reported"
@@ -414,18 +389,18 @@ export function RemoteMachineJobs({
               }
             />
             <DetailRow
-              label="Declared services"
+              label={t("Declared services")}
               value={
                 selected.services.map((service) => service.slug).join(", ") ||
                 "None"
               }
             />
             <DetailRow
-              label="Output availability"
+              label={t("Output availability")}
               value={selected.output_availability}
             />
             <DetailRow
-              label="Output deadline"
+              label={t("Output deadline")}
               value={when(selected.output_expires_at)}
             />
             {selected.output_reason && (
@@ -440,19 +415,14 @@ export function RemoteMachineJobs({
             job={selected}
           />
           {active(selected) && selected.cancellation_available !== true && (
-            <p className="text-12 text-muted-foreground">
-              Owner cancellation is not exposed by this server. No cancellation
-              request can be sent here.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("Owner cancellation is not exposed by this server. No cancellation request can be sent here.")}</p>
           )}
           {active(selected) && (
             <Button
               disabled={selected.cancellation_available !== true}
               variant="destructive"
               onClick={() => setCancelTarget(selected)}
-            >
-              Cancel job
-            </Button>
+            >{t("Cancel job")}</Button>
           )}
         </div>
       )}
@@ -467,20 +437,15 @@ export function RemoteMachineJobs({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Cancel job</DialogTitle>
-            <DialogDescription>
-              Request cancellation of this job’s process group. Cancellation
-              does not resume the machine or extend execution authority.
-            </DialogDescription>
+            <DialogTitle>{t("Cancel job")}</DialogTitle>
+            <DialogDescription>{t("Request cancellation of this job’s process group. Cancellation does not resume the machine or extend execution authority.")}</DialogDescription>
           </DialogHeader>
           {cancelError && <ErrorBanner message={cancelError} />}
           <DialogFooter>
             <Button
               onClick={() => setCancelTarget(null)}
               disabled={cancel.isPending}
-            >
-              Keep running
-            </Button>
+            >{t("Keep running")}</Button>
             <Button
               variant="destructive"
               isLoading={cancel.isPending}
@@ -513,9 +478,7 @@ export function RemoteMachineJobs({
                   );
                 }
               }}
-            >
-              Confirm cancellation
-            </Button>
+            >{t("Confirm cancellation")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -530,6 +493,7 @@ export function MachineOutput({
   readonly machineId: string;
   readonly job: RemoteMachineJob;
 }) {
+  const { t } = useUiTranslation();
   const ownerId = useAuthStore((state) => state.user?.id);
   const [output, setOutput] = useState<RemoteMachineJobOutput | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -605,28 +569,18 @@ export function MachineOutput({
     }
   }
   return (
-    <DetailSection title="Live job output">
+    <DetailSection title={t("Live job output")}>
       <div className="space-y-3 px-4 py-3 text-12 text-muted-foreground">
-        <p>
-          Output is fetched on demand from the live authorized node and held
-          only in this open view. It is never copied into Query caches, browser
-          storage, or history. It may disappear before the one-hour maximum
-          after job completion.
-        </p>
+        <p>{t("Output is fetched on demand from the live authorized node and held only in this open view. It is never copied into Query caches, browser storage, or history. It may disappear before the one-hour maximum after job completion.")}</p>
         {!available && (
-          <p role="status">
-            Output {expired ? "expired" : job.output_availability}. Lost or
-            expired output cannot be recovered from job history.
-          </p>
+          <p role="status">{t("Output ")}{expired ? t("expired") : job.output_availability}{t(". Lost or expired output cannot be recovered from job history.")}</p>
         )}
         <div className="flex flex-wrap gap-2">
           <Button
             disabled={!available || loading}
             isLoading={loading}
             onClick={() => void load()}
-          >
-            Read live output
-          </Button>
+          >{t("Read live output")}</Button>
           {output && output.output_available !== false && (
             <>
               <Button
@@ -634,9 +588,7 @@ export function MachineOutput({
                   request.current?.abort();
                   setOutput(null);
                 }}
-              >
-                Clear output
-              </Button>
+              >{t("Clear output")}</Button>
               <Button
                 disabled={
                   loading ||
@@ -645,21 +597,16 @@ export function MachineOutput({
                   (!output.truncated && !active(job))
                 }
                 onClick={() => void load(true)}
-              >
-                Next output page
-              </Button>
+              >{t("Next output page")}</Button>
             </>
           )}
         </div>
         {output?.output_available === false && (
-          <p role="status">
-            Output unavailable:{" "}
-            {(output.output_unavailable_reason ?? "not reported").replaceAll(
+          <p role="status">{t("Output unavailable:")}{" "}
+            {(output.output_unavailable_reason ?? t("not reported")).replaceAll(
               "_",
               " ",
-            )}
-            . Expired or evicted bytes cannot be recovered from history.
-          </p>
+            )}{t(". Expired or evicted bytes cannot be recovered from history.")}</p>
         )}
         {error && (
           <div role="alert">
@@ -668,24 +615,22 @@ export function MachineOutput({
         )}
         {output && output.output_available !== false && (
           <>
-            <p className="text-11">
-              Status {output.status} · Duration{" "}
+            <p className="text-11">{t("Status ")}{output.status}{t(" · Duration")}{" "}
               {output.duration_ms === undefined
-                ? "not reported"
-                : `${output.duration_ms} ms`}{" "}
-              · Exit {output.exit_code ?? "pending"}
-              {output.timed_out ? " · Timed out" : ""}
+                ? t("not reported")
+                : t("{{duration_ms}} ms", { duration_ms: output.duration_ms })}{" "}{t("· Exit ")}{output.exit_code ?? t("pending")}
+              {output.timed_out ? t(" · Timed out") : ""}
               {output.truncated
-                ? " · Output was truncated; earlier bytes may have been discarded"
+                ? t(" · Output was truncated; earlier bytes may have been discarded")
                 : ""}
             </p>
-            <h4 className="font-medium text-foreground">Standard output</h4>
+            <h4 className="font-medium text-foreground">{t("Standard output")}</h4>
             <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted p-3 font-mono text-11">
               {output.stdout === undefined
                 ? "(not reported)"
                 : output.stdout || "(empty)"}
             </pre>
-            <h4 className="font-medium text-foreground">Standard error</h4>
+            <h4 className="font-medium text-foreground">{t("Standard error")}</h4>
             <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-muted p-3 font-mono text-11">
               {output.stderr === undefined
                 ? "(not reported)"

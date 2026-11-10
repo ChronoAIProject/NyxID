@@ -1,3 +1,7 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { LanguageSettings } from "@/components/settings/language-settings";
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { OwnedOnboardingBindings } from "@/pages/platform-onboarding";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { PageHeader } from "@/components/shared/page-header";
@@ -28,11 +32,7 @@ import {
 } from "@/components/ui/form";
 import { copyToClipboard, formatDate } from "@/lib/utils";
 import { openExternal } from "@/lib/navigation";
-import {
-  SETTINGS_TABS,
-  SETTINGS_TAB_DEFAULT,
-  parseTab,
-} from "@/lib/url-tabs";
+import { SETTINGS_TABS, SETTINGS_TAB_DEFAULT, parseTab } from "@/lib/url-tabs";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { MfaSetupDialog } from "@/components/auth/mfa-setup-dialog";
 import { DisplaySettings } from "@/components/settings/display-settings";
@@ -72,14 +72,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  Eye,
-  EyeOff,
-  Trash2,
-  ExternalLink,
-  Copy,
-  Check,
-} from "lucide-react";
+import { Eye, EyeOff, Trash2, ExternalLink, Copy, Check } from "lucide-react";
 import { PowerButtonIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import {
@@ -104,40 +97,57 @@ export function SettingsPage({
 }: {
   readonly presentation?: "page" | "panel";
 } = {}) {
-  const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
+  const { t } = useAppTranslation();
+  const searchParams = useRouterState({
+    select: (s) => s.location.search as Record<string, unknown>,
+  });
   const navigate = useNavigate();
   const account = useAccountPanel();
-  const currentTab = parseTab(presentation === "panel" ? account.current.panelTab : searchParams.tab, SETTINGS_TABS, SETTINGS_TAB_DEFAULT);
+  const currentTab = parseTab(
+    presentation === "panel" ? account.current.panelTab : searchParams.tab,
+    SETTINGS_TABS,
+    SETTINGS_TAB_DEFAULT,
+  );
 
   function handleTabChange(value: string) {
     if (presentation === "panel") void account.update({ panelTab: value });
-    else void navigate({ to: "/settings", search: { tab: value }, replace: true });
+    else
+      void navigate({ to: "/settings", search: { tab: value }, replace: true });
   }
 
   return (
     <div className="space-y-8">
-      {presentation === "page" && <PageHeader
-        title="Account Settings"
-        description="Manage your account settings and preferences."
-      />}
+      {presentation === "page" && (
+        <PageHeader
+          title={t("Account Settings")}
+          description={t("Manage your account settings and preferences.")}
+        />
+      )}
 
-      <Tabs value={currentTab} onValueChange={handleTabChange} className="space-y-6">
-        <TabsList className="max-w-full" aria-label="Account settings">
-          <TabsTrigger value="profile">Profile</TabsTrigger>
-          <TabsTrigger value="security">Security</TabsTrigger>
-          <TabsTrigger value="sessions">Sessions</TabsTrigger>
-          <TabsTrigger value="mcp">MCP</TabsTrigger>
-          <TabsTrigger value="display">Display</TabsTrigger>
-          <TabsTrigger value="privacy">Privacy</TabsTrigger>
+      <Tabs
+        value={currentTab}
+        onValueChange={handleTabChange}
+        className="space-y-6"
+      >
+        <TabsList className="max-w-full" aria-label={t("Account settings")}>
+          <TabsTrigger value="profile">{t("Profile")}</TabsTrigger>
+          <TabsTrigger value="security">{t("Security")}</TabsTrigger>
+          <TabsTrigger value="sessions">{t("Sessions")}</TabsTrigger>
+          <TabsTrigger value="mcp">{t("MCP")}</TabsTrigger>
+          <TabsTrigger value="display">{t("Display")}</TabsTrigger>
+          <TabsTrigger value="privacy">{t("Privacy")}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="profile">
-          <ProfileTab />
+          <div className="space-y-6">
+            <LanguageSettings />
+            <ProfileTab />
+          </div>
         </TabsContent>
         <TabsContent value="security">
           <SecurityTab />
-        <OwnedOnboardingBindings />
-          </TabsContent>
+          <OwnedOnboardingBindings />
+        </TabsContent>
         <TabsContent value="sessions">
           <SessionsTab />
         </TabsContent>
@@ -156,6 +166,7 @@ export function SettingsPage({
 }
 
 function ProfileTab() {
+  const { t } = useAppTranslation();
   const { data: user, isLoading } = useUser();
   const [name, setName] = useState("");
   const [saving, setSaving] = useState(false);
@@ -174,12 +185,12 @@ function ProfileTab() {
         display_name: displayName,
       });
       setUser(updated);
-      toast.success("Profile updated successfully");
+      toast.success(t("Profile updated successfully"));
     } catch (error) {
       if (error instanceof ApiError) {
-        toast.error(error.message);
+        toast.error(translateErrorMessage(error.message));
       } else {
-        toast.error("Failed to update profile");
+        toast.error(t("Failed to update profile"));
       }
     } finally {
       setSaving(false);
@@ -189,33 +200,35 @@ function ProfileTab() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Profile</CardTitle>
-        <CardDescription>Update your personal information.</CardDescription>
+        <CardTitle>{t("Profile")}</CardTitle>
+        <CardDescription>
+          {t("Update your personal information.")}
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-2">
           <label className="text-12 font-medium" htmlFor="profile-name">
-            Name
+            {t("Display name")}
           </label>
           <Input
             id="profile-name"
             value={displayName}
             onChange={(e) => setName(e.target.value)}
-            placeholder="Your name"
+            placeholder={t("Your name")}
           />
         </div>
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <label className="text-12 font-medium" htmlFor="profile-email">
-              Email
+              {t("Email")}
             </label>
             {user?.email_verified ? (
               <Badge variant="success" className="text-xs">
-                Verified
+                {t("Verified")}
               </Badge>
             ) : (
               <Badge variant="warning" className="text-xs">
-                Not verified
+                {t("Not verified")}
               </Badge>
             )}
           </div>
@@ -238,18 +251,23 @@ function ProfileTab() {
                 //   await api.post<void>("/auth/verify-email/resend");
                 //   toast.success("Verification email sent");
                 toast.info(
-                  "Email resend is not yet available on this server.",
+                  t("Email resend is not yet available on this server."),
                 );
               }}
             >
-              Resend verification email
+              {t("Resend verification email")}
             </Button>
           )}
         </div>
       </CardContent>
       <CardFooter>
-        <Button variant="primary" onClick={() => void handleSave()} isLoading={saving} disabled={!name || name === (user?.display_name ?? "")}>
-          Save Changes
+        <Button
+          variant="primary"
+          onClick={() => void handleSave()}
+          isLoading={saving}
+          disabled={!name || name === (user?.display_name ?? "")}
+        >
+          {t("Save Changes")}
         </Button>
       </CardFooter>
     </Card>
@@ -257,6 +275,7 @@ function ProfileTab() {
 }
 
 function SecurityTab() {
+  const { t } = useAppTranslation();
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const navigate = useNavigate();
@@ -277,7 +296,7 @@ function SecurityTab() {
     deleteConfirmEmail.trim().toLowerCase() === user?.email.toLowerCase();
   const deleteEmailError =
     deleteConfirmEmail.trim().length > 0 && !deleteEmailMatches
-      ? "That does not match your account email."
+      ? t("That does not match your account email.")
       : null;
   const disableMfa = useMfaDisable();
 
@@ -311,25 +330,25 @@ function SecurityTab() {
         current_password: data.currentPassword,
         new_password: data.newPassword,
       });
-      toast.success("Password changed successfully");
+      toast.success(t("Password changed successfully"));
       passwordForm.reset();
     } catch (error) {
       if (error instanceof ApiError) {
         passwordForm.setError("root", { message: error.message });
       } else {
-        toast.error("Failed to change password");
+        toast.error(t("Failed to change password"));
       }
     }
   }
 
   async function handleDisableMfa() {
     if (!disableMfaPassword) {
-      setDisableMfaError("Password is required");
+      setDisableMfaError(t("Password is required"));
       return;
     }
     try {
       await disableMfa.mutateAsync(disableMfaPassword);
-      toast.success("MFA disabled");
+      toast.success(t("MFA disabled"));
       setDisableMfaDialogOpen(false);
       setDisableMfaPassword("");
       setDisableMfaError(null);
@@ -337,7 +356,7 @@ function SecurityTab() {
       if (error instanceof ApiError) {
         setDisableMfaError(error.message);
       } else {
-        setDisableMfaError("Failed to disable MFA");
+        setDisableMfaError(t("Failed to disable MFA"));
       }
     }
   }
@@ -351,16 +370,18 @@ function SecurityTab() {
   async function handleDeleteAccount() {
     if (!user?.email) return;
     if (!deleteEmailMatches) {
-      toast.error("Please enter your email to confirm");
+      toast.error(t("Please enter your email to confirm"));
       return;
     }
     setIsDeletingAccount(true);
     try {
       await apiClient<DeleteAccountResponse>("/users/me", {
         method: "DELETE",
-        headers: { "X-NyxID-Account-Deletion-Policy": ACCOUNT_DELETION_POLICY_VERSION },
+        headers: {
+          "X-NyxID-Account-Deletion-Policy": ACCOUNT_DELETION_POLICY_VERSION,
+        },
       });
-      toast.success("Account deleted successfully");
+      toast.success(t("Account deleted successfully"));
       try {
         await logout();
       } catch {
@@ -370,9 +391,9 @@ function SecurityTab() {
       void navigate({ to: "/login" });
     } catch (error) {
       if (error instanceof ApiError) {
-        toast.error(error.message);
+        toast.error(translateErrorMessage(error.message));
       } else {
-        toast.error("Failed to delete account");
+        toast.error(t("Failed to delete account"));
       }
     } finally {
       setIsDeletingAccount(false);
@@ -390,11 +411,11 @@ function SecurityTab() {
     <div className="space-y-6">
       <Card>
         <CardHeader>
-          <CardTitle>Two-Factor Authentication</CardTitle>
+          <CardTitle>{t("Two-Factor Authentication")}</CardTitle>
           <CardDescription>
             {user?.mfa_enabled
-              ? "Your account is protected with two-factor authentication."
-              : "Add an extra layer of security to your account."}
+              ? t("Your account is protected with two-factor authentication.")
+              : t("Add an extra layer of security to your account.")}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -409,10 +430,10 @@ function SecurityTab() {
                     setDisableMfaDialogOpen(true);
                   }
                 }}
-                aria-label="Toggle two-factor authentication"
+                aria-label={t("Toggle two-factor authentication")}
               />
               <span className="text-12">
-                {user?.mfa_enabled ? "Enabled" : "Disabled"}
+                {user?.mfa_enabled ? t("Enabled") : t("Disabled")}
               </span>
             </div>
           </div>
@@ -424,10 +445,11 @@ function SecurityTab() {
       <Dialog open={disableMfaDialogOpen} onOpenChange={handleDisableMfaClose}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Disable Two-Factor Authentication</DialogTitle>
+            <DialogTitle>{t("Disable Two-Factor Authentication")}</DialogTitle>
             <DialogDescription>
-              Enter your password to confirm disabling two-factor
-              authentication. This will make your account less secure.
+              {t(
+                "Enter your password to confirm disabling two-factor authentication. This will make your account less secure.",
+              )}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -436,7 +458,7 @@ function SecurityTab() {
                 role="alert"
                 className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
               >
-                {disableMfaError}
+                {translateUi(disableMfaError)}
               </div>
             )}
             <div className="space-y-2">
@@ -444,7 +466,7 @@ function SecurityTab() {
                 className="text-12 font-medium"
                 htmlFor="disable-mfa-password"
               >
-                Password
+                {t("Password")}
               </label>
               <Input
                 id="disable-mfa-password"
@@ -452,21 +474,21 @@ function SecurityTab() {
                 autoComplete="current-password"
                 value={disableMfaPassword}
                 onChange={(e) => setDisableMfaPassword(e.target.value)}
-                placeholder="Enter your password"
+                placeholder={t("Enter your password")}
                 autoFocus
               />
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={handleDisableMfaClose}>
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button
               variant="destructive"
               onClick={() => void handleDisableMfa()}
               isLoading={disableMfa.isPending}
             >
-              Disable MFA
+              {t("Disable MFA")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -474,153 +496,178 @@ function SecurityTab() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Change Password</CardTitle>
+          <CardTitle>{t("Change Password")}</CardTitle>
           <CardDescription>
             {isPasswordUser
-              ? "Update your password to keep your account secure."
-              : `You signed in with ${providerLabel ?? "an OAuth provider"} — this account has no password to change.`}
+              ? t("Update your password to keep your account secure.")
+              : t(
+                  "You signed in with {{provider}} — this account has no password to change.",
+                  { provider: providerLabel ?? t("an OAuth provider") },
+                )}
           </CardDescription>
         </CardHeader>
         <CardContent>
           <Form {...passwordForm}>
-            <form
-              onSubmit={passwordForm.handleSubmit(handleChangePassword)}
-            >
-            <fieldset
-              disabled={!isPasswordUser}
-              className="space-y-4 disabled:opacity-60"
-            >
-              {passwordForm.formState.errors.root && (
-                <div
-                  role="alert"
-                  className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
-                >
-                  {passwordForm.formState.errors.root.message}
-                </div>
-              )}
-
-              <FormField
-                control={passwordForm.control}
-                name="currentPassword"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Current Password</FormLabel>
-                    <FormControl>
-                      <div className="relative">
-                        <Input
-                          type={showCurrentPw ? "text" : "password"}
-                          autoComplete="current-password"
-                          className="pr-10"
-                          {...field}
-                        />
-                        <button
-                          type="button"
-                          tabIndex={-1}
-                          onClick={() => setShowCurrentPw((v) => !v)}
-                          className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
-                          aria-label={showCurrentPw ? "Hide password" : "Show password"}
-                        >
-                          {showCurrentPw ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
-                        </button>
-                      </div>
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
-              <Separator />
-
-              <FormField
-                control={passwordForm.control}
-                name="newPassword"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>New Password</FormLabel>
-                    <FormControl>
-                      <div className="relative">
-                        <Input
-                          type={showNewPw ? "text" : "password"}
-                          autoComplete="new-password"
-                          className="pr-10"
-                          {...field}
-                        />
-                        <button
-                          type="button"
-                          tabIndex={-1}
-                          onClick={() => setShowNewPw((v) => !v)}
-                          className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
-                          aria-label={showNewPw ? "Hide password" : "Show password"}
-                        >
-                          {showNewPw ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
-                        </button>
-                      </div>
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
-              <FormField
-                control={passwordForm.control}
-                name="confirmNewPassword"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Confirm New Password</FormLabel>
-                    <FormControl>
-                      <div className="relative">
-                        <Input
-                          type={showConfirmPw ? "text" : "password"}
-                          autoComplete="new-password"
-                          className="pr-10"
-                          {...field}
-                        />
-                        <button
-                          type="button"
-                          tabIndex={-1}
-                          onClick={() => setShowConfirmPw((v) => !v)}
-                          className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
-                          aria-label={showConfirmPw ? "Hide password" : "Show password"}
-                        >
-                          {showConfirmPw ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
-                        </button>
-                      </div>
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-
-              <div className="flex justify-end">
-                {isPasswordUser ? (
-                  <Button
-                    variant="primary"
-                    type="submit"
-                    isLoading={passwordForm.formState.isSubmitting}
-                    disabled={!passwordForm.formState.isDirty}
+            <form onSubmit={passwordForm.handleSubmit(handleChangePassword)}>
+              <fieldset
+                disabled={!isPasswordUser}
+                className="space-y-4 disabled:opacity-60"
+              >
+                {passwordForm.formState.errors.root && (
+                  <div
+                    role="alert"
+                    className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
                   >
-                    Change Password
-                  </Button>
-                ) : (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      {/* span wrapper: disabled buttons swallow pointer events */}
-                      <span tabIndex={0}>
-                        <Button variant="primary" type="button" disabled>
-                          Change Password
-                        </Button>
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent className="max-w-[280px] text-xs">
-                      You signed in with{" "}
-                      {providerLabel ?? "an OAuth provider"}, so this account
-                      has no password. Password sign-in can be added when
-                      email/password login is enabled for your account.
-                    </TooltipContent>
-                  </Tooltip>
+                    {translateUi(passwordForm.formState.errors.root.message ?? "")}
+                  </div>
                 )}
-              </div>
-            </fieldset>
+
+                <FormField
+                  control={passwordForm.control}
+                  name="currentPassword"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t("Current Password")}</FormLabel>
+                      <FormControl>
+                        <div className="relative">
+                          <Input
+                            type={showCurrentPw ? "text" : "password"}
+                            autoComplete="current-password"
+                            className="pr-10"
+                            {...field}
+                          />
+                          <button
+                            type="button"
+                            tabIndex={-1}
+                            onClick={() => setShowCurrentPw((v) => !v)}
+                            className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
+                            aria-label={
+                              showCurrentPw
+                                ? t("Hide password")
+                                : t("Show password")
+                            }
+                          >
+                            {showCurrentPw ? (
+                              <Eye className="h-4 w-4" />
+                            ) : (
+                              <EyeOff className="h-4 w-4" />
+                            )}
+                          </button>
+                        </div>
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <Separator />
+
+                <FormField
+                  control={passwordForm.control}
+                  name="newPassword"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t("New Password")}</FormLabel>
+                      <FormControl>
+                        <div className="relative">
+                          <Input
+                            type={showNewPw ? "text" : "password"}
+                            autoComplete="new-password"
+                            className="pr-10"
+                            {...field}
+                          />
+                          <button
+                            type="button"
+                            tabIndex={-1}
+                            onClick={() => setShowNewPw((v) => !v)}
+                            className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
+                            aria-label={
+                              showNewPw
+                                ? t("Hide password")
+                                : t("Show password")
+                            }
+                          >
+                            {showNewPw ? (
+                              <Eye className="h-4 w-4" />
+                            ) : (
+                              <EyeOff className="h-4 w-4" />
+                            )}
+                          </button>
+                        </div>
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <FormField
+                  control={passwordForm.control}
+                  name="confirmNewPassword"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t("Confirm New Password")}</FormLabel>
+                      <FormControl>
+                        <div className="relative">
+                          <Input
+                            type={showConfirmPw ? "text" : "password"}
+                            autoComplete="new-password"
+                            className="pr-10"
+                            {...field}
+                          />
+                          <button
+                            type="button"
+                            tabIndex={-1}
+                            onClick={() => setShowConfirmPw((v) => !v)}
+                            className="absolute inset-y-0 right-0 flex items-center px-3 text-muted-foreground hover:text-foreground"
+                            aria-label={
+                              showConfirmPw
+                                ? t("Hide password")
+                                : t("Show password")
+                            }
+                          >
+                            {showConfirmPw ? (
+                              <Eye className="h-4 w-4" />
+                            ) : (
+                              <EyeOff className="h-4 w-4" />
+                            )}
+                          </button>
+                        </div>
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+
+                <div className="flex justify-end">
+                  {isPasswordUser ? (
+                    <Button
+                      variant="primary"
+                      type="submit"
+                      isLoading={passwordForm.formState.isSubmitting}
+                      disabled={!passwordForm.formState.isDirty}
+                    >
+                      {t("Change Password")}
+                    </Button>
+                  ) : (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        {/* span wrapper: disabled buttons swallow pointer events */}
+                        <span tabIndex={0}>
+                          <Button variant="primary" type="button" disabled>
+                            {t("Change Password")}
+                          </Button>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-[280px] text-xs">
+                        {t(
+                          "You signed in with {{provider}}, so this account has no password. Password sign-in can be added when email/password login is enabled for your account.",
+                          { provider: providerLabel ?? t("an OAuth provider") },
+                        )}
+                      </TooltipContent>
+                    </Tooltip>
+                  )}
+                </div>
+              </fieldset>
             </form>
           </Form>
         </CardContent>
@@ -629,10 +676,13 @@ function SecurityTab() {
       <Card className="border-destructive/40">
         <CardHeader className="flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="space-y-1.5">
-            <CardTitle className="text-destructive">Delete Account</CardTitle>
+            <CardTitle className="text-destructive">
+              {t("Delete Account")}
+            </CardTitle>
             <CardDescription className="text-destructive/70">
-              Permanently delete your account and managed Machine workspaces.
-              Necessary security and financial records are retained.
+              {t(
+                "Permanently delete your account and managed Machine workspaces. Necessary security and financial records are retained.",
+              )}
             </CardDescription>
           </div>
           <Button
@@ -640,8 +690,10 @@ function SecurityTab() {
             className="shrink-0"
             onClick={() => setDeleteAccountOpen(true)}
           >
-            <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
-            Delete My Account
+            <ButtonIcon variant="destructive">
+              <Trash2 className="h-3 w-3 text-destructive" />
+            </ButtonIcon>
+            {t("Delete My Account")}
           </Button>
         </CardHeader>
       </Card>
@@ -649,10 +701,11 @@ function SecurityTab() {
       <Dialog open={deleteAccountOpen} onOpenChange={handleDeleteAccountDialog}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete Account</DialogTitle>
+            <DialogTitle>{t("Delete Account")}</DialogTitle>
             <DialogDescription>
-              Enter your email address to confirm deletion of your account and
-              the Machine data described below.
+              {t(
+                "Enter your email address to confirm deletion of your account and the Machine data described below.",
+              )}
             </DialogDescription>
           </DialogHeader>
 
@@ -663,18 +716,18 @@ function SecurityTab() {
               className="text-12 font-medium"
               htmlFor="delete-account-email"
             >
-              Email
+              {t("Email")}
             </label>
             <Input
               id="delete-account-email"
               value={deleteConfirmEmail}
               onChange={(e) => setDeleteConfirmEmail(e.target.value)}
-              placeholder={user?.email ?? "your@email.com"}
+              placeholder={user?.email ?? t("your@email.com")}
               aria-invalid={deleteEmailError ? true : undefined}
               autoFocus
             />
             {deleteEmailError && (
-              <p className="text-xs text-destructive">{deleteEmailError}</p>
+              <p className="text-xs text-destructive">{translateUi(deleteEmailError)}</p>
             )}
           </div>
 
@@ -684,7 +737,7 @@ function SecurityTab() {
               onClick={() => handleDeleteAccountDialog(false)}
               disabled={isDeletingAccount}
             >
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button
               variant="destructive"
@@ -692,7 +745,7 @@ function SecurityTab() {
               disabled={!deleteEmailMatches || isDeletingAccount}
               onClick={() => void handleDeleteAccount()}
             >
-              Permanently Delete
+              {t("Permanently Delete")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -712,16 +765,17 @@ function CopyInlineButton({
   readonly text: string;
   readonly label: string;
 }) {
+  const { t } = useAppTranslation();
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
     try {
       await copyToClipboard(text);
       setCopied(true);
-      toast.success(`${label} copied to clipboard`);
+      toast.success(translateUi("{{label}} copied to clipboard", { label: label }));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error("Failed to copy to clipboard");
+      toast.error(t("Failed to copy to clipboard"));
     }
   }
 
@@ -737,12 +791,13 @@ function CopyInlineButton({
       ) : (
         <Copy className="h-3 w-3" aria-hidden="true" />
       )}
-      <span className="sr-only">Copy {label}</span>
+      <span className="sr-only">{t("Copy {{label}}", { label })}</span>
     </Button>
   );
 }
 
 function McpTab() {
+  const { t } = useAppTranslation();
   const { data: config, isLoading } = usePublicConfig();
 
   if (isLoading) {
@@ -760,17 +815,20 @@ function McpTab() {
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="text-lg font-medium">MCP (Model Context Protocol)</h3>
+        <h3 className="text-lg font-medium">
+          {t("MCP (Model Context Protocol)")}
+        </h3>
         <p className="text-12 text-muted-foreground">
-          Install NyxID as an MCP server in your client of choice.
+          {t("Install NyxID as an MCP server in your client of choice.")}
         </p>
       </div>
       <Card>
         <CardHeader>
-          <CardTitle>Install to Cursor</CardTitle>
+          <CardTitle>{t("Install to Cursor")}</CardTitle>
           <CardDescription>
-            One-click install via Cursor's deeplink protocol. Cursor will open
-            and prompt you to confirm the MCP server installation.
+            {t(
+              "One-click install via Cursor's deeplink protocol. Cursor will open and prompt you to confirm the MCP server installation.",
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -779,14 +837,16 @@ function McpTab() {
             onClick={() => void openExternal(cursorDeeplink)}
             className="w-full"
           >
-            <ButtonIcon><ExternalLink className="h-4 w-4" /></ButtonIcon>
-            Install to Cursor
+            <ButtonIcon>
+              <ExternalLink className="h-4 w-4" />
+            </ButtonIcon>
+            {t("Install to Cursor")}
           </Button>
           <Separator />
           <div>
             <div className="mb-1 flex items-center gap-2">
               <p className="text-xs font-medium text-muted-foreground">
-                Or copy manually
+                {t("Or copy manually")}
               </p>
               <Badge variant="secondary" className="text-10">
                 .cursor/mcp.json
@@ -796,44 +856,9 @@ function McpTab() {
               <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
                 {cursorConfig}
               </pre>
-              <CopyInlineButton text={cursorConfig} label="Cursor config" />
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Install to Claude Code</CardTitle>
-          <CardDescription>
-            Run this command in your terminal to add NyxID as an MCP server in
-            Claude Code.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="relative">
-            <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-xs break-all font-mono">
-              {claudeCommand}
-            </code>
-            <CopyInlineButton text={claudeCommand} label="CLI command" />
-          </div>
-          <Separator />
-          <div>
-            <div className="mb-1 flex items-center gap-2">
-              <p className="text-xs font-medium text-muted-foreground">
-                Or add manually
-              </p>
-              <Badge variant="secondary" className="text-10">
-                .claude/settings.json or .mcp.json
-              </Badge>
-            </div>
-            <div className="relative">
-              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
-                {claudeConfig}
-              </pre>
               <CopyInlineButton
-                text={claudeConfig}
-                label="Claude Code config"
+                text={cursorConfig}
+                label={t("Cursor config")}
               />
             </div>
           </div>
@@ -842,10 +867,50 @@ function McpTab() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Install to Codex</CardTitle>
+          <CardTitle>{t("Install to Claude Code")}</CardTitle>
           <CardDescription>
-            Run this command in your terminal to add NyxID as an MCP server in
-            Codex CLI.
+            {t(
+              "Run this command in your terminal to add NyxID as an MCP server in Claude Code.",
+            )}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="relative">
+            <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-xs break-all font-mono">
+              {claudeCommand}
+            </code>
+            <CopyInlineButton text={claudeCommand} label={t("CLI command")} />
+          </div>
+          <Separator />
+          <div>
+            <div className="mb-1 flex items-center gap-2">
+              <p className="text-xs font-medium text-muted-foreground">
+                {t("Or add manually")}
+              </p>
+              <Badge variant="secondary" className="text-10">
+                {t("{{firstPath}} or {{secondPath}}", { firstPath: ".claude/settings.json", secondPath: ".mcp.json" })}
+              </Badge>
+            </div>
+            <div className="relative">
+              <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
+                {claudeConfig}
+              </pre>
+              <CopyInlineButton
+                text={claudeConfig}
+                label={t("Claude Code config")}
+              />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{t("Install to Codex")}</CardTitle>
+          <CardDescription>
+            {t(
+              "Run this command in your terminal to add NyxID as an MCP server in Codex CLI.",
+            )}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -853,13 +918,13 @@ function McpTab() {
             <code className="block rounded-lg border border-border bg-muted px-4 py-3 pr-10 text-xs break-all font-mono">
               {codexCommand}
             </code>
-            <CopyInlineButton text={codexCommand} label="CLI command" />
+            <CopyInlineButton text={codexCommand} label={t("CLI command")} />
           </div>
           <Separator />
           <div>
             <div className="mb-1 flex items-center gap-2">
               <p className="text-xs font-medium text-muted-foreground">
-                Or add manually
+                {t("Or add manually")}
               </p>
               <Badge variant="secondary" className="text-10">
                 ~/.codex/config.toml
@@ -869,20 +934,18 @@ function McpTab() {
               <pre className="whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-4 py-3.5 pr-10 min-h-[44px] font-mono text-xs leading-relaxed">
                 {codexConfig}
               </pre>
-              <CopyInlineButton text={codexConfig} label="Codex config" />
+              <CopyInlineButton text={codexConfig} label={t("Codex config")} />
             </div>
           </div>
         </CardContent>
       </Card>
 
       <div className="rounded-xl border border-border/50 bg-muted/30 p-4">
-        <p className="mb-1 text-13 font-medium">How it works</p>
+        <p className="mb-1 text-13 font-medium">{t("How it works")}</p>
         <p className="text-xs text-muted-foreground">
-          When your MCP client connects for the first time, NyxID will open an
-          OAuth flow in your browser to authenticate. Once authenticated, the
-          proxy exposes tools from all your connected services. Tool calls are
-          forwarded to each service's API with your credentials injected
-          automatically.
+          {t(
+            "When your MCP client connects for the first time, NyxID will open an OAuth flow in your browser to authenticate. Once authenticated, the proxy exposes tools from all your connected services. Tool calls are forwarded to each service's API with your credentials injected automatically.",
+          )}
         </p>
       </div>
     </div>
@@ -894,6 +957,7 @@ function McpTab() {
 // ---------------------------------------------------------------------------
 
 function SessionsTab() {
+  const { t } = useAppTranslation();
   const { data: sessions, isLoading } = useQuery({
     queryKey: ["sessions"],
     queryFn: async (): Promise<readonly Session[]> => {
@@ -914,11 +978,13 @@ function SessionsTab() {
     try {
       await revokeMutation.mutateAsync(revokeTarget.id);
       toast.success(
-        revokeTarget.is_current ? "Session revoked. Signing you out…" : "Session revoked",
+        revokeTarget.is_current
+          ? t("Session revoked. Signing you out…")
+          : t("Session revoked"),
       );
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to revoke session",
+        translateErrorMessage(err instanceof ApiError ? err.message : t("Failed to revoke session")),
       );
     } finally {
       setRevokeTarget(null);
@@ -932,125 +998,152 @@ function SessionsTab() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Active Sessions</CardTitle>
-        <Button asChild variant="outline"><Link to="/login/code">Generate terminal login code</Link></Button>
+        <CardTitle>{t("Active Sessions")}</CardTitle>
+        <Button asChild variant="outline">
+          <Link to="/login/code">{t("Generate terminal login code")}</Link>
+        </Button>
         <CardDescription>
-          Manage your active sessions across devices.
+          {t("Manage your active sessions across devices.")}
         </CardDescription>
       </CardHeader>
       <CardContent>
         {!sessions || sessions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <PowerButtonIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-12 font-medium text-foreground">No Active Sessions</p>
+            <p className="text-12 font-medium text-foreground">
+              {t("No Active Sessions")}
+            </p>
             <p className="text-12 text-muted-foreground">
-              Your active sessions across devices will appear here.
+              {t("Your active sessions across devices will appear here.")}
             </p>
           </div>
         ) : (
           <>
-          {/* Mobile card view */}
-          <div className="flex flex-col gap-3 md:hidden">
-            {sessions.map((session) => {
-              const deviceLabel = humanizeUserAgent(session.user_agent);
-              const ipLabel = humanizeIpAddress(session.ip_address);
-              return (
-                <div
-                  key={session.id}
-                  className={`relative rounded-xl border ${session.is_current ? "border-success/50 bg-success/[0.04]" : "border-border/50 bg-card"} p-4`}
-                >
-                  <div className="absolute right-3 top-3">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                      onClick={() => setRevokeTarget(session)}
-                      aria-label={session.is_current ? "Revoke current session and sign out" : `Revoke session on ${deviceLabel}`}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                  <div className="flex items-center gap-2 pr-10">
-                    {getDeviceIcon(session.user_agent)}
-                    <p className="min-w-0 flex-1 truncate text-13 font-bold">
-                      {deviceLabel}
-                    </p>
-                    {session.is_current && (
-                      <Badge variant="success" className="shrink-0">Current</Badge>
-                    )}
-                  </div>
-                  <div className="mt-3 space-y-1">
-                    <p className="text-11 text-muted-foreground">
-                      <span className="font-medium">IP Address:</span> {ipLabel}
-                    </p>
-                    <p className="text-11 text-muted-foreground">
-                      <span className="font-medium">Signed in:</span>{" "}
-                      {formatDate(session.created_at)}
-                    </p>
-                    <p className="text-11 text-muted-foreground">
-                      <span className="font-medium">Expires:</span>{" "}
-                      {formatDate(session.expires_at)}
-                    </p>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Desktop table view */}
-          <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Device</TableHead>
-                  <TableHead>IP Address</TableHead>
-                  <TableHead>Signed in</TableHead>
-                  <TableHead>Expires</TableHead>
-                  <TableHead className="w-[80px] text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sessions.map((session) => {
-                  const deviceLabel = humanizeUserAgent(session.user_agent);
-                  const ipLabel = humanizeIpAddress(session.ip_address);
-                  return (
-                    <TableRow
-                      key={session.id}
-                      className={session.is_current ? "bg-success/[0.04]" : undefined}
-                    >
-                      <TableCell>
-                        <div className="flex items-center gap-2">
-                          {getDeviceIcon(session.user_agent)}
-                          <span className="max-w-[260px] truncate">{deviceLabel}</span>
-                          {session.is_current && (
-                            <Badge variant="success" className="shrink-0">Current</Badge>
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell>{ipLabel}</TableCell>
-                      <TableCell className="text-muted-foreground">
+            {/* Mobile card view */}
+            <div className="flex flex-col gap-3 md:hidden">
+              {sessions.map((session) => {
+                const deviceLabel = humanizeUserAgent(session.user_agent);
+                const ipLabel = humanizeIpAddress(session.ip_address);
+                return (
+                  <div
+                    key={session.id}
+                    className={`relative rounded-xl border ${session.is_current ? "border-success/50 bg-success/[0.04]" : "border-border/50 bg-card"} p-4`}
+                  >
+                    <div className="absolute right-3 top-3">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                        onClick={() => setRevokeTarget(session)}
+                        aria-label={
+                          session.is_current
+                            ? t("Revoke current session and sign out")
+                            : t("Revoke session on {{device}}", {
+                                device: deviceLabel,
+                              })
+                        }
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                    <div className="flex items-center gap-2 pr-10">
+                      {getDeviceIcon(session.user_agent)}
+                      <p className="min-w-0 flex-1 truncate text-13 font-bold">
+                        {deviceLabel}
+                      </p>
+                      {session.is_current && (
+                        <Badge variant="success" className="shrink-0">
+                          {t("Current")}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="mt-3 space-y-1">
+                      <p className="text-11 text-muted-foreground">
+                        <span className="font-medium">{t("IP Address:")}</span>{" "}
+                        {ipLabel}
+                      </p>
+                      <p className="text-11 text-muted-foreground">
+                        <span className="font-medium">{t("Signed in:")}</span>{" "}
                         {formatDate(session.created_at)}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">
+                      </p>
+                      <p className="text-11 text-muted-foreground">
+                        <span className="font-medium">{t("Expires:")}</span>{" "}
                         {formatDate(session.expires_at)}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 text-muted-foreground hover:text-destructive"
-                          onClick={() => setRevokeTarget(session)}
-                          aria-label={session.is_current ? "Revoke current session and sign out" : `Revoke session on ${deviceLabel}`}
-                        >
-                          <Trash2 className="h-4 w-4" />
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </div>
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Desktop table view */}
+            <div className="hidden md:block rounded-xl border border-border/50 bg-card overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>{t("Device")}</TableHead>
+                    <TableHead>{t("IP Address")}</TableHead>
+                    <TableHead>{t("Signed in")}</TableHead>
+                    <TableHead>{t("Expires")}</TableHead>
+                    <TableHead className="w-[80px] text-right">
+                      {t("Actions")}
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {sessions.map((session) => {
+                    const deviceLabel = humanizeUserAgent(session.user_agent);
+                    const ipLabel = humanizeIpAddress(session.ip_address);
+                    return (
+                      <TableRow
+                        key={session.id}
+                        className={
+                          session.is_current ? "bg-success/[0.04]" : undefined
+                        }
+                      >
+                        <TableCell>
+                          <div className="flex items-center gap-2">
+                            {getDeviceIcon(session.user_agent)}
+                            <span className="max-w-[260px] truncate">
+                              {deviceLabel}
+                            </span>
+                            {session.is_current && (
+                              <Badge variant="success" className="shrink-0">
+                                {t("Current")}
+                              </Badge>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell>{ipLabel}</TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {formatDate(session.created_at)}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {formatDate(session.expires_at)}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={() => setRevokeTarget(session)}
+                            aria-label={
+                              session.is_current
+                                ? t("Revoke current session and sign out")
+                                : t("Revoke session on {{device}}", {
+                                    device: deviceLabel,
+                                  })
+                            }
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
           </>
         )}
       </CardContent>
@@ -1064,40 +1157,34 @@ function SessionsTab() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {revokeTarget?.is_current ? "Sign out of this session?" : "Revoke session?"}
+              {revokeTarget?.is_current
+                ? t("Sign out of this session?")
+                : t("Revoke session?")}
             </DialogTitle>
             <DialogDescription>
-              {revokeTarget?.is_current ? (
-                <>
-                  This is the session you&apos;re currently using on{" "}
-                  <span className="font-medium">
-                    {humanizeUserAgent(revokeTarget?.user_agent)}
-                  </span>
-                  . Revoking it will sign you out immediately and you&apos;ll
-                  need to sign in again.
-                </>
-              ) : (
-                <>
-                  This will immediately invalidate the session on{" "}
-                  <span className="font-medium">
-                    {humanizeUserAgent(revokeTarget?.user_agent)}
-                  </span>
-                  . The person using it will be signed out next time they
-                  load a page.
-                </>
-              )}
+              {revokeTarget?.is_current
+                ? t(
+                    "This is the session you're currently using on {{device}}. Revoking it will sign you out immediately and you'll need to sign in again.",
+                    { device: humanizeUserAgent(revokeTarget?.user_agent) },
+                  )
+                : t(
+                    "This will immediately invalidate the session on {{device}}. The person using it will be signed out next time they load a page.",
+                    { device: humanizeUserAgent(revokeTarget?.user_agent) },
+                  )}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button variant="outline" onClick={() => setRevokeTarget(null)}>
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button
               variant="destructive"
               onClick={() => void handleRevoke()}
               isLoading={revokeMutation.isPending}
             >
-              {revokeTarget?.is_current ? "Revoke and sign out" : "Revoke"}
+              {revokeTarget?.is_current
+                ? t("Revoke and sign out")
+                : t("Revoke")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1107,6 +1194,7 @@ function SessionsTab() {
 }
 
 function PrivacyTab() {
+  const { t } = useAppTranslation();
   const consentEnabled = useConsentStore((s) => s.enabled);
   const consentAsked = useConsentStore((s) => s.asked);
   const setConsent = useConsentStore((s) => s.setConsent);
@@ -1125,20 +1213,19 @@ function PrivacyTab() {
   }
 
   const statusLabel = !consentAsked
-    ? "Not yet answered"
+    ? t("Not yet answered")
     : consentEnabled
-      ? "Enabled"
-      : "Disabled";
+      ? t("Enabled")
+      : t("Disabled");
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Anonymous Usage Telemetry</CardTitle>
+        <CardTitle>{t("Anonymous Usage Telemetry")}</CardTitle>
         <CardDescription>
-          Help us improve NyxID by sharing anonymous usage events. We never
-          capture credentials, form content, or the contents of your
-          requests. This choice applies to this browser only — other
-          devices and the CLI manage their own telemetry settings.
+          {t(
+            "Help us improve NyxID by sharing anonymous usage events. We never capture credentials, form content, or the contents of your requests. This choice applies to this browser only — other devices and the CLI manage their own telemetry settings.",
+          )}
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -1146,20 +1233,21 @@ function PrivacyTab() {
           <Switch
             checked={consentEnabled}
             onCheckedChange={handleToggle}
-            aria-label="Toggle anonymous usage telemetry"
+            aria-label={t("Toggle anonymous usage telemetry")}
           />
           <span className="text-12">{statusLabel}</span>
         </div>
         <Separator />
         <div className="space-y-2 text-12 text-muted-foreground">
           <p>
-            For the full disclosure of what we collect, how it's stored, and
-            retention windows, see the{" "}
+            {t(
+              "For the full disclosure of what we collect, how it's stored, and retention windows, see the",
+            )}{" "}
             <a
               href="/privacy"
               className="underline underline-offset-2 hover:text-foreground"
             >
-              privacy policy
+              {t("privacy policy")}
             </a>
             .
           </p>

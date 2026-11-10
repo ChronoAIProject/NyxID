@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Check, ChevronsUpDown } from "lucide-react";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -47,6 +48,7 @@ export function PoolConnectionPicker({
   isFetchingNextPage,
   onLoadMore,
 }: Props) {
+  const { t } = useUiTranslation();
   const [open, setOpen] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const id = useId();
@@ -141,12 +143,12 @@ export function PoolConnectionPicker({
             type="button"
             variant="outline"
             className="w-full justify-between gap-2 text-left"
-            aria-label="Choose connections"
+            aria-label={t("Choose connections")}
           >
             <span className="min-w-0 truncate">
               {selectedIds.length
-                ? `${selectedIds.length} ${selectedIds.length === 1 ? "connection" : "connections"} selected`
-                : "Search and select connections"}
+                ? t("{{length}} {{value}} selected", { length: selectedIds.length, value: selectedIds.length === 1 ? t("connection") : t("connections") })
+                : t("Search and select connections")}
             </span>
             <ChevronsUpDown className="size-4 shrink-0" aria-hidden="true" />
           </Button>
@@ -154,7 +156,7 @@ export function PoolConnectionPicker({
         <PopoverContent
           align="start"
           collisionPadding={12}
-          aria-label="Choose pool connections"
+          aria-label={t("Choose pool connections")}
           className="flex max-h-[min(28rem,calc(50dvh-2rem))] w-[var(--radix-popover-trigger-width)] max-w-[calc(100vw-1.5rem)] flex-col gap-2 p-2 [@media(max-height:500px)]:gap-1 [@media(max-height:500px)]:p-1.5 data-[state=closed]:hidden data-[state=closed]:animate-none"
           onOpenAutoFocus={(event) => {
             event.preventDefault();
@@ -169,7 +171,7 @@ export function PoolConnectionPicker({
           <Input
             ref={input}
             role="combobox"
-            aria-label="Search candidate services"
+            aria-label={t("Search candidate services")}
             aria-expanded={open}
             aria-controls={listId}
             aria-autocomplete="list"
@@ -178,7 +180,7 @@ export function PoolConnectionPicker({
               activeIndex >= 0 ? `${id}-option-${activeIndex}` : undefined
             }
             autoComplete="off"
-            placeholder="Search your connections"
+            placeholder={t("Search your connections")}
             className="shrink-0 focus-visible:border-primary focus-visible:ring-1 focus-visible:ring-primary/40"
             value={search}
             onChange={(event) => {
@@ -202,9 +204,9 @@ export function PoolConnectionPicker({
           >
             {isCheckingCompatibility
               ? isError
-                ? "Compatibility check failed."
-                : "Checking compatibility…"
-              : "Select multiple connections. Select again to remove."}
+                ? t("Compatibility check failed.")
+                : t("Checking compatibility…")
+              : t("Select multiple connections. Select again to remove.")}
           </p>
           <div className="min-h-0 overflow-y-auto overscroll-contain">
             {isError && (
@@ -217,14 +219,14 @@ export function PoolConnectionPicker({
                 role="status"
                 className="p-2 text-12 text-muted-foreground"
               >
-                {isLoading ? "Loading connections…" : "Searching connections…"}
+                {isLoading ? t("Loading connections…") : t("Searching connections…")}
               </p>
             )}
             <div
               ref={list}
               id={listId}
               role="listbox"
-              aria-label="Connections"
+              aria-label={t("Connections")}
               aria-multiselectable="true"
               aria-busy={busy || isCheckingCompatibility}
             >
@@ -232,7 +234,7 @@ export function PoolConnectionPicker({
                 <div
                   key={group.key}
                   role="group"
-                  aria-label={`${group.name}${group.slug ? ` (${group.slug})` : ""} (${group.rows.length} loaded)`}
+                  aria-label={t("{{name}}{{value}} ({{length}} loaded)", { name: group.name, value: group.slug ? ` (${group.slug})` : "", length: group.rows.length })}
                   className="border-b border-border/40 last:border-b-0"
                 >
                   <div className="flex min-w-0 items-center gap-2 px-2 pb-1 pt-2 text-11 font-semibold text-muted-foreground">
@@ -246,8 +248,7 @@ export function PoolConnectionPicker({
                       </span>
                     )}
                     <span className="shrink-0 font-normal">
-                      {group.rows.length} loaded
-                    </span>
+                      {group.rows.length}{t(" loaded")}</span>
                   </div>
                   {group.rows.map((row) => {
                     const index = displayIndex.get(row.user_service_id) ?? 0;
@@ -285,7 +286,7 @@ export function PoolConnectionPicker({
                               {row.slug} ·{" "}
                               {bindingLabel(row.credential_binding)}
                               {row.protocol
-                                ? ` · ${protocolLabel(row.protocol)}`
+                                ? t(" · {{value}}", { value: protocolLabel(row.protocol) })
                                 : ""}
                             </p>
                             {row.reason && (
@@ -305,8 +306,8 @@ export function PoolConnectionPicker({
                 className="p-2 text-12 text-muted-foreground"
               >
                 {search
-                  ? "No connections match this search."
-                  : "No connections yet. Connect a service in the Services tab first, then return here."}
+                  ? t("No connections match this search.")
+                  : t("No connections yet. Connect a service in the Services tab first, then return here.")}
               </p>
             )}
             {hasNextPage && (
@@ -323,24 +324,16 @@ export function PoolConnectionPicker({
                     document.activeElement === event.currentTarget;
                   void onLoadMore();
                 }}
-              >
-                Load more connections
-              </Button>
+              >{t("Load more connections")}</Button>
             )}
           </div>
           <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border px-1 pt-2">
             <p role="status" className="text-11 text-muted-foreground">
-              {selectedIds.length} of 50 selected
-            </p>
-            <Button type="button" size="sm" onClick={() => setOpen(false)}>
-              Done
-            </Button>
+              {selectedIds.length}{t(" of 50 selected")}</p>
+            <Button type="button" size="sm" onClick={() => setOpen(false)}>{t("Done")}</Button>
           </div>
           {selectedIds.length >= 50 && (
-            <p className="text-11 text-muted-foreground">
-              A pool supports up to 50 connections. Remove one to choose
-              another.
-            </p>
+            <p className="text-11 text-muted-foreground">{t("A pool supports up to 50 connections. Remove one to choose another.")}</p>
           )}
         </PopoverContent>
       </Popover>

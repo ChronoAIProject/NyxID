@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Check, Copy } from "lucide-react";
@@ -47,6 +50,7 @@ interface InviteDialogProps {
 }
 
 export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
+  const { t } = useUiTranslation();
   const createMutation = useCreateInvite();
   const [createdInvite, setCreatedInvite] = useState<InviteResponse | null>(
     null,
@@ -77,12 +81,12 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
         body: { role: values.role, ttl_hours: Number(values.ttl_hours) },
       });
       setCreatedInvite(invite);
-      toast.success("Invite created");
+      toast.success(translateUi("Invite created"));
     } catch (error) {
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
       } else {
-        toast.error("Failed to create invite");
+        toast.error(translateUi("Failed to create invite"));
       }
     }
   }
@@ -92,10 +96,10 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
     try {
       await copyToClipboard(buildOrgInviteJoinUrl(createdInvite.nonce));
       setCopied(true);
-      toast.success("Invite link copied");
+      toast.success(translateUi("Invite link copied"));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error("Failed to copy to clipboard");
+      toast.error(translateUi("Failed to copy to clipboard"));
     }
   }
 
@@ -104,21 +108,19 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {createdInvite ? "Invite created" : "Invite a member"}
+            {createdInvite ? t("Invite created") : t("Invite a member")}
           </DialogTitle>
           <DialogDescription>
             {createdInvite
-              ? "Share the link below with the recipient. They join by clicking it while signed in to NyxID."
-              : "Generate a one-time invite. The recipient must be a NyxID user and will accept the invite while signed in."}
+              ? t("Share the link below with the recipient. They join by clicking it while signed in to NyxID.")
+              : t("Generate a one-time invite. The recipient must be a NyxID user and will accept the invite while signed in.")}
           </DialogDescription>
         </DialogHeader>
 
         {createdInvite ? (
           <div className="space-y-4">
             <div className="rounded-lg border border-border bg-muted/30 p-4">
-              <p className="mb-2 text-xs uppercase tracking-wider text-text-tertiary">
-                Invite link
-              </p>
+              <p className="mb-2 text-xs uppercase tracking-wider text-text-tertiary">{t("Invite link")}</p>
               <div className="flex items-center justify-between gap-2">
                 <span className="break-all text-12 text-foreground">
                   {buildOrgInviteJoinUrl(createdInvite.nonce)}
@@ -127,7 +129,7 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
                   variant="ghost"
                   size="icon"
                   onClick={() => void handleCopy()}
-                  aria-label="Copy invite link"
+                  aria-label={t("Copy invite link")}
                   className="h-8 w-8 shrink-0"
                 >
                   {copied ? (
@@ -138,11 +140,10 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
                 </Button>
               </div>
             </div>
-            <p className="text-xs text-muted-foreground">
-              Expires {new Date(createdInvite.expires_at).toLocaleString()}
+            <p className="text-xs text-muted-foreground">{t("Expires ")}{new Date(createdInvite.expires_at).toLocaleString(getFormattingLocale())}
             </p>
             <DialogFooter>
-              <Button variant="primary" onClick={() => handleOpenChange(false)}>Done</Button>
+              <Button variant="primary" onClick={() => handleOpenChange(false)}>{t("Done")}</Button>
             </DialogFooter>
           </div>
         ) : (
@@ -156,7 +157,7 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
                 name="role"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Role</FormLabel>
+                    <FormLabel>{t("Role")}</FormLabel>
                     <FormControl>
                       <Select
                         value={field.value}
@@ -186,7 +187,7 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
                 name="ttl_hours"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Expires in (hours)</FormLabel>
+                    <FormLabel>{t("Expires in (hours)")}</FormLabel>
                     <FormControl>
                       <Input
                         type="number"
@@ -202,7 +203,7 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
 
               {form.formState.errors.root && (
                 <p className="text-12 text-destructive">
-                  {form.formState.errors.root.message}
+                  {translateUi(form.formState.errors.root.message ?? "")}
                 </p>
               )}
 
@@ -212,12 +213,8 @@ export function InviteDialog({ orgId, open, onOpenChange }: InviteDialogProps) {
                   variant="outline"
                   onClick={() => handleOpenChange(false)}
                   disabled={createMutation.isPending}
-                >
-                  Cancel
-                </Button>
-                <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!form.formState.isValid || createMutation.isPending}>
-                  Create Invite
-                </Button>
+                >{t("Cancel")}</Button>
+                <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!form.formState.isValid || createMutation.isPending}>{t("Create Invite")}</Button>
               </DialogFooter>
             </form>
           </Form>

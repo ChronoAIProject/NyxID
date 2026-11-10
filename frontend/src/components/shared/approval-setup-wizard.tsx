@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Link } from "@tanstack/react-router";
 import { CheckCircle2, Info } from "lucide-react";
 import {
@@ -25,6 +26,7 @@ export function ApprovalSetupWizard({
   readonly approvalEnabled: boolean;
   readonly approvalSuspended: boolean;
 }) {
+  const { t } = useUiTranslation();
   const steps: readonly SetupStep[] = [
     {
       label: "Connect a notification channel",
@@ -53,12 +55,8 @@ export function ApprovalSetupWizard({
       <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
         <Info className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
         <div className="space-y-0.5">
-          <p className="text-12 font-medium">Approval protection is suspended</p>
-          <p className="text-xs text-muted-foreground">
-            Your approval preference is still on, but no enabled notification
-            channel is available. Connect or re-enable Telegram or push
-            notifications and protection will resume automatically.
-          </p>
+          <p className="text-12 font-medium">{t("Approval protection is suspended")}</p>
+          <p className="text-xs text-muted-foreground">{t("Your approval preference is still on, but no enabled notification channel is available. Connect or re-enable Telegram or push notifications and protection will resume automatically.")}</p>
         </div>
       </div>
     );
@@ -69,22 +67,12 @@ export function ApprovalSetupWizard({
       <div className="flex items-start gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4">
         <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-500" />
         <div className="space-y-0.5">
-          <p className="text-12 font-medium">
-            Approval protection is active
-          </p>
-          <p className="text-xs text-muted-foreground">
-            Programmatic proxy, LLM gateway, and SSH requests require your
-            approval by default. Auto-connected services remain available
-            unless you add an explicit per-service policy. You can approve via
-            Telegram, the mobile app, or the{" "}
+          <p className="text-12 font-medium">{t("Approval protection is active")}</p>
+          <p className="text-xs text-muted-foreground">{t("Programmatic proxy, LLM gateway, and SSH requests require your approval by default. Auto-connected services remain available unless you add an explicit per-service policy. You can approve via Telegram, the mobile app, or the")}{" "}
             <Link
               to="/approvals/history"
               className="underline underline-offset-2 hover:text-foreground"
-            >
-              Approval History
-            </Link>{" "}
-            page.
-          </p>
+            >{t("Approval History")}</Link>{" "}{t("page.")}</p>
         </div>
       </div>
     );
@@ -96,21 +84,12 @@ export function ApprovalSetupWizard({
         <CardTitle className="flex items-center gap-2 text-base">
           <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-hairline bg-overlay">
             <Info className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-          </span>
-          Set up approval protection
-        </CardTitle>
-        <CardDescription>
-          Approval protection requires a notification channel so you can
-          approve or reject requests in real time. Follow these steps to get
-          started. You can always approve requests from the{" "}
+          </span>{t("Set up approval protection")}</CardTitle>
+        <CardDescription>{t("Approval protection requires a notification channel so you can approve or reject requests in real time. Follow these steps to get started. You can always approve requests from the")}{" "}
           <Link
             to="/approvals/history"
             className="underline underline-offset-2 hover:text-foreground"
-          >
-            Approval History
-          </Link>{" "}
-          page as a fallback.
-        </CardDescription>
+          >{t("Approval History")}</Link>{" "}{t("page as a fallback.")}</CardDescription>
       </CardHeader>
       <CardContent>
         <ol className="space-y-4">
@@ -120,8 +99,7 @@ export function ApprovalSetupWizard({
                 {String(idx + 1)}
               </span>
               <div className="space-y-0.5">
-                <p className="text-12 font-medium">
-                  Step {String(idx + 1)}: {step.label}
+                <p className="text-12 font-medium">{t("Step ")}{String(idx + 1)}: {step.label}
                 </p>
                 <p className="text-xs text-muted-foreground">
                   {step.description}

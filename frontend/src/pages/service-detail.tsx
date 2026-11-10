@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useAuthStore } from "@/stores/auth-store";
 import { ToolManagerEditor } from "@/components/services/tool-manager-editor";
 import { canWriteTool } from "@/types/api";
@@ -112,13 +115,14 @@ import type { AnonymousEndpointRule } from "@/types/api";
 import { toast } from "sonner";
 
 const PROPAGATION_MODE_LABELS: Readonly<Record<string, string>> = {
-  none: "None",
-  headers: "Headers (X-NyxID-*)",
-  jwt: "Signed JWT",
-  both: "Headers + JWT",
+  get none() { return translateUi("None"); },
+  get headers() { return translateUi("Headers (X-NyxID-*)"); },
+  get jwt() { return translateUi("Signed JWT"); },
+  get both() { return translateUi("Headers + JWT"); },
 };
 
 export function ServiceDetailPage() {
+  const { t } = useUiTranslation();
   const user = useAuthStore((state) => state.user);
   const { serviceId } = useParams({ strict: false }) as { serviceId: string };
   const navigate = useNavigate();
@@ -137,10 +141,10 @@ export function ServiceDetailPage() {
     if (!service) return;
     try {
       await deleteMutation.mutateAsync(service.id);
-      toast.success("Service deleted successfully");
+      toast.success(translateUi("Service deleted successfully"));
       void navigate({ to: "/services" });
     } catch {
-      toast.error("Failed to delete service");
+      toast.error(translateUi("Failed to delete service"));
     }
   }
 
@@ -148,15 +152,15 @@ export function ServiceDetailPage() {
     if (!service?.ssh_config) return;
     const principal = service.ssh_config.allowed_principals[0];
     if (!principal) {
-      toast.error("No SSH principal is configured for this service");
+      toast.error(translateUi("No SSH principal is configured for this service"));
       return;
     }
     try {
       await testSshMutation.mutateAsync({ serviceId: service.id, principal });
-      toast.success("SSH connection test completed");
+      toast.success(translateUi("SSH connection test completed"));
     } catch (err) {
       const message = err instanceof Error ? err.message : "SSH test failed";
-      toast.error(message);
+      toast.error(translateErrorMessage(message));
     }
   }
 
@@ -173,12 +177,12 @@ export function ServiceDetailPage() {
   if (error || !service) {
     return (
       <div className="space-y-8">
-        <PageHeader title="Service Not Found" />
+        <PageHeader title={t("Service Not Found")} />
         <ErrorBanner
           message={
             error instanceof ApiError
               ? error.message
-              : "The service you are looking for does not exist or has been deleted."
+              : t("The service you are looking for does not exist or has been deleted.")
           }
           onRetry={refetch}
         />
@@ -246,9 +250,7 @@ export function ServiceDetailPage() {
               >
                 <ButtonIcon>
                   <Terminal className="h-3 w-3" />
-                </ButtonIcon>
-                Terminal
-              </Button>
+                </ButtonIcon>{t("Terminal")}</Button>
             )}
             <Button
               variant="outline"
@@ -262,9 +264,7 @@ export function ServiceDetailPage() {
             >
               <ButtonIcon>
                 <Pencil className="h-3 w-3" />
-              </ButtonIcon>
-              Edit
-            </Button>
+              </ButtonIcon>{t("Edit")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDelete()}
@@ -272,24 +272,22 @@ export function ServiceDetailPage() {
             >
               <ButtonIcon variant="destructive">
                 <Trash2 className="h-3 w-3 text-destructive" />
-              </ButtonIcon>
-              Delete
-            </Button>
+              </ButtonIcon>{t("Delete")}</Button>
           </>
         }
       />
 
-      <DetailSection title="General">
-        <DetailRow label="Slug" value={service.slug} />
+      <DetailSection title={t("General")}>
+        <DetailRow label={t("Slug")} value={service.slug} />
         <DetailRow
-          label="Service Type"
+          label={t("Service Type")}
           value={
             SERVICE_TYPE_LABELS[service.service_type] ?? service.service_type
           }
           badge
         />
         <DetailRow
-          label="Category"
+          label={t("Category")}
           value={
             SERVICE_CATEGORY_LABELS[service.service_category] ??
             service.service_category
@@ -297,7 +295,7 @@ export function ServiceDetailPage() {
           badge
         />
         <DetailRow
-          label="Visibility"
+          label={t("Visibility")}
           value={
             service.visibility === "private"
               ? "Private (only visible to you)"
@@ -310,9 +308,7 @@ export function ServiceDetailPage() {
         />
         {service.developer_app_ids && service.developer_app_ids.length > 0 && (
           <div className="space-y-1 py-2">
-            <p className="text-12 text-muted-foreground">
-              Developer App Scoping
-            </p>
+            <p className="text-12 text-muted-foreground">{t("Developer App Scoping")}</p>
             <div className="flex flex-wrap gap-1.5">
               {service.developer_app_ids.map((appId) => {
                 const app = appsData?.clients?.find((c) => c.id === appId);
@@ -323,30 +319,27 @@ export function ServiceDetailPage() {
                 );
               })}
             </div>
-            <p className="text-xs text-muted-foreground">
-              Users who consent to these apps will have this service
-              auto-provisioned.
-            </p>
+            <p className="text-xs text-muted-foreground">{t("Users who consent to these apps will have this service auto-provisioned.")}</p>
           </div>
         )}
         {!isSshService && (
           <>
-            <DetailRow label="Base URL" value={service.base_url} copyable />
+            <DetailRow label={t("Base URL")} value={service.base_url} copyable />
             <DetailRow
-              label="Auth Type"
+              label={t("Auth Type")}
               value={getAuthTypeLabel(service)}
               badge
             />
           </>
         )}
         <DetailRow
-          label="Status"
+          label={t("Status")}
           value={service.is_active ? "Active" : "Inactive"}
           badge
           badgeVariant={service.is_active ? "success" : "secondary"}
         />
-        <DetailRow label="Created" value={formatDate(service.created_at)} />
-        <DetailRow label="Updated" value={formatDate(service.updated_at)} />
+        <DetailRow label={t("Created")} value={formatDate(service.created_at)} />
+        <DetailRow label={t("Updated")} value={formatDate(service.updated_at)} />
       </DetailSection>
 
       {/*
@@ -376,22 +369,22 @@ export function ServiceDetailPage() {
       {isSshService ? (
         <>
           <Separator />
-          <DetailSection title="SSH Configuration">
+          <DetailSection title={t("SSH Configuration")}>
             {service.ssh_config ? (
               <>
                 <DetailRow
-                  label="Target"
+                  label={t("Target")}
                   value={`${service.ssh_config.host}:${String(service.ssh_config.port)}`}
                   copyable
                 />
                 <DetailRow
-                  label="SSH Auth Mode"
+                  label={t("SSH Auth Mode")}
                   value={SSH_AUTH_MODE_LABELS[sshAuthMode] ?? "Proxy Only"}
                   badge
                   badgeVariant={getSshAuthModeBadgeVariant(sshAuthMode)}
                 />
                 <DetailRow
-                  label="Certificate Auth"
+                  label={t("Certificate Auth")}
                   value={
                     service.ssh_config.certificate_auth_enabled
                       ? "Enabled"
@@ -407,19 +400,19 @@ export function ServiceDetailPage() {
                 {service.ssh_config.certificate_auth_enabled && (
                   <>
                     <DetailRow
-                      label="Certificate TTL"
+                      label={t("Certificate TTL")}
                       value={`${String(service.ssh_config.certificate_ttl_minutes)} minutes`}
                     />
                   </>
                 )}
                 <DetailRow
-                  label="Allowed Principals"
+                  label={t("Allowed Principals")}
                   value={service.ssh_config.allowed_principals.join(", ")}
                   copyable
                 />
                 {service.ssh_config.ca_public_key && (
                   <CopyableField
-                    label="SSH CA Public Key"
+                    label={t("SSH CA Public Key")}
                     value={service.ssh_config.ca_public_key}
                   />
                 )}
@@ -431,23 +424,19 @@ export function ServiceDetailPage() {
                       size="sm"
                       onClick={() => void handleTestSshConnection()}
                       isLoading={testSshMutation.isPending}
-                    >
-                      Test Connection
-                    </Button>
+                    >{t("Test Connection")}</Button>
                   </div>
                 )}
               </>
             ) : (
-              <p className="text-12 text-muted-foreground">
-                SSH configuration is missing for this service.
-              </p>
+              <p className="text-12 text-muted-foreground">{t("SSH configuration is missing for this service.")}</p>
             )}
           </DetailSection>
 
           {service.ssh_config && (
             <>
               <Separator />
-              <DetailSection title="Connection Instructions">
+              <DetailSection title={t("Connection Instructions")}>
                 <SshServiceInstructions
                   serviceId={service.id}
                   serviceSlug={service.slug}
@@ -462,7 +451,7 @@ export function ServiceDetailPage() {
           {oidc && (
             <>
               <Separator />
-              <DetailSection title="OIDC Configuration">
+              <DetailSection title={t("OIDC Configuration")}>
                 <OidcCredentialsSection
                   serviceId={service.id}
                   oauthClientId={service.oauth_client_id}
@@ -474,7 +463,7 @@ export function ServiceDetailPage() {
           {isConnectable(service) && !oidc && (
             <>
               <Separator />
-              <DetailSection title="API Endpoints">
+              <DetailSection title={t("API Endpoints")}>
                 <EndpointList
                   service={service}
                   serviceId={service.id}
@@ -488,7 +477,7 @@ export function ServiceDetailPage() {
               </DetailSection>
 
               <Separator />
-              <DetailSection title="MCP Connection">
+              <DetailSection title={t("MCP Connection")}>
                 <McpConnectionInfo />
               </DetailSection>
             </>
@@ -498,9 +487,9 @@ export function ServiceDetailPage() {
             service.identity_propagation_mode !== "none" && (
               <>
                 <Separator />
-                <DetailSection title="Identity Propagation">
+                <DetailSection title={t("Identity Propagation")}>
                   <DetailRow
-                    label="Mode"
+                    label={t("Mode")}
                     value={
                       PROPAGATION_MODE_LABELS[
                         service.identity_propagation_mode
@@ -510,7 +499,7 @@ export function ServiceDetailPage() {
                   />
                   {service.identity_include_user_id && (
                     <DetailRow
-                      label="User ID"
+                      label={t("User ID")}
                       value="Included"
                       badge
                       badgeVariant="success"
@@ -518,7 +507,7 @@ export function ServiceDetailPage() {
                   )}
                   {service.identity_include_email && (
                     <DetailRow
-                      label="Email"
+                      label={t("Email")}
                       value="Included"
                       badge
                       badgeVariant="success"
@@ -526,7 +515,7 @@ export function ServiceDetailPage() {
                   )}
                   {service.identity_include_name && (
                     <DetailRow
-                      label="Display Name"
+                      label={t("Display Name")}
                       value="Included"
                       badge
                       badgeVariant="success"
@@ -534,7 +523,7 @@ export function ServiceDetailPage() {
                   )}
                   {service.identity_jwt_audience && (
                     <DetailRow
-                      label="JWT Audience"
+                      label={t("JWT Audience")}
                       value={service.identity_jwt_audience}
                     />
                   )}
@@ -545,9 +534,9 @@ export function ServiceDetailPage() {
           {service.forward_access_token && (
             <>
               <Separator />
-              <DetailSection title="Forward Access Token">
+              <DetailSection title={t("Forward Access Token")}>
                 <DetailRow
-                  label="Status"
+                  label={t("Status")}
                   value="Enabled"
                   badge
                   badgeVariant="success"
@@ -559,15 +548,15 @@ export function ServiceDetailPage() {
           {service.inject_delegation_token && (
             <>
               <Separator />
-              <DetailSection title="Delegation Token Injection">
+              <DetailSection title={t("Delegation Token Injection")}>
                 <DetailRow
-                  label="Status"
+                  label={t("Status")}
                   value="Enabled"
                   badge
                   badgeVariant="success"
                 />
                 <DetailRow
-                  label="Token Scope"
+                  label={t("Token Scope")}
                   value={service.delegation_token_scope || "llm:proxy"}
                 />
               </DetailSection>
@@ -587,63 +576,61 @@ export function ServiceDetailPage() {
             service.capabilities) && (
             <>
               <Separator />
-              <DetailSection title="Service Metadata">
+              <DetailSection title={t("Service Metadata")}>
                 {service.homepage_url && (
                   <DetailRow
-                    label="Homepage"
+                    label={t("Homepage")}
                     value={service.homepage_url}
                     copyable
                   />
                 )}
                 {service.repository_url && (
                   <DetailRow
-                    label="Repository"
+                    label={t("Repository")}
                     value={service.repository_url}
                     copyable
                   />
                 )}
                 {service.issues_url && (
                   <DetailRow
-                    label="Issues"
+                    label={t("Issues")}
                     value={service.issues_url}
                     copyable
                   />
                 )}
                 {service.examples_url && (
                   <DetailRow
-                    label="Skills & Examples"
+                    label={t("Skills & Examples")}
                     value={service.examples_url}
                     copyable
                   />
                 )}
                 {service.auth_notes && (
-                  <DetailRow label="Auth Notes" value={service.auth_notes} />
+                  <DetailRow label={t("Auth Notes")} value={service.auth_notes} />
                 )}
                 {service.known_limitations && (
                   <DetailRow
-                    label="Known Limitations"
+                    label={t("Known Limitations")}
                     value={service.known_limitations}
                   />
                 )}
                 {service.required_permissions &&
                   service.required_permissions.length > 0 && (
                     <DetailRow
-                      label="Required Permissions"
+                      label={t("Required Permissions")}
                       value={service.required_permissions.join(", ")}
                     />
                   )}
                 {service.recommended_skills &&
                   service.recommended_skills.length > 0 && (
                     <DetailRow
-                      label="Recommended Skills"
+                      label={t("Recommended Skills")}
                       value={service.recommended_skills.join(", ")}
                     />
                   )}
                 {service.capabilities && (
                   <div className="space-y-1 py-2">
-                    <p className="text-12 text-muted-foreground">
-                      Capabilities
-                    </p>
+                    <p className="text-12 text-muted-foreground">{t("Capabilities")}</p>
                     <div className="flex flex-wrap gap-1.5">
                       {Object.entries(service.capabilities)
                         .filter(([, v]) => v === true)
@@ -655,9 +642,7 @@ export function ServiceDetailPage() {
                       {Object.entries(service.capabilities).every(
                         ([, v]) => v !== true,
                       ) && (
-                        <span className="text-xs text-muted-foreground">
-                          None configured
-                        </span>
+                        <span className="text-xs text-muted-foreground">{t("None configured")}</span>
                       )}
                     </div>
                   </div>
@@ -667,15 +652,11 @@ export function ServiceDetailPage() {
           )}
 
           <Separator />
-          <DetailSection title="Default request headers">
+          <DetailSection title={t("Default request headers")}>
             {service.default_request_headers &&
             service.default_request_headers.length > 0 ? (
               <div className="space-y-2 p-4">
-                <p className="text-xs text-muted-foreground">
-                  Injected on every proxied request. Non-overridable entries
-                  replace caller-supplied values; overridable ones yield to
-                  them.
-                </p>
+                <p className="text-xs text-muted-foreground">{t("Injected on every proxied request. Non-overridable entries replace caller-supplied values; overridable ones yield to them.")}</p>
                 <DefaultHeadersEditor
                   value={service.default_request_headers.map((h) => ({ ...h }))}
                   onChange={() => {
@@ -685,9 +666,7 @@ export function ServiceDetailPage() {
                 />
               </div>
             ) : (
-              <div className="m-4 rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">
-                No default headers configured for this service.
-              </div>
+              <div className="m-4 rounded-lg bg-overlay px-4 py-3 text-12 text-muted-foreground">{t("No default headers configured for this service.")}</div>
             )}
           </DetailSection>
 
@@ -695,7 +674,7 @@ export function ServiceDetailPage() {
           <AnonymousEndpointsSection key={service.id} serviceId={service.id} />
 
           <Separator />
-          <DetailSection title="Provider Requirements">
+          <DetailSection title={t("Provider Requirements")}>
             <ServiceRequirementsView
               serviceId={service.id}
               userTokenProviderIds={
@@ -757,6 +736,7 @@ function ServiceCredentialPushSection({
 }: {
   readonly service: import("@/types/api").DownstreamService;
 }) {
+  const { t } = useUiTranslation();
   const nodeId = service.node_id ?? "";
   const pushCredentialMutation = usePushNodeCredential(nodeId);
   const initialMethod = injectionMethodForService(service);
@@ -781,7 +761,7 @@ function ServiceCredentialPushSection({
     if (!nodeId) return;
     try {
       const created = await pushCredentialMutation.mutateAsync(data);
-      toast.success("Credential push created");
+      toast.success(translateUi("Credential push created"));
       window.location.assign(
         await buildStandaloneCredentialAcceptUrl(
           nodeId,
@@ -791,13 +771,13 @@ function ServiceCredentialPushSection({
       );
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to push credential",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to push credential"),
       );
     }
   }
 
   return (
-    <DetailSection title="Push credential">
+    <DetailSection title={t("Push credential")}>
       <Form {...form}>
         <form
           className="space-y-4 p-5"
@@ -805,17 +785,14 @@ function ServiceCredentialPushSection({
             void form.handleSubmit(handlePushCredential)(event)
           }
         >
-          <p className="text-12 text-muted-foreground">
-            Create pending metadata for the node, then encrypt the secret in the
-            browser on the accept page.
-          </p>
+          <p className="text-12 text-muted-foreground">{t("Create pending metadata for the node, then encrypt the secret in the browser on the accept page.")}</p>
           <div className="grid gap-4 md:grid-cols-2">
             <FormField
               control={form.control}
               name="injection_method"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Injection method</FormLabel>
+                  <FormLabel>{t("Injection method")}</FormLabel>
                   <Select
                     value={field.value}
                     onValueChange={(value) => {
@@ -845,12 +822,10 @@ function ServiceCredentialPushSection({
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      <SelectItem value="header">Header</SelectItem>
-                      <SelectItem value="query-param">Query param</SelectItem>
-                      <SelectItem value="path-prefix">Path prefix</SelectItem>
-                      <SelectItem value="ifttt-webhook">
-                        IFTTT Webhooks
-                      </SelectItem>
+                      <SelectItem value="header">{t("Header")}</SelectItem>
+                      <SelectItem value="query-param">{t("Query param")}</SelectItem>
+                      <SelectItem value="path-prefix">{t("Path prefix")}</SelectItem>
+                      <SelectItem value="ifttt-webhook">{t("IFTTT Webhooks")}</SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -862,7 +837,7 @@ function ServiceCredentialPushSection({
               name="field_name"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Field name</FormLabel>
+                  <FormLabel>{t("Field name")}</FormLabel>
                   <FormControl>
                     <Input
                       readOnly={
@@ -880,7 +855,7 @@ function ServiceCredentialPushSection({
               name="target_url"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Target URL</FormLabel>
+                  <FormLabel>{t("Target URL")}</FormLabel>
                   <FormControl>
                     <Input {...field} value={field.value ?? ""} />
                   </FormControl>
@@ -893,7 +868,7 @@ function ServiceCredentialPushSection({
               name="label"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Label</FormLabel>
+                  <FormLabel>{t("Label")}</FormLabel>
                   <FormControl>
                     <Input {...field} value={field.value ?? ""} />
                   </FormControl>
@@ -911,9 +886,7 @@ function ServiceCredentialPushSection({
             >
               <ButtonIcon variant="primary">
                 <Send className="h-3 w-3" />
-              </ButtonIcon>
-              Push
-            </Button>
+              </ButtonIcon>{t("Push")}</Button>
           </div>
         </form>
       </Form>
@@ -926,6 +899,7 @@ function AnonymousEndpointsSection({
 }: {
   readonly serviceId: string;
 }) {
+  const { t } = useUiTranslation();
   const { data: endpoints, isLoading } = useAnonymousEndpoints(serviceId);
   const createMutation = useCreateAnonymousEndpoint(serviceId);
   const updateMutation = useUpdateAnonymousEndpoint(serviceId);
@@ -958,12 +932,12 @@ function AnonymousEndpointsSection({
         path_pattern: "/public/**",
         daily_quota: 1000,
       });
-      toast.success("Anonymous endpoint created");
+      toast.success(translateUi("Anonymous endpoint created"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError
+        translateErrorMessage(err instanceof ApiError
           ? err.message
-          : "Failed to create anonymous endpoint",
+          : "Failed to create anonymous endpoint"),
       );
     }
   }
@@ -975,13 +949,13 @@ function AnonymousEndpointsSection({
   }) {
     try {
       const saved = await updateMutation.mutateAsync(variables);
-      toast.success("Anonymous endpoint updated");
+      toast.success(translateUi("Anonymous endpoint updated"));
       return saved;
     } catch (err) {
       toast.error(
-        err instanceof ApiError
+        translateErrorMessage(err instanceof ApiError
           ? err.message
-          : "Failed to update anonymous endpoint",
+          : "Failed to update anonymous endpoint"),
       );
       throw err;
     }
@@ -990,23 +964,23 @@ function AnonymousEndpointsSection({
   async function handleDelete(ruleId: string) {
     try {
       await deleteMutation.mutateAsync(ruleId);
-      toast.success("Anonymous endpoint deleted");
+      toast.success(translateUi("Anonymous endpoint deleted"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError
+        translateErrorMessage(err instanceof ApiError
           ? err.message
-          : "Failed to delete anonymous endpoint",
+          : "Failed to delete anonymous endpoint"),
       );
       throw err;
     }
   }
 
   return (
-    <DetailSection title="Anonymous endpoints">
+    <DetailSection title={t("Anonymous endpoints")}>
       <div className="space-y-5 p-5">
         <div className="flex items-center gap-2">
           <Globe2 className="h-4 w-4 text-primary-text" />
-          <span className="text-13 font-medium">Public proxy rules</span>
+          <span className="text-13 font-medium">{t("Public proxy rules")}</span>
         </div>
 
         <Form {...form}>
@@ -1019,7 +993,7 @@ function AnonymousEndpointsSection({
               name="method"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Method</FormLabel>
+                  <FormLabel>{t("Method")}</FormLabel>
                   <Select
                     value={field.value}
                     onValueChange={(value) => field.onChange(value)}
@@ -1046,7 +1020,7 @@ function AnonymousEndpointsSection({
               name="path_pattern"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Path</FormLabel>
+                  <FormLabel>{t("Path")}</FormLabel>
                   <FormControl>
                     <Input {...field} />
                   </FormControl>
@@ -1059,7 +1033,7 @@ function AnonymousEndpointsSection({
               name="daily_quota"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Daily quota</FormLabel>
+                  <FormLabel>{t("Daily quota")}</FormLabel>
                   <FormControl>
                     <Input
                       {...field}
@@ -1085,9 +1059,7 @@ function AnonymousEndpointsSection({
               >
                 <ButtonIcon variant="primary">
                   <Plus className="h-3 w-3" />
-                </ButtonIcon>
-                Add
-              </Button>
+                </ButtonIcon>{t("Add")}</Button>
             </div>
           </form>
         </Form>
@@ -1097,9 +1069,7 @@ function AnonymousEndpointsSection({
         <div className="space-y-2">
           {isLoading && <Skeleton className="h-12 w-full" />}
           {!isLoading && (!endpoints || endpoints.length === 0) && (
-            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
-              No anonymous endpoints configured.
-            </div>
+            <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">{t("No anonymous endpoints configured.")}</div>
           )}
           {endpoints?.map((rule) => (
             <AnonymousEndpointRow
@@ -1135,17 +1105,13 @@ const PUBLIC_METHODS = [
  * prompts the admin to confirm the exposure is intentional.
  */
 function WideOpenAnonymousWarning() {
+  const { t } = useUiTranslation();
   return (
     <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3 text-12 text-warning">
       <span className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px] border border-warning/20 bg-warning/10">
         <AlertTriangle className="h-3.5 w-3.5" />
       </span>
-      <p>
-        This pattern (<code className="font-mono">/**</code>) matches every path
-        and exposes the entire downstream service unauthenticated. Scope it to a
-        specific prefix (e.g. <code className="font-mono">/public/**</code>)
-        unless full public access is intended.
-      </p>
+      <p>{t("This pattern (")}<code className="font-mono">/**</code>{t(") matches every path and exposes the entire downstream service unauthenticated. Scope it to a specific prefix (e.g. ")}<code className="font-mono">/public/**</code>{t(") unless full public access is intended.")}</p>
     </div>
   );
 }
@@ -1169,6 +1135,7 @@ function AnonymousEndpointRow({
   readonly isUpdating: boolean;
   readonly isDeleting: boolean;
 }) {
+  const { t } = useUiTranslation();
   const projection = (value: AnonymousEndpointRule) => ({
     enabled: value.enabled,
     method: value.method,
@@ -1243,7 +1210,7 @@ function AnonymousEndpointRow({
             disabled={isUpdating || review.saving}
           />
           <Badge variant={rule.enabled ? "success" : "secondary"}>
-            {rule.enabled ? "Enabled" : "Draft"}
+            {rule.enabled ? t("Enabled") : t("Draft")}
           </Badge>
         </div>
         <Select
@@ -1292,7 +1259,7 @@ function AnonymousEndpointRow({
             });
             if (!parsed.success) {
               toast.error(
-                parsed.error.issues[0]?.message ?? "Invalid endpoint rule",
+                translateErrorMessage(parsed.error.issues[0]?.message ?? "Invalid endpoint rule"),
               );
               return;
             }
@@ -1306,9 +1273,7 @@ function AnonymousEndpointRow({
               ...describeChanges(baseline, data),
             ]);
           }}
-        >
-          Save
-        </Button>
+        >{t("Save")}</Button>
         <Button
           size="sm"
           variant="destructive"
@@ -1326,9 +1291,7 @@ function AnonymousEndpointRow({
         >
           <ButtonIcon variant="destructive">
             <Trash2 className="h-3 w-3 text-destructive" />
-          </ButtonIcon>
-          Delete
-        </Button>
+          </ButtonIcon>{t("Delete")}</Button>
       </div>
       {showWideOpenWarning && <WideOpenAnonymousWarning />}
     </div>
@@ -1361,6 +1324,7 @@ function YourRoutingSection({
   >;
   readonly onBindClick: () => void;
 }) {
+  const { t } = useUiTranslation();
   const count = service.your_binding_count ?? 0;
   const userServiceId = service.your_user_service_id ?? null;
 
@@ -1369,8 +1333,8 @@ function YourRoutingSection({
       <RoutingSection
         nodeId={service.node_id ?? null}
         serviceId={userServiceId}
-        title="Your Routing"
-        description="Your personal routing for this service. Other users have their own."
+        title={t("Your Routing")}
+        description={t("Your personal routing for this service. Other users have their own.")}
       />
     );
   }
@@ -1381,34 +1345,26 @@ function YourRoutingSection({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Router className="h-4 w-4 text-primary-text" />
-            <CardTitle className="text-15">Your Routing</CardTitle>
+            <CardTitle className="text-15">{t("Your Routing")}</CardTitle>
           </div>
           <Button
             variant="outline"
             className="text-text-tertiary hover:text-muted-foreground"
             onClick={onBindClick}
           >
-            {count === 0 ? "Bind in AI Services" : "Manage in AI Services"}
+            {count === 0 ? t("Bind in AI Services") : t("Manage in AI Services")}
             <ButtonIcon>
               <ExternalLink className="h-3 w-3" />
             </ButtonIcon>
           </Button>
         </div>
-        <CardDescription>
-          Your personal routing for this service. Other users have their own.
-        </CardDescription>
+        <CardDescription>{t("Your personal routing for this service. Other users have their own.")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {count === 0 ? (
-          <p className="text-xs text-muted-foreground">
-            You haven't bound this service to your account yet, so there's no
-            routing to configure here.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("You haven't bound this service to your account yet, so there's no routing to configure here.")}</p>
         ) : (
-          <p className="text-xs text-muted-foreground">
-            You have {String(count)} personal bindings for this service. Manage
-            each one's routing in AI Services.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("You have ")}{String(count)}{t(" personal bindings for this service. Manage each one's routing in AI Services.")}</p>
         )}
       </CardContent>
     </Card>

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useWatch } from "react-hook-form";
@@ -59,6 +60,7 @@ export function PoolEditor({
   onClose: () => void;
   onCloseAutoFocus?: (event: Event) => void;
 }) {
+  const { t } = useUiTranslation();
   const create = useCreateServicePool();
   const update = useUpdateServicePool();
   const reload = useReloadServicePool();
@@ -157,11 +159,10 @@ export function PoolEditor({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <ServicePoolIcon className="size-4 shrink-0" />
-            {pool ? "Edit service pool" : "Create service pool"}
+            {pool ? t("Edit service pool") : t("Create service pool")}
           </DialogTitle>
-          <DialogDescription className="text-12">
-            Group your connections under one name. Owned by{" "}
-            {orgId ? ownerLabel : "you"}.
+          <DialogDescription className="text-12">{t("Group your connections under one name. Owned by")}{" "}
+            {orgId ? ownerLabel : t("you")}.
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
@@ -173,11 +174,11 @@ export function PoolEditor({
                   name="name"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Name</FormLabel>
+                      <FormLabel>{t("Name")}</FormLabel>
                       <FormControl>
                         <Input
                           {...field}
-                          placeholder="Reliable AI"
+                          placeholder={t("Reliable AI")}
                           onChange={(e) => {
                             field.onChange(e);
                             if (!slugEdited)
@@ -202,20 +203,18 @@ export function PoolEditor({
                   name="slug"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Pool slug</FormLabel>
+                      <FormLabel>{t("Pool slug")}</FormLabel>
                       <FormControl>
                         <Input
                           {...field}
-                          placeholder="reliable-ai"
+                          placeholder={"reliable-ai"}
                           onChange={(e) => {
                             setSlugEdited(true);
                             field.onChange(e);
                           }}
                         />
                       </FormControl>
-                      <p className="text-11 text-muted-foreground">
-                        The stable name used by your apps and CLI.
-                      </p>
+                      <p className="text-11 text-muted-foreground">{t("The stable name used by your apps and CLI.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -223,7 +222,7 @@ export function PoolEditor({
               </div>
               <div className="space-y-2">
                 <Choice
-                  label="Routing"
+                  label={t("Routing")}
                   value={values.strategy ?? "priority"}
                   options={Object.entries(strategyLabels).map(
                     ([strategy, label]) => [
@@ -241,15 +240,13 @@ export function PoolEditor({
                 />
                 <p className="text-12 text-muted-foreground">
                   {priority
-                    ? "Try your preferred connection first, then a backup on retryable failures. A provider quota rejection (429) can fall back automatically."
-                    : "Send each request to one connection. This mode does not retry on another connection."}
+                    ? t("Try your preferred connection first, then a backup on retryable failures. A provider quota rejection (429) can fall back automatically.")
+                    : t("Send each request to one connection. This mode does not retry on another connection.")}
                 </p>
               </div>
               {priority && (
                 <fieldset className="space-y-2">
-                  <legend className="mb-2 text-12 font-medium">
-                    What will this pool handle?
-                  </legend>
+                  <legend className="mb-2 text-12 font-medium">{t("What will this pool handle?")}</legend>
                   <div className="grid gap-2 sm:grid-cols-2">
                     {(
                       [
@@ -294,8 +291,7 @@ export function PoolEditor({
                 setOperation={setOperation}
               />
               <details className="rounded-xl border border-border/50 p-3">
-                <summary className="cursor-pointer text-12 font-medium">
-                  Advanced settings{values.failover ? " · Custom retries" : ""}
+                <summary className="cursor-pointer text-12 font-medium">{t("Advanced settings")}{values.failover ? t(" · Custom retries") : ""}
                 </summary>
                 <div className="space-y-4 pt-4">
                   <FormField
@@ -303,7 +299,7 @@ export function PoolEditor({
                     name="description"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Description (optional)</FormLabel>
+                        <FormLabel>{t("Description (optional)")}</FormLabel>
                         <FormControl>
                           <Input {...field} value={field.value ?? ""} />
                         </FormControl>
@@ -312,14 +308,14 @@ export function PoolEditor({
                     )}
                   />
                   <Toggle
-                    label="Pool enabled"
+                    label={t("Pool enabled")}
                     checked={values.is_active ?? true}
                     onChange={(v) => form.setValue("is_active", v)}
                   />
                   {priority && (
                     <>
                       <Toggle
-                        label="Customize retry settings"
+                        label={t("Customize retry settings")}
                         checked={values.failover != null}
                         onChange={(v) =>
                           form.setValue(
@@ -334,11 +330,7 @@ export function PoolEditor({
                           onChange={(v) => form.setValue("failover", v)}
                         />
                       ) : (
-                        <p className="text-12 text-muted-foreground">
-                          Up to 3 attempts, 60 seconds per attempt, and 120
-                          seconds overall. Failed connections rest for 5–300
-                          seconds. Replaying a possibly accepted POST is off.
-                        </p>
+                        <p className="text-12 text-muted-foreground">{t("Up to 3 attempts, 60 seconds per attempt, and 120 seconds overall. Failed connections rest for 5–300 seconds. Replaying a possibly accepted POST is off.")}</p>
                       )}
                     </>
                   )}
@@ -348,10 +340,7 @@ export function PoolEditor({
             {rootError && <ErrorBanner message={rootError} />}
             {conflict && (
               <div className="flex items-center gap-3 pt-2">
-                <p className="flex-1 text-12 text-muted-foreground">
-                  This pool changed elsewhere. Reload the latest settings to
-                  replace this draft before saving.
-                </p>
+                <p className="flex-1 text-12 text-muted-foreground">{t("This pool changed elsewhere. Reload the latest settings to replace this draft before saving.")}</p>
                 <Button
                   type="button"
                   variant="outline"
@@ -359,9 +348,7 @@ export function PoolEditor({
                   onClick={() => {
                     void reloadLatest();
                   }}
-                >
-                  Reload latest
-                </Button>
+                >{t("Reload latest")}</Button>
               </div>
             )}
             <DialogFooter className="pt-3 md:pt-3">
@@ -370,9 +357,7 @@ export function PoolEditor({
                 variant="outline"
                 disabled={pending}
                 onClick={onClose}
-              >
-                Cancel
-              </Button>
+              >{t("Cancel")}</Button>
               <Button
                 type="submit"
                 variant="primary"
@@ -381,7 +366,7 @@ export function PoolEditor({
                   readOnlyPreview || !isDirty || !isValid || conflict || pending
                 }
               >
-                {pool ? "Save" : "Create pool"}
+                {pool ? t("Save") : t("Create pool")}
               </Button>
             </DialogFooter>
           </form>

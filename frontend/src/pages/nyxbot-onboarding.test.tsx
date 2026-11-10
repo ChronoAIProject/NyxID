@@ -943,11 +943,11 @@ describe("Nyxbot onboarding", () => {
       secondToken,
     );
   });
-  it.each(["en", "zh-CN"])(
+  it.each(["en", "zh-CN", "zh-TW"])(
     "restores the separate result URL in %s without submitting or fetching services",
     async (language) => {
       await nyxbotI18n.changeLanguage(language);
-      const t = nyxbotI18n.t.bind(nyxbotI18n);
+      const t = nyxbotI18n.getFixedT(null, "onboarding");
       window.history.replaceState(null, "", "/nyxbot/onboarding?step=success");
       sessionStorage.setItem(
         "nyxbot-onboarding:owner",
@@ -1111,11 +1111,11 @@ describe("Nyxbot onboarding", () => {
       }),
     );
   });
-  it.each(["en", "zh-CN"])(
+  it.each(["en", "zh-CN", "zh-TW"])(
     "blocks invalid tokens, shows localized feedback and accepts correction in %s",
     async (language) => {
       await nyxbotI18n.changeLanguage(language);
-      const t = nyxbotI18n.t.bind(nyxbotI18n);
+      const t = nyxbotI18n.getFixedT(null, "onboarding");
       await mount();
       await screen.findByRole("heading", { name: t("channelTitle") });
       const token = screen.getByLabelText(t("token"), { exact: true });

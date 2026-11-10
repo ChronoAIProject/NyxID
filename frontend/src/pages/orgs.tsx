@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Building2, Users } from "lucide-react";
@@ -33,22 +34,21 @@ function OrgsLoading() {
 }
 
 function OrgsEmptyState({ onCreate }: { readonly onCreate: () => void }) {
+  const { t } = useUiTranslation();
   return (
     <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
       <HierarchyIcon className="h-64 w-64 text-muted-foreground" />
       <div className="space-y-1">
-        <p className="text-12 font-medium text-muted-foreground">No organizations yet</p>
-        <p className="text-xs text-muted-foreground">
-          Create an organization to share services and credentials with
-          teammates.
-        </p>
+        <p className="text-12 font-medium text-muted-foreground">{t("No organizations yet")}</p>
+        <p className="text-xs text-muted-foreground">{t("Create an organization to share services and credentials with teammates.")}</p>
       </div>
-      <AddCtaButton label="Create your first organization" onClick={onCreate} />
+      <AddCtaButton label={t("Create your first organization")} onClick={onCreate} />
     </div>
   );
 }
 
 export function OrgsPage() {
+  const { t } = useUiTranslation();
   const { data: orgs, isLoading, error, refetch } = useOrgs();
   const [createOpen, setCreateOpen] = useState(false);
   const [viewMode, setViewMode] = useViewMode("orgs");
@@ -57,12 +57,12 @@ export function OrgsPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Organizations"
-        description="Organizations let you share services and credentials with a team."
+        title={t("Organizations")}
+        description={t("Organizations let you share services and credentials with a team.")}
         actions={
           <div className="flex items-center gap-2">
             <ViewToggle viewMode={viewMode} onViewModeChange={setViewMode} />
-            <AddCtaButton label="New Organization" onClick={() => setCreateOpen(true)} />
+            <AddCtaButton label={t("New Organization")} onClick={() => setCreateOpen(true)} />
           </div>
         }
       />
@@ -70,14 +70,14 @@ export function OrgsPage() {
       {isLoading ? (
         <OrgsLoading />
       ) : error ? (
-        <ErrorBanner message="Failed to load organizations. Please try again." onRetry={refetch} />
+        <ErrorBanner message={t("Failed to load organizations. Please try again.")} onRetry={refetch} />
       ) : !orgs || orgs.length === 0 ? (
         <OrgsEmptyState onCreate={() => setCreateOpen(true)} />
       ) : (
         <div className="space-y-3">
           <div className="flex items-center gap-2">
             <Building2 className="h-4 w-4 text-muted-foreground" />
-            <h3 className="text-13 font-semibold text-foreground">My Organizations</h3>
+            <h3 className="text-13 font-semibold text-foreground">{t("My Organizations")}</h3>
           </div>
 
           {/* Cards - always on mobile, desktop only in grid mode */}
@@ -100,7 +100,7 @@ export function OrgsPage() {
                         />
                         <div className="min-w-0">
                           <p className="truncate text-12 font-medium text-foreground">
-                            {org.display_name ?? "Untitled org"}
+                            {org.display_name ?? t("Untitled org")}
                           </p>
                           <p className="truncate text-xs text-muted-foreground">
                             @{org.slug}
@@ -110,8 +110,7 @@ export function OrgsPage() {
                               {org.contact_email}
                             </p>
                           )}
-                          <p className="text-xs text-muted-foreground">
-                            Created {formatRelativeTime(org.created_at) ?? "—"}
+                          <p className="text-xs text-muted-foreground">{t("Created ")}{formatRelativeTime(org.created_at) ?? "—"}
                           </p>
                         </div>
                       </div>
@@ -119,7 +118,7 @@ export function OrgsPage() {
                     </div>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
                       <Users className="h-3.5 w-3.5" />
-                      <span>View members and invites</span>
+                      <span>{t("View members and invites")}</span>
                     </div>
                   </CardContent>
                 </Card>
@@ -133,11 +132,11 @@ export function OrgsPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Name</TableHead>
-                    <TableHead>Slug</TableHead>
-                    <TableHead>Contact</TableHead>
-                    <TableHead>Role</TableHead>
-                    <TableHead>Created</TableHead>
+                    <TableHead>{t("Name")}</TableHead>
+                    <TableHead>{t("Slug")}</TableHead>
+                    <TableHead>{t("Contact")}</TableHead>
+                    <TableHead>{t("Role")}</TableHead>
+                    <TableHead>{t("Created")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -155,7 +154,7 @@ export function OrgsPage() {
                             className="h-7 w-7"
                           />
                           <span className="truncate font-medium">
-                            {org.display_name ?? "Untitled org"}
+                            {org.display_name ?? t("Untitled org")}
                           </span>
                         </div>
                       </TableCell>

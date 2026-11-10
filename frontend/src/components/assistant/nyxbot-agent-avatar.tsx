@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import {
   AGENT_AVATAR_TINTS,
@@ -20,7 +21,7 @@ const SIZES = {
  */
 export function AgentAvatar({
   agent,
-  size = "md",
+  size = "sm",
   className,
   label,
 }: {
@@ -36,6 +37,7 @@ export function AgentAvatar({
   /** Accessible name; the avatar is hidden from assistive tech without one. */
   readonly label?: string;
 }) {
+  useUiTranslation();
   const a11y = label ? { role: "img", "aria-label": label } : { "aria-hidden": true };
   if (agent.kind === "nyxbot") {
     return (
@@ -83,6 +85,7 @@ export function AgentAvatarStack({
   readonly size?: keyof typeof SIZES;
   readonly className?: string;
 }) {
+  useUiTranslation();
   const shown = agents.slice(0, max);
   const hidden = agents.length - shown.length;
   return (

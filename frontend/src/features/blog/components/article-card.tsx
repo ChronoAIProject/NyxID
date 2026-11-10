@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Link } from "@tanstack/react-router";
 
 import type { BlogArticle } from "../types";
@@ -12,6 +13,7 @@ function formatShortDate(iso: string | null): string {
 }
 
 export function ArticleCard({ article }: { readonly article: BlogArticle }) {
+  const { t } = useUiTranslation();
   const readingMinutes = estimateReadingMinutes(article.body);
   const primaryTag = article.tags[0]?.name;
 
@@ -49,8 +51,7 @@ export function ArticleCard({ article }: { readonly article: BlogArticle }) {
             {article.author.first_name} {article.author.last_name}
           </span>
           <span>
-            {formatShortDate(article.published_at)} · {readingMinutes} min
-          </span>
+            {formatShortDate(article.published_at)} · {readingMinutes}{t(" min")}</span>
         </div>
       </div>
     </Link>

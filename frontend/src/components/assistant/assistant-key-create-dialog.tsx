@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { AssistantPlatformServiceFields } from "./assistant-platform-service-fields";
 import { useRef, useState } from "react";
 import { Check, Copy, KeyRound, RefreshCw } from "lucide-react";
@@ -124,6 +126,7 @@ function KeyEffectResult({
   readonly onRetryVerification: () => void;
   readonly onFinish: (keyId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -145,7 +148,7 @@ function KeyEffectResult({
         <div className="flex items-start gap-3 border-y border-border py-4">
           <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 space-y-1">
-            <p className="text-13 font-medium">Existing key</p>
+            <p className="text-13 font-medium">{t("Existing key")}</p>
             <p className="break-all font-mono text-12 text-muted-foreground">
               {result.resource.keyId}
             </p>
@@ -161,8 +164,8 @@ function KeyEffectResult({
               type="button"
               variant="outline"
               size="icon"
-              title="Copy API key"
-              aria-label="Copy API key"
+              title={t("Copy API key")}
+              aria-label={t("Copy API key")}
               onClick={() => void copySecret()}
             >
               {copied ? <Check className="text-success" /> : <Copy />}
@@ -173,14 +176,12 @@ function KeyEffectResult({
               checked={saved}
               onCheckedChange={(value) => setSaved(value === true)}
             />
-            <span>I saved this key in a secure location.</span>
+            <span>{t("I saved this key in a secure location.")}</span>
           </label>
         </div>
       )}
       {verified ? (
-        <p className="text-11 text-success">
-          Exact least-scope access verified.
-        </p>
+        <p className="text-11 text-success">{t("Exact least-scope access verified.")}</p>
       ) : null}
       <DialogFooter>
         {!verified ? (
@@ -190,9 +191,7 @@ function KeyEffectResult({
             isLoading={verifying}
             onClick={onRetryVerification}
           >
-            <RefreshCw />
-            Retry verification
-          </Button>
+            <RefreshCw />{t("Retry verification")}</Button>
         ) : null}
         <Button
           type="button"
@@ -200,7 +199,7 @@ function KeyEffectResult({
           disabled={!verified || (!result.replayed && !saved)}
           onClick={() => onFinish(result.resource.keyId)}
         >
-          {result.replayed ? "Report existing key" : "I have saved it"}
+          {result.replayed ? t("Report existing key") : t("I have saved it")}
         </Button>
       </DialogFooter>
     </>
@@ -227,6 +226,7 @@ export function AssistantKeyCreateDialog({
   readonly params: AssistantKeyCreateParams;
   readonly onComplete: (keyId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const [platformGrant, setPlatformGrant] = useState(
     params.allowAutoConnectedServices,
   );
@@ -370,33 +370,33 @@ export function AssistantKeyCreateDialog({
       >
         <DialogHeader>
           <DialogTitle>
-            {result?.replayed ? "API key already created" : "Create API key"}
+            {result?.replayed ? t("API key already created") : t("Create API key")}
           </DialogTitle>
           <DialogDescription>
             {result
               ? result.replayed
-                ? "The original one-time secret is no longer available."
-                : "This key is shown only once. Copy and store it securely now."
-              : "Confirm the exact key identity and service boundary."}
+                ? t("The original one-time secret is no longer available.")
+                : t("This key is shown only once. Copy and store it securely now.")
+              : t("Confirm the exact key identity and service boundary.")}
           </DialogDescription>
         </DialogHeader>
 
         {!result ? (
           <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">Name</span>
+              <span className="text-muted-foreground">{t("Name")}</span>
               <span className="min-w-0 truncate font-medium">
                 {params.name}
               </span>
             </div>
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">Platform</span>
+              <span className="text-muted-foreground">{t("Platform")}</span>
               <Badge variant="secondary" className="max-w-[70%] truncate">
                 {params.platform}
               </Badge>
             </div>
             <div className="space-y-2">
-              <span className="text-muted-foreground">Allowed services</span>
+              <span className="text-muted-foreground">{t("Allowed services")}</span>
               <div className="flex flex-wrap gap-1.5">
                 {(platformIds ?? params.allowedServiceIds).map((serviceId) => (
                   <Badge
@@ -409,9 +409,7 @@ export function AssistantKeyCreateDialog({
                 ))}
               </div>
             </div>
-            <p className="text-11 leading-relaxed text-muted-foreground">
-              Proxy access follows these service selections. Node access is denied.
-            </p>
+            <p className="text-11 leading-relaxed text-muted-foreground">{t("Proxy access follows these service selections. Node access is denied.")}</p>
           </div>
         ) : null}
 
@@ -427,24 +425,20 @@ export function AssistantKeyCreateDialog({
 
         {error ? (
           <p role="alert" className="text-11 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
 
         {!result ? (
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={close}>
-              Cancel
-            </Button>
+            <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
             <Button
               type="button"
               variant="primary"
               isLoading={submitting}
               disabled={submitting}
               onClick={() => void createKey()}
-            >
-              Create key
-            </Button>
+            >{t("Create key")}</Button>
           </DialogFooter>
         ) : null}
         {result ? (

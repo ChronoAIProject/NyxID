@@ -1,3 +1,4 @@
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { AssistantAccountPanel } from "./assistant-account-panel";
 import { useAssistantViewport } from "@/hooks/use-assistant-viewport";
 import { ThreadTitle } from "@/components/assistant/thread-title";
@@ -35,6 +36,7 @@ export function AssistantShell({
   const [previewWidth, setPreviewWidth] = useState<number | null>(null);
   const sidebarWidth = previewWidth ?? savedSidebarWidth;
   const dismissDrawer = useCallback(() => setMobileSidebarOpen(false), []);
+  const { t } = useAppTranslation();
   const router = useRouter();
   useEffect(
     () =>
@@ -87,7 +89,11 @@ export function AssistantShell({
               className="hidden h-full shrink-0 items-center px-4 md:flex"
               style={{ width: sidebarWidth }}
             >
-              <Link to="/assistant" search={{}} aria-label="Assistant home">
+              <Link
+                to="/assistant"
+                search={{}}
+                aria-label={t("Assistant home")}
+              >
                 <NyxidLogo className="h-5 w-auto" />
               </Link>
             </div>
@@ -96,12 +102,12 @@ export function AssistantShell({
                 type="button"
                 onClick={() => setMobileSidebarOpen(true)}
                 className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-hairline text-text-tertiary md:hidden"
-                aria-label="Open chats"
+                aria-label={t("Open chats")}
               >
                 <Menu className="h-4 w-4" />
               </button>
               <div className="hidden shrink-0 text-12 text-text-tertiary sm:block">
-                assistant
+                {t("Assistant")}
               </div>
               <span className="hidden text-12 text-text-tertiary sm:block">
                 /
@@ -123,7 +129,7 @@ export function AssistantShell({
                 <button
                   type="button"
                   className="flex h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors hover:border-hairline-strong hover:text-muted-foreground focus-visible:outline-none"
-                  aria-label="User menu"
+                  aria-label={t("User menu")}
                   data-assistant-account-fallback=""
                 >
                   <User className="h-[14px] w-[14px]" />
@@ -140,7 +146,7 @@ export function AssistantShell({
               <div className="h-full overflow-hidden">{sidebar}</div>
               <SidebarResizeHandle
                 sidebar="assistant"
-                label="Resize sidebar"
+                label={t("Resize sidebar")}
                 onPreview={setPreviewWidth}
               />
             </aside>
@@ -153,7 +159,7 @@ export function AssistantShell({
                 type="button"
                 className="absolute inset-0 bg-background/80 backdrop-blur-sm"
                 onClick={() => setMobileSidebarOpen(false)}
-                aria-label="Close chats"
+                aria-label={t("Close chats")}
               />
               <aside
                 className="relative flex h-full w-[min(320px,88vw)] flex-col border-r border-border bg-background shadow-xl"
@@ -169,7 +175,7 @@ export function AssistantShell({
                     type="button"
                     onClick={() => setMobileSidebarOpen(false)}
                     className="flex h-8 w-8 items-center justify-center rounded-lg text-text-tertiary"
-                    aria-label="Close chats"
+                    aria-label={t("Close chats")}
                   >
                     <X className="h-4 w-4" />
                   </button>

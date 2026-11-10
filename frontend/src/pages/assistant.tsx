@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AutomationsPage } from "@/pages/automations";
 import { MachinesPage } from "@/pages/machines";
@@ -132,6 +134,7 @@ function workspaceActiveView(view: WorkspaceView) {
 }
 
 function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
+  useUiTranslation();
   if (view === "plugins") return <PluginsView />;
   if (view === "approvals") return <ApprovalsView />;
   return (
@@ -141,8 +144,7 @@ function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
     >
       <Suspense
         fallback={
-          <p role="status" className="text-12 text-text-tertiary">
-            Loading {workspaceTitles[view]}...
+          <p role="status" className="text-12 text-text-tertiary">{translateUi("Loading")}{workspaceTitles[view]}...
           </p>
         }
       >
@@ -212,7 +214,7 @@ function AssistantWorkspacePage({
         await actorChat.deleteConversation(conversationId);
       }
     } catch (error) {
-      toast.error("Could not delete the chat", {
+      toast.error(translateUi("Could not delete the chat"), {
         description:
           error instanceof Error
             ? error.message
@@ -285,6 +287,7 @@ export function AssistantPage({
 }: {
   readonly view?: "chat" | WorkspaceView;
 }) {
+  useUiTranslation();
   const directEnabled = useFeature(FEATURE_FLAG.DIRECT_CHAT_ENGINE);
   const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
   const selectedConversationId = useRouterState({

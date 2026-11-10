@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useAuthStore } from "@/stores/auth-store";
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
@@ -92,6 +95,7 @@ export function RemoteMachineConfirmations({
   readonly machineId: string;
   readonly confirmationId?: string;
 }) {
+  const { t } = useUiTranslation();
   const owner = useAuthStore((state) => state.user?.id);
   const context = `${owner ?? ""}:${machineId}`;
   const [pages, setPages] = useState<{
@@ -129,55 +133,32 @@ export function RemoteMachineConfirmations({
   if (review && !reviewStillCurrent) setReview(null);
   return (
     <div className="space-y-4">
-      <p className="text-12 text-muted-foreground">
-        Only the human owner can approve external execution. The client must
-        retry the same operation and parameters using the same valid identity;
-        approval is consumed once after live authorization is checked again.
-        Approval does not execute the request from this page.
-      </p>
-      <p className="text-12 text-muted-foreground">
-        Waiting approval expires after 15 minutes. Once approved, execution has
-        a separate window of at most 10 minutes and remains limited by grant,
-        credential, runtime and funding deadlines. A different child credential
-        cannot consume this approval.
-      </p>
-      <p className="text-12 text-muted-foreground">
-        Each page contains at most 100 live pending or approved confirmations.
-        {query.data?.next_cursor === undefined
-          ? " Older-page availability is unknown on this server."
-          : " Older pages use the server’s stable cursor."}
+      <p className="text-12 text-muted-foreground">{t("Only the human owner can approve external execution. The client must retry the same operation and parameters using the same valid identity; approval is consumed once after live authorization is checked again. Approval does not execute the request from this page.")}</p>
+      <p className="text-12 text-muted-foreground">{t("Waiting approval expires after 15 minutes. Once approved, execution has a separate window of at most 10 minutes and remains limited by grant, credential, runtime and funding deadlines. A different child credential cannot consume this approval.")}</p>
+      <p className="text-12 text-muted-foreground">{t("Each page contains at most 100 live pending or approved confirmations.")}{query.data?.next_cursor === undefined
+          ? t(" Older-page availability is unknown on this server.")
+          : t(" Older pages use the server’s stable cursor.")}
       </p>
       {query.isPending && (
-        <p role="status" className="text-12">
-          Loading confirmations…
-        </p>
+        <p role="status" className="text-12">{t("Loading confirmations…")}</p>
       )}
       {query.error &&
         (missing ? (
           <p
             role="status"
             className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground"
-          >
-            External confirmations are unavailable on this server. Requests that
-            require confirmation must remain blocked; this page cannot approve
-            or bypass them until the owner confirmation API is connected.
-          </p>
+          >{t("External confirmations are unavailable on this server. Requests that require confirmation must remain blocked; this page cannot approve or bypass them until the owner confirmation API is connected.")}</p>
         ) : (
           <ErrorBanner
-            message={`Confirmations could not be loaded. ${query.error.message}`}
+            message={t("Confirmations could not be loaded. {{message}}", { message: translateErrorMessage(query.error.message) })}
             onRetry={() => void query.refetch()}
           />
         ))}
       {confirmationId && !linked && !query.isPending && !query.error && (
-        <p role="status" className="text-12 text-muted-foreground">
-          The linked confirmation is not on this page. Check older pages; it may
-          have expired or no longer be visible under your current authorization.
-        </p>
+        <p role="status" className="text-12 text-muted-foreground">{t("The linked confirmation is not on this page. Check older pages; it may have expired or no longer be visible under your current authorization.")}</p>
       )}
       {!query.isPending && !query.error && !rows.length && (
-        <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
-          No pending or approved confirmations are available.
-        </p>
+        <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">{t("No pending or approved confirmations are available.")}</p>
       )}
       {rows.map((row) => {
         const expired =
@@ -205,15 +186,15 @@ export function RemoteMachineConfirmations({
               </Badge>
             }
           >
-            <DetailRow label="Confirmation ID" value={row.id} mono />
-            <DetailRow label="Principal" value={identity(row)} mono />
-            <DetailRow label="Acting person" value={row.subject.user_id} mono />
+            <DetailRow label={t("Confirmation ID")} value={row.id} mono />
+            <DetailRow label={t("Principal")} value={identity(row)} mono />
+            <DetailRow label={t("Acting person")} value={row.subject.user_id} mono />
             <DetailRow
-              label="Grant / assignment revision"
+              label={t("Grant / assignment revision")}
               value={`${row.grant_revision} / ${row.assignment_revision}`}
             />
             <DetailRow
-              label="Runtime generation"
+              label={t("Runtime generation")}
               value={
                 row.runtime_generation === null
                   ? "Unknown"
@@ -223,15 +204,15 @@ export function RemoteMachineConfirmations({
             <DetailRow
               label={
                 row.status === "approved"
-                  ? "Approved retry deadline"
-                  : "Waiting approval expires"
+                  ? t("Approved retry deadline")
+                  : t("Waiting approval expires")
               }
-              value={new Date(row.expires_at).toLocaleString()}
+              value={new Date(row.expires_at).toLocaleString(getFormattingLocale())}
             />
             {row.approved_until && row.status !== "approved" && (
               <DetailRow
-                label="Approved retry deadline"
-                value={new Date(row.approved_until).toLocaleString()}
+                label={t("Approved retry deadline")}
+                value={new Date(row.approved_until).toLocaleString(getFormattingLocale())}
               />
             )}
             <div className="space-y-2 px-4 py-3 text-12 text-muted-foreground">
@@ -247,22 +228,12 @@ export function RemoteMachineConfirmations({
                   ))}
                 </dl>
               ) : (
-                <p>
-                  No safe parameter summary was provided. Approval is
-                  unavailable until the server provides a reviewable summary.
-                </p>
+                <p>{t("No safe parameter summary was provided. Approval is unavailable until the server provides a reviewable summary.")}</p>
               )}
               {!reviewable(row, clock) && status === "pending" && (
-                <p role="status">
-                  A server-confirmed safe summary and known runtime generation
-                  are required before either approval or decline is available
-                  here.
-                </p>
+                <p role="status">{t("A server-confirmed safe summary and known runtime generation are required before either approval or decline is available here.")}</p>
               )}
-              <p>
-                Only server-redacted parameters appear here. Raw commands,
-                environment values, input and secrets are not shown.
-              </p>
+              <p>{t("Only server-redacted parameters appear here. Raw commands, environment values, input and secrets are not shown.")}</p>
               <Button
                 disabled={
                   Boolean(query.error) ||
@@ -272,9 +243,7 @@ export function RemoteMachineConfirmations({
                   !reviewable(row, clock)
                 }
                 onClick={() => setReview(row)}
-              >
-                Review decision
-              </Button>
+              >{t("Review decision")}</Button>
             </div>
           </DetailSection>
         );
@@ -288,9 +257,7 @@ export function RemoteMachineConfirmations({
               cursors: pages.cursors.slice(0, -1),
             })
           }
-        >
-          Newer confirmations
-        </Button>
+        >{t("Newer confirmations")}</Button>
         <Button
           disabled={!query.data?.next_cursor || query.isFetching}
           onClick={() => {
@@ -300,17 +267,13 @@ export function RemoteMachineConfirmations({
                 cursors: [...pages.cursors, query.data.next_cursor],
               });
           }}
-        >
-          Older confirmations
-        </Button>
+        >{t("Older confirmations")}</Button>
         <Button
           onClick={() => {
             setPages({ machineId: context, cursors: [undefined] });
             void query.refetch();
           }}
-        >
-          Refresh confirmations
-        </Button>
+        >{t("Refresh confirmations")}</Button>
       </div>
       {review && reviewStillCurrent && (
         <ConfirmationDecision
@@ -335,6 +298,7 @@ export function ConfirmationDecision({
   readonly machineId: string;
   readonly onClose: () => void;
 }) {
+  const { t } = useUiTranslation();
   const mutation = useDecideRemoteMachineConfirmation();
   const active = useRef(true);
   useEffect(() => {
@@ -404,17 +368,13 @@ export function ConfirmationDecision({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Review external request</DialogTitle>
-          <DialogDescription>
-            This decision is bound to the displayed principal, child, grant,
-            runtime generation and parameter digest.
-          </DialogDescription>
+          <DialogTitle>{t("Review external request")}</DialogTitle>
+          <DialogDescription>{t("This decision is bound to the displayed principal, child, grant, runtime generation and parameter digest.")}</DialogDescription>
         </DialogHeader>
         <p className="break-all text-12 text-muted-foreground">
           {identity(confirmation)}
         </p>
-        <p className="text-12 text-muted-foreground">
-          Operation: {confirmation.operation}
+        <p className="text-12 text-muted-foreground">{t("Operation: ")}{confirmation.operation}
         </p>
         <dl className="space-y-2 text-12">
           {confirmation.safe_parameters.map((parameter, index) => (
@@ -441,9 +401,7 @@ export function ConfirmationDecision({
                       }
                     />
                   </FormControl>
-                  <FormLabel className="text-12">
-                    I reviewed this identity and safe request summary.
-                  </FormLabel>
+                  <FormLabel className="text-12">{t("I reviewed this identity and safe request summary.")}</FormLabel>
                 </div>
                 <FormMessage />
               </FormItem>
@@ -451,9 +409,7 @@ export function ConfirmationDecision({
           />
         </Form>
         {expired && (
-          <p role="status" className="text-12 text-destructive">
-            This confirmation expired. The client must submit a new request.
-          </p>
+          <p role="status" className="text-12 text-destructive">{t("This confirmation expired. The client must submit a new request.")}</p>
         )}
         {error && (
           <div role="alert">
@@ -461,9 +417,7 @@ export function ConfirmationDecision({
           </div>
         )}
         <DialogFooter>
-          <Button onClick={onClose} disabled={mutation.isPending}>
-            Close
-          </Button>
+          <Button onClick={onClose} disabled={mutation.isPending}>{t("Close")}</Button>
           <Button
             variant="destructive"
             disabled={
@@ -475,9 +429,7 @@ export function ConfirmationDecision({
             }
             isLoading={mutation.isPending}
             onClick={() => void decide(false)}
-          >
-            Decline
-          </Button>
+          >{t("Decline")}</Button>
           <Button
             variant="primary"
             disabled={
@@ -490,9 +442,7 @@ export function ConfirmationDecision({
             }
             isLoading={mutation.isPending}
             onClick={() => void decide(true)}
-          >
-            Approve one retry
-          </Button>
+          >{t("Approve one retry")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

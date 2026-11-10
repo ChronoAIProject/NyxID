@@ -1,3 +1,4 @@
+import { useWizardTranslation } from "@/i18n/wizard";
 /**
  * Context-aware footer for the shared wizard shell.
  *
@@ -17,24 +18,24 @@ export interface WizardFooterProps {
 }
 
 export function WizardFooter({ context, localOrigin }: WizardFooterProps) {
+  const { t } = useWizardTranslation();
   if (context === "local") {
     return (
       <footer className="mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-12 text-muted-foreground">
-        <span>
-          Served locally from{" "}
+        <span>{t("Served locally from")}{" "}
           <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs">
             {localOrigin ?? window.location.host}
           </code>
         </span>
-        <span>· Nothing leaves your machine</span>
+        <span>{t("· Nothing leaves your machine")}</span>
       </footer>
     )
   }
 
   return (
     <footer className="mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-12 text-muted-foreground">
-      <span>Pairing with a remote CLI</span>
-      <span>· Secrets never travel back through the pairing channel</span>
+      <span>{t("Pairing with a remote CLI")}</span>
+      <span>{t("· Secrets never travel back through the pairing channel")}</span>
     </footer>
   )
 }

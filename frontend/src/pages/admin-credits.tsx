@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { normalizedBillingTargets } from "@/lib/billing-targets";
 import {
   changedFields,
@@ -105,6 +108,7 @@ const SCHEDULE_DEFAULTS: ScheduleForm = {
 const GRANTS_PER_PAGE = 50;
 
 export function AdminCreditsPage() {
+  const { t } = useUiTranslation();
   const search = useSearch({ strict: false });
   const navigate = useNavigate();
   const tab = parseTab(search.tab, ADMIN_CREDITS_TABS, ADMIN_CREDITS_TAB_DEFAULT);
@@ -191,7 +195,7 @@ export function AdminCreditsPage() {
       setGrantPage(1);
       setGrantOpen(false);
     } catch (error) {
-      toast.error(errorMessage(error, "Failed to issue credits"));
+      toast.error(translateErrorMessage(errorMessage(error, "Failed to issue credits")));
     }
   }
 
@@ -215,7 +219,7 @@ export function AdminCreditsPage() {
     async ({ before: _before, ...update }) => {
       void _before;
       await updateAllowance.mutateAsync(update);
-      toast.success("Allowance updated");
+      toast.success(translateUi("Allowance updated"));
       setAllowanceOpen(false);
     },
     (pending) => {
@@ -233,7 +237,7 @@ export function AdminCreditsPage() {
     async ({ before: _before, ...update }) => {
       void _before;
       await updateSchedule.mutateAsync(update);
-      toast.success("Credit schedule updated");
+      toast.success(translateUi("Credit schedule updated"));
       setScheduleOpen(false);
     },
     (pending) => {
@@ -304,11 +308,11 @@ export function AdminCreditsPage() {
         return;
       } else {
         await createAllowance.mutateAsync(normalized);
-        toast.success("Allowance created");
+        toast.success(translateUi("Allowance created"));
       }
       setAllowanceOpen(false);
     } catch (error) {
-      toast.error(errorMessage(error, "Failed to save allowance"));
+      toast.error(translateErrorMessage(errorMessage(error, "Failed to save allowance")));
     }
   }
 
@@ -342,11 +346,11 @@ export function AdminCreditsPage() {
           ...normalizedBillingTargets(value),
           service_refs: serviceRefs,
         });
-        toast.success("Credit schedule created");
+        toast.success(translateUi("Credit schedule created"));
       }
       setScheduleOpen(false);
     } catch (error) {
-      toast.error(errorMessage(error, "Failed to save credit schedule"));
+      toast.error(translateErrorMessage(errorMessage(error, "Failed to save credit schedule")));
     }
   }
 
@@ -354,10 +358,10 @@ export function AdminCreditsPage() {
     if (!grantToRevoke) return;
     try {
       await revokeGrant.mutateAsync(grantToRevoke.id);
-      toast.success("Grant revoked");
+      toast.success(translateUi("Grant revoked"));
       setGrantToRevoke(null);
     } catch (error) {
-      toast.error(errorMessage(error, "Failed to revoke grant"));
+      toast.error(translateErrorMessage(errorMessage(error, "Failed to revoke credit grant")));
     }
   }
 
@@ -421,31 +425,27 @@ export function AdminCreditsPage() {
       {scheduleReview.dialog}
       {statusReview.dialog}
       <PageHeader
-        title="Credits"
-        description="Manage promotional credit grants, recurring credit schedules, and free usage allowances."
+        title={t("Credits")}
+        description={t("Manage promotional credit grants, recurring credit schedules, and free usage allowances.")}
       />
 
       <Tabs value={tab} onValueChange={(value) => {
         void navigate({ to: "/admin/credits", search: { tab: value }, replace: true });
       }}>
         <TabsList>
-          <TabsTrigger value="grants">Credit grants</TabsTrigger>
-          <TabsTrigger value="allowances">Free allowances</TabsTrigger>
-          <TabsTrigger value="schedules">Schedules</TabsTrigger>
+          <TabsTrigger value="grants">{t("Credit grants")}</TabsTrigger>
+          <TabsTrigger value="allowances">{t("Free allowances")}</TabsTrigger>
+          <TabsTrigger value="schedules">{t("Schedules")}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="grants" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-12 text-muted-foreground">
-              Promotional credits are consumed before purchased wallet credits.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("Promotional credits are consumed before purchased wallet credits.")}</p>
             {canManageGrants ? (
               <Button size="sm" variant="primary" onClick={openGrantDialog}>
                 <ButtonIcon variant="primary">
                   <Plus className="h-3.5 w-3.5" />
-                </ButtonIcon>
-                Issue grant
-              </Button>
+                </ButtonIcon>{t("Issue grant")}</Button>
             ) : null}
           </div>
           {grantsQuery.isError ? (
@@ -472,10 +472,7 @@ export function AdminCreditsPage() {
 
         <TabsContent value="allowances" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-12 text-muted-foreground">
-              Free metric units reset on UTC recurrence windows and settle
-              against actual usage.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("Free metric units reset on UTC recurrence windows and settle against actual usage.")}</p>
             {canWrite ? (
               <Button
                 size="sm"
@@ -484,9 +481,7 @@ export function AdminCreditsPage() {
               >
                 <ButtonIcon variant="primary">
                   <Plus className="h-3.5 w-3.5" />
-                </ButtonIcon>
-                Create allowance
-              </Button>
+                </ButtonIcon>{t("Create allowance")}</Button>
             ) : null}
           </div>
           {allowancesQuery.isError ? (
@@ -513,10 +508,7 @@ export function AdminCreditsPage() {
 
         <TabsContent value="schedules" className="space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-12 text-muted-foreground">
-              Disburse wallet credits on recurring UTC periods. These are
-              credits, not metered service units.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("Disburse wallet credits on recurring UTC periods. These are credits, not metered service units.")}</p>
             {canWrite ? (
               <Button
                 size="sm"
@@ -525,9 +517,7 @@ export function AdminCreditsPage() {
               >
                 <ButtonIcon variant="primary">
                   <Plus className="h-3.5 w-3.5" />
-                </ButtonIcon>
-                Create schedule
-              </Button>
+                </ButtonIcon>{t("Create schedule")}</Button>
             ) : null}
           </div>
           {schedulesQuery.isError ? (
@@ -586,7 +576,7 @@ export function AdminCreditsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Revoke credit grant</DialogTitle>
+            <DialogTitle>{t("Revoke credit grant")}</DialogTitle>
             {grantToRevoke ? (
               <GrantRevokeDescription grant={grantToRevoke} />
             ) : null}
@@ -597,17 +587,13 @@ export function AdminCreditsPage() {
               variant="outline"
               disabled={revokeGrant.isPending}
               onClick={() => setGrantToRevoke(null)}
-            >
-              Cancel
-            </Button>
+            >{t("Cancel")}</Button>
             <Button
               type="button"
               variant="destructive"
               isLoading={revokeGrant.isPending}
               onClick={() => void handleRevoke()}
-            >
-              Revoke grant
-            </Button>
+            >{t("Revoke grant")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

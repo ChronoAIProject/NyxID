@@ -1,3 +1,5 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -26,6 +28,7 @@ export function ConnectionDeleteAction({
   readonly connection: KeyInfo;
   readonly disabled?: boolean;
 }) {
+  const { t } = useUiTranslation();
   const [open, setOpen] = useState(false);
   return (
     <>
@@ -34,11 +37,10 @@ export function ConnectionDeleteAction({
         variant="ghost"
         size="sm"
         disabled={disabled}
-        aria-label={`Delete connection ${connection.label} (${connection.slug})`}
+        aria-label={t("Delete connection {{label}} ({{slug}})", { label: connection.label, slug: connection.slug })}
         onClick={() => setOpen(true)}
       >
-        <Trash2 className="size-3" aria-hidden="true" /> Delete
-      </Button>
+        <Trash2 className="size-3" aria-hidden="true" />{t(" Delete")}</Button>
       {open && (
         <DeleteConnectionDialog
           connection={connection}
@@ -56,6 +58,7 @@ function DeleteConnectionDialog({
   readonly connection: KeyInfo;
   readonly onClose: () => void;
 }) {
+  const { t } = useUiTranslation();
   const deletion = useDeleteKey();
   const [cascade, setCascade] = useState<GrantCascadeDetails | null>(null);
   const close = () => {
@@ -79,9 +82,9 @@ function DeleteConnectionDialog({
         if (details) setCascade(details);
         else
           toast.error(
-            error instanceof ApiError
+            translateErrorMessage(error instanceof ApiError
               ? error.message
-              : "Failed to delete connection",
+              : "Failed to delete connection"),
           );
       },
     });
@@ -106,14 +109,8 @@ function DeleteConnectionDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Delete connection</DialogTitle>
-          <DialogDescription>
-            Delete {connection.label} ({connection.slug}) and its stored
-            credential? Requests using this connection will stop working. This
-            cannot be undone. To stop it temporarily, use Disable. Removing an
-            OAuth connection may also revoke its upstream authorization; shared
-            authorizations require a separate confirmation.
-          </DialogDescription>
+          <DialogTitle>{t("Delete connection")}</DialogTitle>
+          <DialogDescription>{t("Delete ")}{connection.label} ({connection.slug}{t(") and its stored credential? Requests using this connection will stop working. This cannot be undone. To stop it temporarily, use Disable. Removing an OAuth connection may also revoke its upstream authorization; shared authorizations require a separate confirmation.")}</DialogDescription>
         </DialogHeader>
         <DialogFooter>
           <Button
@@ -121,18 +118,14 @@ function DeleteConnectionDialog({
             variant="outline"
             disabled={deletion.isPending}
             onClick={close}
-          >
-            Cancel
-          </Button>
+          >{t("Cancel")}</Button>
           <Button
             type="button"
             variant="destructive"
             isLoading={deletion.isPending}
             disabled={deletion.isPending}
             onClick={() => remove(connection.id)}
-          >
-            Delete connection
-          </Button>
+          >{t("Delete connection")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

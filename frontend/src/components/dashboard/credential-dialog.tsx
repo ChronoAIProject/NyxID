@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import type { DownstreamService } from "@/types/api";
 import { getCredentialInputType } from "@/lib/constants";
@@ -28,6 +29,7 @@ export function CredentialDialog({
   onCancel,
   isPending,
 }: CredentialDialogProps) {
+  const { t } = useUiTranslation();
   const inputConfig = getCredentialInputType(service);
   const [credential, setCredential] = useState("");
   const [label, setLabel] = useState("");
@@ -73,18 +75,16 @@ export function CredentialDialog({
               autoComplete="off"
             />
             {inputConfig.type === "basic" && (
-              <p className="text-xs text-muted-foreground">
-                Format: username:password
-              </p>
+              <p className="text-xs text-muted-foreground">{t("Format: username:password")}</p>
             )}
-            <p className="text-xs text-muted-foreground">Max 8192 characters</p>
+            <p className="text-xs text-muted-foreground">{t("Max 8192 characters")}</p>
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="label">Label (optional)</Label>
+            <Label htmlFor="label">{t("Label (optional)")}</Label>
             <Input
               id="label"
-              placeholder="e.g., Production Key"
+              placeholder={t("e.g., Production Key")}
               value={label}
               onChange={(e) => setLabel(e.target.value)}
               maxLength={200}
@@ -92,15 +92,13 @@ export function CredentialDialog({
           </div>
 
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={onCancel}>
-              Cancel
-            </Button>
+            <Button type="button" variant="outline" onClick={onCancel}>{t("Cancel")}</Button>
             <Button
               variant="primary"
               type="submit"
               disabled={credential.trim().length === 0 || isPending}
             >
-              {submitLabel}
+              {t(submitLabel)}
             </Button>
           </DialogFooter>
         </form>

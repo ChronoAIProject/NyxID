@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Check, FlaskConical, RotateCcw, TriangleAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -27,6 +28,7 @@ function activityAge(at: number): string {
 }
 
 export function MockScenariosAction() {
+  const { t } = useUiTranslation();
   const enabled = useAssistantMockScenariosStore((state) => state.enabled);
   const disabledScenarioIds = useAssistantMockScenariosStore(
     (state) => state.disabledScenarioIds,
@@ -60,7 +62,7 @@ export function MockScenariosAction() {
               type="button"
               variant="ghost"
               size="icon"
-              aria-label="Mock scenarios"
+              aria-label={t("Mock scenarios")}
               className="relative shrink-0 text-text-tertiary"
             >
               <FlaskConical className="h-4 w-4" />
@@ -74,7 +76,7 @@ export function MockScenariosAction() {
             </Button>
           </PopoverTrigger>
         </TooltipTrigger>
-        <TooltipContent>Mock scenarios</TooltipContent>
+        <TooltipContent>{t("Mock scenarios")}</TooltipContent>
       </Tooltip>
 
       <PopoverContent
@@ -85,36 +87,24 @@ export function MockScenariosAction() {
         <section className="space-y-3 p-4">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <h2 className="text-13 font-semibold text-foreground">
-                Mock scenarios
-              </h2>
+              <h2 className="text-13 font-semibold text-foreground">{t("Mock scenarios")}</h2>
               {engineState === "loading" ? (
-                <p role="status" className="mt-0.5 text-11 text-warning">
-                  Loading...
-                </p>
+                <p role="status" className="mt-0.5 text-11 text-warning">{t("Loading...")}</p>
               ) : engineState === "error" ? (
-                <p role="alert" className="mt-0.5 text-11 text-destructive">
-                  Scenario engine failed to load.
-                </p>
+                <p role="alert" className="mt-0.5 text-11 text-destructive">{t("Scenario engine failed to load.")}</p>
               ) : null}
             </div>
             <Switch
               checked={enabled}
               onCheckedChange={setEnabled}
               disabled={engineState === "loading"}
-              aria-label="Enable mock scenarios"
+              aria-label={t("Enable mock scenarios")}
             />
           </div>
-          <p className="text-11 leading-4 text-muted-foreground">
-            Shapes matching assistant HTTP fixtures. Session-only; other
-            messages use the default fixture stream.
-          </p>
+          <p className="text-11 leading-4 text-muted-foreground">{t("Shapes matching assistant HTTP fixtures. Session-only; other messages use the default fixture stream.")}</p>
           <div className="flex gap-2 text-11 leading-4 text-warning">
             <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" />
-            <p>
-              Action cards open real connection journeys and can create real
-              keys on your account.
-            </p>
+            <p>{t("Action cards open real connection journeys and can create real keys on your account.")}</p>
           </div>
         </section>
 
@@ -125,9 +115,7 @@ export function MockScenariosAction() {
           <h3
             id="mock-scenario-list-heading"
             className="mb-1 text-10 font-semibold uppercase text-text-tertiary"
-          >
-            Scenarios
-          </h3>
+          >{t("Scenarios")}</h3>
           <div className="divide-y divide-border/50">
             {assistantHttpScenarios.map((entry) => {
               const scenarioEnabled = !disabledScenarioIds.includes(entry.id);
@@ -150,8 +138,7 @@ export function MockScenariosAction() {
                           data-testid={`scenario-activity-${entry.id}`}
                           className="flex shrink-0 items-center gap-1 text-10 text-success"
                         >
-                          <Check className="h-3 w-3" />
-                          Matched {activityAge(lastActivity.at)}
+                          <Check className="h-3 w-3" />{t("Matched ")}{activityAge(lastActivity.at)}
                         </span>
                       ) : null}
                     </div>
@@ -167,7 +154,7 @@ export function MockScenariosAction() {
                     onCheckedChange={(checked) =>
                       setScenarioEnabled(entry.id, checked)
                     }
-                    aria-label={`Enable ${entry.id} scenario`}
+                    aria-label={t("Enable {{id}} scenario", { id: entry.id })}
                   />
                 </div>
               );
@@ -177,10 +164,7 @@ export function MockScenariosAction() {
             <p
               data-testid="unmatched-scenario-activity"
               className="border-t border-border/50 pt-2 text-10 text-text-tertiary"
-            >
-              No scenario matched - {activityAge(lastActivity.at)}; message
-              passed through.
-            </p>
+            >{t("No scenario matched - ")}{activityAge(lastActivity.at)}{t("; message passed through.")}</p>
           ) : null}
         </section>
 
@@ -192,9 +176,7 @@ export function MockScenariosAction() {
             <h3
               id="mock-scenario-world-heading"
               className="text-10 font-semibold uppercase text-text-tertiary"
-            >
-              Connected (mock)
-            </h3>
+            >{t("Connected (mock)")}</h3>
             <Button
               type="button"
               variant="ghost"
@@ -203,15 +185,10 @@ export function MockScenariosAction() {
               disabled={world.connected.length === 0}
               className="h-6 px-1.5 text-10"
             >
-              <RotateCcw />
-              Reset world
-            </Button>
+              <RotateCcw />{t("Reset world")}</Button>
           </div>
           {world.connected.length === 0 ? (
-            <p className="mt-2 text-11 leading-4 text-text-tertiary">
-              Nothing connected - <code className="font-mono">need</code> flows
-              will run their connect step.
-            </p>
+            <p className="mt-2 text-11 leading-4 text-text-tertiary">{t("Nothing connected - ")}<code className="font-mono">need</code>{t(" flows will run their connect step.")}</p>
           ) : (
             <div className="mt-2 flex flex-wrap gap-1.5">
               {world.connected.map((serviceSlug) => (
@@ -223,7 +200,7 @@ export function MockScenariosAction() {
                   <button
                     type="button"
                     onClick={() => disconnectService(serviceSlug)}
-                    aria-label={`Remove ${serviceSlug} from mock world`}
+                    aria-label={t("Remove {{serviceSlug}} from mock world", { serviceSlug: serviceSlug })}
                     className="flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] hover:bg-success/15 focus-visible:outline-none"
                   >
                     <X className="h-3 w-3" />
@@ -235,15 +212,14 @@ export function MockScenariosAction() {
         </section>
 
         <footer className="space-y-1 border-t border-border/60 px-4 py-3 text-10 leading-4 text-text-tertiary">
-          <p>
-            Edit flows in{" "}
+          <p>{t("Edit flows in")}{" "}
             <code className="font-mono">
               src/lib/assistant/assistant-http-scenarios.ts
             </code>
             .
           </p>
-          <p>Fixture conversations are session-only and disappear on reload.</p>
-          <p>Settings use last-write-wins across tabs.</p>
+          <p>{t("Fixture conversations are session-only and disappear on reload.")}</p>
+          <p>{t("Settings use last-write-wins across tabs.")}</p>
         </footer>
       </PopoverContent>
     </Popover>

@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { RefreshCw, Server } from "lucide-react";
 import { z } from "zod";
@@ -118,6 +120,7 @@ export function AssistantServiceUpdateDialog({
   readonly params: AssistantServiceUpdateParams;
   readonly onComplete: (userServiceId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -241,21 +244,21 @@ export function AssistantServiceUpdateDialog({
           <DialogTitle>
             {resultId
               ? replayed
-                ? "Service already updated"
-                : "Service updated"
-              : "Update connected service"}
+                ? t("Service already updated")
+                : t("Service updated")
+              : t("Update connected service")}
           </DialogTitle>
           <DialogDescription>
             {resultId
-              ? "NyxID verified the change from authorization evidence. The assistant receives only the service reference."
-              : "Confirm the fields NyxID will change. Your credential stays in NyxID."}
+              ? t("NyxID verified the change from authorization evidence. The assistant receives only the service reference.")
+              : t("Confirm the fields NyxID will change. Your credential stays in NyxID.")}
           </DialogDescription>
         </DialogHeader>
 
         {!resultId ? (
           <div className="space-y-3 border-y border-border py-4">
             <div className="space-y-1.5">
-              <Label htmlFor="assistant-service-update-name">Name</Label>
+              <Label htmlFor="assistant-service-update-name">{t("Name")}</Label>
               <Input
                 id="assistant-service-update-name"
                 value={name}
@@ -264,7 +267,7 @@ export function AssistantServiceUpdateDialog({
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="assistant-service-update-url">Endpoint URL</Label>
+              <Label htmlFor="assistant-service-update-url">{t("Endpoint URL")}</Label>
               <Input
                 id="assistant-service-update-url"
                 value={endpointUrl}
@@ -273,7 +276,7 @@ export function AssistantServiceUpdateDialog({
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="assistant-service-update-auth">Auth method</Label>
+              <Label htmlFor="assistant-service-update-auth">{t("Auth method")}</Label>
               <Input
                 id="assistant-service-update-auth"
                 value={authMethod}
@@ -282,9 +285,7 @@ export function AssistantServiceUpdateDialog({
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="assistant-service-update-key-name">
-                Auth key name
-              </Label>
+              <Label htmlFor="assistant-service-update-key-name">{t("Auth key name")}</Label>
               <Input
                 id="assistant-service-update-key-name"
                 value={authKeyName}
@@ -297,14 +298,12 @@ export function AssistantServiceUpdateDialog({
           <div className="flex items-start gap-3 border-y border-border py-4">
             <Server className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 space-y-1">
-              <p className="text-13 font-medium">Connected service</p>
+              <p className="text-13 font-medium">{t("Connected service")}</p>
               <p className="break-all font-mono text-12 text-muted-foreground">
                 {resultId}
               </p>
               {verified ? (
-                <p className="text-11 text-success">
-                  Authorization evidence verified.
-                </p>
+                <p className="text-11 text-success">{t("Authorization evidence verified.")}</p>
               ) : null}
             </div>
           </div>
@@ -312,7 +311,7 @@ export function AssistantServiceUpdateDialog({
 
         {error ? (
           <p role="alert" className="text-12 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
 
@@ -327,9 +326,7 @@ export function AssistantServiceUpdateDialog({
                   void verifyEvidence(resultId, expectedStateVersion);
               }}
             >
-              <RefreshCw />
-              Retry verification
-            </Button>
+              <RefreshCw />{t("Retry verification")}</Button>
           ) : null}
           {resultId ? (
             <Button
@@ -337,18 +334,14 @@ export function AssistantServiceUpdateDialog({
               variant="primary"
               disabled={!verified}
               onClick={() => onComplete(resultId)}
-            >
-              Report service
-            </Button>
+            >{t("Report service")}</Button>
           ) : (
             <Button
               type="button"
               variant="primary"
               isLoading={submitting}
               onClick={() => void submit()}
-            >
-              Update service
-            </Button>
+            >{t("Update service")}</Button>
           )}
         </DialogFooter>
       </DialogContent>

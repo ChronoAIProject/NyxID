@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { copyToClipboard } from "@/lib/utils";
@@ -49,16 +51,17 @@ function CopyButton({
   readonly text: string;
   readonly label: string;
 }) {
+  const { t } = useUiTranslation();
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
     try {
       await copyToClipboard(text);
       setCopied(true);
-      toast.success(`${label} copied to clipboard`);
+      toast.success(translateUi("{{label}} copied to clipboard", { label: label }));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error("Failed to copy to clipboard");
+      toast.error(translateUi("Failed to copy to clipboard"));
     }
   }
 
@@ -74,12 +77,13 @@ function CopyButton({
       ) : (
         <Copy className="h-3 w-3" />
       )}
-      <span className="sr-only">Copy {label}</span>
+      <span className="sr-only">{t("Copy ")}{label}</span>
     </Button>
   );
 }
 
 export function McpConnectionInfo() {
+  const { t } = useUiTranslation();
   const { data: config, isLoading } = usePublicConfig();
 
   if (isLoading) {
@@ -94,30 +98,22 @@ export function McpConnectionInfo() {
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-border/50 bg-muted/30 p-3">
-        <p className="text-xs text-muted-foreground">
-          NyxID exposes a single MCP endpoint that provides tools for all your
-          connected services. Connect your MCP client once and it will
-          automatically discover tools from every service you have enabled.
-        </p>
+        <p className="text-xs text-muted-foreground">{t("NyxID exposes a single MCP endpoint that provides tools for all your connected services. Connect your MCP client once and it will automatically discover tools from every service you have enabled.")}</p>
       </div>
 
       <div>
-        <p className="mb-1 text-xs font-medium text-muted-foreground">
-          MCP Proxy URL
-        </p>
+        <p className="mb-1 text-xs font-medium text-muted-foreground">{t("MCP Proxy URL")}</p>
         <div className="relative">
           <code className="block rounded bg-muted px-3 py-2 pr-10 text-xs break-all">
             {mcpUrl}
           </code>
-          <CopyButton text={mcpUrl} label="MCP proxy URL" />
+          <CopyButton text={mcpUrl} label={t("MCP proxy URL")} />
         </div>
       </div>
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="text-xs font-medium text-muted-foreground">
-            Cursor Configuration
-          </p>
+          <p className="text-xs font-medium text-muted-foreground">{t("Cursor Configuration")}</p>
           <Badge variant="secondary" className="text-10">
             .cursor/mcp.json
           </Badge>
@@ -126,15 +122,13 @@ export function McpConnectionInfo() {
           <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-xs">
             {cursorConfig}
           </pre>
-          <CopyButton text={cursorConfig} label="Cursor config" />
+          <CopyButton text={cursorConfig} label={t("Cursor config")} />
         </div>
       </div>
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="text-xs font-medium text-muted-foreground">
-            Claude Code Configuration
-          </p>
+          <p className="text-xs font-medium text-muted-foreground">{t("Claude Code Configuration")}</p>
           <Badge variant="secondary" className="text-10">
             .claude/settings.json
           </Badge>
@@ -143,15 +137,13 @@ export function McpConnectionInfo() {
           <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-xs">
             {claudeCodeConfig}
           </pre>
-          <CopyButton text={claudeCodeConfig} label="Claude Code config" />
+          <CopyButton text={claudeCodeConfig} label={t("Claude Code config")} />
         </div>
       </div>
 
       <div>
         <div className="mb-1 flex items-center gap-2">
-          <p className="text-xs font-medium text-muted-foreground">
-            Codex Configuration
-          </p>
+          <p className="text-xs font-medium text-muted-foreground">{t("Codex Configuration")}</p>
           <Badge variant="secondary" className="text-10">
             ~/.codex/config.toml
           </Badge>
@@ -160,18 +152,13 @@ export function McpConnectionInfo() {
           <pre className="whitespace-pre-wrap break-all rounded-lg bg-muted px-4 py-3.5 pr-10 min-h-[44px] text-xs">
             {codexConfig}
           </pre>
-          <CopyButton text={codexConfig} label="Codex config" />
+          <CopyButton text={codexConfig} label={t("Codex config")} />
         </div>
       </div>
 
       <div className="rounded-lg border border-border/50 bg-muted/30 p-3">
-        <p className="text-xs font-medium mb-1">How it works</p>
-        <p className="text-xs text-muted-foreground">
-          When an MCP client connects, NyxID authenticates via OAuth in your
-          browser. Once authenticated, the proxy exposes tools from all your
-          connected services. Tool calls are forwarded to each service's API
-          with your credentials injected automatically.
-        </p>
+        <p className="text-xs font-medium mb-1">{t("How it works")}</p>
+        <p className="text-xs text-muted-foreground">{t("When an MCP client connects, NyxID authenticates via OAuth in your browser. Once authenticated, the proxy exposes tools from all your connected services. Tool calls are forwarded to each service's API with your credentials injected automatically.")}</p>
       </div>
     </div>
   );

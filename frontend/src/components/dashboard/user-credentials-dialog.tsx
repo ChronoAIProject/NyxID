@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { ProviderConfig, UserProviderCredentials } from "@/types/api";
@@ -45,6 +48,7 @@ export function UserCredentialsDialog({
   provider,
   onClose,
 }: UserCredentialsDialogProps) {
+  const { t } = useUiTranslation();
   const { data: credentials, isLoading } = useMyProviderCredentials(
     provider.id,
   );
@@ -85,7 +89,7 @@ export function UserCredentialsDialog({
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
       } else {
-        toast.error("Failed to save credentials");
+        toast.error(translateUi("Failed to save credentials"));
       }
     }
   }
@@ -93,13 +97,13 @@ export function UserCredentialsDialog({
   async function handleDelete() {
     try {
       await deleteMutation.mutateAsync(provider.id);
-      toast.success("OAuth credentials removed");
+      toast.success(translateUi("OAuth credentials removed"));
       onClose();
     } catch (error) {
       if (error instanceof ApiError) {
-        toast.error(error.message);
+        toast.error(translateErrorMessage(error.message));
       } else {
-        toast.error("Failed to remove credentials");
+        toast.error(translateUi("Failed to remove credentials"));
       }
     }
   }
@@ -109,18 +113,13 @@ export function UserCredentialsDialog({
       <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            {hasExisting ? "Manage" : "Setup"} OAuth App for {provider.name}
+            {hasExisting ? t("Manage") : t("Setup")}{t(" OAuth App for ")}{provider.name}
           </DialogTitle>
-          <DialogDescription>
-            Enter your own OAuth app credentials to connect with {provider.name}
-            . Public or PKCE-only clients can leave Client Secret blank.
-          </DialogDescription>
+          <DialogDescription>{t("Enter your own OAuth app credentials to connect with ")}{provider.name}{t(". Public or PKCE-only clients can leave Client Secret blank.")}</DialogDescription>
         </DialogHeader>
 
         {isLoading ? (
-          <div className="py-8 text-center text-12 text-muted-foreground">
-            Loading...
-          </div>
+          <div className="py-8 text-center text-12 text-muted-foreground">{t("Loading...")}</div>
         ) : (
           <>
             <ExistingCredentialsInfo credentials={credentials} />
@@ -138,9 +137,7 @@ export function UserCredentialsDialog({
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 text-12 text-primary-text hover:underline"
-              >
-                How to create an OAuth app
-                <ExternalLink className="h-3 w-3" />
+              >{t("How to create an OAuth app")}<ExternalLink className="h-3 w-3" />
               </a>
             )}
 
@@ -151,7 +148,7 @@ export function UserCredentialsDialog({
               >
                 {form.formState.errors.root && (
                   <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
-                    {form.formState.errors.root.message}
+                    {translateUi(form.formState.errors.root.message ?? "")}
                   </div>
                 )}
 
@@ -160,10 +157,10 @@ export function UserCredentialsDialog({
                   name="client_id"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Client ID</FormLabel>
+                      <FormLabel>{t("Client ID")}</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="Your OAuth app Client ID"
+                          placeholder={t("Your OAuth app Client ID")}
                           autoComplete="off"
                           {...field}
                         />
@@ -178,19 +175,16 @@ export function UserCredentialsDialog({
                   name="client_secret"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Client Secret (optional)</FormLabel>
+                      <FormLabel>{t("Client Secret (optional)")}</FormLabel>
                       <FormControl>
                         <Input
                           type="password"
-                          placeholder="Your OAuth app Client Secret"
+                          placeholder={t("Your OAuth app Client Secret")}
                           autoComplete="off"
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
-                        Leave blank for public clients that do not use a client
-                        secret.
-                      </p>
+                      <p className="text-xs text-muted-foreground">{t("Leave blank for public clients that do not use a client secret.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -201,10 +195,10 @@ export function UserCredentialsDialog({
                   name="label"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Label (optional)</FormLabel>
+                      <FormLabel>{t("Label (optional)")}</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="e.g., My Dev App"
+                          placeholder={t("e.g., My Dev App")}
                           maxLength={200}
                           {...field}
                         />
@@ -222,9 +216,7 @@ export function UserCredentialsDialog({
                       onClick={() => setConfirmDelete(true)}
                       className="mr-auto"
                     >
-                      <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
-                      Remove
-                    </Button>
+                      <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>{t("Remove")}</Button>
                   )}
 
                   {confirmDelete && (
@@ -234,16 +226,12 @@ export function UserCredentialsDialog({
                         variant="destructive"
                         onClick={() => void handleDelete()}
                         isLoading={deleteMutation.isPending}
-                      >
-                        Confirm Remove
-                      </Button>
+                      >{t("Confirm Remove")}</Button>
                       <Button
                         type="button"
                         variant="ghost"
                         onClick={() => setConfirmDelete(false)}
-                      >
-                        Cancel
-                      </Button>
+                      >{t("Cancel")}</Button>
                     </div>
                   )}
 
@@ -252,11 +240,9 @@ export function UserCredentialsDialog({
                     variant="outline"
                     onClick={onClose}
                     disabled={setMutation.isPending}
-                  >
-                    Cancel
-                  </Button>
+                  >{t("Cancel")}</Button>
                   <Button variant="primary" type="submit" isLoading={setMutation.isPending} disabled={!form.formState.isValid || setMutation.isPending}>
-                    {hasExisting ? "Update" : "Save"}
+                    {hasExisting ? t("Update") : t("Save")}
                   </Button>
                 </DialogFooter>
               </form>
@@ -273,15 +259,16 @@ function ExistingCredentialsInfo({
 }: {
   readonly credentials: UserProviderCredentials | undefined;
 }) {
+  const { t } = useUiTranslation();
   if (!credentials?.has_credentials) return null;
 
   return (
     <div className="flex items-center gap-2 rounded-lg bg-muted p-3 text-12">
-      <Badge variant="success">Configured</Badge>
+      <Badge variant="success">{t("Configured")}</Badge>
       <div className="flex flex-col gap-0.5 text-xs text-muted-foreground">
         {credentials.label && <span>{credentials.label}</span>}
         {credentials.updated_at && (
-          <span>Updated {formatDate(credentials.updated_at)}</span>
+          <span>{t("Updated ")}{formatDate(credentials.updated_at)}</span>
         )}
       </div>
     </div>

@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { Link } from "@tanstack/react-router";
 import { TimezoneSelect } from "@/components/shared/timezone-select";
 import { browserTimezone, formatAutomationTime } from "@/lib/automation-time";
@@ -23,6 +25,7 @@ import { Button } from "@/components/ui/button";
 const message = (e: unknown) =>
   e instanceof Error ? e.message : "Could not save preferences";
 export function AgentAutomations({ agentId }: { readonly agentId: string }) {
+  const { t } = useUiTranslation();
   const triggers = useTriggers();
   const settings = useNyxBotSettings();
   const rows =
@@ -31,7 +34,7 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
     ) ?? [];
   return (
     <section className="space-y-2">
-      <h3 className="text-13 font-semibold">Automations</h3>
+      <h3 className="text-13 font-semibold">{t("Automations")}</h3>
       {rows.map((row) => (
         <p key={row.id} className="text-12">
           {row.label} ·{" "}
@@ -40,29 +43,27 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
                 row.next_run_at,
                 settings.data?.timezone ?? browserTimezone(),
               )
-            : "Paused"}
+            : t("Paused")}
         </p>
       ))}
       <Link
         className="text-12 text-primary-text underline"
         to="/assistant/automations"
         search={{ agent: agentId }}
-      >
-        Manage automations ({rows.length})
+      >{t("Manage automations (")}{rows.length})
       </Link>
     </section>
   );
 }
 
 export function AutomationPreferences() {
+  const { t } = useUiTranslation();
   const settings = useNyxBotSettings();
   const update = useUpdateNyxBotSettings();
   const [open, setOpen] = useState(false);
   return (
     <div className="text-12">
-      <button className="text-primary-text underline" onClick={() => setOpen(!open)}>
-        Timezone and automation budgets
-      </button>
+      <button className="text-primary-text underline" onClick={() => setOpen(!open)}>{t("Timezone and automation budgets")}</button>
       {open && settings.data && (
         <AutomationPreferencesForm
           timezone={settings.data.timezone ?? browserTimezone()}
@@ -103,6 +104,7 @@ function AutomationPreferencesForm({
     trigger_runs_per_day: number;
   }) => Promise<void>;
 }) {
+  const { t } = useUiTranslation();
   const form = useAppForm({
     resolver: zodResolver(automationPreferencesSchema),
     defaultValues: {
@@ -168,16 +170,14 @@ function AutomationPreferencesForm({
       ))}
       {error && (
         <p role="alert" className="text-destructive">
-          {error}
+          {translateUi(error)}
         </p>
       )}
       <Button
         type="submit"
         variant="primary"
         disabled={form.formState.isSubmitting}
-      >
-        Save preferences
-      </Button>
+      >{t("Save preferences")}</Button>
     </form>
   );
 }

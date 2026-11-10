@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
@@ -52,6 +54,7 @@ export function OwnershipTransferDialog({
   readonly onClose: () => void;
   readonly onTransferred?: () => void;
 }) {
+  const { t } = useUiTranslation();
   const form = useAppForm<OwnershipTransferForm>({
     resolver: zodResolver(ownershipTransferSchema),
     defaultValues: { new_owner_user_id: "" },
@@ -97,7 +100,7 @@ export function OwnershipTransferDialog({
         expected_version: review.preview.version,
         request_id: review.requestId,
       });
-      toast.success(`Ownership of ${review.preview.name} transferred`);
+      toast.success(translateUi("Ownership of {{name}} transferred", { name: review.preview.name }));
       onClose();
       onTransferred?.();
     } catch (cause) {
@@ -118,16 +121,14 @@ export function OwnershipTransferDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {review ? "Review ownership transfer" : "Transfer ownership"}
+            {review ? t("Review ownership transfer") : t("Transfer ownership")}
           </DialogTitle>
-          <DialogDescription>
-            Move {resource.name} to a specific person or organization.
-          </DialogDescription>
+          <DialogDescription>{t("Move ")}{resource.name}{t(" to a specific person or organization.")}</DialogDescription>
         </DialogHeader>
         {review ? (
           <div className="space-y-4 text-sm">
             <dl className="space-y-2 rounded-md border p-3">
-              <dt className="text-muted-foreground">Current owner</dt>
+              <dt className="text-muted-foreground">{t("Current owner")}</dt>
               <dd className="break-all">
                 {review.preview.previous_owner_name ??
                   review.preview.previous_owner_user_id}
@@ -137,11 +138,10 @@ export function OwnershipTransferDialog({
                   </span>
                 )}
               </dd>
-              <dt className="text-muted-foreground">
-                Destination{" "}
+              <dt className="text-muted-foreground">{t("Destination")}{" "}
                 {review.preview.destination_type === "org"
-                  ? "organization"
-                  : "person"}
+                  ? t("organization")
+                  : t("person")}
               </dt>
               <dd>
                 {review.preview.destination_name}
@@ -157,18 +157,14 @@ export function OwnershipTransferDialog({
             </ul>
             {kind === "channel_bot" && (
               <p>
-                {review.preview.routes_to_retire} routes will be permanently
-                retired.
-              </p>
+                {review.preview.routes_to_retire}{t(" routes will be permanently retired.")}</p>
             )}
             {review.preview.blockers.length > 0 && (
               <div
                 role="alert"
                 className="rounded-md border border-destructive p-3 text-destructive"
               >
-                <p className="font-medium">
-                  This resource cannot be transferred
-                </p>
+                <p className="font-medium">{t("This resource cannot be transferred")}</p>
                 <ul className="mt-2 list-disc space-y-2 pl-5">
                   {review.preview.blockers.map((blocker) => (
                     <li key={blocker}>{blocker}</li>
@@ -184,7 +180,7 @@ export function OwnershipTransferDialog({
             className="space-y-4"
           >
             <div className="space-y-2">
-              <Label htmlFor="destination-type">Destination type</Label>
+              <Label htmlFor="destination-type">{t("Destination type")}</Label>
               <Select
                 value={ownerType}
                 disabled={pending}
@@ -198,13 +194,13 @@ export function OwnershipTransferDialog({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="org">Organization</SelectItem>
-                  <SelectItem value="person">Person</SelectItem>
+                  <SelectItem value="org">{t("Organization")}</SelectItem>
+                  <SelectItem value="person">{t("Person")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="destination-owner">Destination owner</Label>
+              <Label htmlFor="destination-owner">{t("Destination owner")}</Label>
               <OwnerSelect
                 kind={kind}
                 resourceId={resource.id}
@@ -221,7 +217,7 @@ export function OwnershipTransferDialog({
               />
               {form.formState.errors.new_owner_user_id && (
                 <p role="alert" className="text-sm text-destructive">
-                  {form.formState.errors.new_owner_user_id.message}
+                  {translateUi(form.formState.errors.new_owner_user_id.message ?? "")}
                 </p>
               )}
             </div>
@@ -229,7 +225,7 @@ export function OwnershipTransferDialog({
         )}
         {error && (
           <p role="alert" className="text-sm text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         )}
         <DialogFooter>
@@ -244,7 +240,7 @@ export function OwnershipTransferDialog({
               } else onClose();
             }}
           >
-            {review ? "Back" : "Cancel"}
+            {review ? t("Back") : t("Cancel")}
           </Button>
           {review ? (
             <Button
@@ -252,7 +248,7 @@ export function OwnershipTransferDialog({
               disabled={pending || review.preview.blockers.length > 0}
               onClick={() => void confirm()}
             >
-              {pending ? "Transferring…" : "Confirm transfer"}
+              {pending ? t("Transferring…") : t("Confirm transfer")}
             </Button>
           ) : (
             <Button
@@ -260,7 +256,7 @@ export function OwnershipTransferDialog({
               form="ownership-transfer"
               disabled={pending || !selectedId}
             >
-              {pending ? "Preparing…" : "Review transfer"}
+              {pending ? t("Preparing…") : t("Review transfer")}
             </Button>
           )}
         </DialogFooter>

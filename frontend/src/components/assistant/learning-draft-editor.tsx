@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -28,6 +31,7 @@ import {
 } from "@/hooks/use-agent-learning-review";
 import {
   skillDraftDiagnostics,
+  skillDraftRemediation,
   skillDraftFieldLabel,
   skillDraftFormSchema,
   learningDraftEditable,
@@ -99,7 +103,7 @@ function formPath(
 }
 
 function fieldMessage(item: SkillDraftDiagnostic): string {
-  return `${item.line ? `Line ${item.line}: ` : ""}${item.remediation}`;
+  return `${item.line ? translateUi("Line {{line}}: ", { line: item.line }) : ""}${skillDraftRemediation(item)}`;
 }
 
 /** The attached pins an improve draft may build on, plus its current base. */
@@ -128,13 +132,14 @@ function BaseSkillField({
   readonly form: ReturnType<typeof useAppForm<SkillDraftForm>>;
   readonly onChosen: (pin: SkillPin) => void;
 }) {
+  const { t } = useUiTranslation();
   return (
     <FormField
       control={form.control}
       name="base_skill_id"
       render={({ field }) => (
         <FormItem className="space-y-1">
-          <FormLabel className={LABEL}>Base skill</FormLabel>
+          <FormLabel className={LABEL}>{t("Base skill")}</FormLabel>
           <Select
             value={field.value}
             disabled={readOnly}
@@ -145,22 +150,21 @@ function BaseSkillField({
             }}
           >
             <FormControl>
-              <SelectTrigger aria-label="Base skill">
-                <SelectValue placeholder="Choose an attached skill" />
+              <SelectTrigger aria-label={t("Base skill")}>
+                <SelectValue placeholder={t("Choose an attached skill")} />
               </SelectTrigger>
             </FormControl>
             <SelectContent>
               {options.map((pin) => (
                 <SelectItem key={pin.skill_id} value={pin.skill_id}>
                   {pin.name} · {pin.version}
-                  {pin.skill_id === detached ? " (not attached)" : ""}
+                  {pin.skill_id === detached ? t(" (not attached)") : ""}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
           {loadError ? (
-            <p role="alert" className="text-11 text-destructive">
-              Attached skills could not be loaded. {loadError.message}
+            <p role="alert" className="text-11 text-destructive">{t("Attached skills could not be loaded. ")}{translateUi(loadError.message ?? "")}
             </p>
           ) : null}
           <FormMessage className="text-11" />
@@ -190,6 +194,7 @@ export function LearningDraftEditor({
   readonly validate: Review["validate"];
   readonly onSaved?: () => void;
 }) {
+  const { t } = useUiTranslation();
   const draft = proposal.draft;
   const form = useAppForm<SkillDraftForm>({
     resolver: zodResolver(skillDraftFormSchema),
@@ -318,7 +323,7 @@ export function LearningDraftEditor({
   return (
     <Form {...form}>
       <form
-        aria-label="Edit skill draft"
+        aria-label={t("Edit skill draft")}
         className="space-y-3"
         onSubmit={(event) => void save(event)}
       >
@@ -332,35 +337,29 @@ export function LearningDraftEditor({
             ))}
           </div>
         ) : null}
-        <p className="text-11 text-text-tertiary">
-          Generated guidance is untrusted and is shown as plain text.
-        </p>
+        <p className="text-11 text-text-tertiary">{t("Generated guidance is untrusted and is shown as plain text.")}</p>
         {draft.kind === "none" ? (
-          <p className="text-11 text-muted-foreground">
-            Kind: no skill proposed
-          </p>
+          <p className="text-11 text-muted-foreground">{t("Kind: no skill proposed")}</p>
         ) : (
           <FormField
             control={form.control}
             name="kind"
             render={({ field }) => (
               <FormItem className="space-y-1">
-                <FormLabel className={LABEL}>Skill kind</FormLabel>
+                <FormLabel className={LABEL}>{t("Skill kind")}</FormLabel>
                 <Select
                   value={field.value}
                   disabled={readOnly}
                   onValueChange={field.onChange}
                 >
                   <FormControl>
-                    <SelectTrigger aria-label="Skill kind">
+                    <SelectTrigger aria-label={t("Skill kind")}>
                       <SelectValue />
                     </SelectTrigger>
                   </FormControl>
                   <SelectContent>
-                    <SelectItem value="new">New skill</SelectItem>
-                    <SelectItem value="improve">
-                      Improve an attached skill
-                    </SelectItem>
+                    <SelectItem value="new">{t("New skill")}</SelectItem>
+                    <SelectItem value="improve">{t("Improve an attached skill")}</SelectItem>
                   </SelectContent>
                 </Select>
                 <FormMessage className="text-11" />
@@ -383,9 +382,7 @@ export function LearningDraftEditor({
         ) : null}
         {text("name", "Skill name", false)}
         {kind === "improve" && proposal.source === "authored" ? (
-          <p className="text-11 text-text-tertiary">
-            An improvement keeps the base skill&apos;s name.
-          </p>
+          <p className="text-11 text-text-tertiary">{t("An improvement keeps the base skill's name.")}</p>
         ) : null}
         {text("description", "Skill description", true)}
         {text("skill_md", "Skill draft", true, "min-h-40 font-mono text-11")}
@@ -401,10 +398,10 @@ export function LearningDraftEditor({
               name={`files.${index}.path`}
               render={({ field }) => (
                 <FormItem className="space-y-1">
-                  <FormLabel className={LABEL}>{`File ${index + 1} path`}</FormLabel>
+                  <FormLabel className={LABEL}>{t("File {{value}} path", { value: index + 1 })}</FormLabel>
                   <FormControl>
                     <Input
-                      aria-label={`File ${index + 1} path`}
+                      aria-label={t("File {{value}} path", { value: index + 1 })}
                       readOnly={readOnly}
                       {...field}
                     />
@@ -418,10 +415,10 @@ export function LearningDraftEditor({
               name={`files.${index}.content`}
               render={({ field }) => (
                 <FormItem className="space-y-1">
-                  <FormLabel className={LABEL}>{`File ${index + 1} content`}</FormLabel>
+                  <FormLabel className={LABEL}>{t("File {{value}} content", { value: index + 1 })}</FormLabel>
                   <FormControl>
                     <Textarea
-                      aria-label={`File ${index + 1} content`}
+                      aria-label={t("File {{value}} content", { value: index + 1 })}
                       className="font-mono text-11"
                       readOnly={readOnly}
                       {...field}
@@ -438,7 +435,7 @@ export function LearningDraftEditor({
                 variant="ghost"
                 onClick={() => files.remove(index)}
               >
-                {`Remove file ${index + 1}`}
+                {t("Remove file {{value}}", { value: index + 1 })}
               </Button>
             ) : null}
           </div>
@@ -450,42 +447,30 @@ export function LearningDraftEditor({
               size="sm"
               variant="ghost"
               onClick={() => files.append({ path: "", content: "" })}
-            >
-              Add file
-            </Button>
+            >{t("Add file")}</Button>
             <Button
               type="button"
               size="sm"
               variant="ghost"
               disabled={validate.isPending}
               onClick={() => void check()}
-            >
-              Validate
-            </Button>
+            >{t("Validate")}</Button>
             {form.formState.isDirty ? (
               <Button
                 type="submit"
                 size="sm"
                 variant="secondary"
                 disabled={edit.isPending}
-              >
-                Save draft
-              </Button>
+              >{t("Save draft")}</Button>
             ) : null}
           </div>
         ) : null}
         {validBytes !== undefined ? (
-          <p role="status" className="text-11 text-success">
-            The draft passes validation ({validBytes.toLocaleString("en-US")}{" "}
-            bytes).
-            {form.formState.isDirty ? " Save it to keep these changes." : ""}
+          <p role="status" className="text-11 text-success">{t("The draft passes validation (")}{validBytes.toLocaleString(getFormattingLocale())}{" "}{t("bytes).")}{form.formState.isDirty ? t(" Save it to keep these changes.") : ""}
           </p>
         ) : null}
         {proposal.source === "authored" ? (
-          <p className="text-11 text-muted-foreground">
-            Saving updates the draft. Authored drafts are published only from
-            their confirmation card in the conversation.
-          </p>
+          <p className="text-11 text-muted-foreground">{t("Saving updates the draft. Authored drafts are published only from their confirmation card in the conversation.")}</p>
         ) : null}
       </form>
     </Form>
@@ -510,27 +495,23 @@ export function ProposalDraftEditor({
   readonly showCardLink?: boolean;
   readonly onSaved?: () => void;
 }) {
+  const { t } = useUiTranslation();
   const review = useAgentLearningReview(agentId);
   const proposal = review.data?.proposals.find((item) => item.id === proposalId);
   if (review.isPending) {
     return (
-      <p role="status" className="text-11 text-muted-foreground">
-        Loading the draft…
-      </p>
+      <p role="status" className="text-11 text-muted-foreground">{t("Loading the draft…")}</p>
     );
   }
   if (review.error) {
     return (
-      <p role="alert" className="text-11 text-destructive">
-        The draft could not be loaded. {requestFailure(review.error)}
+      <p role="alert" className="text-11 text-destructive">{t("The draft could not be loaded. ")}{requestFailure(review.error)}
       </p>
     );
   }
   if (!proposal?.draft) {
     return (
-      <p role="status" className="text-11 text-muted-foreground">
-        This draft is no longer available.
-      </p>
+      <p role="status" className="text-11 text-muted-foreground">{t("This draft is no longer available.")}</p>
     );
   }
   return (
@@ -549,9 +530,7 @@ export function ProposalDraftEditor({
           to="/assistant"
           search={{ c: proposal.card_conversation_id }}
           className="text-11 text-primary hover:underline"
-        >
-          Open the confirmation card
-        </Link>
+        >{t("Open the confirmation card")}</Link>
       ) : null}
     </div>
   );

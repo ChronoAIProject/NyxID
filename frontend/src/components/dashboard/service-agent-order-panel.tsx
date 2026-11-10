@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useRef, useState, type ReactNode } from "react";
 import { Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -22,6 +23,7 @@ export function ServiceAgentOrderPanel({
   readonly actions: ReactNode;
   readonly className?: string;
 }) {
+  const { t } = useUiTranslation();
   const [helpOpen, setHelpOpen] = useState(false);
   const helpTrigger = useRef<HTMLButtonElement>(null);
   const helpPointerType = useRef<string | null>(null);
@@ -59,7 +61,7 @@ export function ServiceAgentOrderPanel({
   );
   return (
     <section
-      aria-label={`Agent discovery order for ${group.name}`}
+      aria-label={t("Agent discovery order for {{name}}", { name: group.name })}
       className={cn(
         "space-y-2 bg-card px-4 py-3 text-12 text-muted-foreground",
         className,
@@ -77,7 +79,7 @@ export function ServiceAgentOrderPanel({
               <p>
                 {preferred ? (
                   <>
-                    <span>Preferred in discovery:</span>{" "}
+                    <span>{t("Preferred in discovery:")}</span>{" "}
                     <span className="font-medium text-foreground">
                       {preferred.label}
                     </span>
@@ -96,7 +98,7 @@ export function ServiceAgentOrderPanel({
                     variant="ghost"
                     size="sm"
                     className="size-7 shrink-0 p-0 [&_svg]:size-3.5"
-                    aria-label="How discovery order works"
+                    aria-label={t("How discovery order works")}
                     onPointerDown={(event) => {
                       helpPointerType.current = event.pointerType;
                       event.preventDefault();
@@ -126,43 +128,31 @@ export function ServiceAgentOrderPanel({
                   className="max-w-[min(20rem,calc(100vw-2rem))] space-y-2 text-12 leading-relaxed"
                 >
                   <ul className="space-y-2">
-                    <li>Connections that match equally are shown in your order.</li>
-                    <li>
-                      The AI chooses which connection to use; this order is a
-                      preference.
-                    </li>
-                    <li>
-                      Agents see only the enabled HTTP connections they can access.
-                    </li>
+                    <li>{t("Connections that match equally are shown in your order.")}</li>
+                    <li>{t("The AI chooses which connection to use; this order is a preference.")}</li>
+                    <li>{t("Agents see only the enabled HTTP connections they can access.")}</li>
                   </ul>
                   {otherProtocols && (
-                    <p>
-                      Other protocol connections keep their saved positions but
-                      are excluded from tool discovery.
-                    </p>
+                    <p>{t("Other protocol connections keep their saved positions but are excluded from tool discovery.")}</p>
                   )}
                   {(group.slug?.startsWith("llm-") ||
                     group.connections.some(
                       (key) =>
                         key.inference != null || key.service_category === "llm",
                     )) && (
-                    <p>
-                      Provider gateway routing is separate from this discovery
-                      order.
-                    </p>
+                    <p>{t("Provider gateway routing is separate from this discovery order.")}</p>
                   )}
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>
           </div>
           <p>
-            {enabled.length} enabled ·{" "}
-            {group.connections.length - enabled.length} disabled
-          </p>
+            {enabled.length}{t(" enabled ·")}{" "}
+            {group.connections.length - enabled.length}{t(" disabled")}</p>
         </div>
         <div
           role="group"
-          aria-label={`Discovery order actions for ${group.name}`}
+          aria-label={t("Discovery order actions for {{name}}", { name: group.name })}
           className="flex flex-wrap items-center gap-2"
         >
           {actions}
@@ -173,9 +163,7 @@ export function ServiceAgentOrderPanel({
             variant="outline"
             size="sm"
             onClick={() => void order.retryRead()}
-          >
-            Retry reads
-          </Button>
+          >{t("Retry reads")}</Button>
         )}
       </div>
       {!stateInSummary && availability}

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { lazy, Suspense, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
@@ -90,6 +91,7 @@ function LiveAnalytics({
   onTabChange: (tab: "dashboard" | "list") => void;
   preloadSearch: AdminUsageSearch;
 }) {
+  const { t } = useUiTranslation();
   const user = useAuthStore((state) => state.user);
   const query = useUsageWorkspace(user?.id ?? "");
   if (query.isPending || query.isFetching)
@@ -102,7 +104,7 @@ function LiveAnalytics({
   if (query.isError)
     return (
       <ErrorBanner
-        message="Could not load your analytics workspace."
+        message={t("Could not load your analytics workspace.")}
         onRetry={() => void query.refetch()}
       />
     );
@@ -139,6 +141,7 @@ export function AnalyticsWorkspace({
   onTabChange?: (tab: "dashboard" | "list") => void;
   preloadSearch?: AdminUsageSearch;
 }) {
+  const { t } = useUiTranslation();
   const [starting] = useState<WorkspaceResponse>(() =>
     initialLayout && !initial.config
       ? {
@@ -189,8 +192,8 @@ export function AnalyticsWorkspace({
   return (
     <div className="space-y-5 pb-6">
       <PageHeader
-        title="Usage"
-        description="Understand what you use, where credits go, and who drives spend."
+        title={t("Usage")}
+        description={t("Understand what you use, where credits go, and who drives spend.")}
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <Button
@@ -207,9 +210,7 @@ export function AnalyticsWorkspace({
                 ])
               }
             >
-              <RefreshCw className="size-3" />
-              Refresh
-            </Button>
+              <RefreshCw className="size-3" />{t("Refresh")}</Button>
           </div>
         }
       />
@@ -217,19 +218,13 @@ export function AnalyticsWorkspace({
         import.meta.env.VITE_USAGE_SEEDED === "true" &&
         !sample && (
           <p className="text-12 text-muted-foreground" role="note">
-            <strong className="font-medium text-foreground">
-              Local seed data.
-            </strong>{" "}
-            Sample usage for reviewing analytics. No real charges.
-          </p>
+            <strong className="font-medium text-foreground">{t("Local seed data.")}</strong>{" "}{t("Sample usage for reviewing analytics. No real charges.")}</p>
         )}
       {sample && (
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-info/25 bg-info/5 px-4 py-2.5 text-11 text-info">
           <span>
-            <strong>Automated test fixture.</strong> Synthetic data for browser
-            tests only.
-          </span>
-          <span>Interactive filters · charts · saved views</span>
+            <strong>{t("Automated test fixture.")}</strong>{t(" Synthetic data for browser tests only.")}</span>
+          <span>{t("Interactive filters · charts · saved views")}</span>
         </div>
       )}
       <Tabs
@@ -240,14 +235,14 @@ export function AnalyticsWorkspace({
           onTabChange?.(next);
         }}
       >
-        <TabsList aria-label="Usage view">
-          <TabsTrigger value="dashboard">Dashboard</TabsTrigger>
-          <TabsTrigger value="list">List</TabsTrigger>
+        <TabsList aria-label={t("Usage view")}>
+          <TabsTrigger value="dashboard">{t("Dashboard")}</TabsTrigger>
+          <TabsTrigger value="list">{t("List")}</TabsTrigger>
         </TabsList>
         {sample && (
           <div
             className="mt-5 flex flex-wrap gap-2"
-            aria-label="Analytics layout"
+            aria-label={t("Analytics layout")}
           >
             {LAYOUTS.map((layout) => {
               const Icon =
@@ -263,7 +258,7 @@ export function AnalyticsWorkspace({
                   key={layout}
                   aria-pressed={view.layout === layout}
                   disabled={Boolean(workspace.pendingRecovery)}
-                  title={TEMPLATE_COPY[layout].description}
+                  title={t(TEMPLATE_COPY[layout].description)}
                   onClick={() => {
                     if (view.layout !== layout)
                       setConfig({
@@ -288,15 +283,13 @@ export function AnalyticsWorkspace({
                       )}
                     />
                     <span className="text-13 font-semibold">
-                      {TEMPLATE_COPY[layout].name}
+                      {t(TEMPLATE_COPY[layout].name)}
                     </span>
                     <span className="sr-only">
-                      {TEMPLATE_COPY[layout].reference}
+                      {t(TEMPLATE_COPY[layout].reference)}
                     </span>
                     {TEMPLATE_COPY[layout].recommended && (
-                      <span className="rounded-md border border-nyx-secondary-400/30 bg-nyx-secondary-400/10 px-1.5 py-0.5 text-10 font-medium text-nyx-secondary-400">
-                        Recommended
-                      </span>
+                      <span className="rounded-md border border-nyx-secondary-400/30 bg-nyx-secondary-400/10 px-1.5 py-0.5 text-10 font-medium text-nyx-secondary-400">{t("Recommended")}</span>
                     )}
                   </div>
                 </Button>
@@ -307,11 +300,11 @@ export function AnalyticsWorkspace({
         <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-3">
             <h2 className="truncate text-15 font-semibold">
-              {activeTab === "dashboard" ? view.name : "Usage records"}
+              {activeTab === "dashboard" ? view.name : t("Usage records")}
             </h2>
             <span
               role="status"
-              aria-label="Workspace save status"
+              aria-label={t("Workspace save status")}
               className={cn(
                 "flex items-center gap-1.5 text-10",
                 workspace.error ? "text-warning" : "text-muted-foreground",
@@ -345,9 +338,7 @@ export function AnalyticsWorkspace({
                     })
                   }
                 >
-                  <Save className="size-3" />
-                  Update saved view
-                </Button>
+                  <Save className="size-3" />{t("Update saved view")}</Button>
               )}
               <Popover open={viewsOpen} onOpenChange={setViewsOpen}>
                 <PopoverTrigger asChild>
@@ -355,28 +346,19 @@ export function AnalyticsWorkspace({
                     variant="outline"
                     disabled={Boolean(workspace.pendingRecovery)}
                   >
-                    <Copy className="size-3" />
-                    Saved views
-                    <span className="ml-1 text-muted-foreground">
+                    <Copy className="size-3" />{t("Saved views")}<span className="ml-1 text-muted-foreground">
                       {config.saved_views.length}
                     </span>
                   </Button>
                 </PopoverTrigger>
                 <PopoverContent align="end" className="w-80 space-y-4 p-4">
                   <div>
-                    <h3 className="text-13 font-semibold">
-                      Your saved views
-                    </h3>
-                    <p className="mt-1 text-11 text-muted-foreground">
-                      Private to your account. Exploring never overwrites a
-                      named view.
-                    </p>
+                    <h3 className="text-13 font-semibold">{t("Your saved views")}</h3>
+                    <p className="mt-1 text-11 text-muted-foreground">{t("Private to your account. Exploring never overwrites a named view.")}</p>
                   </div>
                   <div className="max-h-64 space-y-1 overflow-auto">
                     {config.saved_views.length === 0 && (
-                      <p className="py-3 text-12 text-muted-foreground">
-                        Save a starting point to return to later.
-                      </p>
+                      <p className="py-3 text-12 text-muted-foreground">{t("Save a starting point to return to later.")}</p>
                     )}
                     {config.saved_views.map((item) => (
                       <div key={item.id} className="flex items-center gap-1">
@@ -396,7 +378,7 @@ export function AnalyticsWorkspace({
                         <Button
                           variant="ghost"
                           size="icon"
-                          aria-label={`Delete saved view ${item.name}`}
+                          aria-label={t("Delete saved view {{name}}", { name: item.name })}
                           disabled={!editable}
                           onClick={() =>
                             setConfig({
@@ -414,8 +396,8 @@ export function AnalyticsWorkspace({
                   </div>
                   <div className="space-y-2 border-t border-border pt-3">
                     <Input
-                      aria-label="New saved view name"
-                      placeholder="e.g. Weekly platform spend"
+                      aria-label={t("New saved view name")}
+                      placeholder={t("e.g. Weekly platform spend")}
                       value={name}
                       onChange={(e) => setName(e.target.value)}
                       maxLength={100}
@@ -443,9 +425,7 @@ export function AnalyticsWorkspace({
                         setViewsOpen(false);
                       }}
                     >
-                      <Save className="size-3" />
-                      Save as new view
-                    </Button>
+                      <Save className="size-3" />{t("Save as new view")}</Button>
                   </div>
                 </PopoverContent>
               </Popover>
@@ -455,25 +435,17 @@ export function AnalyticsWorkspace({
         {workspace.pendingRecovery && (
           <div
             role="status"
-            aria-label="Recovered workspace"
+            aria-label={t("Recovered workspace")}
             className="mt-3 space-y-3 rounded-lg border border-border bg-card p-3 text-12"
           >
-            <p>
-              Showing your saved view. An older or incomplete draft is still
-              available in this browser. Choose which version to use before
-              editing further.
-            </p>
+            <p>{t("Showing your saved view. An older or incomplete draft is still available in this browser. Choose which version to use before editing further.")}</p>
             <div className="flex flex-wrap gap-2">
-              <Button size="sm" onClick={() => void workspace.reload()}>
-                Use saved view
-              </Button>
+              <Button size="sm" onClick={() => void workspace.reload()}>{t("Use saved view")}</Button>
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => void workspace.reload(true)}
-              >
-                Restore recovered draft
-              </Button>
+              >{t("Restore recovered draft")}</Button>
             </div>
           </div>
         )}
@@ -483,22 +455,13 @@ export function AnalyticsWorkspace({
             className="flex flex-wrap items-center gap-2 rounded-lg border border-warning/30 bg-warning/5 p-3 text-12"
           >
             <p className="mr-auto">{workspace.error}</p>
-            <Button size="sm" onClick={workspace.retry}>
-              Retry
-            </Button>
-            <Button size="sm" onClick={() => void workspace.reload()}>
-              Reload saved
-            </Button>
-            <Button size="sm" onClick={() => void workspace.reload(true)}>
-              Keep my changes
-            </Button>
+            <Button size="sm" onClick={workspace.retry}>{t("Retry")}</Button>
+            <Button size="sm" onClick={() => void workspace.reload()}>{t("Reload saved")}</Button>
+            <Button size="sm" onClick={() => void workspace.reload(true)}>{t("Keep my changes")}</Button>
           </div>
         )}
         {workspace.storageError && (
-          <p role="alert" className="text-11 text-warning">
-            Browser recovery storage is unavailable. Keep this page open until
-            changes are saved.
-          </p>
+          <p role="alert" className="text-11 text-warning">{t("Browser recovery storage is unavailable. Keep this page open until changes are saved.")}</p>
         )}
         {workspace.validationError && (
           <p role="alert" className="text-11 text-warning">
@@ -534,11 +497,7 @@ export function AnalyticsWorkspace({
           <AdminUsagePreload filters={view.filters} search={preloadSearch} />
         )}
       </Tabs>
-      <p className="text-10 leading-relaxed text-muted-foreground">
-        Usage windows are UTC and end-exclusive. Gross cost includes wallet,
-        grant, and allowance funding. Billing-account filters select who paid;
-        acting-user filters select who made the request.
-      </p>
+      <p className="text-10 leading-relaxed text-muted-foreground">{t("Usage windows are UTC and end-exclusive. Gross cost includes wallet, grant, and allowance funding. Billing-account filters select who paid; acting-user filters select who made the request.")}</p>
     </div>
   );
 }

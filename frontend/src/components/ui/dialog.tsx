@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { DialogFocusReturnContext } from "./dialog-focus-return";
 import { restorePanelFocus } from "@/lib/assistant/panel-focus";
 import * as React from "react";
@@ -43,6 +44,7 @@ const DialogContent = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Content>,
   DialogContentProps
 >(({ className, children, scrollMode = "content", style, onOpenAutoFocus, onCloseAutoFocus, ...props }, ref) => {
+  const { t } = useUiTranslation();
   const layer = useOverlayLayer();
   const restoreFocus = React.useContext(DialogFocusReturnContext);
   const opener = React.useRef<HTMLElement | null>(null);
@@ -96,7 +98,7 @@ const DialogContent = React.forwardRef<
         style={{ top: "max(1rem, var(--sat, env(safe-area-inset-top, 0px)))" }}
       >
         <X className="h-4 w-4" />
-        <span className="sr-only">Close</span>
+        <span className="sr-only">{t("Close")}</span>
       </DialogPrimitive.Close>
     </DialogPrimitive.Content>
   </DialogPortal>

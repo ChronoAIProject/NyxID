@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import {
   SETTINGS_TABS,
   SETTINGS_TAB_DEFAULT,
@@ -112,60 +113,60 @@ const TAB_SECTIONS: Readonly<Record<string, TabSection>> = {
 };
 
 const PAGE_LABELS: Record<string, string> = {
-  "/dashboard": "Dashboard",
-  "/billing": "Billing & Usage",
-  "/keys": "Services & Credentials",
-  "/tools": "Tools",
-  "/admin/tools": "Tools",
-  "/orgs": "Organizations",
-  "/nodes": "Credential Nodes",
-  "/channel-bots": "Channel Bots",
-  "/onboarding/setups": "Bot Setups",
-  "/channel-bots/connect": "Setup links",
-  "/settings": "Account Settings",
-  "/settings/consents": "Access & Authorizations",
-  "/devices/onboard": "Device Onboard",
-  "/approvals/settings": "Notification Settings",
-  "/approvals/history": "Approval History",
-  "/approvals/grants": "Active Grants",
-  "/developer/apps": "Developer Apps",
-  "/triggers": "Triggers",
-  "/ai-setup": "AI Setup Guide",
-  "/integration-guide": "Integration & SDK Guide",
-  "/services": "Services",
-  "/providers": "Providers",
-  "/providers/manage": "Providers",
-  "/providers/callback": "Connection status",
-  "/admin": "Admin",
-  "/admin/users": "Users",
-  "/admin/audit-log": "Audit Log",
-  "/admin/usage": "Usage",
-  "/admin/integrity": "Integrity",
-  "/admin/credits": "Credits",
-  "/admin/billing": "Billing",
-  "/admin/service-accounts": "Service Accounts",
-  "/admin/oauth-clients": "OAuth Clients",
-  "/admin/roles": "Roles",
-  "/admin/groups": "Groups",
-  "/admin/invite-codes": "Invite Codes",
-  "/admin/feature-flags": "Feature Flags",
-  "/admin/platform-credentials": "Platform Credentials",
-  "/admin/platform-bots": "Platform BotFather",
-  "/admin/upload-retention": "Upload retention",
-  "/admin/nodes": "Nodes",
-  "/admin/ownership": "Ownership transfers",
+  get "/dashboard"() { return translateUi("Dashboard"); },
+  get "/billing"() { return translateUi("Billing & Usage"); },
+  get "/keys"() { return translateUi("Services & Credentials"); },
+  get "/tools"() { return translateUi("Tools"); },
+  get "/admin/tools"() { return translateUi("Tools"); },
+  get "/orgs"() { return translateUi("Organizations"); },
+  get "/nodes"() { return translateUi("Credential Nodes"); },
+  get "/channel-bots"() { return translateUi("Channel Bots"); },
+  get "/onboarding/setups"() { return translateUi("Bot Setups"); },
+  get "/channel-bots/connect"() { return translateUi("Setup links"); },
+  get "/settings"() { return translateUi("Account Settings"); },
+  get "/settings/consents"() { return translateUi("Access & Authorizations"); },
+  get "/devices/onboard"() { return translateUi("Device Onboard"); },
+  get "/approvals/settings"() { return translateUi("Notification Settings"); },
+  get "/approvals/history"() { return translateUi("Approval History"); },
+  get "/approvals/grants"() { return translateUi("Active Grants"); },
+  get "/developer/apps"() { return translateUi("Developer Apps"); },
+  get "/triggers"() { return translateUi("Triggers"); },
+  get "/ai-setup"() { return translateUi("AI Setup Guide"); },
+  get "/integration-guide"() { return translateUi("Integration & SDK Guide"); },
+  get "/services"() { return translateUi("Services"); },
+  get "/providers"() { return translateUi("Providers"); },
+  get "/providers/manage"() { return translateUi("Providers"); },
+  get "/providers/callback"() { return translateUi("Connection status"); },
+  get "/admin"() { return translateUi("Admin"); },
+  get "/admin/users"() { return translateUi("Users"); },
+  get "/admin/audit-log"() { return translateUi("Audit Log"); },
+  get "/admin/usage"() { return translateUi("Usage"); },
+  get "/admin/integrity"() { return translateUi("Integrity"); },
+  get "/admin/credits"() { return translateUi("Credits"); },
+  get "/admin/billing"() { return translateUi("Billing"); },
+  get "/admin/service-accounts"() { return translateUi("Service Accounts"); },
+  get "/admin/oauth-clients"() { return translateUi("OAuth Clients"); },
+  get "/admin/roles"() { return translateUi("Roles"); },
+  get "/admin/groups"() { return translateUi("Groups"); },
+  get "/admin/invite-codes"() { return translateUi("Invite Codes"); },
+  get "/admin/feature-flags"() { return translateUi("Feature Flags"); },
+  get "/admin/platform-credentials"() { return translateUi("Platform Credentials"); },
+  get "/admin/platform-bots"() { return translateUi("Platform BotFather"); },
+  get "/admin/upload-retention"() { return translateUi("Upload retention"); },
+  get "/admin/nodes"() { return translateUi("Nodes"); },
+  get "/admin/ownership"() { return translateUi("Ownership transfers"); },
 };
 
 const DETAIL_LABELS: Record<string, string> = {
-  "/keys": "Credential",
-  "/nodes": "Node",
-  "/services": "Service",
-  "/providers": "Provider",
-  "/developer/apps": "Developer app",
-  "/admin/users": "User",
-  "/admin/roles": "Role",
-  "/admin/groups": "Group",
-  "/admin/service-accounts": "Service account",
+  get "/keys"() { return translateUi("Credential"); },
+  get "/nodes"() { return translateUi("Node"); },
+  get "/services"() { return translateUi("Service"); },
+  get "/providers"() { return translateUi("Provider"); },
+  get "/developer/apps"() { return translateUi("Developer app"); },
+  get "/admin/users"() { return translateUi("User"); },
+  get "/admin/roles"() { return translateUi("Role"); },
+  get "/admin/groups"() { return translateUi("Group"); },
+  get "/admin/service-accounts"() { return translateUi("Service account"); },
 };
 
 export function buildStudioBreadcrumbs(
@@ -173,17 +174,19 @@ export function buildStudioBreadcrumbs(
   labels: Readonly<Record<string, string>> = {},
   search: Readonly<Record<string, unknown>> = {},
   activeSection?: string,
+  t: (key: string, options?: { readonly name: string }) => string = (key, options) =>
+    options ? key.replaceAll("{{name}}", options.name) : key,
 ): readonly StudioBreadcrumb[] {
   const path = pathname.replace(/\/+$/, "") || "/";
   const named = (to: string, fallback: string): StudioBreadcrumb => ({
-    label: labels[to] || fallback,
+    label: labels[to] || t(fallback),
     to,
   });
   const page = (
     to: string,
     search?: Record<string, string>,
   ): StudioBreadcrumb => ({
-    label: PAGE_LABELS[to]!,
+    label: t(PAGE_LABELS[to]!),
     to,
     ...(search && { search }),
   });
@@ -197,12 +200,12 @@ export function buildStudioBreadcrumbs(
       section.values,
       section.defaultValue,
     );
-    return { label: section.labels[value]! };
+    return { label: t(section.labels[value]!) };
   };
   const keysParent = (tab: "services" | "nyxid") => [
     page("/keys", { tab: KEYS_TAB_DEFAULT }),
     {
-      label: TAB_SECTIONS["/keys"]!.labels[tab]!,
+      label: t(TAB_SECTIONS["/keys"]!.labels[tab]!),
       to: "/keys",
       search: { tab },
     },
@@ -211,12 +214,12 @@ export function buildStudioBreadcrumbs(
   if (path === "/settings/devices/bind") {
     return finish([
       page("/settings", { tab: SETTINGS_TAB_DEFAULT }),
-      { label: "Security", to: "/settings", search: { tab: "security" } },
-      { label: "Bind device" },
+      { label: t("Security"), to: "/settings", search: { tab: "security" } },
+      { label: t("Bind device") },
     ]);
   }
   if (path === "/channel-bots/connect") {
-    return finish([page("/channel-bots"), { label: "Setup links" }]);
+    return finish([page("/channel-bots"), { label: t("Setup links") }]);
   }
   const platformSetup = path.match(/^\/onboarding\/setups\/[^/]+$/);
   if (platformSetup) {
@@ -225,7 +228,7 @@ export function buildStudioBreadcrumbs(
   if (path === "/providers/callback") {
     return finish([
       page("/keys", { tab: "services" }),
-      { label: "Connection status" },
+      { label: t("Connection status") },
     ]);
   }
   if (path === "/ai-setup") {
@@ -235,12 +238,12 @@ export function buildStudioBreadcrumbs(
     );
     const mcp = AI_TOOLS.find((tool) => tool.id === search.tool);
     const selected = [
-      skills && `${skills.name} skills`,
-      mcp && `${mcp.name} MCP`,
+      skills && t("{{name}} skills", { name: skills.name }),
+      mcp && t("{{name}} MCP", { name: mcp.name }),
     ].filter(Boolean);
     return selected.length
       ? finish([page(path), { label: selected.join(" · ") }])
-      : [{ label: PAGE_LABELS[path]! }];
+      : [{ label: t(PAGE_LABELS[path]!) }];
   }
   const tabSection = TAB_SECTIONS[path];
   if (tabSection) {
@@ -249,7 +252,7 @@ export function buildStudioBreadcrumbs(
       subsection(tabSection),
     ]);
   }
-  if (PAGE_LABELS[path]) return [{ label: PAGE_LABELS[path] }];
+  if (PAGE_LABELS[path]) return [{ label: t(PAGE_LABELS[path]!) }];
 
   const apiKey = path.match(/^\/keys\/api-key\/[^/]+$/);
   if (apiKey) {
@@ -271,7 +274,7 @@ export function buildStudioBreadcrumbs(
   }
 
   if (/^\/orgs\/join\/[^/]+$/.test(path)) {
-    return finish([page("/orgs"), { label: "Join organization" }]);
+    return finish([page("/orgs"), { label: t("Join organization") }]);
   }
   const orgChild = path.match(
     /^(\/orgs\/[^/]+)\/(service-accounts|developer-apps)\/[^/]+$/,
@@ -286,7 +289,7 @@ export function buildStudioBreadcrumbs(
         search: { tab: ORG_DETAIL_TAB_DEFAULT },
       },
       {
-        label: isAccount ? "Service Accounts" : "Developer Apps",
+        label: t(isAccount ? "Service Accounts" : "Developer Apps"),
         to: orgPath,
         search: { tab: orgChild[2]! },
       },
@@ -323,7 +326,7 @@ export function buildStudioBreadcrumbs(
     const parentPath = parent === "/providers" ? "/providers/manage" : parent;
     const items = [page(parentPath), named(detailPath, fallback)];
     if (parts[1] === "edit") {
-      items.push({ label: "Edit" });
+      items.push({ label: t("Edit") });
       items[1] = { ...items[1]!, label: labels[path] || items[1]!.label };
     }
     return finish(items);

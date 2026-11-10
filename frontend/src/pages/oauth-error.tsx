@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useNavigate } from "@tanstack/react-router";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -7,18 +9,19 @@ import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import { ServiceIcon } from "@/components/service-icon";
 
 const ERROR_LABELS: Record<string, string> = {
-  invalid_request: "Invalid Request",
-  invalid_redirect_uri: "Invalid Redirect URI",
-  not_found: "Client Not Found",
-  bad_request: "Bad Request",
-  pkce_verification_failed: "PKCE Verification Failed",
-  invalid_scope: "Invalid Scope",
-  consent_required: "Consent Required",
-  login_required: "Login Required",
-  required_service_not_connected: "Connect a Required Service",
+  get invalid_request() { return translateUi("Invalid Request"); },
+  get invalid_redirect_uri() { return translateUi("Invalid Redirect URI"); },
+  get not_found() { return translateUi("Client Not Found"); },
+  get bad_request() { return translateUi("Bad Request"); },
+  get pkce_verification_failed() { return translateUi("PKCE Verification Failed"); },
+  get invalid_scope() { return translateUi("Invalid Scope"); },
+  get consent_required() { return translateUi("Consent Required"); },
+  get login_required() { return translateUi("Login Required"); },
+  get required_service_not_connected() { return translateUi("Connect a Required Service"); },
 };
 
 export function OAuthErrorPage() {
+  const { t } = useUiTranslation();
   useApplyTheme();
   const navigate = useNavigate();
   const search = new URLSearchParams(window.location.search);
@@ -61,7 +64,7 @@ export function OAuthErrorPage() {
           <CardContent className="space-y-4">
             <p className="text-12 leading-relaxed text-muted-foreground">
               {isMissingRequiredService
-                ? `${serviceName} is required by this app but is not connected to your NyxID account. Connect it, then retry authorization.`
+                ? t("{{serviceName}} is required by this app but is not connected to your NyxID account. Connect it, then retry authorization.", { serviceName: serviceName })
                 : message}
             </p>
             {isMissingRequiredService && (
@@ -78,7 +81,7 @@ export function OAuthErrorPage() {
               </div>
             )}
             <div className="rounded-lg border border-border bg-muted px-3 py-2">
-              <p className="text-11 text-text-tertiary">Error code</p>
+              <p className="text-11 text-text-tertiary">{t("Error code")}</p>
               <p className="text-xs text-foreground">{code}</p>
             </div>
             {isMissingRequiredService ? (
@@ -88,36 +91,26 @@ export function OAuthErrorPage() {
                   onClick={() => window.history.back()}
                   className="w-full sm:w-auto"
                 >
-                  <RotateCcw />
-                  Retry authorization
-                </Button>
+                  <RotateCcw />{t("Retry authorization")}</Button>
                 <Button asChild variant="primary" className="w-full sm:w-auto">
                   <a
                     href={connectServiceUrl}
                     target="_blank"
                     rel="noreferrer"
-                  >
-                    Connect service
-                    <ExternalLink />
+                  >{t("Connect service")}<ExternalLink />
                   </a>
                 </Button>
               </div>
             ) : (
               <div className="flex justify-end gap-3 pt-2">
-                <Button variant="outline" onClick={() => window.history.back()}>
-                  Go Back
-                </Button>
-                <Button onClick={() => void navigate({ to: "/dashboard" })}>
-                  Home
-                </Button>
+                <Button variant="outline" onClick={() => window.history.back()}>{t("Go Back")}</Button>
+                <Button onClick={() => void navigate({ to: "/dashboard" })}>{t("Home")}</Button>
               </div>
             )}
           </CardContent>
         </Card>
 
-        <p className="text-center text-11 text-text-tertiary">
-          If this issue persists, contact the application developer.
-        </p>
+        <p className="text-center text-11 text-text-tertiary">{t("If this issue persists, contact the application developer.")}</p>
       </div>
     </div>
   );

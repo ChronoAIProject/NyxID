@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { isAssistantShellRoute } from "@/lib/assistant/account-panel-search";
@@ -35,6 +36,7 @@ export default function CreditsDeniedDialog({
   billingAvailable,
   onDismiss,
 }: CreditsDeniedDialogProps) {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const router = useRouter();
   const purchaseOrigin = useRef<{ path: string; actor?: string } | null>(null);
@@ -86,50 +88,40 @@ export default function CreditsDeniedDialog({
           data-testid="credits-denied-illustration"
         />
         <DialogHeader className="items-center space-y-2 text-center">
-          <DialogTitle>Not enough credits to continue</DialogTitle>
+          <DialogTitle>{t("Not enough credits to continue")}</DialogTitle>
           <DialogDescription className="max-w-[330px] text-12 leading-relaxed">
             {org
-              ? `This request is billed to ${orgName ?? "your organization"}'s credits, which have been used up or have expired, so it couldn't run.`
-              : "Your free platform credits have been used up or have expired, so this request couldn't run."}
+              ? t("This request is billed to {{value}}'s credits, which have been used up or have expired, so it couldn't run.", { value: orgName ?? t("your organization") })
+              : t("Your free platform credits have been used up or have expired, so this request couldn't run.")}
           </DialogDescription>
         </DialogHeader>
-        <ul className="space-y-2" aria-label="Ways to continue">
+        <ul className="space-y-2" aria-label={t("Ways to continue")}>
           <OptionRow
             icon={<ShieldCheck className="h-3.5 w-3.5" />}
-            title="Ask an admin"
+            title={t("Ask an admin")}
           >
             {org
-              ? `Only an admin of ${orgName ?? "that organization"} can add credits to it.`
-              : "An admin can add credits to your account."}
+              ? t("Only an admin of {{value}} can add credits to it.", { value: orgName ?? t("that organization") })
+              : t("An admin can add credits to your account.")}
           </OptionRow>
           {canPurchase && (
             <OptionRow
               icon={<CreditCard className="h-3.5 w-3.5" />}
-              title="Purchase platform credits"
-            >
-              Buy credits for your account and keep going.
-            </OptionRow>
+              title={t("Purchase platform credits")}
+            >{t("Buy credits for your account and keep going.")}</OptionRow>
           )}
         </ul>
         {payer === "unknown" && (
-          <p className="text-11 leading-relaxed text-muted-foreground">
-            If this is billed to an organization, ask one of its admins instead.
-          </p>
+          <p className="text-11 leading-relaxed text-muted-foreground">{t("If this is billed to an organization, ask one of its admins instead.")}</p>
         )}
         <DialogFooter>
           {canPurchase ? (
             <>
-              <Button variant="outline" onClick={onDismiss}>
-                Not now
-              </Button>
-              <Button variant="primary" onClick={purchase}>
-                Purchase credits
-              </Button>
+              <Button variant="outline" onClick={onDismiss}>{t("Not now")}</Button>
+              <Button variant="primary" onClick={purchase}>{t("Purchase credits")}</Button>
             </>
           ) : (
-            <Button variant="primary" onClick={onDismiss}>
-              Got it
-            </Button>
+            <Button variant="primary" onClick={onDismiss}>{t("Got it")}</Button>
           )}
         </DialogFooter>
       </DialogContent>

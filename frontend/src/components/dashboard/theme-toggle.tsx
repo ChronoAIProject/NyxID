@@ -1,3 +1,4 @@
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { Moon, Sun } from "lucide-react";
 import { useThemeStore } from "@/stores/theme-store";
 import { useResolvedTheme } from "@/hooks/use-theme";
@@ -9,6 +10,7 @@ import { cn } from "@/lib/utils";
  * mode (persisted); until then the dashboard tracks the OS preference.
  */
 export function ThemeToggle({ className }: { readonly className?: string }) {
+  const { t } = useAppTranslation();
   const toggle = useThemeStore((s) => s.toggle);
   const isDark = useResolvedTheme() === "dark";
 
@@ -16,8 +18,8 @@ export function ThemeToggle({ className }: { readonly className?: string }) {
     <button
       type="button"
       onClick={toggle}
-      aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
-      title={isDark ? "Switch to light mode" : "Switch to dark mode"}
+      aria-label={t(isDark ? "Switch to light mode" : "Switch to dark mode")}
+      title={t(isDark ? "Switch to light mode" : "Switch to dark mode")}
       className={cn(
         "flex h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground focus-visible:outline-none",
         className,

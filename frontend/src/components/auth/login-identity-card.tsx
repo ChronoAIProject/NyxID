@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Fingerprint, Monitor } from "lucide-react";
@@ -27,6 +29,7 @@ export function LoginIdentityCard({
   onVerified: () => void;
   disabled: boolean;
 }) {
+  const { t } = useUiTranslation();
   const [keep, setKeep] = useState(false);
   const [busy, setBusy] = useState(false);
   const [appOpen, setAppOpen] = useState(false);
@@ -63,15 +66,12 @@ export function LoginIdentityCard({
   return (
     <div className="space-y-4 border-t border-border pt-4">
       <div className="space-y-1">
-        <h3 className="text-13 font-semibold">Verify your identity</h3>
-        <p className="text-12 text-muted-foreground">
-          Choose how to use this browser. You’ll choose the requesting device’s
-          access next.
-        </p>
+        <h3 className="text-13 font-semibold">{t("Verify your identity")}</h3>
+        <p className="text-12 text-muted-foreground">{t("Choose how to use this browser. You’ll choose the requesting device’s access next.")}</p>
       </div>
       <div
         role="group"
-        aria-label="Browser sign-in"
+        aria-label={t("Browser sign-in")}
         className="grid gap-2 sm:grid-cols-2"
       >
         {[
@@ -98,17 +98,17 @@ export function LoginIdentityCard({
           >
             <span className="flex items-center gap-2 text-12 font-medium">
               <Icon className="size-4" />
-              {title}
+              {t(title)}
             </span>
             <span className="mt-1 block text-11 text-muted-foreground">
-              {text}
+              {t(text)}
             </span>
           </button>
         ))}
       </div>
       {error && (
         <p role="alert" className="text-12 text-destructive">
-          {error}
+          {translateUi(error)}
         </p>
       )}
       {approval.identity?.mfa_required ? (
@@ -129,7 +129,7 @@ export function LoginIdentityCard({
               name="code"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Authenticator code</FormLabel>
+                  <FormLabel>{t("Authenticator code")}</FormLabel>
                   <FormControl>
                     <Input
                       {...field}
@@ -149,9 +149,7 @@ export function LoginIdentityCard({
               className="h-9 w-full rounded-md"
               isLoading={busy}
               disabled={blocked}
-            >
-              Verify & continue
-            </Button>
+            >{t("Verify & continue")}</Button>
           </form>
         </Form>
       ) : (
@@ -195,7 +193,7 @@ export function LoginIdentityCard({
                   name="email"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Email</FormLabel>
+                      <FormLabel>{t("Email")}</FormLabel>
                       <FormControl>
                         <Input
                           {...field}
@@ -214,13 +212,11 @@ export function LoginIdentityCard({
                   render={({ field }) => (
                     <FormItem>
                       <div className="flex items-center justify-between">
-                        <FormLabel>Password</FormLabel>
+                        <FormLabel>{t("Password")}</FormLabel>
                         <Link
                           to={"/forgot-password" as string}
                           className="text-xs font-medium text-nyx-secondary-400 hover:text-nyx-300"
-                        >
-                          Forgot password?
-                        </Link>
+                        >{t("Forgot password?")}</Link>
                       </div>
                       <FormControl>
                         <Input
@@ -243,8 +239,8 @@ export function LoginIdentityCard({
                   disabled={blocked}
                 >
                   {(approval.identity?.keep_signed_in ?? keep)
-                    ? "Sign in & continue"
-                    : "Verify & continue"}
+                    ? t("Sign in & continue")
+                    : t("Verify & continue")}
                 </Button>
               </form>
             </Form>
@@ -263,9 +259,7 @@ export function LoginIdentityCard({
               mfa.reset();
             })
           }
-        >
-          Change verification choice
-        </Button>
+        >{t("Change verification choice")}</Button>
       )}
     </div>
   );

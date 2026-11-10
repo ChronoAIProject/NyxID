@@ -1,4 +1,5 @@
 import "./lib/platform-personal-handoff";
+import { appLanguageReady } from "./i18n";
 import { preserveTelegramClaimForLogin } from "./lib/telegram-claim-handoff";
 import { StrictMode, useState, useEffect } from "react";
 import { createRoot } from "react-dom/client";
@@ -52,14 +53,14 @@ if (import.meta.env.DEV) {
 }
 
 function isLoginApprovalPage() {
-  return ["/login/agent-key", "/login/device", "/login/code"].includes(window.location.pathname);
+  return ["/login/agent-key", "/login/device", "/login/code"].includes(
+    window.location.pathname,
+  );
 }
 
 function Root() {
   const [ready, setReady] = useState(false);
-  const [agentKeyLogin, setAgentKeyLogin] = useState(
-    isLoginApprovalPage,
-  );
+  const [agentKeyLogin, setAgentKeyLogin] = useState(isLoginApprovalPage);
   useEffect(
     () =>
       router.subscribe("onResolved", () => {
@@ -144,7 +145,9 @@ function Root() {
         preserveTelegramClaimForLogin();
         router.navigate({
           to: "/login",
-          search: { return_to: window.location.origin + path + window.location.search },
+          search: {
+            return_to: window.location.origin + path + window.location.search,
+          },
         });
       }
     }
@@ -173,10 +176,12 @@ if (!rootElement) {
 // QueryClientProvider must wrap Root — `usePublicConfig()` (and every
 // other TanStack Query hook used inside Root) throws without a provider
 // above it in the tree.
-createRoot(rootElement).render(
-  <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <Root />
-    </QueryClientProvider>
-  </StrictMode>,
-);
+void appLanguageReady.then(() => {
+  createRoot(rootElement).render(
+    <StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <Root />
+      </QueryClientProvider>
+    </StrictMode>,
+  );
+});

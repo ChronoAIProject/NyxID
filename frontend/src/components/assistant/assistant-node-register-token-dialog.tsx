@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -41,6 +43,7 @@ export function AssistantNodeRegisterTokenDialog({
   readonly params: AssistantNodeRegisterTokenParams;
   readonly onComplete: (nodeId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const submittingRef = useRef(false);
   const [name, setName] = useState(params.name);
   const [targetOrgId, setTargetOrgId] = useState(params.targetOrgId ?? "");
@@ -120,15 +123,15 @@ export function AssistantNodeRegisterTokenDialog({
           <DialogTitle className="flex items-center gap-2">
             <KeyRound className="size-4" />
             {result
-              ? "Node registration ready"
-              : "Create node registration token"}
+              ? t("Node registration ready")
+              : t("Create node registration token")}
           </DialogTitle>
           <DialogDescription>
             {result?.unavailable
-              ? "The registration was created, but its one-time token was not captured. Create another registration token before continuing setup."
+              ? t("The registration was created, but its one-time token was not captured. Create another registration token before continuing setup.")
               : result
-                ? "This token is shown only once. Copy and store it securely now."
-                : "Review the node name and owner. NyxID creates the token only after you continue."}
+                ? t("This token is shown only once. Copy and store it securely now.")
+                : t("Review the node name and owner. NyxID creates the token only after you continue.")}
           </DialogDescription>
         </DialogHeader>
 
@@ -136,9 +139,7 @@ export function AssistantNodeRegisterTokenDialog({
           <div className="space-y-3 border-y border-border py-4">
             {result.token ? (
               <div className="space-y-1.5">
-                <Label htmlFor="assistant-node-registration-token">
-                  One-time registration token
-                </Label>
+                <Label htmlFor="assistant-node-registration-token">{t("One-time registration token")}</Label>
                 <Input
                   id="assistant-node-registration-token"
                   readOnly
@@ -148,8 +149,7 @@ export function AssistantNodeRegisterTokenDialog({
               </div>
             ) : null}
             {result.expiresAt ? (
-              <p className="text-11 text-muted-foreground">
-                Expires {result.expiresAt}
+              <p className="text-11 text-muted-foreground">{t("Expires ")}{result.expiresAt}
               </p>
             ) : null}
             <p className="break-all font-mono text-11 text-muted-foreground">
@@ -159,9 +159,7 @@ export function AssistantNodeRegisterTokenDialog({
         ) : (
           <div className="space-y-4 border-y border-border py-4">
             <div className="space-y-1.5">
-              <Label htmlFor="assistant-node-registration-name">
-                Node name
-              </Label>
+              <Label htmlFor="assistant-node-registration-name">{t("Node name")}</Label>
               <Input
                 id="assistant-node-registration-name"
                 value={name}
@@ -170,9 +168,7 @@ export function AssistantNodeRegisterTokenDialog({
               />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="assistant-node-registration-owner">
-                Organization owner (optional)
-              </Label>
+              <Label htmlFor="assistant-node-registration-owner">{t("Organization owner (optional)")}</Label>
               <Input
                 id="assistant-node-registration-owner"
                 value={targetOrgId}
@@ -185,7 +181,7 @@ export function AssistantNodeRegisterTokenDialog({
 
         {error ? (
           <p role="alert" className="text-11 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
         <DialogFooter>
@@ -198,22 +194,18 @@ export function AssistantNodeRegisterTokenDialog({
                 close();
               }}
             >
-              {result.unavailable ? "Acknowledge" : "I have saved it"}
+              {result.unavailable ? t("Acknowledge") : t("I have saved it")}
             </Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
               <Button
                 type="button"
                 variant="primary"
                 isLoading={submitting}
                 disabled={submitting || !name.trim()}
                 onClick={() => void submit()}
-              >
-                Create token
-              </Button>
+              >{t("Create token")}</Button>
             </>
           )}
         </DialogFooter>

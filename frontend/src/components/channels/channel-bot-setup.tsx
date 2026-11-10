@@ -1,3 +1,6 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
@@ -90,6 +93,7 @@ export function ChannelBotSetup({
   readonly onContinue?: () => void | Promise<void>;
   readonly returnTo?: string;
 }) {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const link = useChannelConnectLinkContext();
   const catalog = useChannelPlatformViews();
@@ -257,7 +261,7 @@ export function ChannelBotSetup({
       onError: (err) => {
         const message =
           err instanceof ApiError ? err.message : "Failed to create bot";
-        toast.error(message);
+        toast.error(translateErrorMessage(message));
       },
     });
   }
@@ -280,30 +284,25 @@ export function ChannelBotSetup({
         <DialogHeader>
           <DialogTitle>
             {completedId
-              ? `${getPlatform(createdBot?.platform ?? platform).label} Bot ${createdBot ? "Created" : "Connected"}`
-              : "Add Channel Bot"}
+              ? t("{{label}} Bot {{value}}", { label: getPlatform(createdBot?.platform ?? platform).label, value: createdBot ? t("Created") : t("Connected") })
+              : t("Add Channel Bot")}
           </DialogTitle>
           <DialogDescription>
             {completedId
               ? createdBot?.webhook_secret
-                ? "Store this verification secret now. It will not be shown again."
-                : "Your bot has been added to NyxID."
-              : "Connect a messaging platform bot to your AI agents."}
+                ? t("Store this verification secret now. It will not be shown again.")
+                : t("Your bot has been added to NyxID.")
+              : t("Connect a messaging platform bot to your AI agents.")}
           </DialogDescription>
         </DialogHeader>
       )}
 
       {catalog.isLoading && (
-        <p role="status" className="text-xs text-muted-foreground">
-          Loading platforms...
-        </p>
+        <p role="status" className="text-xs text-muted-foreground">{t("Loading platforms...")}</p>
       )}
       {catalog.isError && (
-        <p role="alert" className="text-xs text-destructive">
-          Unable to load platforms.{" "}
-          <button type="button" onClick={() => void catalog.refetch()}>
-            Retry
-          </button>
+        <p role="alert" className="text-xs text-destructive">{t("Unable to load platforms.")}{" "}
+          <button type="button" onClick={() => void catalog.refetch()}>{t("Retry")}</button>
         </p>
       )}
       {completedId ? (
@@ -319,28 +318,28 @@ export function ChannelBotSetup({
               />
               <div className="space-y-1">
                 <p className="text-13 font-medium">
-                  {createdBot?.label || label || "Channel bot created"}
+                  {createdBot?.label || label || t("Channel bot created")}
                 </p>
                 <p className="text-xs leading-relaxed text-muted-foreground">
                   {stayInPlace && connectedBotId
-                    ? `${connectedBotLabel || label || "Your bot"} is connected. NyxBot will continue in this chat.`
+                    ? t("{{value}} is connected. NyxBot will continue in this chat.", { value: connectedBotLabel || label || t("Your bot") })
                     : createdBot?.webhook_secret
-                    ? "Save the verification secret below. It will not be shown again."
-                    : "Your bot has been added to NyxID. Open it to review setup and assign an agent."}
+                    ? t("Save the verification secret below. It will not be shown again.")
+                    : t("Your bot has been added to NyxID. Open it to review setup and assign an agent.")}
                 </p>
               </div>
             </div>
           )}
           {createdBot?.webhook_url && (
             <CopyableUrlCallout
-              label="Callback URL"
+              label={t("Callback URL")}
               url={createdBot.webhook_url}
               docsHref={getPlatform(createdBot.platform).webhookDocs}
             />
           )}
           {createdBot?.webhook_secret && (
             <CopyableUrlCallout
-              label={createdBot.webhook_secret_label ?? "Webhook Secret"}
+              label={createdBot.webhook_secret_label ?? t("Webhook Secret")}
               url={createdBot.webhook_secret}
             />
           )}
@@ -352,7 +351,7 @@ export function ChannelBotSetup({
             </ol>
           )}
           <div className="flex justify-end gap-2">
-            {onContinue && fullPage ? <Button variant="outline" asChild><Link to="/channel-bots/$botId" params={{ botId: completedId }}>Open channel bot</Link></Button> : null}
+            {onContinue && fullPage ? <Button variant="outline" asChild><Link to="/channel-bots/$botId" params={{ botId: completedId }}>{t("Open channel bot")}</Link></Button> : null}
             <Button
               variant="primary"
               className={fullPage ? "w-full" : undefined}
@@ -368,8 +367,8 @@ export function ChannelBotSetup({
               }}
             >
               {stayInPlace && connectedBotId
-                ? "Back to chat"
-                : onContinue ? (returnTo ? "Back to chat" : "Continue") : fullPage ? "Open channel bot" : "Done"}
+                ? t("Back to chat")
+                : onContinue ? (returnTo ? t("Back to chat") : t("Continue")) : fullPage ? t("Open channel bot") : t("Done")}
               {fullPage && <ArrowRight aria-hidden="true" />}
             </Button>
           </div>
@@ -405,7 +404,7 @@ export function ChannelBotSetup({
                 {showScope && (
                   <div className="space-y-2">
                     <Label htmlFor="scope">
-                      {fullPage ? "Create for" : "Scope"}
+                      {fullPage ? t("Create for") : t("Scope")}
                     </Label>
                     <OrgScopeSelect
                       id="scope"
@@ -415,7 +414,7 @@ export function ChannelBotSetup({
                       onChange={(next) =>
                         setValue("target_org_id", next ?? undefined)
                       }
-                      label={fullPage ? "Create for" : "Scope"}
+                      label={fullPage ? t("Create for") : t("Scope")}
                     />
                     <p
                       id="scope-description"
@@ -423,15 +422,15 @@ export function ChannelBotSetup({
                     >
                       {scopeDescription ??
                         (fullPage
-                          ? link ? "The requesting app selected this account." : "Choose your personal account or an organization."
-                          : "Choose where this bot lives. Org bots are visible to every org admin and can be bound to org-owned agent keys.")}
+                          ? link ? t("The requesting app selected this account.") : t("Choose your personal account or an organization.")
+                          : t("Choose where this bot lives. Org bots are visible to every org admin and can be bound to org-owned agent keys."))}
                     </p>
                   </div>
                 )}
 
                 {!fullPage && (
                   <div className="space-y-2">
-                    <Label htmlFor="platform">Platform</Label>
+                    <Label htmlFor="platform">{t("Platform")}</Label>
                     <Select
                       value={platform}
                       onValueChange={(value) =>
@@ -439,7 +438,7 @@ export function ChannelBotSetup({
                       }
                     >
                       <SelectTrigger id="platform">
-                        <SelectValue placeholder="Select platform" />
+                        <SelectValue placeholder={t("Select platform")} />
                       </SelectTrigger>
                       <SelectContent>
                         {Object.entries(catalog.platforms)
@@ -453,7 +452,7 @@ export function ChannelBotSetup({
                     </Select>
                     {errors.platform && (
                       <p className="text-xs text-destructive">
-                        {errors.platform.message}
+                        {translateUi(errors.platform.message ?? "")}
                       </p>
                     )}
                     {getPlatform(platform).enabled && !stayInPlace && (
@@ -466,24 +465,22 @@ export function ChannelBotSetup({
                         }}
                         className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
                       >
-                        <ExternalLink className="size-3" aria-hidden="true" />
-                        Open full setup page
-                      </Link>
+                        <ExternalLink className="size-3" aria-hidden="true" />{t("Open full setup page")}</Link>
                     )}
                   </div>
                 )}
 
                 <div className="space-y-2">
                   <Label htmlFor="label">
-                    {fullPage ? "Bot name" : "Label"}
+                    {fullPage ? t("Bot name") : t("Label")}
                   </Label>
                   <Input
                     id="label"
                     disabled={disabled || Boolean(link)}
                     placeholder={
                       labelOptional
-                        ? "Your bot's Telegram name"
-                        : `My ${getPlatform(platform).label} Bot`
+                        ? t("Your bot's Telegram name")
+                        : t("My {{label}} Bot", { label: getPlatform(platform).label })
                     }
                     aria-describedby={labelOptional ? "label-hint" : undefined}
                     {...register("label")}
@@ -491,13 +488,13 @@ export function ChannelBotSetup({
                   {labelOptional && (
                     <p id="label-hint" className="text-xs text-muted-foreground">
                       {lookingUpBot
-                        ? "Looking up your bot's name..."
-                        : "Optional. Leave blank to use the name from your bot token."}
+                        ? t("Looking up your bot's name...")
+                        : t("Optional. Leave blank to use the name from your bot token.")}
                     </p>
                   )}
                   {errors.label && (
                     <p className="text-xs text-destructive">
-                      {errors.label.message}
+                      {translateUi(errors.label.message ?? "")}
                     </p>
                   )}
                 </div>
@@ -505,12 +502,7 @@ export function ChannelBotSetup({
             )}
           >
             {platform === "telegram" && !fullPage && (
-              <p className="text-xs text-muted-foreground">
-                To connect an existing Telegram manager, enter its bot token
-                here. NyxID keeps its bot creation webhook and adds conversation
-                routing. You can then choose a public default agent or an exact
-                chat route.
-              </p>
+              <p className="text-xs text-muted-foreground">{t("To connect an existing Telegram manager, enter its bot token here. NyxID keeps its bot creation webhook and adds conversation routing. You can then choose a public default agent or an exact chat route.")}</p>
             )}
             {setupNote && (
               <details
@@ -529,7 +521,7 @@ export function ChannelBotSetup({
               <div key={field.name} className="space-y-2">
                 <Label htmlFor={field.name}>
                   {field.label}
-                  {field.required ? "" : " (optional)"}
+                  {field.required ? "" : t(" (optional)")}
                 </Label>
                 <Input
                   id={field.name}
@@ -542,7 +534,7 @@ export function ChannelBotSetup({
                 )}
                 {errors[field.name] && (
                   <p className="text-xs text-destructive">
-                    {errors[field.name]?.message}
+                    {translateUi(errors[field.name]?.message ?? "")}
                   </p>
                 )}
               </div>
@@ -559,9 +551,7 @@ export function ChannelBotSetup({
                   variant="outline"
                   disabled={createBot.isPending}
                   onClick={() => onOpenChange(false)}
-                >
-                  Cancel
-                </Button>
+                >{t("Cancel")}</Button>
               )}
               <Button
                 variant="primary"
@@ -571,9 +561,9 @@ export function ChannelBotSetup({
               >
                 {fullPage
                   ? platform === "telegram"
-                    ? "Connect bot"
-                    : "Create channel bot"
-                  : "Add Bot"}
+                    ? t("Connect bot")
+                    : t("Create channel bot")
+                  : t("Add Bot")}
                 {fullPage && <ArrowRight aria-hidden="true" />}
               </Button>
             </div>

@@ -1,3 +1,4 @@
+import { useWizardTranslation } from "@/i18n/wizard";
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope"
 /**
  * Access Scope card — Services + Nodes multi-select, porting
@@ -41,6 +42,7 @@ export function AccessScopeCard({
   onChange,
   ownerId,
 }: AccessScopeCardProps) {
+  const { t } = useWizardTranslation();
   const services = useKeys({ includeTools: true });
   const nodes = useNodes()
 
@@ -64,22 +66,18 @@ export function AccessScopeCard({
       className="flex flex-col gap-4 rounded-lg border border-border bg-muted/30 p-4"
     >
       <div className="flex flex-col gap-1">
-        <h3 id="access-scope-title" className="text-13 font-semibold">
-          Access Scope
-        </h3>
-        <p className="text-xs text-muted-foreground">
-          Restrict which services and nodes this key can access via proxy.
-        </p>
+        <h3 id="access-scope-title" className="text-13 font-semibold">{t("Access Scope")}</h3>
+        <p className="text-xs text-muted-foreground">{t("Restrict which services and nodes this key can access via proxy.")}</p>
       </div>
 
       <AccessGroup
-        label="Services"
+        label={t("Services")}
         icon={<ShieldIcon />}
         allowAll={value.allowAllServices}
         onAllowAllChange={(allowAll) => {
           onChange({ ...value, allowAllServices: allowAll })
         }}
-        listLabel="Select allowed services:"
+        listLabel={t("Select allowed services:")}
         loading={services.isLoading}
         items={
           services.data
@@ -124,13 +122,13 @@ export function AccessScopeCard({
         />
       )}
       <AccessGroup
-        label="Nodes"
+        label={t("Nodes")}
         icon={<ServersIcon />}
         allowAll={value.allowAllNodes}
         onAllowAllChange={(allowAll) => {
           onChange({ ...value, allowAllNodes: allowAll })
         }}
-        listLabel="Select allowed nodes:"
+        listLabel={t("Select allowed nodes:")}
         loading={nodes.isLoading}
         items={
           nodes.data
@@ -178,6 +176,7 @@ function AccessGroup({
   selectedIds,
   onToggle,
 }: AccessGroupProps) {
+  const { t } = useWizardTranslation();
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-1.5 text-12 font-medium">
@@ -191,18 +190,16 @@ function AccessGroup({
             onAllowAllChange(checked === true)
           }}
         />
-        <span>Allow all {label.toLowerCase()}</span>
+        <span>{t("Allow all {{kind}}", { kind: label.toLowerCase() })}</span>
       </Label>
 
       {allowAll ? null : (
         <div className="flex flex-col gap-1.5 rounded-lg border border-border bg-background/40 p-3">
           <p className="text-xs text-muted-foreground">{listLabel}</p>
           {loading ? (
-            <p className="text-xs text-muted-foreground">Loading…</p>
+            <p className="text-xs text-muted-foreground">{t("Loading…")}</p>
           ) : items.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              None available. Add one first, then come back.
-            </p>
+            <p className="text-xs text-muted-foreground">{t("None available. Add one first, then come back.")}</p>
           ) : (
             <div className="flex flex-col gap-1" role="list">
               {items.map((item) => (

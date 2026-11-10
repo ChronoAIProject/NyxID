@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useId, useState } from "react";
 import {
   DndContext,
@@ -80,6 +82,7 @@ function AnalyticsPanelCard({
   sample?: AnalyticsSample;
   children?: React.ReactNode;
 }) {
+  const { t } = useUiTranslation();
   const { ref, visible, hasEntered } = usePanelVisibility();
   const query = useUsageAnalytics(view.filters, panel, sample, visible);
   const compact = view.layout === "operations";
@@ -108,12 +111,12 @@ function AnalyticsPanelCard({
             className="truncate font-display text-15 font-semibold leading-none tracking-tight"
             title={panel.title}
           >
-            {panel.title || "Untitled panel"}
+            {panel.title || t("Untitled panel")}
           </h3>
           <p className="mt-1 text-12 text-muted-foreground">
             {MEASURE_LABELS[panel.measure]} ·{" "}
             {panel.top === 0
-              ? "All selected usage"
+              ? t("All selected usage")
               : BREAKDOWN_LABELS[panel.breakdown]}
           </p>
         </div>
@@ -125,9 +128,7 @@ function AnalyticsPanelCard({
             "flex items-center justify-center text-12 text-muted-foreground",
             compact ? "h-[260px]" : "h-[330px]",
           )}
-        >
-          Choose a valid time range to query usage.
-        </div>
+        >{t("Choose a valid time range to query usage.")}</div>
       ) : !hasEntered || query.isPending ? (
         <Skeleton className={compact ? "h-[260px]" : "h-[330px]"} />
       ) : query.isError ? (
@@ -140,7 +141,7 @@ function AnalyticsPanelCard({
           <ErrorBanner
             message={
               query.error.message ||
-              "Could not load analytics. Try a narrower range."
+              t("Could not load analytics. Try a narrower range.")
             }
             onRetry={() => void query.refetch()}
           />
@@ -165,6 +166,7 @@ function Summary({
   view: AnalyticsView;
   sample?: AnalyticsSample;
 }) {
+  const { t } = useUiTranslation();
   const [tokenTypes, setTokenTypes] = useState<TokenMetric[]>(["total_tokens"]);
   const query = useUsageAnalytics(
     view.filters,
@@ -219,9 +221,11 @@ function Summary({
     },
     {
       label: "Active users",
-      value: data.totals.unique_users.toLocaleString(),
+      value: data.totals.unique_users.toLocaleString(getFormattingLocale()),
       suffix: "users",
-      note: `${data.totals.unique_services.toLocaleString()} services in this selection`,
+      note: t("{{value}} services in this selection", {
+        value: data.totals.unique_services.toLocaleString(getFormattingLocale()),
+      }),
     },
   ];
   return (
@@ -235,14 +239,14 @@ function Summary({
         <Card key={stat.label} className="min-w-0 px-4 py-4">
           {stat.tokenControl ? (
             <TokenMetricPicker
-              label="Summary token types"
+              label={t("Summary token types")}
               selected={tokenTypes}
               onChange={setTokenTypes}
               compact
             />
           ) : (
             <p className="text-10 font-medium uppercase tracking-[1.5px] text-muted-foreground">
-              {stat.label}
+              {t(stat.label)}
             </p>
           )}
           <div className="mt-3 flex flex-wrap items-baseline gap-x-2">
@@ -253,14 +257,14 @@ function Summary({
                 {stat.value}
               </span>
             )}
-            <span className="text-10 text-muted-foreground">{stat.suffix}</span>
+            <span className="text-10 text-muted-foreground">{t(stat.suffix)}</span>
           </div>
           {stat.tokenControl ? (
             <TokenMetricCaption selected={tokenTypes} />
           ) : (
             stat.note && (
               <p className="mt-2 text-10 leading-relaxed text-muted-foreground">
-                {stat.note}
+                {t(stat.note)}
               </p>
             )
           )}
@@ -280,6 +284,7 @@ export function AnalyticsCanvas({
   sample?: AnalyticsSample;
   disabled?: boolean;
 }) {
+  const { t } = useUiTranslation();
   const operations = view.layout === "operations";
   const dragId = useId();
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -322,10 +327,8 @@ export function AnalyticsCanvas({
       <div className="grid items-start gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
         <aside className="rounded-xl border border-border bg-card p-4 text-card-foreground shadow-sm">
           <div className="mb-5 border-b border-border/50 pb-4">
-            <h3 className="text-15 font-semibold">Build an insight</h3>
-            <p className="mt-1 text-11 leading-relaxed text-muted-foreground">
-              Choose what to measure and how to see it.
-            </p>
+            <h3 className="text-15 font-semibold">{t("Build an insight")}</h3>
+            <p className="mt-1 text-11 leading-relaxed text-muted-foreground">{t("Choose what to measure and how to see it.")}</p>
           </div>
           <PanelControls panel={panel} onChange={updatePanel} />
           <Button
@@ -346,9 +349,7 @@ export function AnalyticsCanvas({
               })
             }
           >
-            <Plus className="size-3" />
-            Use in Operations
-          </Button>
+            <Plus className="size-3" />{t("Use in Operations")}</Button>
         </aside>
         <AnalyticsPanelCard
           panel={panel}
@@ -366,17 +367,15 @@ export function AnalyticsCanvas({
         operations && "analytics-operations",
       )}
     >
-      <span className="sr-only" aria-label="Panel order" aria-live="polite">
+      <span className="sr-only" aria-label={t("Panel order")} aria-live="polite">
         {announcement}
       </span>
       <Summary view={view} sample={sample} />
       {operations && (
         <div className="flex items-center justify-between gap-3">
-          <p className="text-10 font-semibold uppercase tracking-[1.5px] text-muted-foreground">
-            Usage monitors{" "}
+          <p className="text-10 font-semibold uppercase tracking-[1.5px] text-muted-foreground">{t("Usage monitors")}{" "}
             <span className="ml-2 font-mono font-normal">
-              {view.panels.length} panels
-            </span>
+              {view.panels.length}{t(" panels")}</span>
           </p>
           <Button
             variant="outline"
@@ -385,9 +384,7 @@ export function AnalyticsCanvas({
               onChange({ ...view, panels: [...view.panels, newPanel()] })
             }
           >
-            <Plus className="size-3" />
-            Add panel
-          </Button>
+            <Plus className="size-3" />{t("Add panel")}</Button>
         </div>
       )}
       <DndContext
@@ -464,7 +461,7 @@ export function AnalyticsCanvas({
                                 variant="ghost"
                                 size="icon"
                                 className="size-7 shrink-0"
-                                aria-label={`Configure ${panel.title}`}
+                                aria-label={t("Configure {{title}}", { title: panel.title })}
                               >
                                 {operations ? (
                                   <Ellipsis className="size-3.5" />
@@ -474,9 +471,7 @@ export function AnalyticsCanvas({
                               </Button>
                             </PopoverTrigger>
                           </TooltipTrigger>
-                          <TooltipContent side="top">
-                            Panel options
-                          </TooltipContent>
+                          <TooltipContent side="top">{t("Panel options")}</TooltipContent>
                         </Tooltip>
                         <PopoverContent
                           align="end"
@@ -485,7 +480,7 @@ export function AnalyticsCanvas({
                         >
                           <PanelControls panel={panel} onChange={updatePanel} />
                           <AnalyticsSelect
-                            label="Panel width"
+                            label={t("Panel width")}
                             value={String(panelSpan(panel))}
                             onChange={(value) =>
                               updatePanel({
@@ -501,7 +496,7 @@ export function AnalyticsCanvas({
                             ]}
                           />
                           <AnalyticsSelect
-                            label="Chart height"
+                            label={t("Chart height")}
                             value={
                               panel.height ??
                               (operations ? "compact" : "standard")
@@ -532,13 +527,11 @@ export function AnalyticsCanvas({
                                 })
                               }
                             >
-                              <Copy className="size-3" />
-                              Duplicate
-                            </Button>
+                              <Copy className="size-3" />{t("Duplicate")}</Button>
                             <Button
                               variant="ghost"
                               size="icon"
-                              aria-label={`Move ${panel.title} up`}
+                              aria-label={t("Move {{title}} up", { title: panel.title })}
                               disabled={index === 0}
                               onClick={() => move(index, -1)}
                             >
@@ -547,7 +540,7 @@ export function AnalyticsCanvas({
                             <Button
                               variant="ghost"
                               size="icon"
-                              aria-label={`Move ${panel.title} down`}
+                              aria-label={t("Move {{title}} down", { title: panel.title })}
                               disabled={index === view.panels.length - 1}
                               onClick={() => move(index, 1)}
                             >
@@ -556,7 +549,7 @@ export function AnalyticsCanvas({
                             <Button
                               variant="ghost"
                               size="icon"
-                              aria-label={`Remove ${panel.title}`}
+                              aria-label={t("Remove {{title}}", { title: panel.title })}
                               disabled={view.panels.length === 1}
                               onClick={() =>
                                 onChange({
@@ -584,18 +577,14 @@ export function AnalyticsCanvas({
                 onChange({ ...view, panels: [...view.panels, newPanel()] })
               }
             >
-              <Plus className="size-4" />
-              Add a panel
-            </Button>
+              <Plus className="size-4" />{t("Add a panel")}</Button>
           </div>
         </SortableContext>
         <DragOverlay dropAnimation={null}>
           {activePanel && (
             <Card className="border-primary p-4 shadow-xl">
               <p className="text-15 font-semibold">{activePanel.title}</p>
-              <p className="mt-1 text-12 text-muted-foreground">
-                Move to a new position
-              </p>
+              <p className="mt-1 text-12 text-muted-foreground">{t("Move to a new position")}</p>
             </Card>
           )}
         </DragOverlay>

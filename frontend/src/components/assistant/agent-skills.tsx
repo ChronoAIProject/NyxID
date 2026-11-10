@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState, type ReactNode } from "react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -31,27 +34,28 @@ import { FEATURE_FLAG, userHasFeature } from "@/lib/feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 
 const HISTORY_LABELS: Record<string, string> = {
-  assistant_skills_updated: "Attached skills changed",
-  assistant_learning_proposal_edited: "Skill draft edited",
-  assistant_learning_proposal_rejected: "Skill draft rejected",
-  assistant_learning_proposal_reprepared: "Skill draft package rebuilt",
-  assistant_learning_publication_approved: "Skill publication approved",
-  assistant_learning_publication_deferred: "Skill publication deferred",
-  assistant_learning_skill_pinned: "Published skill attached",
+  get assistant_skills_updated() { return translateUi("Attached skills changed"); },
+  get assistant_learning_proposal_edited() { return translateUi("Skill draft edited"); },
+  get assistant_learning_proposal_rejected() { return translateUi("Skill draft rejected"); },
+  get assistant_learning_proposal_reprepared() { return translateUi("Skill draft package rebuilt"); },
+  get assistant_learning_publication_approved() { return translateUi("Skill publication approved"); },
+  get assistant_learning_publication_deferred() { return translateUi("Skill publication deferred"); },
+  get assistant_learning_skill_pinned() { return translateUi("Published skill attached"); },
 };
 
 function SkillHistory({ items }: { readonly items: readonly AgentSkillHistoryItem[] }) {
+  const { t } = useUiTranslation();
   return (
     <div className="space-y-1">
-      <p className="text-12 font-medium">Skill history</p>
-      <ol aria-label="Skill history" className="space-y-1">
+      <p className="text-12 font-medium">{t("Skill history")}</p>
+      <ol aria-label={t("Skill history")} className="space-y-1">
         {items.map((item) => (
           <li key={item.id} className="text-11 text-muted-foreground">
             <span className="font-medium text-foreground">
-              {HISTORY_LABELS[item.event_type] ?? "Skill activity"}
+              {HISTORY_LABELS[item.event_type] ?? t("Skill activity")}
             </span>{" "}
-            · {new Date(item.created_at).toLocaleString()}
-            {item.revision !== null ? ` · Revision ${item.revision}` : ""}
+            · {new Date(item.created_at).toLocaleString(getFormattingLocale())}
+            {item.revision !== null ? t(" · Revision {{revision}}", { revision: item.revision }) : ""}
             {item.skills.length > 0 ? (
               <span className="block">
                 {item.skills
@@ -75,17 +79,15 @@ function TestResult({
 }: {
   readonly result: UseQueryResult<AttachedSkillPreview>;
 }) {
+  const { t } = useUiTranslation();
   if (result.isFetching) {
     return (
-      <p role="status" className="text-11 text-muted-foreground">
-        Testing…
-      </p>
+      <p role="status" className="text-11 text-muted-foreground">{t("Testing…")}</p>
     );
   }
   if (result.error) {
     return (
-      <p role="alert" className="text-11 text-destructive">
-        Test failed: {result.error.message}
+      <p role="alert" className="text-11 text-destructive">{t("Test failed: ")}{translateUi(result.error.message ?? "")}
       </p>
     );
   }
@@ -94,17 +96,13 @@ function TestResult({
   if (!data.readable) {
     return (
       <p role="status" className="text-11 text-warning">
-        {data.name} {data.version} is disabled, so the agent does not read it.
-        Enable it to use it again.
-      </p>
+        {data.name} {data.version}{t(" is disabled, so the agent does not read it. Enable it to use it again.")}</p>
     );
   }
   return (
     <div role="status" className="space-y-1">
-      <p className="text-11 text-success">
-        Test passed: the agent reads {data.name} {data.version} (
-        {data.size_bytes.toLocaleString()} bytes).
-      </p>
+      <p className="text-11 text-success">{t("Test passed: the agent reads ")}{data.name} {data.version} (
+        {data.size_bytes.toLocaleString(getFormattingLocale())}{t(" bytes).")}</p>
       {data.excerpt ? (
         <pre
           aria-label={`${data.name} SKILL.md excerpt`}
@@ -148,6 +146,7 @@ function AttachedSkill({
   readonly edit: () => void;
   readonly children?: ReactNode;
 }) {
+  const { t } = useUiTranslation();
   const versions = useSkillVersions(skill.skill_id);
   const latest = versions.data?.items[0]?.version;
   return (
@@ -159,55 +158,47 @@ function AttachedSkill({
       <p className="text-12 text-muted-foreground">{description}</p>
       {size !== undefined && (
         <p className="text-11 text-text-tertiary">
-          {size.toLocaleString()} bytes
-        </p>
+          {size.toLocaleString(getFormattingLocale())}{t(" bytes")}</p>
       )}
       {versions.error && (
-        <p className="text-11 text-text-tertiary">
-          Could not check for updates. Your pinned version is unchanged.
-        </p>
+        <p className="text-11 text-text-tertiary">{t("Could not check for updates. Your pinned version is unchanged.")}</p>
       )}
       <div className="flex flex-wrap gap-2">
         <Button size="sm" disabled={disabled} onClick={review}>
           {latest && latest !== skill.version
-            ? `Newer version available: ${latest}`
-            : "Choose version"}
+            ? t("Newer version available: {{latest}}", { latest: latest })
+            : t("Choose version")}
         </Button>
-        <Button size="sm" disabled={disabled} onClick={remove}>
-          Remove {skill.name}
+        <Button size="sm" disabled={disabled} onClick={remove}>{t("Remove ")}{skill.name}
         </Button>
         <Button
           size="sm"
           variant="secondary"
-          aria-label={`Test ${skill.name}`}
+          aria-label={t("Test {{name}}", { name: skill.name })}
           disabled={testResult?.isFetching}
           onClick={test}
-        >
-          Test
-        </Button>
+        >{t("Test")}</Button>
         {canEdit ? (
           <Button
             size="sm"
             variant="secondary"
-            aria-label={`Edit ${skill.name}`}
+            aria-label={t("Edit {{name}}", { name: skill.name })}
             disabled={disabled}
             onClick={edit}
-          >
-            Edit
-          </Button>
+          >{t("Edit")}</Button>
         ) : null}
         {canDisable ? (
           <label className="flex items-center gap-2 text-11">
             <Switch
               checked={!skill.disabled}
               disabled={disabled}
-              aria-label={`Use ${skill.name}`}
+              aria-label={t("Use {{name}}", { name: skill.name })}
               onCheckedChange={toggle}
             />
-            {skill.disabled ? "Disabled" : "Enabled"}
+            {skill.disabled ? t("Disabled") : t("Enabled")}
           </label>
         ) : skill.disabled ? (
-          <span className="text-11 text-text-tertiary">Disabled</span>
+          <span className="text-11 text-text-tertiary">{t("Disabled")}</span>
         ) : null}
       </div>
       {testResult ? <TestResult result={testResult} /> : null}
@@ -225,6 +216,7 @@ export function AgentSkills({
   readonly readOnly?: boolean;
   readonly id?: string;
 }) {
+  const { t } = useUiTranslation();
   const current = useAgentSkills(agentId);
   const canDisable = useAuthStore((s) =>
     userHasFeature(s.user, FEATURE_FLAG.SKILL_PIN_DISABLE),
@@ -290,15 +282,12 @@ export function AgentSkills({
     <section
       id={id}
       tabIndex={id ? -1 : undefined}
-      aria-label="Skills"
+      aria-label={t("Skills")}
       className="space-y-3 outline-none"
     >
       <div className="space-y-1">
-        <h3 className="text-13 font-semibold">Skills</h3>
-        <p className="text-12 text-muted-foreground">
-          Teach this agent with pinned Ornn skills. Skills never grant
-          permissions. Up to 16 skills.
-        </p>
+        <h3 className="text-13 font-semibold">{t("Skills")}</h3>
+        <p className="text-12 text-muted-foreground">{t("Teach this agent with pinned Ornn skills. Skills never grant permissions. Up to 16 skills.")}</p>
       </div>
       {current.data && (
         <p className="text-11 text-text-tertiary">
@@ -307,7 +296,7 @@ export function AgentSkills({
         </p>
       )}
       {current.isPending && (
-        <p className="text-12 text-muted-foreground">Loading skills...</p>
+        <p className="text-12 text-muted-foreground">{t("Loading skills...")}</p>
       )}
       {[
         current.error,
@@ -322,7 +311,7 @@ export function AgentSkills({
           <ErrorBanner key={i} message={e!.message} />
         ))}
       {current.data?.skills.length === 0 && (
-        <p className="text-12 text-muted-foreground">No skills attached.</p>
+        <p className="text-12 text-muted-foreground">{t("No skills attached.")}</p>
       )}
       {current.data?.skills.map((skill) => (
         <AttachedSkill
@@ -346,12 +335,7 @@ export function AgentSkills({
         >
           {improving?.skillId === skill.skill_id ? (
             <div className="space-y-2 border-t border-border/50 pt-2">
-              <p className="text-11 text-muted-foreground">
-                Editing a copy of {skill.name} {skill.version}. Saving changes
-                only the draft; the attached version stays in use until you
-                publish the draft from its confirmation card in NyxBot&apos;s
-                home thread.
-              </p>
+              <p className="text-11 text-muted-foreground">{t("Editing a copy of ")}{skill.name} {skill.version}{t(". Saving changes only the draft; the attached version stays in use until you publish the draft from its confirmation card in NyxBot's home thread.")}</p>
               <ProposalDraftEditor
                 agentId={agentId}
                 proposalId={improving.proposalId}
@@ -364,8 +348,7 @@ export function AgentSkills({
         <SkillHistory items={history.data.items} />
       ) : null}
       {history.error ? (
-        <p role="alert" className="text-11 text-destructive">
-          Skill history is unavailable: {history.error.message}
+        <p role="alert" className="text-11 text-destructive">{t("Skill history is unavailable: ")}{translateUi(history.error.message ?? "")}
         </p>
       ) : null}
       {!readOnly && (
@@ -379,8 +362,8 @@ export function AgentSkills({
             }}
           >
             <Input
-              aria-label="Search Ornn skills"
-              placeholder="Search Ornn skills"
+              aria-label={t("Search Ornn skills")}
+              placeholder={t("Search Ornn skills")}
               value={input}
               maxLength={200}
               onChange={(e) => setInput(e.target.value)}
@@ -389,9 +372,7 @@ export function AgentSkills({
               type="submit"
               disabled={disabled}
               isLoading={search.isFetching}
-            >
-              Search
-            </Button>
+            >{t("Search")}</Button>
           </form>
           {search.data?.items.map((item) => (
             <div
@@ -411,36 +392,30 @@ export function AgentSkills({
             </div>
           ))}
           {search.data?.items.length === 0 && (
-            <p className="text-12 text-muted-foreground">
-              No visible skills found.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("No visible skills found.")}</p>
           )}
           {search.data && search.data.total_pages > 1 && (
             <div className="flex items-center gap-2">
-              <Button disabled={page <= 1} onClick={() => setPage(page - 1)}>
-                Previous
-              </Button>
-              <span className="text-11">Page {page}</span>
+              <Button disabled={page <= 1} onClick={() => setPage(page - 1)}>{t("Previous")}</Button>
+              <span className="text-11">{t("Page ")}{page}</span>
               <Button
                 disabled={page >= search.data.total_pages}
                 onClick={() => setPage(page + 1)}
-              >
-                Next
-              </Button>
+              >{t("Next")}</Button>
             </div>
           )}
           {selected && (
             <div className="space-y-3 rounded-lg border border-border/50 p-3">
               <p className="text-12 font-medium">{selected.name}</p>
               <Select value={version} onValueChange={setVersion}>
-                <SelectTrigger aria-label="Skill version">
-                  <SelectValue placeholder="Choose an exact version" />
+                <SelectTrigger aria-label={t("Skill version")}>
+                  <SelectValue placeholder={t("Choose an exact version")} />
                 </SelectTrigger>
                 <SelectContent>
                   {versions.data?.items.map((v) => (
                     <SelectItem key={v.version} value={v.version}>
                       {v.version}
-                      {v.deprecated ? " (Deprecated)" : ""}
+                      {v.deprecated ? t(" (Deprecated)") : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -453,11 +428,8 @@ export function AgentSkills({
                       setVersionPage(versionPage - 1);
                       setVersion("");
                     }}
-                  >
-                    Newer versions
-                  </Button>
-                  <span className="text-11">
-                    Version page {versionPage}
+                  >{t("Newer versions")}</Button>
+                  <span className="text-11">{t("Version page ")}{versionPage}
                   </span>
                   <Button
                     disabled={versionPage >= versions.data.total_pages}
@@ -465,15 +437,11 @@ export function AgentSkills({
                       setVersionPage(versionPage + 1);
                       setVersion("");
                     }}
-                  >
-                    Older versions
-                  </Button>
+                  >{t("Older versions")}</Button>
                 </div>
               )}
               {preview.isFetching && (
-                <p className="text-12 text-muted-foreground">
-                  Verifying package...
-                </p>
+                <p className="text-12 text-muted-foreground">{t("Verifying package...")}</p>
               )}
               {preview.data && (
                 <>
@@ -481,15 +449,11 @@ export function AgentSkills({
                     {preview.data.description}
                   </p>
                   <p className="text-11 text-text-tertiary">
-                    {preview.data.size_bytes.toLocaleString()} bytes ·{" "}
-                    {preview.data.reference.dependencies.length} pinned
-                    dependencies
-                  </p>
+                    {preview.data.size_bytes.toLocaleString(getFormattingLocale())}{t(" bytes ·")}{" "}
+                    {preview.data.reference.dependencies.length}{t(" pinned dependencies")}</p>
                 </>
               )}
-              <p className="text-11 text-text-tertiary">
-                Attaching external guidance changes how this agent works.
-              </p>
+              <p className="text-11 text-text-tertiary">{t("Attaching external guidance changes how this agent works.")}</p>
               <Button
                 variant="primary"
                 isLoading={write.isPending}
@@ -510,7 +474,7 @@ export function AgentSkills({
                     ]);
                 }}
               >
-                {replacement ? "Re-pin skill" : "Attach skill"}
+                {replacement ? t("Re-pin skill") : t("Attach skill")}
               </Button>
             </div>
           )}

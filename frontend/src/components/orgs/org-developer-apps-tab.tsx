@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -104,6 +107,7 @@ export function OrgDeveloperAppsTab({
   orgId,
   orgName,
 }: OrgDeveloperAppsTabProps) {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const { data, isLoading, error, refetch } = useDeveloperApps(orgId);
   const createMutation = useCreateDeveloperApp();
@@ -139,13 +143,13 @@ export function OrgDeveloperAppsTab({
 
   async function handleCreate() {
     if (!name.trim()) {
-      toast.error("Application name is required");
+      toast.error(translateUi("Application name is required"));
       return;
     }
 
     const parsedUris = parseRedirectUris(redirectUrisText);
     if (parsedUris.error) {
-      toast.error(parsedUris.error);
+      toast.error(translateErrorMessage(parsedUris.error));
       return;
     }
 
@@ -158,7 +162,7 @@ export function OrgDeveloperAppsTab({
         target_org_id: orgId,
       });
 
-      toast.success("Developer app created");
+      toast.success(translateUi("Developer app created"));
       if (created.client_secret) {
         setCreatedClientId(created.id);
         setCreatedClientSecret(created.client_secret);
@@ -168,7 +172,7 @@ export function OrgDeveloperAppsTab({
       resetCreateForm();
     } catch (error) {
       toast.error(
-        error instanceof ApiError ? error.message : "Failed to create app",
+        translateErrorMessage(error instanceof ApiError ? error.message : "Failed to create app"),
       );
     }
   }
@@ -181,42 +185,35 @@ export function OrgDeveloperAppsTab({
           variant="outline"
           onClick={() => setShowInactive((current) => !current)}
         >
-          {showInactive ? "Hide inactive" : "Show inactive"}
+          {showInactive ? t("Hide inactive") : t("Show inactive")}
         </Button>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogTrigger asChild>
             <Button>
-              <ButtonIcon><Plus className="h-4 w-4" /></ButtonIcon>
-              New Application
-            </Button>
+              <ButtonIcon><Plus className="h-4 w-4" /></ButtonIcon>{t("New Application")}</Button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Create Developer App</DialogTitle>
-              <DialogDescription>
-                Register an OAuth application owned by {orgName}.
+              <DialogTitle>{t("Create Developer App")}</DialogTitle>
+              <DialogDescription>{t("Register an OAuth application owned by ")}{orgName}.
               </DialogDescription>
             </DialogHeader>
             <div className="space-y-4">
               <OrgReadOnlyRow orgName={orgName} />
               <div className="space-y-2">
-                <label className="text-12 font-medium" htmlFor="org-app-name">
-                  Application Name
-                </label>
+                <label className="text-12 font-medium" htmlFor="org-app-name">{t("Application Name")}</label>
                 <Input
                   id="org-app-name"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
-                  placeholder="My SaaS App"
+                  placeholder={t("My SaaS App")}
                 />
               </div>
               <div className="space-y-2">
                 <label
                   className="text-12 font-medium"
                   htmlFor="org-redirect-uris"
-                >
-                  Redirect URIs (one per line)
-                </label>
+                >{t("Redirect URIs (one per line)")}</label>
                 <textarea
                   id="org-redirect-uris"
                   value={redirectUrisText}
@@ -228,7 +225,7 @@ export function OrgDeveloperAppsTab({
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-12 font-medium">Client Type</label>
+                <label className="text-12 font-medium">{t("Client Type")}</label>
                 <Select
                   value={clientType}
                   onValueChange={(value: "public" | "confidential") =>
@@ -239,17 +236,14 @@ export function OrgDeveloperAppsTab({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="public">Public (PKCE)</SelectItem>
-                    <SelectItem value="confidential">Confidential</SelectItem>
+                    <SelectItem value="public">{t("Public (PKCE)")}</SelectItem>
+                    <SelectItem value="confidential">{t("Confidential")}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
               <div className="space-y-3">
-                <label className="text-12 font-medium">Allowed Scopes</label>
-                <p className="text-xs text-muted-foreground">
-                  OIDC scopes this app can request. Determines what user data
-                  and NyxID capabilities are included in tokens.
-                </p>
+                <label className="text-12 font-medium">{t("Allowed Scopes")}</label>
+                <p className="text-xs text-muted-foreground">{t("OIDC scopes this app can request. Determines what user data and NyxID capabilities are included in tokens.")}</p>
                 <div className="space-y-2">
                   {OIDC_SCOPES.map((scope) => (
                     <div key={scope.id} className="flex items-start gap-2">
@@ -272,9 +266,7 @@ export function OrgDeveloperAppsTab({
                         >
                           {scope.label}
                           {scope.required && (
-                            <span className="ml-1 text-xs text-muted-foreground">
-                              (required)
-                            </span>
+                            <span className="ml-1 text-xs text-muted-foreground">{t("(required)")}</span>
                           )}
                         </label>
                         {"hint" in scope && scope.hint && (
@@ -293,16 +285,12 @@ export function OrgDeveloperAppsTab({
                 type="button"
                 variant="outline"
                 onClick={() => setCreateOpen(false)}
-              >
-                Cancel
-              </Button>
+              >{t("Cancel")}</Button>
               <Button
                 variant="primary"
                 onClick={() => void handleCreate()}
                 isLoading={createMutation.isPending}
-              >
-                Create App
-              </Button>
+              >{t("Create App")}</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
@@ -317,21 +305,21 @@ export function OrgDeveloperAppsTab({
 
       <div className="grid gap-4 md:grid-cols-3">
         <StatCard
-          title="Total Apps"
+          title={t("Total Apps")}
           value={apps.length}
-          description={`OAuth clients owned by ${orgName}`}
+          description={t("OAuth clients owned by {{orgName}}", { orgName: orgName })}
           icon={Code}
         />
         <StatCard
-          title="Active Apps"
+          title={t("Active Apps")}
           value={activeCount}
-          description="Ready for production traffic"
+          description={t("Ready for production traffic")}
           icon={ShieldCheck}
         />
         <StatCard
-          title="Confidential Apps"
+          title={t("Confidential Apps")}
           value={confidentialCount}
-          description="Require client secret"
+          description={t("Require client secret")}
           icon={Shield}
         />
       </div>
@@ -340,7 +328,7 @@ export function OrgDeveloperAppsTab({
         {!isLoading && error && (
           <Card className="xl:col-span-2">
             <CardContent className="p-4">
-              <ErrorBanner message={`Failed to load developer apps owned by ${orgName}.`} onRetry={refetch} />
+              <ErrorBanner message={t("Failed to load developer apps owned by {{orgName}}.", { orgName: orgName })} onRetry={refetch} />
             </CardContent>
           </Card>
         )}
@@ -387,11 +375,10 @@ export function OrgDeveloperAppsTab({
                 <div className="flex items-center justify-between gap-3">
                   <CardTitle className="text-base">{app.client_name}</CardTitle>
                   <Badge variant={app.is_active ? "success" : "secondary"}>
-                    {app.is_active ? "Active" : "Inactive"}
+                    {app.is_active ? t("Active") : t("Inactive")}
                   </Badge>
                 </div>
-                <CardDescription className="break-all">
-                  Client ID:{" "}
+                <CardDescription className="break-all">{t("Client ID:")}{" "}
                   <span className="text-xs text-foreground">
                     {app.id}
                   </span>
@@ -401,8 +388,7 @@ export function OrgDeveloperAppsTab({
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant="secondary">{app.client_type}</Badge>
                   <Badge variant="secondary">
-                    {app.redirect_uris.length} redirect URIs
-                  </Badge>
+                    {app.redirect_uris.length}{t(" redirect URIs")}</Badge>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {(app.allowed_scopes || "")
@@ -427,8 +413,8 @@ export function OrgDeveloperAppsTab({
             <CardContent className="p-4 text-center">
               <p className="text-12 text-muted-foreground">
                 {apps.length === 0
-                  ? `No developer apps owned by ${orgName}.`
-                  : `No active developer apps owned by ${orgName}. Enable "Show inactive" to view deactivated apps.`}
+                  ? t("No developer apps owned by {{orgName}}.", { orgName: orgName })
+                  : t("No active developer apps owned by {{orgName}}. Enable \"Show inactive\" to view deactivated apps.", { orgName: orgName })}
               </p>
             </CardContent>
           </Card>

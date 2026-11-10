@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { Check, ChevronsUpDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -12,12 +14,14 @@ import { browserTimezone } from "@/lib/automation-time";
 export function TimezoneSelect({
   value,
   onChange,
-  label = "Timezone",
+  label: labelLocaleDefault,
 }: {
   readonly value: string;
   readonly onChange: (value: string) => void;
   readonly label?: string;
 }) {
+  const label = labelLocaleDefault === undefined ? translateUi("Timezone") : labelLocaleDefault;
+  const { t } = useUiTranslation();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const suggested = browserTimezone();
@@ -42,20 +46,20 @@ export function TimezoneSelect({
             aria-expanded={open}
             className="w-full justify-between"
           >
-            {value || "Choose a timezone"}
+            {value || t("Choose a timezone")}
             <ChevronsUpDown className="size-3.5 opacity-50" />
           </Button>
         </PopoverTrigger>
         <PopoverContent className="w-72 p-2" align="start">
           <Input
-            aria-label="Search timezones"
-            placeholder="Search timezones…"
+            aria-label={t("Search timezones")}
+            placeholder={t("Search timezones…")}
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
           <div
             role="listbox"
-            aria-label="Timezones"
+            aria-label={t("Timezones")}
             className="mt-2 max-h-64 overflow-y-auto"
           >
             {zones
@@ -80,7 +84,7 @@ export function TimezoneSelect({
                   />
                   {zone}
                   {zone === suggested && (
-                    <span className="text-muted-foreground">(browser)</span>
+                    <span className="text-muted-foreground">{t("(browser)")}</span>
                   )}
                 </button>
               ))}

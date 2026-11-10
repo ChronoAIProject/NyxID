@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useKeys } from "@/hooks/use-keys";
 import { useApiKey } from "@/hooks/use-api-keys";
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
@@ -19,14 +20,15 @@ export function AssistantPlatformServiceFields({
   readonly onAllowAllChange: (value: boolean) => void;
   readonly disabled: boolean;
 }) {
+  const { t } = useUiTranslation();
   const services = useKeys({ includeTools: true });
   const key = useApiKey(keyId ?? "");
   if (keyId && !key.data)
     return (
       <p className="text-12 text-muted-foreground">
         {key.isError
-          ? "Could not load service scope."
-          : "Loading service scope…"}
+          ? t("Could not load service scope.")
+          : t("Loading service scope…")}
       </p>
     );
   const orgId =

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { routeAgentIssue } from "@/lib/channel-readiness";
 import { formatDate } from "@/lib/utils";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -20,6 +21,7 @@ export function CredentialVerification({
   readonly error: string | null;
   readonly previousCheckId: string | null;
 }) {
+  const { t } = useUiTranslation();
   const currentError = check && check.id !== previousCheckId ? null : error;
   const status = pending ? "pending" : currentError ? "failed" : check?.status;
   const label =
@@ -33,7 +35,7 @@ export function CredentialVerification({
             ? "Credential check incomplete"
             : "Credentials not checked";
   return (
-    <DetailSection title="Credential Verification">
+    <DetailSection title={t("Credential Verification")}>
       <div
         className="space-y-3 p-4 text-12 text-muted-foreground"
         aria-live="polite"
@@ -47,21 +49,16 @@ export function CredentialVerification({
                 : "warning"
           }
         >
-          {label}
+          {t(label)}
         </Badge>
         {!pending && (currentError || check?.message) && (
           <ErrorBanner message={currentError ?? check?.message ?? ""} />
         )}
         {!pending && !currentError && check && (
-          <p>
-            Last check: {formatDate(check.completed_at ?? check.started_at)}
+          <p>{t("Last check: ")}{formatDate(check.completed_at ?? check.started_at)}
           </p>
         )}
-        <p>
-          Verify Bot checks access to this WhatsApp phone through Meta. Webhook
-          subscriptions, an agent route, and a real message exchange must be
-          checked separately.
-        </p>
+        <p>{t("Verify Bot checks access to this WhatsApp phone through Meta. Webhook subscriptions, an agent route, and a real message exchange must be checked separately.")}</p>
       </div>
     </DetailSection>
   );
@@ -78,6 +75,7 @@ export function RouteReadiness({
   readonly ownerLabel: string;
   readonly conversations?: readonly ChannelConversationItem[];
 }) {
+  const { t } = useUiTranslation();
   const eligible = keys.filter((key) => !routeAgentIssue(key, ownerOrgId));
   const readyRoutes = conversations?.filter(
     (route) =>
@@ -96,14 +94,9 @@ export function RouteReadiness({
             : "Select a key registered with your agent runtime.";
   return (
     <div className="space-y-2 rounded-lg border border-border bg-muted/50 p-3 text-12 text-muted-foreground">
-      <p className="font-medium text-foreground">Agent setup · {ownerLabel}</p>
-      <p>{message}</p>
-      <p>
-        Register the intended agent runtime with a key owned by {ownerLabel}.
-        The runtime must recognize that key, authenticate NyxID callbacks, and
-        send asynchronous replies. Setting a callback URL alone does not
-        register the runtime.
-      </p>
+      <p className="font-medium text-foreground">{t("Agent setup · ")}{ownerLabel}</p>
+      <p>{t(message)}</p>
+      <p>{t("Register the intended agent runtime with a key owned by ")}{ownerLabel}{t(". The runtime must recognize that key, authenticate NyxID callbacks, and send asynchronous replies. Setting a callback URL alone does not register the runtime.")}</p>
       {keys
         .filter((key) => routeAgentIssue(key, ownerOrgId) === "No callback URL")
         .map((key) => (
@@ -111,29 +104,19 @@ export function RouteReadiness({
             <a
               className="underline"
               href={`/keys/api-key/${encodeURIComponent(key.id)}`}
-            >
-              Configure {key.name}
-            </a>
-            : callback URL missing.
-          </p>
+            >{t("Configure ")}{key.name}
+            </a>{t(": callback URL missing.")}</p>
         ))}
       {keys.length === 0 && (
         <p>
-          <a className="underline" href="/keys?tab=nyxid">
-            Open Agent Keys
-          </a>{" "}
-          and choose {ownerLabel} as the owner when creating a runtime key.
-        </p>
+          <a className="underline" href="/keys?tab=nyxid">{t("Open Agent Keys")}</a>{" "}{t("and choose ")}{ownerLabel}{t(" as the owner when creating a runtime key.")}</p>
       )}
       {keys.some((key) =>
         ["Expired", "Inactive", "Assistant chat key"].includes(
           routeAgentIssue(key, ownerOrgId) ?? "",
         ),
       ) && (
-        <p>
-          Expired, inactive, and assistant chat keys cannot receive channel
-          messages.
-        </p>
+        <p>{t("Expired, inactive, and assistant chat keys cannot receive channel messages.")}</p>
       )}
     </div>
   );

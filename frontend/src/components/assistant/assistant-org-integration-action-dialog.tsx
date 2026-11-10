@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { Cloud, PlugZap } from "lucide-react";
 import { z } from "zod";
@@ -85,6 +87,7 @@ export function AssistantOrgIntegrationActionDialog({
   readonly params: Record<string, unknown>;
   readonly onComplete: (resourceId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const [label, setLabel] = useState(textParam(params, "label"));
   const [keyJson, setKeyJson] = useState("");
   const [scopes, setScopes] = useState("https://www.googleapis.com/auth/cloud-platform");
@@ -176,17 +179,17 @@ export function AssistantOrgIntegrationActionDialog({
     <Dialog open={open} onOpenChange={(next) => !next && close()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">{gcp ? <Cloud className="size-4" /> : <PlugZap className="size-4" />}{resultId ? "Connection confirmed" : gcp ? "Add GCP service account" : "Connect OpenClaw"}</DialogTitle>
-          <DialogDescription>{resultId ? "The canonical typed projection confirms the new resource." : "Sensitive material is submitted directly from this browser dialog and is never returned to chat."}</DialogDescription>
+          <DialogTitle className="flex items-center gap-2">{gcp ? <Cloud className="size-4" /> : <PlugZap className="size-4" />}{resultId ? t("Connection confirmed") : gcp ? t("Add GCP service account") : t("Connect OpenClaw")}</DialogTitle>
+          <DialogDescription>{resultId ? t("The canonical typed projection confirms the new resource.") : t("Sensitive material is submitted directly from this browser dialog and is never returned to chat.")}</DialogDescription>
         </DialogHeader>
         {!resultId ? (
           <div className="space-y-4 border-y border-border py-4">
-            <div className="space-y-2"><Label htmlFor="integration-label">Label</Label><Input id="integration-label" value={label} onChange={(event) => setLabel(event.target.value)} autoComplete="off" /></div>
-            {gcp ? <><div className="space-y-2"><Label htmlFor="gcp-key-json">Service-account JSON</Label><textarea id="gcp-key-json" value={keyJson} onChange={(event) => setKeyJson(event.target.value)} className="min-h-32 w-full border border-input bg-background px-3 py-2 font-mono text-xs" autoComplete="off" /></div><div className="space-y-2"><Label htmlFor="gcp-scopes">OAuth scopes</Label><Input id="gcp-scopes" value={scopes} onChange={(event) => setScopes(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="gcp-services">Service slugs</Label><Input id="gcp-services" value={serviceSlugs} onChange={(event) => setServiceSlugs(event.target.value)} /></div>{targetOrgId ? <div className="space-y-1.5"><p className="text-xs font-medium">Target organization</p><p className="break-all font-mono text-xs text-muted-foreground">{targetOrgId}</p></div> : null}</> : <><div className="space-y-2"><Label htmlFor="openclaw-url">Gateway URL</Label><Input id="openclaw-url" type="url" value={gatewayUrl} onChange={(event) => setGatewayUrl(event.target.value)} autoComplete="url" /></div><div className="space-y-2"><Label htmlFor="openclaw-credential">Bearer credential</Label><Input id="openclaw-credential" type="password" value={credential} onChange={(event) => setCredential(event.target.value)} autoComplete="new-password" /></div></>}
+            <div className="space-y-2"><Label htmlFor="integration-label">{t("Label")}</Label><Input id="integration-label" value={label} onChange={(event) => setLabel(event.target.value)} autoComplete="off" /></div>
+            {gcp ? <><div className="space-y-2"><Label htmlFor="gcp-key-json">{t("Service-account JSON")}</Label><textarea id="gcp-key-json" value={keyJson} onChange={(event) => setKeyJson(event.target.value)} className="min-h-32 w-full border border-input bg-background px-3 py-2 font-mono text-xs" autoComplete="off" /></div><div className="space-y-2"><Label htmlFor="gcp-scopes">{t("OAuth scopes")}</Label><Input id="gcp-scopes" value={scopes} onChange={(event) => setScopes(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="gcp-services">{t("Service slugs")}</Label><Input id="gcp-services" value={serviceSlugs} onChange={(event) => setServiceSlugs(event.target.value)} /></div>{targetOrgId ? <div className="space-y-1.5"><p className="text-xs font-medium">{t("Target organization")}</p><p className="break-all font-mono text-xs text-muted-foreground">{targetOrgId}</p></div> : null}</> : <><div className="space-y-2"><Label htmlFor="openclaw-url">{t("Gateway URL")}</Label><Input id="openclaw-url" type="url" value={gatewayUrl} onChange={(event) => setGatewayUrl(event.target.value)} autoComplete="url" /></div><div className="space-y-2"><Label htmlFor="openclaw-credential">{t("Bearer credential")}</Label><Input id="openclaw-credential" type="password" value={credential} onChange={(event) => setCredential(event.target.value)} autoComplete="new-password" /></div></>}
           </div>
         ) : <p className="border-y border-border py-4 font-mono text-xs text-muted-foreground">{resultId}</p>}
-        {error ? <p role="alert" className="text-xs text-destructive">{error}</p> : null}
-        <DialogFooter>{resultId ? <Button type="button" onClick={() => { onComplete(resultId); close(); }}>Done</Button> : <><Button type="button" variant="outline" onClick={close}>Cancel</Button><Button type="button" variant="primary" isLoading={pending} disabled={pending} onClick={() => void submit()}>Continue</Button></>}</DialogFooter>
+        {error ? <p role="alert" className="text-xs text-destructive">{translateUi(error)}</p> : null}
+        <DialogFooter>{resultId ? <Button type="button" onClick={() => { onComplete(resultId); close(); }}>{t("Done")}</Button> : <><Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button><Button type="button" variant="primary" isLoading={pending} disabled={pending} onClick={() => void submit()}>{t("Continue")}</Button></>}</DialogFooter>
       </DialogContent>
     </Dialog>
   );

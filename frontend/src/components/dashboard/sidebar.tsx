@@ -1,3 +1,4 @@
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouterState, Link } from "@tanstack/react-router";
 import {
@@ -178,11 +179,12 @@ function NavItem({
   readonly collapsed: boolean;
   readonly onClick?: () => void;
 }) {
+  const { t } = useAppTranslation();
   return (
     <Link
       to={item.to}
       onClick={onClick}
-      title={collapsed ? item.label : undefined}
+      title={collapsed ? t(item.label) : undefined}
       className={cn(
         "group/nav flex items-center rounded-lg py-2 text-13 overflow-hidden",
         "transition-[padding,gap,background-color,color] duration-300 ease-in-out",
@@ -204,7 +206,7 @@ function NavItem({
           collapsed ? "max-w-0 flex-none opacity-0" : "max-w-full opacity-100",
         )}
       >
-        {item.label}
+        {t(item.label)}
       </span>
     </Link>
   );
@@ -219,6 +221,7 @@ export function AssistantNavEntry({
   readonly mobile?: boolean;
   readonly onClick?: () => void;
 }) {
+  const { t } = useAppTranslation();
   const enabled = useFeature(FEATURE_FLAG.AI_ASSISTANT);
 
   if (!enabled) return null;
@@ -227,7 +230,7 @@ export function AssistantNavEntry({
     <Link
       to="/assistant"
       onClick={onClick}
-      title={collapsed ? "Assistant" : undefined}
+      title={collapsed ? t("Assistant") : undefined}
       className={cn(
         "group/assistant mb-1.5 flex w-full items-center overflow-hidden rounded-lg border border-nyx-500/30 font-medium text-foreground",
         "transition-[padding,gap,background-color,border-color] duration-300 ease-in-out hover:border-nyx-500/40 hover:bg-overlay",
@@ -247,7 +250,7 @@ export function AssistantNavEntry({
           collapsed ? "max-w-0 flex-none opacity-0" : "max-w-full opacity-100",
         )}
       >
-        Assistant
+        {t("Assistant")}
       </span>
       <span
         className={cn(
@@ -255,7 +258,7 @@ export function AssistantNavEntry({
           collapsed && "hidden",
         )}
       >
-        NEW
+        {t("NEW")}
       </span>
     </Link>
   );
@@ -265,6 +268,7 @@ export function Sidebar({
   onNavigate,
   mobile = false,
 }: { readonly onNavigate?: () => void; readonly mobile?: boolean } = {}) {
+  const { t } = useAppTranslation();
   const routerState = useRouterState();
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
@@ -332,7 +336,7 @@ export function Sidebar({
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
             <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
-              Approvals
+              {t("Approvals")}
             </span>
           )}
         </div>
@@ -353,7 +357,7 @@ export function Sidebar({
             <div className="mx-auto w-3 border-t border-border/40" />
           ) : (
             <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
-              Developer
+              {t("Developer")}
             </span>
           )}
         </div>
@@ -376,7 +380,7 @@ export function Sidebar({
                 <div className="mx-auto w-3 border-t border-border/40" />
               ) : (
                 <span className="text-9 font-medium uppercase tracking-[1.5px] text-text-tertiary">
-                  Admin
+                  {t("Admin")}
                 </span>
               )}
             </div>
@@ -401,7 +405,7 @@ export function Sidebar({
             <PopoverTrigger asChild>
               <button
                 className="flex h-[28px] w-[28px] items-center justify-center rounded-[6px] border border-hairline bg-overlay-strong text-text-tertiary transition-colors duration-200 hover:border-hairline-strong hover:text-foreground"
-                title="Sidebar control"
+                title={t("Sidebar control")}
               >
                 {isCollapsed ? (
                   <PanelLeft className="h-[14px] w-[14px]" />
@@ -418,22 +422,22 @@ export function Sidebar({
             >
               <div className="px-4 py-2.5 border-b border-border/50">
                 <p className="text-13 font-medium text-foreground">
-                  Sidebar control
+                  {t("Sidebar control")}
                 </p>
               </div>
               <div className="p-1.5">
                 <SidebarModeOption
-                  label="Expanded"
+                  label={t("Expanded")}
                   active={mode === "expanded"}
                   onClick={() => changeMode("expanded")}
                 />
                 <SidebarModeOption
-                  label="Collapsed"
+                  label={t("Collapsed")}
                   active={mode === "collapsed"}
                   onClick={() => changeMode("collapsed")}
                 />
                 <SidebarModeOption
-                  label="Expand on hover"
+                  label={t("Expand on hover")}
                   active={mode === "hover"}
                   onClick={() => changeMode("hover")}
                 />
@@ -490,7 +494,7 @@ export function Sidebar({
       {mode === "expanded" && (
         <SidebarResizeHandle
           sidebar="dashboard"
-          label="Resize sidebar"
+          label={t("Resize sidebar")}
           onPreview={setPreviewWidth}
         />
       )}
@@ -507,6 +511,7 @@ function SidebarModeOption({
   readonly active: boolean;
   readonly onClick: () => void;
 }) {
+  const { t } = useAppTranslation();
   return (
     <button
       type="button"
@@ -526,7 +531,7 @@ function SidebarModeOption({
             : "fill-transparent text-muted-foreground/30",
         )}
       />
-      {label}
+      {t(label)}
     </button>
   );
 }

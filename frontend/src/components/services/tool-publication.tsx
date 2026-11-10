@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useAuthStore } from "@/stores/auth-store";
 import { canWriteTool } from "@/types/api";
 import { useEndpoints } from "@/hooks/use-endpoints";
@@ -13,6 +15,7 @@ export function PublicationOperations({
   tool: DownstreamService;
   disabled?: boolean;
 }) {
+  const { t } = useUiTranslation();
   const user = useAuthStore((state) => state.user);
   const admin = user?.is_admin === true;
   const writable = canWriteTool(user, tool);
@@ -21,9 +24,7 @@ export function PublicationOperations({
   return (
     <div className="space-y-2">
       {!admin && (
-        <p className="text-11 text-text-tertiary">
-          Admin publication and audience approval required before use.
-        </p>
+        <p className="text-11 text-text-tertiary">{t("Admin publication and audience approval required before use.")}</p>
       )}
       {operations.map((op) => (
         <div
@@ -40,9 +41,7 @@ export function PublicationOperations({
             <Badge
               variant={op.publication === "published" ? "success" : "secondary"}
             >
-              {(op.publication ?? "published").replace(/^./, (s) =>
-                s.toUpperCase(),
-              )}
+              {t((op.publication ?? "published").replace(/^./, (s) => s.toUpperCase()))}
             </Badge>
             <Button
               disabled={
@@ -63,15 +62,15 @@ export function PublicationOperations({
                           ? "published"
                           : "validated",
                   },
-                  { onError: () => toast.error("Publication failed") },
+                  { onError: () => toast.error(translateUi("Publication failed")) },
                 )
               }
             >
               {op.publication === "published"
-                ? "Pause"
+                ? t("Pause")
                 : admin
-                  ? "Publish"
-                  : "Validate"}
+                  ? t("Publish")
+                  : t("Validate")}
             </Button>
           </div>
         </div>

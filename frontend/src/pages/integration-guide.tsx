@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useCallback } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
@@ -25,12 +27,13 @@ function CodeBlock({
   readonly label: string;
   readonly code: string;
 }) {
+  const { t } = useUiTranslation();
   const handleCopy = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(code);
-      toast.success("Copied to clipboard");
+      toast.success(translateUi("Copied to clipboard"));
     } catch {
-      toast.error("Failed to copy");
+      toast.error(translateUi("Failed to copy"));
     }
   }, [code]);
 
@@ -48,7 +51,7 @@ function CodeBlock({
           size="icon"
           className="absolute right-2 top-2 h-8 w-8 text-text-tertiary hover:text-foreground"
           onClick={() => void handleCopy()}
-          aria-label="Copy"
+          aria-label={t("Copy")}
         >
           <Copy className="h-3.5 w-3.5" />
         </Button>
@@ -135,6 +138,7 @@ const rawUserInfo = `GET /api/v1/users/me
 Authorization: Bearer ACCESS_TOKEN`;
 
 export function IntegrationGuidePage() {
+  const { t } = useUiTranslation();
   const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
   const navigate = useNavigate();
   const currentTab = parseTab(
@@ -150,57 +154,57 @@ export function IntegrationGuidePage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Integration & SDK Guide"
-        description="Use the official React or Core SDK (recommended), or integrate with raw OAuth endpoints for custom flows."
+        title={t("Integration & SDK Guide")}
+        description={t("Use the official React or Core SDK (recommended), or integrate with raw OAuth endpoints for custom flows.")}
       />
 
       <Tabs value={currentTab} onValueChange={handleTabChange} className="space-y-6">
         <TabsList>
-          <TabsTrigger value="react">React SDK</TabsTrigger>
-          <TabsTrigger value="core">Core SDK</TabsTrigger>
-          <TabsTrigger value="raw">Raw API</TabsTrigger>
+          <TabsTrigger value="react">{t("React SDK")}</TabsTrigger>
+          <TabsTrigger value="core">{t("Core SDK")}</TabsTrigger>
+          <TabsTrigger value="raw">{t("Raw API")}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="react" className="space-y-4">
-          <StepCard index={1} title="Install React SDK">
-            <CodeBlock label="Install" code={reactInstall} />
+          <StepCard index={1} title={t("Install React SDK")}>
+            <CodeBlock label={t("Install")} code={reactInstall} />
           </StepCard>
-          <StepCard index={2} title="Wrap your app with provider">
-            <CodeBlock label="Provider setup" code={reactProvider} />
+          <StepCard index={2} title={t("Wrap your app with provider")}>
+            <CodeBlock label={t("Provider setup")} code={reactProvider} />
           </StepCard>
-          <StepCard index={3} title="Trigger login flow">
-            <CodeBlock label="Login button" code={reactLogin} />
+          <StepCard index={3} title={t("Trigger login flow")}>
+            <CodeBlock label={t("Login button")} code={reactLogin} />
           </StepCard>
         </TabsContent>
 
         <TabsContent value="core" className="space-y-4">
-          <StepCard index={1} title="Install Core SDK">
-            <CodeBlock label="Install" code={coreInstall} />
+          <StepCard index={1} title={t("Install Core SDK")}>
+            <CodeBlock label={t("Install")} code={coreInstall} />
           </StepCard>
-          <StepCard index={2} title="Create client and start PKCE flow">
-            <CodeBlock label="Client + redirect" code={corePkce} />
+          <StepCard index={2} title={t("Create client and start PKCE flow")}>
+            <CodeBlock label={t("Client + redirect")} code={corePkce} />
           </StepCard>
-          <StepCard index={3} title="Handle callback and load user">
-            <CodeBlock label="Callback handling" code={coreCallback} />
+          <StepCard index={3} title={t("Handle callback and load user")}>
+            <CodeBlock label={t("Callback handling")} code={coreCallback} />
           </StepCard>
         </TabsContent>
 
         <TabsContent value="raw" className="space-y-4">
-          <StepCard index={1} title="Redirect user to authorize endpoint">
-            <CodeBlock label="GET /oauth/authorize" code={rawAuthorize} />
+          <StepCard index={1} title={t("Redirect user to authorize endpoint")}>
+            <CodeBlock label={"GET /oauth/authorize"} code={rawAuthorize} />
           </StepCard>
-          <StepCard index={2} title="Exchange authorization code for tokens">
-            <CodeBlock label="POST /oauth/token" code={rawToken} />
+          <StepCard index={2} title={t("Exchange authorization code for tokens")}>
+            <CodeBlock label={"POST /oauth/token"} code={rawToken} />
           </StepCard>
-          <StepCard index={3} title="Use access token to call APIs">
-            <CodeBlock label="GET /api/v1/users/me" code={rawUserInfo} />
+          <StepCard index={3} title={t("Use access token to call APIs")}>
+            <CodeBlock label={"GET /api/v1/users/me"} code={rawUserInfo} />
           </StepCard>
         </TabsContent>
       </Tabs>
 
       <Card>
         <CardHeader>
-          <CardTitle>Scope Reference</CardTitle>
+          <CardTitle>{t("Scope Reference")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           {Object.entries(OAUTH_SCOPE_META).map(([scope, meta]) => (

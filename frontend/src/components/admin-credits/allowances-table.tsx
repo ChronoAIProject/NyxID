@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Pencil } from "lucide-react";
 import { billingTargetLabel } from "@/lib/billing-targets";
 import { billingMetricLabel } from "@/lib/billing-units";
@@ -29,6 +31,7 @@ export function AllowancesTable({
   onEdit: (bundle: AllowanceBundle) => void;
   onToggle: (bundle: AllowanceBundle) => void;
 }) {
+  const { t } = useUiTranslation();
   const name = (bundle: AllowanceBundle) =>
     services.find((s) => s.id === bundle.service_id)?.name ??
     bundle.service_slug;
@@ -36,13 +39,13 @@ export function AllowancesTable({
     <div className="space-y-1">
       {bundle.rows.map((row) => (
         <div key={row.id}>
-          {row.quantity.toLocaleString()}{" "}
+          {row.quantity.toLocaleString(getFormattingLocale())}{" "}
           {billingMetricLabel(row.metric, row.quantity)} ·{" "}
           <span className="capitalize">
             {row.recurrence.replaceAll("_", " ")}
           </span>
           {!row.is_active && (
-            <span className="ml-2 text-muted-foreground">Disabled</span>
+            <span className="ml-2 text-muted-foreground">{t("Disabled")}</span>
           )}
         </div>
       ))}
@@ -58,7 +61,7 @@ export function AllowancesTable({
             : "secondary"
       }
     >
-      {bundleStatus(bundle)}
+      {t(bundleStatus(bundle))}
     </Badge>
   );
   const actions = (bundle: AllowanceBundle) =>
@@ -68,8 +71,8 @@ export function AllowancesTable({
           type="button"
           size="icon"
           variant="ghost"
-          title="Edit allowance"
-          aria-label={`Edit ${bundle.service_slug} allowance`}
+          title={t("Edit allowance")}
+          aria-label={t("Edit {{service_slug}} allowance", { service_slug: bundle.service_slug })}
           onClick={() => onEdit(bundle)}
         >
           <Pencil className="h-4 w-4" />
@@ -81,15 +84,13 @@ export function AllowancesTable({
           disabled={pending}
           onClick={() => onToggle(bundle)}
         >
-          {bundle.is_active ? "Disable" : "Enable"}
+          {bundle.is_active ? t("Disable") : t("Enable")}
         </Button>
       </div>
     );
   if (!bundles.length)
     return (
-      <p className="py-10 text-center text-12 text-muted-foreground">
-        No usage allowances.
-      </p>
+      <p className="py-10 text-center text-12 text-muted-foreground">{t("No usage allowances.")}</p>
     );
   return (
     <>
@@ -115,12 +116,12 @@ export function AllowancesTable({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Service</TableHead>
-              <TableHead>Units</TableHead>
-              <TableHead>Targets</TableHead>
-              <TableHead>Status</TableHead>
+              <TableHead>{t("Service")}</TableHead>
+              <TableHead>{t("Units")}</TableHead>
+              <TableHead>{t("Targets")}</TableHead>
+              <TableHead>{t("Status")}</TableHead>
               {canWrite && (
-                <TableHead className="text-right">Actions</TableHead>
+                <TableHead className="text-right">{t("Actions")}</TableHead>
               )}
             </TableRow>
           </TableHeader>

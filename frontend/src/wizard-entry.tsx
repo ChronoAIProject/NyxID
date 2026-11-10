@@ -1,3 +1,4 @@
+import { useWizardTranslation } from "@/i18n/wizard";
 /* eslint-disable react-refresh/only-export-components -- standalone entry exports a pure helper for focused tests. */
 
 /**
@@ -544,14 +545,15 @@ function SecretDispatcher({
   readonly completeError: string | null
   readonly onAck: () => void
 }) {
+  const { t } = useWizardTranslation();
   const isCompleting = completeError === null
   if (result.kind === "api-key-create") {
     return (
       <DisplayOncePanel
-        title="API key created"
-        description="Save this key now — it won't be shown again."
+        title={t("API key created")}
+        description={t("Save this key now — it won't be shown again.")}
         secret={result.full_key}
-        ackButtonLabel="I have saved this — close"
+        ackButtonLabel={t("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={isCompleting && completeError === null && false}
       />
@@ -561,8 +563,8 @@ function SecretDispatcher({
     return (
       <ApiKeyRotationResult
         result={result}
-        description="The previous key is revoked. Save this new value now — it won't be shown again."
-        ackButtonLabel="I have saved this — close"
+        description={t("The previous key is revoked. Save this new value now — it won't be shown again.")}
+        ackButtonLabel={t("I have saved this — close")}
         onAcknowledge={onAck}
       />
     )
@@ -570,10 +572,10 @@ function SecretDispatcher({
   if (result.kind === "node-register-token") {
     return (
       <DisplayOncePanel
-        title="Registration token generated"
-        description="Use this with `nyxid node register`. Save it now — it won't be shown again."
+        title={t("Registration token generated")}
+        description={t("Use this with `nyxid node register`. Save it now — it won't be shown again.")}
         secret={result.token}
-        ackButtonLabel="I have saved this — close"
+        ackButtonLabel={t("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -582,14 +584,14 @@ function SecretDispatcher({
   if (result.kind === "node-rotate-token") {
     return (
       <DisplayOncePanel
-        title="Node tokens rotated"
-        description="Update the node with `nyxid node rekey`. Save both values now — they won't be shown again."
+        title={t("Node tokens rotated")}
+        description={t("Update the node with `nyxid node rekey`. Save both values now — they won't be shown again.")}
         secret={result.auth_token}
         secondarySecret={{
           label: "Signing secret",
           value: result.signing_secret,
         }}
-        ackButtonLabel="I have saved this — close"
+        ackButtonLabel={t("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -598,11 +600,11 @@ function SecretDispatcher({
   if (result.kind === "service-account-create") {
     return (
       <DisplayOncePanel
-        title="Service account created"
-        description="Save the client_secret — it isn't shown again. Use it with the OAuth client_credentials flow."
+        title={t("Service account created")}
+        description={t("Save the client_secret — it isn't shown again. Use it with the OAuth client_credentials flow.")}
         secret={result.client_secret}
         secondarySecret={{ label: "Client ID", value: result.client_id }}
-        ackButtonLabel="I have saved this — close"
+        ackButtonLabel={t("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -611,11 +613,11 @@ function SecretDispatcher({
   if (result.kind === "service-account-rotate-secret") {
     return (
       <DisplayOncePanel
-        title="Service account secret rotated"
-        description="All previously-issued tokens have been revoked. Save this new client_secret — it isn't shown again."
+        title={t("Service account secret rotated")}
+        description={t("All previously-issued tokens have been revoked. Save this new client_secret — it isn't shown again.")}
         secret={result.client_secret}
         secondarySecret={{ label: "Client ID", value: result.client_id }}
-        ackButtonLabel="I have saved this — close"
+        ackButtonLabel={t("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -624,10 +626,10 @@ function SecretDispatcher({
   if (result.kind === "developer-app-create") {
     return (
       <DisplayOncePanel
-        title="Developer app created"
-        description="Save the client_secret — it isn't shown again. Use it to sign Sign-in-with-NyxID requests."
+        title={t("Developer app created")}
+        description={t("Save the client_secret — it isn't shown again. Use it to sign Sign-in-with-NyxID requests.")}
         secret={result.client_secret}
-        ackButtonLabel="I have saved this — close"
+        ackButtonLabel={t("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -636,10 +638,10 @@ function SecretDispatcher({
   if (result.kind === "developer-app-rotate-secret") {
     return (
       <DisplayOncePanel
-        title="Developer app secret rotated"
-        description="The previous client_secret no longer authenticates. Update any deployments using it."
+        title={t("Developer app secret rotated")}
+        description={t("The previous client_secret no longer authenticates. Update any deployments using it.")}
         secret={result.client_secret}
-        ackButtonLabel="I have saved this — close"
+        ackButtonLabel={t("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -652,7 +654,7 @@ function SecretDispatcher({
   }
   // ai-key uses `acking` phase instead of `secret`, so this is
   // unreachable — keep it exhaustive.
-  return <p className="text-sm text-destructive">Unknown result kind.</p>
+  return <p className="text-sm text-destructive">{t("Unknown result kind.")}</p>
 }
 
 function AckingPanel({
@@ -664,21 +666,17 @@ function AckingPanel({
   readonly completeError: string | null
   readonly onRetry: () => void
 }) {
+  const { t } = useWizardTranslation();
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="font-serif text-28 font-normal">Service added</h2>
+      <h2 className="font-serif text-28 font-normal">{t("Service added")}</h2>
       <p className="text-sm text-muted-foreground">
-        <code className="font-mono text-xs">{result.slug}</code> is now connected. Check
-        your terminal for the final summary.
-      </p>
+        <code className="font-mono text-xs">{result.slug}</code>{t(" is now connected. Check your terminal for the final summary.")}</p>
       {completeError ? (
         <div className="flex flex-col gap-2">
-          <p className="text-sm text-destructive">
-            Couldn't notify CLI: {completeError}
+          <p className="text-sm text-destructive">{t("Couldn't notify CLI: ")}{completeError}
           </p>
-          <Button variant="outline" onClick={onRetry}>
-            Retry
-          </Button>
+          <Button variant="outline" onClick={onRetry}>{t("Retry")}</Button>
         </div>
       ) : null}
     </div>
@@ -686,27 +684,24 @@ function AckingPanel({
 }
 
 function DonePanel() {
+  const { t } = useWizardTranslation();
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">Done</h2>
-        <p className="text-sm text-muted-foreground">
-          You can close this tab and return to your terminal.
-        </p>
+        <h2 className="font-serif text-28 font-normal">{t("Done")}</h2>
+        <p className="text-sm text-muted-foreground">{t("You can close this tab and return to your terminal.")}</p>
       </div>
     </div>
   )
 }
 
 function CancelledPanel() {
+  const { t } = useWizardTranslation();
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">Cancelled</h2>
-        <p className="text-sm text-muted-foreground">
-          Nothing was created. You can close this tab — your CLI should
-          already be back at the prompt.
-        </p>
+        <h2 className="font-serif text-28 font-normal">{t("Cancelled")}</h2>
+        <p className="text-sm text-muted-foreground">{t("Nothing was created. You can close this tab — your CLI should already be back at the prompt.")}</p>
       </div>
     </div>
   )
@@ -725,49 +720,36 @@ function CancelledPanel() {
  * success or failure.
  */
 function WizardLostPanel() {
+  const { t } = useWizardTranslation();
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Wizard interrupted
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Lost contact with the <code>nyxid</code> CLI. The CLI may have
-          finished and exited successfully, or the connection was
-          interrupted before the result reached this page.
-        </p>
-        <p className="mt-2 text-sm text-muted-foreground">
-          Run <code>nyxid status</code> in your terminal to see whether
-          the service was created. If it&rsquo;s missing, re-run the
-          wizard command.
-        </p>
+        <h2 className="font-serif text-28 font-normal">{t("Wizard interrupted")}</h2>
+        <p className="text-sm text-muted-foreground">{t("Lost contact with the ")}<code>nyxid</code>{t(" CLI. The CLI may have finished and exited successfully, or the connection was interrupted before the result reached this page.")}</p>
+        <p className="mt-2 text-sm text-muted-foreground">{t("Run ")}<code>nyxid status</code>{t(" in your terminal to see whether the service was created. If it’s missing, re-run the wizard command.")}</p>
       </div>
     </div>
   )
 }
 
 function CancelLink({ onCancel }: { readonly onCancel: () => void }) {
+  const { t } = useWizardTranslation();
   return (
     <button
       type="button"
       onClick={onCancel}
       className="self-start text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
-    >
-      Cancel and return to terminal
-    </button>
+    >{t("Cancel and return to terminal")}</button>
   )
 }
 
 function NoBootstrapFallback() {
+  const { t } = useWizardTranslation();
   return (
     <NotFoundPage
-      title="Wizard not available here"
+      title={t("Wizard not available here")}
       description={
-        <>
-          This page is served by the <code>nyxid</code> CLI&rsquo;s local
-          wizard server, which injects its config on request. Open the URL
-          printed by the CLI instead.
-        </>
+        <>{t("This page is served by the ")}<code>nyxid</code>{t(" CLI’s local wizard server, which injects its config on request. Open the URL printed by the CLI instead.")}</>
       }
     />
   )

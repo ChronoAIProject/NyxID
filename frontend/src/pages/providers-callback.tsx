@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { CheckCircle, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
  * redirects here with ?status=success or ?status=error&message=...
  */
 export function ProvidersCallbackPage() {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const search = useSearch({ strict: false }) as {
     readonly status?: string;
@@ -27,19 +29,15 @@ export function ProvidersCallbackPage() {
       <Card className="w-full max-w-md">
         <CardHeader className="text-center">
           <CardTitle>
-            {isSuccess ? "Provider Connected" : "Connection Failed"}
+            {isSuccess ? t("Provider Connected") : t("Connection Failed")}
           </CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col items-center gap-4">
           {isSuccess ? (
             <>
               <CheckCircle className="h-12 w-12 text-success" />
-              <p className="text-12 text-muted-foreground text-center">
-                Your provider has been connected successfully.
-              </p>
-              <Button onClick={() => void navigate({ to: "/providers" })}>
-                Back to Providers
-              </Button>
+              <p className="text-12 text-muted-foreground text-center">{t("Your provider has been connected successfully.")}</p>
+              <Button onClick={() => void navigate({ to: "/providers" })}>{t("Back to Providers")}</Button>
             </>
           ) : (
             <>
@@ -50,9 +48,7 @@ export function ProvidersCallbackPage() {
               <Button
                 variant="outline"
                 onClick={() => void navigate({ to: "/providers" })}
-              >
-                Back to Providers
-              </Button>
+              >{t("Back to Providers")}</Button>
             </>
           )}
         </CardContent>

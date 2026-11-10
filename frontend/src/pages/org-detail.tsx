@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { useParams, useNavigate, useRouterState } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -97,6 +100,7 @@ import { OrgServiceAccountsTab } from "@/components/orgs/org-service-accounts-ta
 import { connectionIconUrl } from "@/lib/connection-icon";
 
 export function OrgDetailPage() {
+  const { t } = useUiTranslation();
   const { orgId } = useParams({ strict: false }) as { orgId: string };
   const navigate = useNavigate();
   const searchParams = useRouterState({ select: (s) => s.location.search as Record<string, unknown> });
@@ -144,13 +148,11 @@ export function OrgDetailPage() {
   if (error || !org) {
     return (
       <div className="space-y-4">
-        <ErrorBanner message="Failed to load organization. It may have been deleted or you no longer have access." onRetry={refetch} />
+        <ErrorBanner message={t("Failed to load organization. It may have been deleted or you no longer have access.")} onRetry={refetch} />
         <Button
           variant="outline"
           onClick={() => void navigate({ to: "/orgs" })}
-        >
-          Back to organizations
-        </Button>
+        >{t("Back to organizations")}</Button>
       </div>
     );
   }
@@ -168,10 +170,10 @@ export function OrgDetailPage() {
         memberId: memberUserId,
         body: { role: nextRole },
       });
-      toast.success("Role updated");
+      toast.success(translateUi("Role updated"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to update role",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to update role"),
       );
     }
   }
@@ -183,10 +185,10 @@ export function OrgDetailPage() {
         orgId,
         memberId: revokeTarget.user_id,
       });
-      toast.success("Member removed");
+      toast.success(translateUi("Member removed"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to remove member",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to remove member"),
       );
     } finally {
       setRevokeTarget(null);
@@ -196,10 +198,10 @@ export function OrgDetailPage() {
   async function handleCancelInvite(inviteId: string) {
     try {
       await cancelInviteMutation.mutateAsync({ orgId, inviteId });
-      toast.success("Invite cancelled");
+      toast.success(translateUi("Invite cancelled"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to cancel invite",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to cancel invite"),
       );
     }
   }
@@ -208,12 +210,12 @@ export function OrgDetailPage() {
     try {
       await copyToClipboard(buildOrgInviteJoinUrl(nonce));
       setCopiedInviteId(inviteId);
-      toast.success("Invite link copied");
+      toast.success(translateUi("Invite link copied"));
       setTimeout(() => {
         setCopiedInviteId((current) => (current === inviteId ? null : current));
       }, 2000);
     } catch {
-      toast.error("Failed to copy to clipboard");
+      toast.error(translateUi("Failed to copy to clipboard"));
     }
   }
 
@@ -224,10 +226,10 @@ export function OrgDetailPage() {
         memberId: member.user_id,
         body: { scope_source: "inherit" },
       });
-      toast.success("Member reset to role defaults");
+      toast.success(translateUi("Member reset to role defaults"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to reset member scope",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to reset member scope"),
       );
     }
   }
@@ -235,11 +237,11 @@ export function OrgDetailPage() {
   async function handleDeleteOrg() {
     try {
       await deleteOrgMutation.mutateAsync(orgId);
-      toast.success("Organization deleted");
+      toast.success(translateUi("Organization deleted"));
       void navigate({ to: "/orgs" });
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to delete organization",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to delete organization"),
       );
     }
   }
@@ -247,11 +249,11 @@ export function OrgDetailPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title={org.display_name ?? "Untitled org"}
+        title={org.display_name ?? t("Untitled org")}
         description={
           org.contact_email
-            ? `${org.contact_email} · ${String(org.member_count)} member${org.member_count === 1 ? "" : "s"}`
-            : `${String(org.member_count)} member${org.member_count === 1 ? "" : "s"}`
+            ? `${org.contact_email} · ${t("{{count}} members", { count: org.member_count })}`
+            : t("{{count}} members", { count: org.member_count })
         }
         leading={
           isAdmin ? (
@@ -268,7 +270,7 @@ export function OrgDetailPage() {
                 </button>
               </PopoverTrigger>
               <PopoverContent side="bottom" align="start" className="w-[280px] p-3 space-y-3">
-                <p className="text-12 font-medium text-foreground">Change avatar</p>
+                <p className="text-12 font-medium text-foreground">{t("Change avatar")}</p>
                 <div className="flex gap-2">
                   <Input
                     value={avatarUrlInput}
@@ -296,22 +298,17 @@ export function OrgDetailPage() {
                           orgId,
                           body: { avatar_url: avatarUrlInput.trim() },
                         });
-                        toast.success("Avatar updated");
+                        toast.success(translateUi("Avatar updated"));
                         setAvatarPopoverOpen(false);
                       } catch {
-                        toast.error("Failed to update avatar");
+                        toast.error(translateUi("Failed to update avatar"));
                       }
                     }}
-                  >
-                    Save
-                  </Button>
+                  >{t("Save")}</Button>
                 </div>
                 {avatarUrlInput.trim() !== "" &&
                   !isValidHttpUrl(avatarUrlInput.trim()) && (
-                    <p className="text-xs text-destructive">
-                      Must be a full URL with a domain, e.g.
-                      https://example.com/avatar.png
-                    </p>
+                    <p className="text-xs text-destructive">{t("Must be a full URL with a domain, e.g. https://example.com/avatar.png")}</p>
                   )}
                 {org.avatar_url && (
                   <button
@@ -320,16 +317,14 @@ export function OrgDetailPage() {
                     onClick={async () => {
                       try {
                         await avatarUpdateMutation.mutateAsync({ orgId, body: { avatar_url: "" } });
-                        toast.success("Avatar removed");
+                        toast.success(translateUi("Avatar removed"));
                         setAvatarPopoverOpen(false);
                       } catch {
-                        toast.error("Failed to remove avatar");
+                        toast.error(translateUi("Failed to remove avatar"));
                       }
                     }}
                   >
-                    <X className="h-3 w-3" />
-                    Remove avatar
-                  </button>
+                    <X className="h-3 w-3" />{t("Remove avatar")}</button>
                 )}
               </PopoverContent>
             </Popover>
@@ -342,23 +337,23 @@ export function OrgDetailPage() {
 
       <Tabs value={tab} onValueChange={(value) => setTab(value as OrgDetailTab)}>
         <TabsList>
-          <TabsTrigger value="members">Members</TabsTrigger>
-          <TabsTrigger value="role-permissions">Role permissions</TabsTrigger>
-          <TabsTrigger value="invites">Invites</TabsTrigger>
-          <TabsTrigger value="approvals">Approvals</TabsTrigger>
+          <TabsTrigger value="members">{t("Members")}</TabsTrigger>
+          <TabsTrigger value="role-permissions">{t("Role permissions")}</TabsTrigger>
+          <TabsTrigger value="invites">{t("Invites")}</TabsTrigger>
+          <TabsTrigger value="approvals">{t("Approvals")}</TabsTrigger>
           {isAdmin && (
-            <TabsTrigger value="service-accounts">Service Accounts</TabsTrigger>
+            <TabsTrigger value="service-accounts">{t("Service Accounts")}</TabsTrigger>
           )}
           {isAdmin && (
-            <TabsTrigger value="developer-apps">Developer Apps</TabsTrigger>
+            <TabsTrigger value="developer-apps">{t("Developer Apps")}</TabsTrigger>
           )}
-          <TabsTrigger value="settings">Settings</TabsTrigger>
+          <TabsTrigger value="settings">{t("Settings")}</TabsTrigger>
         </TabsList>
 
         <TabsContent value="members" className="mt-6 space-y-4">
           {isAdmin && (
             <div className="flex justify-end">
-              <AddCtaButton label="Invite Member" onClick={() => setInviteOpen(true)} />
+              <AddCtaButton label={t("Invite Member")} onClick={() => setInviteOpen(true)} />
             </div>
           )}
 
@@ -368,8 +363,8 @@ export function OrgDetailPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <BenchesIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-12 font-medium text-muted-foreground">No Members</p>
-                <p className="text-xs text-muted-foreground">No members yet.</p>
+                <p className="text-12 font-medium text-muted-foreground">{t("No Members")}</p>
+                <p className="text-xs text-muted-foreground">{t("No members yet.")}</p>
               </div>
             </div>
           ) : (
@@ -380,7 +375,7 @@ export function OrgDetailPage() {
                   const displayName = member.display_name ?? member.email ?? member.user_id;
                   const isSelf = member.user_id === currentUser?.id;
                   const scopeList = member.effective_allowed_service_ids;
-                  const scopeLabel = scopeList == null ? "All services" : scopeList.length === 0 ? "No services" : `${String(scopeList.length)} service${scopeList.length === 1 ? "" : "s"}`;
+                  const scopeLabel = scopeList == null ? t("All services") : scopeList.length === 0 ? t("No services") : t(scopeList.length === 1 ? "{{count}} service" : "{{count}} services", { count: scopeList.length });
                   return (
                     <div key={member.membership_id} className="relative rounded-xl border border-border/50 bg-card p-4">
                       {isAdmin && (
@@ -398,7 +393,7 @@ export function OrgDetailPage() {
                       )}
                       <p className="pr-10 text-13 font-semibold text-foreground truncate">
                         {displayName}
-                        {isSelf && <span className="ml-1 text-11 font-normal text-muted-foreground">(you)</span>}
+                        {isSelf && <span className="ml-1 text-11 font-normal text-muted-foreground">{t("(you)")}</span>}
                       </p>
                       {member.email && member.display_name && (
                         <p className="text-11 text-muted-foreground truncate">{member.email}</p>
@@ -406,10 +401,9 @@ export function OrgDetailPage() {
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         <RoleBadge role={member.role} />
                         <Badge variant={scopeList != null ? "info" : "secondary"} className="text-xs">{scopeLabel}</Badge>
-                        {member.scope_source === "override" && <Badge variant="info" className="text-xs">Custom scope</Badge>}
+                        {member.scope_source === "override" && <Badge variant="info" className="text-xs">{t("Custom scope")}</Badge>}
                       </div>
-                      <div className="mt-3 text-11 text-muted-foreground">
-                        Joined {formatRelativeTime(member.created_at) ?? "—"}
+                      <div className="mt-3 text-11 text-muted-foreground">{t("Joined ")}{formatRelativeTime(member.created_at) ?? "—"}
                       </div>
                     </div>
                   );
@@ -421,14 +415,12 @@ export function OrgDetailPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Member</TableHead>
-                      <TableHead>Role</TableHead>
-                      <TableHead>Services</TableHead>
-                      <TableHead>Joined</TableHead>
+                      <TableHead>{t("Member")}</TableHead>
+                      <TableHead>{t("Role")}</TableHead>
+                      <TableHead>{t("Services")}</TableHead>
+                      <TableHead>{t("Joined")}</TableHead>
                       {isAdmin && (
-                        <TableHead className="w-[100px] text-right">
-                          Actions
-                        </TableHead>
+                        <TableHead className="w-[100px] text-right">{t("Actions")}</TableHead>
                       )}
                     </TableRow>
                   </TableHeader>
@@ -470,9 +462,7 @@ export function OrgDetailPage() {
             <RolePermissionsPanel orgId={orgId} />
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-12 text-muted-foreground">
-                Only admins can manage role permissions.
-              </CardContent>
+              <CardContent className="py-6 text-center text-12 text-muted-foreground">{t("Only admins can manage role permissions.")}</CardContent>
             </Card>
           )}
         </TabsContent>
@@ -480,13 +470,11 @@ export function OrgDetailPage() {
         <TabsContent value="invites" className="mt-6 space-y-4">
           {isAdmin ? (
             <div className="flex justify-end">
-              <AddCtaButton label="Create Invite" onClick={() => setInviteOpen(true)} />
+              <AddCtaButton label={t("Create Invite")} onClick={() => setInviteOpen(true)} />
             </div>
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-12 text-muted-foreground">
-                Only admins can manage invites.
-              </CardContent>
+              <CardContent className="py-6 text-center text-12 text-muted-foreground">{t("Only admins can manage invites.")}</CardContent>
             </Card>
           )}
 
@@ -498,7 +486,7 @@ export function OrgDetailPage() {
                 <Card>
                   <CardContent className="flex flex-col items-center justify-center gap-1 py-8 text-center">
                     <MailSendingIcon className="h-48 w-48 text-muted-foreground" />
-                    <p className="text-12 text-muted-foreground">No pending invites.</p>
+                    <p className="text-12 text-muted-foreground">{t("No pending invites.")}</p>
                   </CardContent>
                 </Card>
               ) : (
@@ -521,7 +509,7 @@ export function OrgDetailPage() {
                         <div key={invite.id} className="relative rounded-xl border border-border/50 bg-card p-4">
                           {!isRedeemed && !isExpired && (
                             <div className="absolute right-3 top-3 flex gap-1">
-                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void handleCopyInviteLink(invite.id, invite.nonce)} title="Copy invite link">
+                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void handleCopyInviteLink(invite.id, invite.nonce)} title={t("Copy invite link")}>
                                 {copiedInviteId === invite.id ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
                               </Button>
                               <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => void handleCancelInvite(invite.id)}>
@@ -532,11 +520,11 @@ export function OrgDetailPage() {
                           <p className="pr-20 text-12 font-mono text-foreground break-all">{invite.nonce}</p>
                           <div className="mt-2 flex flex-wrap gap-1.5">
                             <RoleBadge role={invite.role} />
-                            {isRedeemed ? <Badge variant="success">Redeemed</Badge> : isExpired ? <Badge variant="warning">Expired</Badge> : <Badge variant="info">Pending</Badge>}
+                            {isRedeemed ? <Badge variant="success">{t("Redeemed")}</Badge> : isExpired ? <Badge variant="warning">{t("Expired")}</Badge> : <Badge variant="info">{t("Pending")}</Badge>}
                           </div>
                           <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
                             <span>{timeline}</span>
-                            {usedBy && <span>Used by {usedBy}</span>}
+                            {usedBy && <span>{t("Used by ")}{usedBy}</span>}
                           </div>
                         </div>
                       );
@@ -548,13 +536,13 @@ export function OrgDetailPage() {
                     <Table>
                       <TableHeader>
                         <TableRow>
-                          <TableHead>Invite code</TableHead>
-                          <TableHead>Role</TableHead>
-                          <TableHead>Status</TableHead>
-                          <TableHead>Used by</TableHead>
-                          <TableHead>Timeline</TableHead>
+                          <TableHead>{t("Invite code")}</TableHead>
+                          <TableHead>{t("Role")}</TableHead>
+                          <TableHead>{t("Status")}</TableHead>
+                          <TableHead>{t("Used by")}</TableHead>
+                          <TableHead>{t("Timeline")}</TableHead>
                           {invites.some((inv) => inv.redeemed_at === null && new Date(inv.expires_at).getTime() >= Date.now()) && (
-                            <TableHead className="w-[112px]">Actions</TableHead>
+                            <TableHead className="w-[112px]">{t("Actions")}</TableHead>
                           )}
                         </TableRow>
                       </TableHeader>
@@ -592,11 +580,11 @@ export function OrgDetailPage() {
                               </TableCell>
                               <TableCell>
                                 {isRedeemed ? (
-                                  <Badge variant="success">Redeemed</Badge>
+                                  <Badge variant="success">{t("Redeemed")}</Badge>
                                 ) : isExpired ? (
-                                  <Badge variant="warning">Expired</Badge>
+                                  <Badge variant="warning">{t("Expired")}</Badge>
                                 ) : (
-                                  <Badge variant="info">Pending</Badge>
+                                  <Badge variant="info">{t("Pending")}</Badge>
                                 )}
                               </TableCell>
                               <TableCell className="break-all text-xs text-muted-foreground">
@@ -622,8 +610,8 @@ export function OrgDetailPage() {
                                             invite.nonce,
                                           )
                                         }
-                                        aria-label={`Copy invite link ${invite.nonce}`}
-                                        title="Copy invite link"
+                                        aria-label={t("Copy invite link {{nonce}}", { nonce: invite.nonce })}
+                                        title={t("Copy invite link")}
                                       >
                                         {copiedInviteId === invite.id ? (
                                           <Check className="h-4 w-4 text-success" />
@@ -638,7 +626,7 @@ export function OrgDetailPage() {
                                         onClick={() =>
                                           void handleCancelInvite(invite.id)
                                         }
-                                        aria-label="Cancel invite"
+                                        aria-label={t("Cancel invite")}
                                       >
                                         <Trash2 className="h-4 w-4 text-destructive" />
                                       </Button>
@@ -663,9 +651,7 @@ export function OrgDetailPage() {
             <OrgApprovalConfigs orgId={orgId} />
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-12 text-muted-foreground">
-                Only admins can manage org approval policies.
-              </CardContent>
+              <CardContent className="py-6 text-center text-12 text-muted-foreground">{t("Only admins can manage org approval policies.")}</CardContent>
             </Card>
           )}
         </TabsContent>
@@ -697,9 +683,7 @@ export function OrgDetailPage() {
             />
           ) : (
             <Card>
-              <CardContent className="py-6 text-center text-12 text-muted-foreground">
-                Only admins can edit organization settings.
-              </CardContent>
+              <CardContent className="py-6 text-center text-12 text-muted-foreground">{t("Only admins can edit organization settings.")}</CardContent>
             </Card>
           )}
         </TabsContent>
@@ -727,30 +711,22 @@ export function OrgDetailPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Remove member</DialogTitle>
-            <DialogDescription>
-              Remove{" "}
+            <DialogTitle>{t("Remove member")}</DialogTitle>
+            <DialogDescription>{t("Remove")}{" "}
               <span className="font-medium text-foreground">
                 {revokeTarget?.display_name ??
                   revokeTarget?.email ??
                   revokeTarget?.user_id ??
                   ""}
-              </span>{" "}
-              from this organization? They will lose access to shared services
-              immediately.
-            </DialogDescription>
+              </span>{" "}{t("from this organization? They will lose access to shared services immediately.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRevokeTarget(null)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setRevokeTarget(null)}>{t("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleRevokeMember()}
               isLoading={removeMemberMutation.isPending}
-            >
-              Remove
-            </Button>
+            >{t("Remove")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -758,28 +734,19 @@ export function OrgDetailPage() {
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete Organization</DialogTitle>
-            <DialogDescription>
-              Delete{" "}
+            <DialogTitle>{t("Delete Organization")}</DialogTitle>
+            <DialogDescription>{t("Delete")}{" "}
               <span className="font-medium text-foreground">
-                {org.display_name ?? "this organization"}
-              </span>
-              ? All memberships and invites will be removed. Shared services
-              remain in place so admins can rescue their credentials. This
-              action cannot be undone.
-            </DialogDescription>
+                {org.display_name ?? t("this organization")}
+              </span>{t("? All memberships and invites will be removed. Shared services remain in place so admins can rescue their credentials. This action cannot be undone.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteOpen(false)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDeleteOrg()}
               isLoading={deleteOrgMutation.isPending}
-            >
-              Delete Organization
-            </Button>
+            >{t("Delete Organization")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -815,12 +782,12 @@ function RolePermissionsPanel({ orgId }: { readonly orgId: string }) {
           body: { allowed_service_ids: [...allowedServiceIds] },
         });
       }
-      toast.success("Role permissions updated");
+      toast.success(translateUi("Role permissions updated"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError
+        translateErrorMessage(err instanceof ApiError
           ? err.message
-          : "Failed to update role permissions",
+          : "Failed to update role permissions"),
       );
     }
   }
@@ -870,6 +837,7 @@ function RolePermissionCard({
   pending,
   onSave,
 }: RolePermissionCardProps) {
+  const { t } = useUiTranslation();
   const [draftFullAccess, setDraftFullAccess] = useState(
     scope.allowed_service_ids === null,
   );
@@ -918,9 +886,7 @@ function RolePermissionCard({
             </p>
           </div>
           {scope.is_default && (
-            <Badge variant="secondary" className="text-11">
-              Default
-            </Badge>
+            <Badge variant="secondary" className="text-11">{t("Default")}</Badge>
           )}
         </div>
 
@@ -928,26 +894,20 @@ function RolePermissionCard({
           <Label
             htmlFor={`role-scope-full-${role}`}
             className="text-12 font-medium"
-          >
-            Full access
-          </Label>
+          >{t("Full access")}</Label>
           <Switch
             id={`role-scope-full-${role}`}
             checked={draftFullAccess}
             disabled={pending}
             onCheckedChange={(checked) => setDraftFullAccess(checked === true)}
-            aria-label={`Toggle full access for ${roleLabel(role)}`}
+            aria-label={t("Toggle full access for {{value}}", { value: roleLabel(role) })}
           />
         </div>
 
         <div className="space-y-2">
-          <Label className="text-xs font-medium text-muted-foreground">
-            Services
-          </Label>
+          <Label className="text-xs font-medium text-muted-foreground">{t("Services")}</Label>
           {services.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
-              This org has no services yet.
-            </div>
+            <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">{t("This org has no services yet.")}</div>
           ) : (
             <div className="relative max-h-72 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
               {services.map((service) => {
@@ -993,17 +953,13 @@ function RolePermissionCard({
             variant="ghost"
             onClick={reset}
             disabled={!dirty || pending}
-          >
-            Reset
-          </Button>
+          >{t("Reset")}</Button>
           <Button
             variant="primary"
             onClick={save}
             disabled={!dirty}
             isLoading={pending}
-          >
-            Save
-          </Button>
+          >{t("Save")}</Button>
         </div>
       </CardContent>
     </Card>
@@ -1031,9 +987,9 @@ function roleLabel(role: OrgRole): string {
 }
 
 function scopeSummary(allowedServiceIds: readonly string[] | null): string {
-  if (allowedServiceIds === null) return "Full access";
-  if (allowedServiceIds.length === 0) return "No services";
-  return `${String(allowedServiceIds.length)} service${allowedServiceIds.length === 1 ? "" : "s"}`;
+  if (allowedServiceIds === null) return translateUi("Full access");
+  if (allowedServiceIds.length === 0) return translateUi("No services");
+  return translateUi(allowedServiceIds.length === 1 ? "{{count}} service" : "{{count}} services", { count: allowedServiceIds.length });
 }
 
 interface SettingsPanelProps {
@@ -1055,6 +1011,7 @@ function SettingsPanel({
   initialRemoteCredentialIntegrityVerificationOptOut,
   onDelete,
 }: SettingsPanelProps) {
+  const { t } = useUiTranslation();
   const updateMutation = useUpdateOrg();
 
   const form = useAppForm<UpdateOrgRequest>({
@@ -1085,12 +1042,12 @@ function SettingsPanel({
     }
     try {
       await updateMutation.mutateAsync({ orgId, body });
-      toast.success("Organization updated");
+      toast.success(translateUi("Organization updated"));
     } catch (err) {
       if (err instanceof ApiError) {
         form.setError("root", { message: err.message });
       } else {
-        toast.error("Failed to update organization");
+        toast.error(translateUi("Failed to update organization"));
       }
     }
   }
@@ -1109,7 +1066,7 @@ function SettingsPanel({
                 name="display_name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Display name</FormLabel>
+                    <FormLabel>{t("Display name")}</FormLabel>
                     <FormControl>
                       <Input {...field} />
                     </FormControl>
@@ -1123,15 +1080,11 @@ function SettingsPanel({
                 name="slug"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Slug</FormLabel>
+                    <FormLabel>{t("Slug")}</FormLabel>
                     <FormControl>
                       <Input {...field} />
                     </FormControl>
-                    <p className="text-xs text-muted-foreground">
-                      URL-friendly identifier. Pass to --org or use in
-                      slug-based API paths. Auto-generated from the display name
-                      on org creation; admins can edit later.
-                    </p>
+                    <p className="text-xs text-muted-foreground">{t("URL-friendly identifier. Pass to --org or use in slug-based API paths. Auto-generated from the display name on org creation; admins can edit later.")}</p>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -1142,7 +1095,7 @@ function SettingsPanel({
                 name="avatar_url"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Avatar URL</FormLabel>
+                    <FormLabel>{t("Avatar URL")}</FormLabel>
                     <FormControl>
                       <Input placeholder="https://..." {...field} />
                     </FormControl>
@@ -1156,18 +1109,15 @@ function SettingsPanel({
                 name="contact_email"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Contact email</FormLabel>
+                    <FormLabel>{t("Contact email")}</FormLabel>
                     <FormControl>
                       <Input
                         type="email"
-                        placeholder="you@example.com"
+                        placeholder={t("you@example.com")}
                         {...field}
                       />
                     </FormControl>
-                    <p className="text-xs text-muted-foreground">
-                      Shown in admin surfaces and used as the org user's
-                      identity. Leave blank to clear.
-                    </p>
+                    <p className="text-xs text-muted-foreground">{t("Shown in admin surfaces and used as the org user's identity. Leave blank to clear.")}</p>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -1186,13 +1136,8 @@ function SettingsPanel({
                         }
                       />
                       <span className="space-y-1">
-                        <span className="block text-13 font-medium text-foreground">
-                          Opt out of credential accept fingerprint verification
-                        </span>
-                        <span className="block text-xs text-muted-foreground">
-                          This only skips the admin UX gate for this org. It
-                          does not change the encrypted credential flow.
-                        </span>
+                        <span className="block text-13 font-medium text-foreground">{t("Opt out of credential accept fingerprint verification")}</span>
+                        <span className="block text-xs text-muted-foreground">{t("This only skips the admin UX gate for this org. It does not change the encrypted credential flow.")}</span>
                       </span>
                     </label>
                     <FormMessage />
@@ -1202,14 +1147,12 @@ function SettingsPanel({
 
               {form.formState.errors.root && (
                 <p className="text-12 text-destructive">
-                  {form.formState.errors.root.message}
+                  {translateUi(form.formState.errors.root.message ?? "")}
                 </p>
               )}
 
               <div className="flex justify-end">
-                <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>
-                  Save Changes
-                </Button>
+                <Button variant="primary" type="submit" isLoading={updateMutation.isPending} disabled={!form.formState.isDirty}>{t("Save Changes")}</Button>
               </div>
             </form>
           </Form>
@@ -1219,17 +1162,12 @@ function SettingsPanel({
       <Card>
         <CardContent className="flex flex-col gap-4 p-4">
           <div>
-            <p className="text-12 font-medium text-foreground">Danger zone</p>
-            <p className="text-xs text-muted-foreground">
-              Deleting the organization removes memberships and invites. Shared
-              services stay in place so admins can rescue credentials.
-            </p>
+            <p className="text-12 font-medium text-foreground">{t("Danger zone")}</p>
+            <p className="text-xs text-muted-foreground">{t("Deleting the organization removes memberships and invites. Shared services stay in place so admins can rescue credentials.")}</p>
           </div>
           <div className="flex justify-end">
             <Button variant="destructive" onClick={onDelete}>
-              <ButtonIcon variant="destructive"><Trash2 className="h-4 w-4 text-destructive" /></ButtonIcon>
-              Delete Organization
-            </Button>
+              <ButtonIcon variant="destructive"><Trash2 className="h-4 w-4 text-destructive" /></ButtonIcon>{t("Delete Organization")}</Button>
           </div>
         </CardContent>
       </Card>

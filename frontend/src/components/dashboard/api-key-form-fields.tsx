@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
 import type { UseFormReturn } from "react-hook-form";
 import { API_KEY_SCOPES, type CreateApiKeyFormData } from "@/schemas/api-keys";
@@ -28,6 +29,7 @@ export function ApiKeyResourceFields({
   }[];
   nodes: readonly { id: string; name: string }[];
 }) {
+  const { t } = useUiTranslation();
   const prefix = useId();
   const allServices = form.watch("allow_all_services");
   const allNodes = form.watch("allow_all_nodes");
@@ -55,7 +57,7 @@ export function ApiKeyResourceFields({
                 <FormItem>
                   <div className="flex items-center justify-between gap-3">
                     <FormLabel>
-                      {kind === "services" ? "Services" : "Nodes"}
+                      {kind === "services" ? t("Services") : t("Nodes")}
                     </FormLabel>
                     <label className="flex items-center gap-2 text-12">
                       <Checkbox
@@ -64,8 +66,7 @@ export function ApiKeyResourceFields({
                           field.onChange(checked === true);
                           if (checked === true) form.setValue(idsField, []);
                         }}
-                      />
-                      Allow all {kind}
+                      />{t("Allow all ")}{kind}
                     </label>
                   </div>
                 </FormItem>
@@ -99,9 +100,7 @@ export function ApiKeyResourceFields({
                         </label>
                       ))}
                       {resources.length === 0 && (
-                        <p className="text-12 text-muted-foreground">
-                          No {kind} available.
-                        </p>
+                        <p className="text-12 text-muted-foreground">{t("No ")}{kind}{t(" available.")}</p>
                       )}
                     </div>
                     <FormMessage />
@@ -145,15 +144,16 @@ function toggleInArray(
 }
 
 export function ApiKeyNameField({ form }: Props) {
+  const { t } = useUiTranslation();
   return (
     <FormField
       control={form.control}
       name="name"
       render={({ field }) => (
         <FormItem>
-          <FormLabel>Name</FormLabel>
+          <FormLabel>{t("Name")}</FormLabel>
           <FormControl>
-            <Input placeholder="My API Key" {...field} />
+            <Input placeholder={t("My API Key")} {...field} />
           </FormControl>
           <FormMessage />
         </FormItem>
@@ -163,13 +163,14 @@ export function ApiKeyNameField({ form }: Props) {
 }
 
 export function ApiKeyScopesField({ form }: Props) {
+  const { t } = useUiTranslation();
   return (
     <FormField
       control={form.control}
       name="scopes"
       render={({ field }) => (
         <FormItem>
-          <FormLabel>Scopes</FormLabel>
+          <FormLabel>{t("Scopes")}</FormLabel>
           <div className="flex flex-wrap gap-2">
             {API_KEY_SCOPES.map((scope) => {
               const isSelected = (field.value as readonly string[]).includes(
@@ -201,22 +202,22 @@ export function ApiKeyScopesField({ form }: Props) {
 }
 
 export function ApiKeyExpiryField({ form }: Props) {
+  const { t } = useUiTranslation();
   return (
     <FormField
       control={form.control}
       name="expires_at"
       render={({ field }) => (
         <FormItem>
-          <FormLabel>
-            Expiry Date{" "}
-            <span className="text-muted-foreground">(optional)</span>
+          <FormLabel>{t("Expiry Date")}{" "}
+            <span className="text-muted-foreground">{t("(optional)")}</span>
           </FormLabel>
           <FormControl>
             <DatePicker
               value={field.value ?? null}
               onChange={(v) => field.onChange(v)}
               minDate={new Date().toISOString().slice(0, 10)}
-              placeholder="No expiry"
+              placeholder={t("No expiry")}
             />
           </FormControl>
           <FormMessage />

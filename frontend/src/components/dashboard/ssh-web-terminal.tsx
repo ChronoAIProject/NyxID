@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useCallback, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -59,6 +60,7 @@ export function SshWebTerminal({
   nodeWsUrl,
   onDisconnect,
 }: SshWebTerminalProps) {
+  const { t } = useUiTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -382,16 +384,14 @@ export function SshWebTerminal({
           {status === "connecting" && "Connecting..."}
           {status === "connected" && "Connected"}
           {status === "disconnected" && "Disconnected"}
-          {status === "error" && (errorMessage ?? "Error")}
+          {status === "error" && (errorMessage ?? t("Error"))}
         </span>
         {(status === "disconnected" || status === "error") && (
           <button
             type="button"
             onClick={connect}
             className="ml-auto rounded px-2 py-0.5 text-xs text-slate-300 transition-colors duration-300 hover:bg-slate-700 hover:text-white"
-          >
-            Reconnect
-          </button>
+          >{t("Reconnect")}</button>
         )}
       </div>
 

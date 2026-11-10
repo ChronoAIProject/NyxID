@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import {
   createContext,
   memo,
@@ -311,9 +312,7 @@ const COMPONENTS: Components = {
     <section
       className={`${BLOCK} border-t border-hairline pt-2 text-11 text-foreground/90`}
     >
-      <div className="mb-1 text-10 font-medium text-muted-foreground">
-        Footnotes
-      </div>
+      <div className="mb-1 text-10 font-medium text-muted-foreground">{translateUi("Footnotes")}</div>
       <InsideFootnoteSectionContext.Provider value>
         {children}
       </InsideFootnoteSectionContext.Provider>

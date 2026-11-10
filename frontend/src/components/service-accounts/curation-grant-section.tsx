@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -32,6 +35,7 @@ export function CurationGrantSection({
 }: {
   readonly account: ServiceAccount;
 }) {
+  const { t } = useUiTranslation();
   const isAdmin = useAuthStore((state) => state.user?.is_admin ?? false);
   const issue = useIssueCurationGrant();
   const revoke = useRevokeCurationGrant();
@@ -84,7 +88,7 @@ export function CurationGrantSection({
         },
       });
       setEditing(false);
-      toast.success("Curation grant issued");
+      toast.success(translateUi("Curation grant issued"));
     } catch (error) {
       setSubmitError(
         error instanceof ApiError
@@ -97,24 +101,24 @@ export function CurationGrantSection({
   async function revokeGrant() {
     try {
       await revoke.mutateAsync(account.id);
-      toast.success("Curation grant revoked");
+      toast.success(translateUi("Curation grant revoked"));
     } catch (error) {
       toast.error(
-        error instanceof ApiError
+        translateErrorMessage(error instanceof ApiError
           ? error.message
-          : "Could not revoke curation grant",
+          : "Could not revoke curation grant"),
       );
     }
   }
 
   return (
-    <DetailSection title="Catalog skill curation">
+    <DetailSection title={t("Catalog skill curation")}>
       <DetailRow
-        label="Purpose"
+        label={t("Purpose")}
         value={account.purpose === "curation" ? "Curation" : "General"}
       />
       <DetailRow
-        label="Management"
+        label={t("Management")}
         value={
           account.platform_protected
             ? "Platform admin only"
@@ -122,30 +126,30 @@ export function CurationGrantSection({
         }
       />
       <DetailRow
-        label="Credential generation"
+        label={t("Credential generation")}
         value={String(account.credential_generation ?? 0)}
       />
       <DetailRow
-        label="Grant"
+        label={t("Grant")}
         value={grant ? (expired ? "Expired" : "Active") : "None"}
       />
       {grant && (
         <>
-          <DetailRow label="Grant ID" value={grant.id} copyable />
+          <DetailRow label={t("Grant ID")} value={grant.id} copyable />
           <DetailRow
-            label="Catalog service IDs"
+            label={t("Catalog service IDs")}
             value={grant.service_ids.join(", ")}
           />
           <DetailRow
-            label="Ornn proxy target"
+            label={t("Ornn proxy target")}
             value={grant.ornn_proxy_service_id ?? "Disabled"}
           />
           <DetailRow
-            label="Write budget"
+            label={t("Write budget")}
             value={`${grant.writes_used} / ${grant.max_writes} per ${grant.window_seconds}s`}
           />
           <DetailRow
-            label="Expires"
+            label={t("Expires")}
             value={
               grant.expires_at ? formatDate(grant.expires_at) : "No expiry"
             }
@@ -153,11 +157,7 @@ export function CurationGrantSection({
         </>
       )}
       <div className="space-y-4 p-5">
-        <p className="text-12 text-muted-foreground">
-          Recommendations can be assigned, replaced, removed, and restored
-          within these catalog services. Package editing requires a separate
-          scoped Ornn identity. Revoking the grant keeps this account protected.
-        </p>
+        <p className="text-12 text-muted-foreground">{t("Recommendations can be assigned, replaced, removed, and restored within these catalog services. Package editing requires a separate scoped Ornn identity. Revoking the grant keeps this account protected.")}</p>
         {isAdmin && !editing && (
           <div className="flex justify-end gap-2">
             {grant && (
@@ -165,23 +165,17 @@ export function CurationGrantSection({
                 variant="destructive"
                 isLoading={revoke.isPending}
                 onClick={() => void revokeGrant()}
-              >
-                Revoke grant
-              </Button>
+              >{t("Revoke grant")}</Button>
             )}
             <Button onClick={openForm}>
-              {grant ? "Replace grant" : "Issue grant"}
+              {grant ? t("Replace grant") : t("Issue grant")}
             </Button>
           </div>
         )}
         {isAdmin && editing && (
           <Form {...form}>
             <form onSubmit={form.handleSubmit(submit)} className="space-y-4">
-              <p className="text-12 text-muted-foreground">
-                This legacy grant limits access to selected catalog services.
-                Saving catalog scopes in Edit switches the account to platform-wide
-                catalog access. Org-owned accounts cannot receive a legacy grant.
-              </p>
+              <p className="text-12 text-muted-foreground">{t("This legacy grant limits access to selected catalog services. Saving catalog scopes in Edit switches the account to platform-wide catalog access. Org-owned accounts cannot receive a legacy grant.")}</p>
               {(
                 [
                   [
@@ -216,7 +210,7 @@ export function CurationGrantSection({
               ))}
               {submitError && (
                 <p role="alert" className="text-12 text-destructive">
-                  {submitError}
+                  {translateUi(submitError)}
                 </p>
               )}
               <div className="flex justify-end gap-2">
@@ -224,17 +218,13 @@ export function CurationGrantSection({
                   type="button"
                   variant="outline"
                   onClick={() => setEditing(false)}
-                >
-                  Cancel
-                </Button>
+                >{t("Cancel")}</Button>
                 <Button
                   type="submit"
                   variant="primary"
                   isLoading={issue.isPending}
                   disabled={!form.formState.isDirty || !form.formState.isValid}
-                >
-                  Issue grant
-                </Button>
+                >{t("Issue grant")}</Button>
               </div>
             </form>
           </Form>

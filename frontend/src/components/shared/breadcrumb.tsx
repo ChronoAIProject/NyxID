@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Link } from "@tanstack/react-router";
 import { ArrowLeft, ChevronRight } from "lucide-react";
 
@@ -12,10 +13,11 @@ interface BreadcrumbProps {
 
 /* ── NyxID Breadcrumb ── */
 export function Breadcrumb({ items }: BreadcrumbProps) {
+  const { t } = useUiTranslation();
   const parentTo = items.length > 1 ? items[0]?.to : undefined;
 
   return (
-    <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-sm">
+    <nav aria-label={t("Breadcrumb")} className="flex items-center gap-1.5 text-sm">
       {parentTo && (
         <Link
           to={parentTo}

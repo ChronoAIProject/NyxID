@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
 import { Loader2, XCircle } from "lucide-react";
@@ -18,6 +19,7 @@ type RedeemState =
  * is only consumed once.
  */
 export function OrgJoinPage() {
+  const { t } = useUiTranslation();
   const { nonce } = useParams({ strict: false }) as { nonce: string };
   const navigate = useNavigate();
   const redeemMutation = useRedeemInvite();
@@ -61,18 +63,14 @@ export function OrgJoinPage() {
           {state.status === "pending" && (
             <>
               <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-              <p className="text-12 text-muted-foreground">
-                Joining organization...
-              </p>
+              <p className="text-12 text-muted-foreground">{t("Joining organization...")}</p>
             </>
           )}
 
           {state.status === "success" && (
             <>
               <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-              <p className="text-12 text-muted-foreground">
-                Joined. Redirecting...
-              </p>
+              <p className="text-12 text-muted-foreground">{t("Joined. Redirecting...")}</p>
             </>
           )}
 
@@ -80,17 +78,13 @@ export function OrgJoinPage() {
             <>
               <XCircle className="h-8 w-8 text-destructive" />
               <div className="space-y-1">
-                <p className="text-12 font-medium text-foreground">
-                  Could not join organization
-                </p>
+                <p className="text-12 font-medium text-foreground">{t("Could not join organization")}</p>
                 <p className="text-xs text-muted-foreground">{state.message}</p>
               </div>
               <Button
                 variant="outline"
                 onClick={() => void navigate({ to: "/orgs" })}
-              >
-                Back to organizations
-              </Button>
+              >{t("Back to organizations")}</Button>
             </>
           )}
         </CardContent>

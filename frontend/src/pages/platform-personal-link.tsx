@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
@@ -39,6 +40,7 @@ function PersonalLinkFlow({
   actor?: string;
   authLoading: boolean;
 }) {
+  const { t } = useUiTranslation();
   const preview = usePersonalLinkPreview();
   const config = usePublicConfig();
   const client = useQueryClient();
@@ -150,34 +152,27 @@ function PersonalLinkFlow({
     <main className="mx-auto max-w-lg space-y-5 px-4 py-10" data-sensitive>
       <meta name="referrer" content="no-referrer" />
       <PageHeader
-        title="Use your NyxBot in Telegram"
-        description="Link only if you requested this in the bot's private chat."
+        title={t("Use your NyxBot in Telegram")}
+        description={t("Link only if you requested this in the bot's private chat.")}
       />
       {status.data?.status === "confirmed" ? (
         <section className="space-y-3 rounded-xl border border-border bg-card p-5">
-          <p role="status">Telegram is linked.</p>
-          <p className="text-12 text-muted-foreground">
-            Send a new private message to the bot to start your dedicated
-            Telegram thread. Your thread and approvals will be available in
-            NyxID.
-          </p>
+          <p role="status">{t("Telegram is linked.")}</p>
+          <p className="text-12 text-muted-foreground">{t("Send a new private message to the bot to start your dedicated Telegram thread. Your thread and approvals will be available in NyxID.")}</p>
           <Button asChild variant="primary">
-            <a href="/assistant?panel=nyxbot">Open NyxBot</a>
+            <a href="/assistant?panel=nyxbot">{t("Open NyxBot")}</a>
           </Button>
         </section>
       ) : denied ||
         status.data?.status === "denied" ||
         status.data?.status === "cancelled" ? (
-        <p role="status">
-          Linking was cancelled. No new personal access was granted. Send /link
-          to start again.
-        </p>
+        <p role="status">{t("Linking was cancelled. No new personal access was granted. Send /link to start again.")}</p>
       ) : intentExpired ? (
-        <ErrorBanner message="This linking request is missing or expired. Reopen the original link in this browser, or send /link again in the bot's private chat. Storage must be available to continue after navigating away." />
+        <ErrorBanner message={t("This linking request is missing or expired. Reopen the original link in this browser, or send /link again in the bot's private chat. Storage must be available to continue after navigating away.")} />
       ) : (
         <>
           {preview.isPending && (
-            <p role="status">Checking your linking request...</p>
+            <p role="status">{t("Checking your linking request...")}</p>
           )}
           {preview.error && (
             <ErrorBanner
@@ -187,52 +182,33 @@ function PersonalLinkFlow({
           )}
           {preview.data && (
             <section className="space-y-3 rounded-xl border border-border bg-card p-5 text-12">
-              <p>
-                Bot: <strong>{preview.data.manager.display_name}</strong>
+              <p>{t("Bot: ")}<strong>{preview.data.manager.display_name}</strong>
               </p>
-              <p>
-                Telegram account:{" "}
+              <p>{t("Telegram account:")}{" "}
                 {preview.data.sender.display_name ?? preview.data.sender.id}
               </p>
               {!actor ? (
                 <>
-                  <p>
-                    Sign in to review personal access. Registration and email
-                    verification do not link Telegram automatically.
-                  </p>
+                  <p>{t("Sign in to review personal access. Registration and email verification do not link Telegram automatically.")}</p>
                   {(config.data?.invite_code_required ?? true) && (
-                    <p>
-                      An invitation is required to register. Use your existing
-                      invitation, or follow the invitation instructions on the
-                      registration page. Existing users can sign in directly.
-                    </p>
+                    <p>{t("An invitation is required to register. Use your existing invitation, or follow the invitation instructions on the registration page. Existing users can sign in directly.")}</p>
                   )}
                   {config.error && (
-                    <p role="alert">
-                      Registration settings are unavailable. Invitation
-                      requirements remain enforced.
-                    </p>
+                    <p role="alert">{t("Registration settings are unavailable. Invitation requirements remain enforced.")}</p>
                   )}
                   <div className="flex flex-wrap gap-2">
                     <Button asChild variant="primary" disabled={authLoading}>
                       <a
                         href={`/login?return_to=${encodeURIComponent(returnTo)}`}
-                      >
-                        Sign in
-                      </a>
+                      >{t("Sign in")}</a>
                     </Button>
                     <Button asChild variant="outline" disabled={authLoading}>
                       <a
                         href={`/register?return_to=${encodeURIComponent(returnTo)}`}
-                      >
-                        Register
-                      </a>
+                      >{t("Register")}</a>
                     </Button>
                   </div>
-                  <p className="text-muted-foreground">
-                    After email verification in another tab, return to this tab
-                    to continue. This request lasts up to 24 hours.
-                  </p>
+                  <p className="text-muted-foreground">{t("After email verification in another tab, return to this tab to continue. This request lasts up to 24 hours.")}</p>
                 </>
               ) : (!review || challengeExpired) &&
                 (!challenge ||
@@ -244,59 +220,33 @@ function PersonalLinkFlow({
                   isLoading={busy}
                   onClick={beginReview}
                 >
-                  {challenge ? "Review again" : "Review personal access"}
+                  {challenge ? t("Review again") : t("Review personal access")}
                 </Button>
               ) : null}
             </section>
           )}
           {review && !challengeExpired && (
             <section className="space-y-4 rounded-xl border border-border bg-card p-5 text-12">
-              <h2 className="text-15 font-semibold">Review personal access</h2>
-              <p>
-                NyxID account:{" "}
+              <h2 className="text-15 font-semibold">{t("Review personal access")}</h2>
+              <p>{t("NyxID account:")}{" "}
                 {review.account.display_name ?? review.account.id}
               </p>
-              <p>
-                Permission mode:{" "}
+              <p>{t("Permission mode:")}{" "}
                 <strong>{ACCESS_MODE_LABEL[review.permission_mode]}</strong>.{" "}
                 {ACCESS_MODE_DESCRIPTION[review.permission_mode]}
               </p>
-              <p>
-                Telegram uses your existing NyxBot access to connected services
-                and account management, including existing memory and persona.
-                Changes to your NyxBot settings apply here too.
-              </p>
-              <p>
-                Personal work uses your normal billing and credits. The public
-                sponsor does not pay for your personal turns. Existing
-                organization resource billing rules still apply.
-              </p>
-              <p>
-                Telegram confirmations can approve sensitive actions, including
-                destructive actions, machine access and saved logins. Your
-                current permission mode determines when NyxBot asks for
-                confirmation.
-              </p>
-              <p>
-                This Telegram bot is operated by the platform. Telegram bot
-                chats are not end-to-end encrypted.
-              </p>
-              <p>
-                This creates a new personal thread. Public chat and your old
-                home transcript are not imported. Work already started may keep
-                running in NyxID after unlink; stop it from the app. Saved
-                history and pending cards remain available there.
-              </p>
+              <p>{t("Telegram uses your existing NyxBot access to connected services and account management, including existing memory and persona. Changes to your NyxBot settings apply here too.")}</p>
+              <p>{t("Personal work uses your normal billing and credits. The public sponsor does not pay for your personal turns. Existing organization resource billing rules still apply.")}</p>
+              <p>{t("Telegram confirmations can approve sensitive actions, including destructive actions, machine access and saved logins. Your current permission mode determines when NyxBot asks for confirmation.")}</p>
+              <p>{t("This Telegram bot is operated by the platform. Telegram bot chats are not end-to-end encrypted.")}</p>
+              <p>{t("This creates a new personal thread. Public chat and your old home transcript are not imported. Work already started may keep running in NyxID after unlink; stop it from the app. Saved history and pending cards remain available there.")}</p>
               {review.replaces_existing_binding && (
                 <label className="flex items-start gap-2">
                   <Checkbox
                     checked={replace}
                     onCheckedChange={(v) => setReplace(v === true)}
                   />
-                  <span>
-                    I agree to replace the existing personal link for this
-                    Telegram account. Its previous history will not transfer.
-                  </span>
+                  <span>{t("I agree to replace the existing personal link for this Telegram account. Its previous history will not transfer.")}</span>
                 </label>
               )}
               <div className="flex flex-wrap gap-2">
@@ -323,9 +273,7 @@ function PersonalLinkFlow({
                       });
                     })
                   }
-                >
-                  Approve personal access
-                </Button>
+                >{t("Approve personal access")}</Button>
                 <Button
                   variant="outline"
                   disabled={busy}
@@ -336,46 +284,31 @@ function PersonalLinkFlow({
                       setReview(undefined);
                     })
                   }
-                >
-                  Deny
-                </Button>
+                >{t("Deny")}</Button>
               </div>
-              <p className="text-muted-foreground">
-                Approve here, then confirm in the same private Telegram chat
-                within 10 minutes.
-              </p>
+              <p className="text-muted-foreground">{t("Approve here, then confirm in the same private Telegram chat within 10 minutes.")}</p>
             </section>
           )}
           {!review && challenge && !challengeExpired && (
             <section className="space-y-3 rounded-xl border border-border bg-card p-5 text-12">
-              <p role="status">
-                Waiting for confirmation from the same private Telegram chat.
-                Browser approval alone does not grant access.
-              </p>
+              <p role="status">{t("Waiting for confirmation from the same private Telegram chat. Browser approval alone does not grant access.")}</p>
               {command ? (
                 <>
-                  <p>Send this one-time command in the private chat:</p>
+                  <p>{t("Send this one-time command in the private chat:")}</p>
                   <code className="block select-all rounded-lg bg-muted p-3 font-mono">
                     {command}
                   </code>
                 </>
               ) : (
-                <p>
-                  The one-time command is shown only after approval. If you lost
-                  it, review again to request a new one.
-                </p>
+                <p>{t("The one-time command is shown only after approval. If you lost it, review again to request a new one.")}</p>
               )}
               <div className="flex flex-wrap gap-2">
                 <Button
                   variant="outline"
                   onClick={() => void status.refetch()}
                   disabled={status.isFetching}
-                >
-                  Refresh status
-                </Button>
-                <Button variant="outline" onClick={beginReview} disabled={busy}>
-                  Review again
-                </Button>
+                >{t("Refresh status")}</Button>
+                <Button variant="outline" onClick={beginReview} disabled={busy}>{t("Review again")}</Button>
                 <Button
                   variant="outline"
                   disabled={busy}
@@ -385,35 +318,25 @@ function PersonalLinkFlow({
                       setDenied(true);
                     })
                   }
-                >
-                  Cancel linking
-                </Button>
+                >{t("Cancel linking")}</Button>
               </div>
             </section>
           )}
           {challengeExpired && actor && (
-            <p role="status" className="text-12">
-              The 10-minute confirmation expired. Review again while the
-              original linking request is valid.
-            </p>
+            <p role="status" className="text-12">{t("The 10-minute confirmation expired. Review again while the original linking request is valid.")}</p>
           )}
           {(error || status.error) && (
             <>
               <ErrorBanner message={error ?? status.error!.message} />
               {actor && (
-                <Button variant="outline" onClick={beginReview} disabled={busy}>
-                  Start a fresh review
-                </Button>
+                <Button variant="outline" onClick={beginReview} disabled={busy}>{t("Start a fresh review")}</Button>
               )}
             </>
           )}
         </>
       )}
-      <p className="text-12 text-muted-foreground">
-        Looking for child-bot setup?{" "}
-        <a className="underline" href="/onboarding">
-          Open BotFather setup
-        </a>
+      <p className="text-12 text-muted-foreground">{t("Looking for child-bot setup?")}{" "}
+        <a className="underline" href="/onboarding">{t("Open BotFather setup")}</a>
         .
       </p>
     </main>

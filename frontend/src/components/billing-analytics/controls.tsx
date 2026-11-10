@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useDeferredValue, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,7 +34,7 @@ type FilterKind = keyof SampleOptions;
 const FILTER_FIELDS: DataTableFilterField<FilterKind>[] = [
   {
     key: "services",
-    label: "Services",
+    get label() { return translateUi("Services"); },
     value_type: "enum",
     operator: "includes",
     multiple: true,
@@ -40,7 +42,7 @@ const FILTER_FIELDS: DataTableFilterField<FilterKind>[] = [
   },
   {
     key: "owners",
-    label: "Billing accounts",
+    get label() { return translateUi("Billing accounts"); },
     value_type: "enum",
     operator: "includes",
     multiple: true,
@@ -48,7 +50,7 @@ const FILTER_FIELDS: DataTableFilterField<FilterKind>[] = [
   },
   {
     key: "actors",
-    label: "Acting users",
+    get label() { return translateUi("Acting users"); },
     value_type: "enum",
     operator: "includes",
     multiple: true,
@@ -70,6 +72,7 @@ function AnalyticsFilterPicker({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useUiTranslation();
   const [search, setSearch] = useState("");
   const deferred = useDeferredValue(search);
   const label = FILTER_FIELDS.find((field) => field.key === kind)!.label;
@@ -85,10 +88,10 @@ function AnalyticsFilterPicker({
       onSearchChange={setSearch}
       searchPlaceholder={
         kind === "actors"
-          ? "Search by email"
+          ? t("Search by email")
           : kind === "owners"
-            ? "Organization name, slug, or email"
-            : "Search services"
+            ? t("Organization name, slug, or email")
+            : t("Search services")
       }
       options={
         query.isPending
@@ -117,6 +120,7 @@ export function FilterBar({
   onChange: (filters: AnalyticsFilters) => void;
   sample?: SampleOptions;
 }) {
+  const { t } = useUiTranslation();
   const error = filterError(filters);
   const [openKind, setOpenKind] = useState<FilterKind | null>(null);
   const labels = useAnalyticsLabels(filters, sample);
@@ -143,7 +147,7 @@ export function FilterBar({
       ))}
       aside={
         <AnalyticsSelect
-          label="Time range"
+          label={t("Time range")}
           inline
           value={filters.period}
           onChange={(value) =>
@@ -203,12 +207,12 @@ export function FilterBar({
               className="flex items-center gap-2 whitespace-nowrap text-11 text-muted-foreground"
             >
               <span>
-                {bound === "from" ? "Start (UTC)" : "End (UTC, exclusive)"}
+                {bound === "from" ? t("Start (UTC)") : t("End (UTC, exclusive)")}
               </span>
               <Input
                 className="w-auto"
                 type="datetime-local"
-                aria-label={bound === "from" ? "Start (UTC)" : "End (UTC)"}
+                aria-label={bound === "from" ? t("Start (UTC)") : t("End (UTC)")}
                 value={dateValue(filters[bound])}
                 onChange={(e) =>
                   onChange({ ...filters, [bound]: toIso(e.target.value) })
@@ -226,14 +230,12 @@ export function FilterBar({
                 to: null,
               })
             }
-          >
-            Reset range
-          </Button>
+          >{t("Reset range")}</Button>
         </div>
       )}
       {error && (
         <p role="alert" className="text-12 text-warning">
-          {error}
+          {translateUi(error)}
         </p>
       )}
     </FilterCard>
@@ -246,18 +248,17 @@ export function PanelControls({
   panel: AnalyticsPanel;
   onChange: (panel: AnalyticsPanel) => void;
 }) {
+  const { t } = useUiTranslation();
   return (
     <div className="space-y-4">
-      <label className="block space-y-1.5 text-10 font-medium text-muted-foreground">
-        Panel title
-        <Input
+      <label className="block space-y-1.5 text-10 font-medium text-muted-foreground">{t("Panel title")}<Input
           value={panel.title}
           maxLength={100}
           onChange={(e) => onChange({ ...panel, title: e.target.value })}
         />
       </label>
       <AnalyticsSelect
-        label="Measure"
+        label={t("Measure")}
         value={panel.measure}
         onChange={(measure) =>
           onChange({
@@ -279,7 +280,7 @@ export function PanelControls({
       </p>
       {panel.measure === "quantity" && (
         <AnalyticsSelect
-          label="Metric unit"
+          label={t("Metric unit")}
           value={panel.metric}
           onChange={(metric) =>
             onChange({ ...panel, metric: metric as AnalyticsPanel["metric"] })
@@ -291,7 +292,7 @@ export function PanelControls({
         />
       )}
       <AnalyticsSelect
-        label="Chart type"
+        label={t("Chart type")}
         value={panel.chart}
         onChange={(chart) =>
           onChange({ ...panel, chart: chart as AnalyticsPanel["chart"] })
@@ -309,7 +310,7 @@ export function PanelControls({
         }))}
       />
       <AnalyticsSelect
-        label="Data table"
+        label={t("Data table")}
         value={panel.table_display ?? "always"}
         onChange={(table_display) =>
           onChange({
@@ -323,7 +324,7 @@ export function PanelControls({
         ]}
       />
       <AnalyticsSelect
-        label="Break down by"
+        label={t("Break down by")}
         value={panel.breakdown}
         onChange={(breakdown) =>
           onChange({
@@ -337,7 +338,7 @@ export function PanelControls({
         }))}
       />
       <AnalyticsSelect
-        label="Show"
+        label={t("Show")}
         value={String(panel.top)}
         onChange={(top) =>
           onChange({ ...panel, top: Number(top) as AnalyticsPanel["top"] })
@@ -352,7 +353,7 @@ export function PanelControls({
       {(panel.chart === "line" || panel.chart === "combo") && (
         <>
           <AnalyticsSelect
-            label="Time interval"
+            label={t("Time interval")}
             value={panel.interval ?? "auto"}
             onChange={(interval) =>
               onChange({
@@ -365,15 +366,8 @@ export function PanelControls({
               label: INTERVAL_LABELS[value],
             }))}
           />
-          <p className="text-11 leading-relaxed text-muted-foreground">
-            Weeks start Monday; months follow the calendar, in UTC. Edge buckets
-            include only the selected dates.
-          </p>
-          <p className="text-11 leading-relaxed text-muted-foreground">
-            Trends use the same Top 5/10 groups across the whole window. Other
-            keeps the remaining usage visible. Combined charts stack these
-            groups with total requests on the right axis.
-          </p>
+          <p className="text-11 leading-relaxed text-muted-foreground">{t("Weeks start Monday; months follow the calendar, in UTC. Edge buckets include only the selected dates.")}</p>
+          <p className="text-11 leading-relaxed text-muted-foreground">{t("Trends use the same Top 5/10 groups across the whole window. Other keeps the remaining usage visible. Combined charts stack these groups with total requests on the right axis.")}</p>
         </>
       )}
     </div>

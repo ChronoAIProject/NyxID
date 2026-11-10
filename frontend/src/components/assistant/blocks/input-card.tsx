@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { Check, Loader2, MessageSquareText, Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -14,6 +15,7 @@ export function InputCard({
   readonly disabled?: boolean;
   readonly onResolve: (answer: InputAnswer) => Promise<void> | void;
 }) {
+  const { t } = useUiTranslation();
   const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
   const [freeText, setFreeText] = useState("");
   const [pending, setPending] = useState<"selection" | "text" | null>(null);
@@ -58,18 +60,16 @@ export function InputCard({
             />
           )}
           {resolved
-            ? "Answer recorded"
+            ? t("Answer recorded")
             : submitted
-              ? "Answer sent"
-              : "Input cancelled"}
+              ? t("Answer sent")
+              : t("Input cancelled")}
         </div>
         <p className="mt-2 text-12 leading-relaxed text-muted-foreground">
           {block.prompt}
         </p>
         {submitted ? (
-          <p className="mt-1.5 text-11 text-text-tertiary">
-            Waiting for committed confirmation.
-          </p>
+          <p className="mt-1.5 text-11 text-text-tertiary">{t("Waiting for committed confirmation.")}</p>
         ) : null}
       </section>
     );
@@ -84,9 +84,7 @@ export function InputCard({
           <MessageSquareText className="h-4 w-4 text-nyx-secondary-400" />
         </div>
         <div className="min-w-0 flex-1">
-          <h3 className="text-13 font-semibold text-foreground">
-            Input required
-          </h3>
+          <h3 className="text-13 font-semibold text-foreground">{t("Input required")}</h3>
           <p className="mt-1 text-12 leading-relaxed text-muted-foreground">
             {block.prompt}
           </p>
@@ -144,9 +142,7 @@ export function InputCard({
               <Loader2 className="animate-spin" />
             ) : (
               <Send />
-            )}
-            Submit
-          </Button>
+            )}{t("Submit")}</Button>
         </div>
       ) : null}
 
@@ -160,7 +156,7 @@ export function InputCard({
           }}
         >
           <Input
-            aria-label="Answer"
+            aria-label={t("Answer")}
             disabled={busy || disabled}
             maxLength={32_768}
             onChange={(event) => setFreeText(event.target.value)}
@@ -170,14 +166,14 @@ export function InputCard({
             type="submit"
             size="icon"
             disabled={busy || disabled || !normalizedText}
-            title="Submit answer"
+            title={t("Submit answer")}
           >
             {pending === "text" ? (
               <Loader2 className="animate-spin" />
             ) : (
               <Send />
             )}
-            <span className="sr-only">Submit answer</span>
+            <span className="sr-only">{t("Submit answer")}</span>
           </Button>
         </form>
       ) : null}

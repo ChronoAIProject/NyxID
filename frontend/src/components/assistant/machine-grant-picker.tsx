@@ -1,3 +1,5 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useNodes } from "@/hooks/use-nodes";
 import { useSavedLogins } from "@/hooks/use-saved-logins";
@@ -15,6 +17,7 @@ export function MachineGrantPicker({
   readonly onChange: (ids: string[]) => void;
   readonly disabled?: boolean;
 }) {
+  const { t } = useUiTranslation();
   const nodes = useNodes();
   const logins = useSavedLogins("all");
   const rows =
@@ -40,11 +43,11 @@ export function MachineGrantPicker({
   return (
     <fieldset disabled={disabled} className="space-y-2">
       <legend className="mb-2 text-12 font-medium">
-        {kind === "machines" ? "Machines" : "Saved logins"}
+        {kind === "machines" ? t("Machines") : t("Saved logins")}
       </legend>
       {error ? (
         <p role="alert" className="text-12 text-destructive">
-          {error.message}
+          {translateUi(error.message ?? "")}
         </p>
       ) : null}
       {[...rows, ...unknown].map((row) => (
@@ -63,11 +66,10 @@ export function MachineGrantPicker({
         </label>
       ))}
       {!rows.length && !unknown.length ? (
-        <p className="text-12 text-muted-foreground">
-          None available.{" "}
+        <p className="text-12 text-muted-foreground">{t("None available.")}{" "}
           {kind === "machines"
-            ? "Pair a machine first, then grant it here."
-            : "Save a login first, then grant it here."}
+            ? t("Pair a machine first, then grant it here.")
+            : t("Save a login first, then grant it here.")}
         </p>
       ) : null}
     </fieldset>

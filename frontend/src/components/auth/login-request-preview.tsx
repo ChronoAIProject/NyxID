@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { ChevronDown, Info } from "lucide-react";
 import {
   formatAuthDeviceUserCodeInput,
@@ -22,14 +24,12 @@ export function LoginDeviceShell({
 }
 
 export function ApprovalCaution() {
+  const { t } = useUiTranslation();
   return (
     <div className="flex items-start gap-2 px-1 text-12 leading-relaxed text-muted-foreground">
       <Info className="mt-0.5 size-4 shrink-0" />
-      <p>
-        Only approve if you started this sign-in.{" "}
-        <span className="font-medium text-destructive">
-          If anything looks unfamiliar, reject it.
-        </span>
+      <p>{t("Only approve if you started this sign-in.")}{" "}
+        <span className="font-medium text-destructive">{t("If anything looks unfamiliar, reject it.")}</span>
       </p>
     </div>
   );
@@ -50,6 +50,7 @@ export function PreviewPanel({
   readonly detailsOpen: boolean;
   readonly onDetailsOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useUiTranslation();
   const expired = remainingSeconds === 0;
   const verifiedIp = preview.client_ip_attribution === "verified";
   const unverifiedIp = preview.client_ip_attribution === "unverified";
@@ -100,12 +101,12 @@ export function PreviewPanel({
           : "default";
 
   return (
-    <section className="space-y-3" aria-label="Request details">
+    <section className="space-y-3" aria-label={t("Request details")}>
       <div
         data-sensitive
         className="rounded-lg border border-border bg-background px-4 py-5 text-center"
       >
-        <span className="sr-only">User code: </span>
+        <span className="sr-only">{t("User code: ")}</span>
         <p className="font-mono text-28 font-medium tracking-widest">
           {formatAuthDeviceUserCodeInput(userCode)}
         </p>
@@ -117,30 +118,30 @@ export function PreviewPanel({
           )}
         >
           {expired
-            ? "Expired"
+            ? t("Expired")
             : remainingSeconds === null
-              ? "Checking expiry…"
-              : `Expires in ${formatWebAuthDeviceRemaining(remainingSeconds)}`}
+              ? t("Checking expiry…")
+              : t("Expires in {{value}}", { value: formatWebAuthDeviceRemaining(remainingSeconds) })}
         </p>
       </div>
       <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-12">
-        <span className="text-muted-foreground">Requester</span>
+        <span className="text-muted-foreground">{t("Requester")}</span>
         <span className="min-w-0 break-words font-medium">
-          {preview.client_label ?? preview.client_app ?? "Requesting device"}
+          {preview.client_label ?? preview.client_app ?? t("Requesting device")}
         </span>
         <span className="font-mono text-11 text-muted-foreground">
           {verifiedIp && preview.client_ip
             ? preview.client_ip
             : unverifiedIp
-              ? "IP not verified"
-              : "IP unavailable"}
+              ? t("IP not verified")
+              : t("IP unavailable")}
         </span>
       </div>
       {/* Reported origin can be forged: show negative signals, never a trust badge. */}
       {originValue && (
         <div className="rounded-lg border border-destructive/20 bg-destructive/5">
           <ApprovalDetailRow
-            label="Started from"
+            label={t("Started from")}
             value={originValue}
             tone={originTone}
           />
@@ -148,7 +149,7 @@ export function PreviewPanel({
       )}
       {timezoneDifferences.length > 0 && (
         <ApprovalDetailRow
-          label="Timezone"
+          label={t("Timezone")}
           value={timezoneValue}
           tone={timezoneTone}
         />
@@ -158,58 +159,56 @@ export function PreviewPanel({
         open={detailsOpen}
         onToggle={(event) => onDetailsOpenChange(event.currentTarget.open)}
       >
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-12 text-muted-foreground hover:text-foreground">
-          Request details
-          <ChevronDown
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2.5 text-12 text-muted-foreground hover:text-foreground">{t("Request details")}<ChevronDown
             aria-hidden="true"
             className="size-3.5 transition-transform group-open:rotate-180"
           />
         </summary>
         <div className="divide-y divide-border/30 border-t border-border/50">
           <ApprovalDetailRow
-            label="Status"
-            value={capitalize(preview.status)}
+            label={t("Status")}
+            value={t(capitalize(preview.status))}
           />
           <ApprovalDetailRow
-            label="Location"
-            value={verifiedIp ? (location ?? "Not available") : "Not available"}
+            label={t("Location")}
+            value={verifiedIp ? (location ?? t("Not available")) : t("Not available")}
           />
           <ApprovalDetailRow
-            label="Network"
+            label={t("Network")}
             value={
               verifiedIp
                 ? formatNetworkRelation(networkRelation)
-                : "Not available"
+                : t("Not available")
             }
           />
           {unverifiedIp && preview.client_ip && (
             <ApprovalDetailRow
-              label="Reported IP"
-              value={`${preview.client_ip} · unverified`}
+              label={t("Reported IP")}
+              value={t("{{ip}} · unverified", { ip: preview.client_ip })}
               mono
             />
           )}
           <ApprovalDetailRow
-            label="Requested"
+            label={t("Requested")}
             value={`${formatAuthDeviceRelativeTime(preview.initiated_at)} · ${formatAbsoluteDateTime(preview.initiated_at)}`}
           />
           <ApprovalDetailRow
-            label="Reported model"
+            label={t("Reported model")}
             value={preview.client_model ?? "Not provided"}
           />
-          <ApprovalDetailRow label="Reported client" value={appDescription} />
+          <ApprovalDetailRow label={t("Reported client")} value={appDescription} />
           <ApprovalDetailRow
-            label="Platform"
+            label={t("Platform")}
             value={preview.client_platform ?? "Not identified"}
           />
           {requestedProfile && (
             <ApprovalDetailRow
-              label="Requested profile"
+              label={t("Requested profile")}
               value={requestedProfile}
             />
           )}
           <ApprovalDetailRow
-            label="Form factor"
+            label={t("Form factor")}
             value={
               preview.client_form_factor
                 ? capitalize(preview.client_form_factor)
@@ -217,18 +216,18 @@ export function PreviewPanel({
             }
           />
           {timezoneDifferences.length === 0 && (
-            <ApprovalDetailRow label="Timezone" value={timezoneValue} />
+            <ApprovalDetailRow label={t("Timezone")} value={timezoneValue} />
           )}
           <ApprovalDetailRow
-            label="Locale"
+            label={t("Locale")}
             value={preview.client_locale ?? "Not reported"}
           />
           <ApprovalDetailRow
-            label="Screen"
+            label={t("Screen")}
             value={screenDescription ?? "Not reported"}
           />
           <ApprovalDetailRow
-            label="Processor"
+            label={t("Processor")}
             value={
               preview.client_hardware_concurrency === null
                 ? "Not reported"
@@ -236,7 +235,7 @@ export function PreviewPanel({
             }
           />
           <ApprovalDetailRow
-            label="Memory"
+            label={t("Memory")}
             value={
               preview.client_device_memory === null
                 ? "Not reported"
@@ -244,7 +243,7 @@ export function PreviewPanel({
             }
           />
           <ApprovalDetailRow
-            label="Raw user agent"
+            label={t("Raw user agent")}
             value={preview.client_user_agent ?? "Not provided"}
             mono
           />
@@ -303,7 +302,7 @@ function formatVerifiedLocation(
   }
   if (place) return place;
   return preview.client_ip_timezone
-    ? `IP timezone: ${preview.client_ip_timezone}`
+    ? translateUi("IP timezone: {{timezone}}", { timezone: preview.client_ip_timezone })
     : null;
 }
 
@@ -315,11 +314,11 @@ function formatNetworkRelation(
     | "different_ip"
     | null,
 ): string {
-  if (relation === "same_ip") return "Same IP as this device";
-  if (relation === "same_network") return "Same network as this device";
-  if (relation === "different_network") return "Different network";
-  if (relation === "different_ip") return "Different IP";
-  return "Not available";
+  if (relation === "same_ip") return translateUi("Same IP as this device");
+  if (relation === "same_network") return translateUi("Same network as this device");
+  if (relation === "different_network") return translateUi("Different network");
+  if (relation === "different_ip") return translateUi("Different IP");
+  return translateUi("Not available");
 }
 
 function formatScreenDescription(
@@ -355,6 +354,7 @@ function ApprovalDetailRow({
   readonly mono?: boolean;
   readonly tone?: DetailValueTone;
 }) {
+  useUiTranslation();
   return (
     <div className="flex items-start justify-between gap-4 px-4 py-2.5 text-12">
       <span className="shrink-0 text-muted-foreground">{label}</span>
@@ -375,7 +375,7 @@ function ApprovalDetailRow({
 function formatAbsoluteDateTime(value: string): string {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return "Unknown";
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(getFormattingLocale(), {
     dateStyle: "medium",
     timeStyle: "medium",
   }).format(timestamp);

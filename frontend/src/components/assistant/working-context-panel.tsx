@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useAssistantContext, useResetAssistantContext } from "@/hooks/use-assistant-context";
@@ -19,6 +21,7 @@ export function WorkingContextPanel({
   readonly onManageMemory?: (agentId: string) => void;
   readonly onReset?: () => void;
 }) {
+  const { t } = useUiTranslation();
   const [open, setOpen] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const query = useAssistantContext(conversationId, open);
@@ -30,70 +33,55 @@ export function WorkingContextPanel({
   const checkpoint = context?.checkpoint;
   return (
     <div className="rounded border border-hairline px-3 py-2 text-11">
-      <button type="button" aria-expanded={open} className="underline" onClick={() => setOpen(true)}>
-        Working context
-      </button>
+      <button type="button" aria-expanded={open} className="underline" onClick={() => setOpen(true)}>{t("Working context")}</button>
       <Sheet open={open} onOpenChange={(next) => { setOpen(next); setConfirming(false); }}>
         <SheetContent>
           <SheetHeader>
-            <SheetTitle>Working context</SheetTitle>
+            <SheetTitle>{t("Working context")}</SheetTitle>
           </SheetHeader>
           <div className="mt-4 space-y-2 text-text-tertiary">
-            {query.isPending ? <p>Loading working context…</p> : null}
+            {query.isPending ? <p>{t("Loading working context…")}</p> : null}
             {query.isError ? (
-              <p role="alert" className="text-destructive">
-                Unable to load the working context.{" "}
-                <button type="button" className="underline" onClick={() => void query.refetch()}>
-                  Try again
-                </button>
+              <p role="alert" className="text-destructive">{t("Unable to load the working context.")}{" "}
+                <button type="button" className="underline" onClick={() => void query.refetch()}>{t("Try again")}</button>
               </p>
             ) : null}
             {context ? (
               <>
-                <div>Goal: {checkpoint?.goal ?? "No goal recorded"}</div>
-                <div>
-                  Last checkpoint:{" "}
+                <div>{t("Goal: ")}{checkpoint?.goal ?? t("No goal recorded")}</div>
+                <div>{t("Last checkpoint:")}{" "}
                   {checkpoint
-                    ? `${checkpoint.status === "completed" ? "completed" : `failed (${checkpoint.error_code ?? "unknown"})`} · ${new Date(checkpoint.updated_at).toLocaleString()}`
-                    : "None yet"}
+                    ? t("{{value}} · {{value1}}", { value: checkpoint.status === "completed" ? t("completed") : t("failed ({{code}})", { code: checkpoint.error_code ?? t("unknown") }), value1: new Date(checkpoint.updated_at).toLocaleString(getFormattingLocale()) })
+                    : t("None yet")}
                 </div>
-                <div>
-                  Last successful checkpoint:{" "}
+                <div>{t("Last successful checkpoint:")}{" "}
                   {checkpoint?.last_successful_at
-                    ? new Date(checkpoint.last_successful_at).toLocaleString()
-                    : "None"}
+                    ? new Date(checkpoint.last_successful_at).toLocaleString(getFormattingLocale())
+                    : t("None")}
                 </div>
-                <div>Completed since then: {labels(checkpoint?.completed_actions)}</div>
-                <div>Failed or interrupted: {labels(checkpoint?.failed_actions)}</div>
-                <div>Running now: {context.pending_actions.join(", ") || "None"}</div>
-                <div>Live context: {context.binding_state === "bound" ? "kept" : "starts fresh next turn"}</div>
-                {context.reset_reason ? <div>Last reset: {contextResetCopy(context.reset_reason)}</div> : null}
+                <div>{t("Completed since then: ")}{labels(checkpoint?.completed_actions)}</div>
+                <div>{t("Failed or interrupted: ")}{labels(checkpoint?.failed_actions)}</div>
+                <div>{t("Running now: ")}{context.pending_actions.join(", ") || t("None")}</div>
+                <div>{t("Live context: ")}{context.binding_state === "bound" ? t("kept") : t("starts fresh next turn")}</div>
+                {context.reset_reason ? <div>{t("Last reset: ")}{contextResetCopy(context.reset_reason)}</div> : null}
                 {reset.isError ? (
                   <p role="alert" className="text-destructive">
                     {context.active_turn_id
-                      ? "A turn is running. Stop it or wait, then reset."
-                      : "Unable to reset the working context. Try again."}
+                      ? t("A turn is running. Stop it or wait, then reset.")
+                      : t("Unable to reset the working context. Try again.")}
                   </p>
                 ) : null}
                 {confirming ? (
-                  <div role="group" aria-label="Confirm reset" className="space-y-1 rounded border border-hairline p-2">
-                    <p>Reset clears the live context and the checkpoint. The transcript stays; the next turn starts without a recap.</p>
-                    <button type="button" className="underline" disabled={reset.isPending} onClick={() => reset.mutate()}>
-                      Confirm reset
-                    </button>{" "}
-                    <button type="button" className="underline" onClick={() => setConfirming(false)}>
-                      Cancel
-                    </button>
+                  <div role="group" aria-label={t("Confirm reset")} className="space-y-1 rounded border border-hairline p-2">
+                    <p>{t("Reset clears the live context and the checkpoint. The transcript stays; the next turn starts without a recap.")}</p>
+                    <button type="button" className="underline" disabled={reset.isPending} onClick={() => reset.mutate()}>{t("Confirm reset")}</button>{" "}
+                    <button type="button" className="underline" onClick={() => setConfirming(false)}>{t("Cancel")}</button>
                   </div>
                 ) : (
-                  <button type="button" className="underline" disabled={Boolean(context.active_turn_id)} onClick={() => setConfirming(true)}>
-                    Reset context
-                  </button>
+                  <button type="button" className="underline" disabled={Boolean(context.active_turn_id)} onClick={() => setConfirming(true)}>{t("Reset context")}</button>
                 )}{" "}
                 {onManageMemory && context.agent_id ? (
-                  <button type="button" className="underline" onClick={() => onManageMemory(context.agent_id!)}>
-                    Manage memory notes
-                  </button>
+                  <button type="button" className="underline" onClick={() => onManageMemory(context.agent_id!)}>{t("Manage memory notes")}</button>
                 ) : null}
               </>
             ) : null}

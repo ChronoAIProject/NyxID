@@ -1,3 +1,7 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { toast } from "sonner";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -32,6 +36,7 @@ export function PoolHealthDialog({
   onClose: () => void;
   onCloseAutoFocus?: (event: Event) => void;
 }) {
+  const { t } = useUiTranslation();
   const aiChat = pool.member_contract === "ai_chat";
   const [operation, setOperation] = useState<PoolOperation | null>(null);
   const health = usePoolHealth({
@@ -45,9 +50,9 @@ export function PoolHealthDialog({
   async function clear(userServiceId?: string) {
     try {
       await reset.mutateAsync({ poolId: pool.id, userServiceId });
-      toast.success("Cooldown reset");
+      toast.success(translateUi("Cooldown reset"));
     } catch (error) {
-      toast.error(message(error));
+      toast.error(translateErrorMessage(message(error)));
     }
   }
   return (
@@ -62,39 +67,26 @@ export function PoolHealthDialog({
         className="md:max-w-2xl [&_input:focus-visible]:border-primary [&_input:focus-visible]:ring-1 [&_input:focus-visible]:ring-primary/40"
       >
         <DialogHeader>
-          <DialogTitle className="break-words">{pool.name} health</DialogTitle>
-          <DialogDescription>
-            Availability and recent failures for your saved connections.
-            Cooldowns depend on the operation being called. Reset lets a
-            connection be tried again; it does not test the provider.
-          </DialogDescription>
+          <DialogTitle className="break-words">{pool.name}{t(" health")}</DialogTitle>
+          <DialogDescription>{t("Availability and recent failures for your saved connections. Cooldowns depend on the operation being called. Reset lets a connection be tried again; it does not test the provider.")}</DialogDescription>
         </DialogHeader>
         {aiChat ? (
-          <p className="text-12 text-muted-foreground">
-            Checking AI chat requests (POST /chat/completions).
-          </p>
+          <p className="text-12 text-muted-foreground">{t("Checking AI chat requests (POST /chat/completions).")}</p>
         ) : (
           <PoolOperationCheck operation={operation} onChange={setOperation} />
         )}
         {!aiChat && !operation && (
-          <p className="text-12 text-muted-foreground">
-            Choose an operation above to see its cooldown and failure history.
-            Connection availability is shown below.
-          </p>
+          <p className="text-12 text-muted-foreground">{t("Choose an operation above to see its cooldown and failure history. Connection availability is shown below.")}</p>
         )}
         {pool.strategy !== "priority" && (
           <p className="text-12 text-muted-foreground">
-            {strategyLabels[pool.strategy]} sends one attempt per request and
-            does not use cooldowns.
-          </p>
+            {strategyLabels[pool.strategy]}{t(" sends one attempt per request and does not use cooldowns.")}</p>
         )}
         {health.isError && <ErrorBanner message={message(health.error)} />}
         {health.isLoading && <Skeleton className="h-16" />}
         <div className="space-y-2">
           {health.data?.candidates.length === 0 && (
-            <p className="text-12 text-muted-foreground">
-              This pool has no connections yet. Edit the pool to add them.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("This pool has no connections yet. Edit the pool to add them.")}</p>
           )}
           {health.data?.candidates.map((row) => (
             <div
@@ -108,27 +100,27 @@ export function PoolHealthDialog({
                     {row.reason
                       ? reason(row)
                       : health.data?.operation_checked
-                        ? "Ready for this operation"
-                        : "Available connection"}
+                        ? t("Ready for this operation")
+                        : t("Available connection")}
                   </Badge>
                 </div>
                 <p className="break-words text-11 text-muted-foreground">
                   {row.slug} · {bindingLabel(row.credential_binding)}
                   {pool.strategy === "priority"
-                    ? ` · Priority ${pool.members.find((m) => m.user_service_id === row.user_service_id)?.priority ?? 0}`
+                    ? t(" · Priority {{value}}", { value: pool.members.find((m) => m.user_service_id === row.user_service_id)?.priority ?? 0 })
                     : ""}
                   {pool.members.find(
                     (m) => m.user_service_id === row.user_service_id,
                   )?.model
-                    ? ` · ${pool.members.find((m) => m.user_service_id === row.user_service_id)?.model}`
+                    ? t(" · {{model}}", { model: pool.members.find((m) => m.user_service_id === row.user_service_id)?.model })
                     : ""}
                   {health.data?.operation_checked &&
                   pool.strategy === "priority"
-                    ? ` · ${row.consecutive_failures} failures`
+                    ? t(" · {{consecutive_failures}} failures", { consecutive_failures: row.consecutive_failures })
                     : ""}
-                  {row.last_status ? ` · HTTP ${row.last_status}` : ""}
+                  {row.last_status ? t(" · HTTP {{last_status}}", { last_status: row.last_status }) : ""}
                   {row.cooldown_until
-                    ? ` · Retry after ${new Date(row.cooldown_until).toLocaleString()}`
+                    ? t(" · Retry after {{value}}", { value: new Date(row.cooldown_until).toLocaleString(getFormattingLocale()) })
                     : ""}
                 </p>
               </div>
@@ -139,17 +131,13 @@ export function PoolHealthDialog({
                     void clear(row.user_service_id);
                   }}
                   disabled={readOnlyPreview || reset.isPending}
-                >
-                  Reset
-                </Button>
+                >{t("Reset")}</Button>
               )}
             </div>
           ))}
         </div>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
-            Close
-          </Button>
+          <Button variant="outline" onClick={onClose}>{t("Close")}</Button>
           {pool.strategy === "priority" && pool.members.length > 0 && (
             <Button
               onClick={() => {
@@ -157,9 +145,7 @@ export function PoolHealthDialog({
               }}
               isLoading={reset.isPending}
               disabled={readOnlyPreview}
-            >
-              Reset all cooldowns
-            </Button>
+            >{t("Reset all cooldowns")}</Button>
           )}
         </DialogFooter>
       </DialogContent>

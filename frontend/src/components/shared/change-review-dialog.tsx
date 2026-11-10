@@ -1,3 +1,5 @@
+import { useUiTranslation, translateUi } from "@/i18n/use-ui-translation";
+
 import { toast } from "sonner";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -16,6 +18,7 @@ export function useChangeReview<T>(
   conflict: boolean | ((payload: T) => boolean) = false,
   sourceId = "",
 ) {
+  useUiTranslation();
   const [pending, setPending] = useState<{
     payload: T;
     changes: FormChange[];
@@ -40,7 +43,7 @@ export function useChangeReview<T>(
   function review(payload: T, changes: FormChange[]) {
     if (submitting.current) return;
     if (!changes.length) {
-      toast.info("No changes to save");
+      toast.info(translateUi("No changes to save"));
       return;
     }
     setError(null);
@@ -77,10 +80,8 @@ export function useChangeReview<T>(
     >
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Review changes</DialogTitle>
-          <DialogDescription>
-            Confirm these changes before saving.
-          </DialogDescription>
+          <DialogTitle>{translateUi("Review changes")}</DialogTitle>
+          <DialogDescription>{translateUi("Confirm these changes before saving.")}</DialogDescription>
         </DialogHeader>
         <div className="max-h-[60vh] space-y-4 overflow-y-auto">
           {pending?.changes.map((change) => (
@@ -88,16 +89,16 @@ export function useChangeReview<T>(
               key={change.field}
               className="space-y-2 rounded-md border border-border p-3 text-sm"
             >
-              <p className="font-medium">{change.field}</p>
+              <p className="font-medium">{translateUi(change.field)}</p>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <p className="text-xs text-muted-foreground">Current</p>
+                  <p className="text-xs text-muted-foreground">{translateUi("Current")}</p>
                   <pre className="whitespace-pre-wrap break-all font-sans">
                     {change.before}
                   </pre>
                 </div>
                 <div>
-                  <p className="text-xs text-muted-foreground">New</p>
+                  <p className="text-xs text-muted-foreground">{translateUi("New")}</p>
                   <pre className="whitespace-pre-wrap break-all font-sans">
                     {change.after}
                   </pre>
@@ -107,14 +108,11 @@ export function useChangeReview<T>(
           ))}
         </div>
         {stale && (
-          <p role="alert">
-            Saved values changed while you were editing. Cancel and load the
-            latest values before saving.
-          </p>
+          <p role="alert">{translateUi("Saved values changed while you were editing. Cancel and load the latest values before saving.")}</p>
         )}
         {error && (
           <p role="alert" className="text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         )}
         <DialogFooter>
@@ -123,18 +121,14 @@ export function useChangeReview<T>(
             variant="outline"
             disabled={saving}
             onClick={() => setPending(null)}
-          >
-            Cancel
-          </Button>
+          >{translateUi("Cancel")}</Button>
           <Button
             type="button"
             variant="primary"
             isLoading={saving}
             disabled={stale || saving}
             onClick={() => void confirm()}
-          >
-            Confirm changes
-          </Button>
+          >{translateUi("Confirm changes")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

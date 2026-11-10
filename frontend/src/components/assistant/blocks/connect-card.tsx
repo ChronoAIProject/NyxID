@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
@@ -21,12 +23,12 @@ import { connectWatchDeadline } from "@/lib/assistant/connect-watch";
 import type { ConnectCardContentBlock } from "@/types/assistant";
 
 const STATE_LABEL: Record<ConnectCardContentBlock["state"], string> = {
-  needs_connection: "Not connected",
-  waiting_for_provider: "Authorizing",
-  waiting_for_user: "Waiting for you",
-  connected: "Connected",
-  error: "Failed",
-  timed_out: "Timed out",
+  get needs_connection() { return translateUi("Not connected"); },
+  get waiting_for_provider() { return translateUi("Authorizing"); },
+  get waiting_for_user() { return translateUi("Waiting for you"); },
+  get connected() { return translateUi("Connected"); },
+  get error() { return translateUi("Failed"); },
+  get timed_out() { return translateUi("Timed out"); },
 };
 
 type LocalVerdict = {
@@ -59,6 +61,7 @@ export function ConnectCard({
 }: {
   readonly block: ConnectCardContentBlock;
 }) {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -276,7 +279,7 @@ export function ConnectCard({
               }
             >
               {connected
-                ? "Connected"
+                ? t("Connected")
                 : timedOut
                   ? STATE_LABEL.timed_out
                   : stateLabel}
@@ -331,8 +334,7 @@ export function ConnectCard({
           {showDeviceCode && (
             <div className="space-y-1">
               {block.device_user_code && (
-                <p>
-                  Enter code{" "}
+                <p>{t("Enter code")}{" "}
                   <code className="rounded bg-overlay px-1 py-0.5 font-mono text-foreground">
                     {block.device_user_code}
                   </code>
@@ -356,8 +358,8 @@ export function ConnectCard({
             <ol className="space-y-0.5">
               {extraSteps.map((step, index) => (
                 <li key={`${step.title}-${String(index)}`}>
-                  {step.done ? "✓" : `${String(index + 1)}.`} {step.title}
-                  {step.body ? ` — ${step.body}` : ""}
+                  {step.done ? "✓" : t("{{value}}.", { value: String(index + 1) })} {step.title}
+                  {step.body ? t(" — {{body}}", { body: step.body }) : ""}
                 </li>
               ))}
             </ol>
@@ -366,8 +368,8 @@ export function ConnectCard({
           {showScopes && (
             <p>
               {(block.granted_scopes?.length ?? 0) > 0
-                ? `Granted: ${(block.granted_scopes ?? []).join(", ")}`
-                : `Requests: ${block.requested_scopes.join(", ")}`}
+                ? t("Granted: {{value}}", { value: (block.granted_scopes ?? []).join(", ") })
+                : t("Requests: {{value}}", { value: block.requested_scopes.join(", ") })}
             </p>
           )}
 

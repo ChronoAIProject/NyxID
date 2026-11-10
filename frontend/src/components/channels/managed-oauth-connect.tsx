@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -36,6 +38,7 @@ export function ManagedOAuthConnect({
   botId,
   fullPage = false,
 }: ManagedFlowProps) {
+  const { t } = useUiTranslation();
   const link = useChannelConnectLinkContext();
   const [stage, setStage] = useState<
     "starting" | "authorizing" | "completing" | null
@@ -168,10 +171,7 @@ export function ManagedOAuthConnect({
     <div className="space-y-3">
       {error && <ErrorBanner message={error} />}
       {canRetry && (
-        <p role="status" className="text-xs text-muted-foreground">
-          Finish authorization in the sign-in window. If you closed it, retry
-          the connection.
-        </p>
+        <p role="status" className="text-xs text-muted-foreground">{t("Finish authorization in the sign-in window. If you closed it, retry the connection.")}</p>
       )}
       {link?.connectionId && stage === null && (
         <Button type="button" variant="outline" onClick={() => {
@@ -181,7 +181,7 @@ export function ManagedOAuthConnect({
             .then(onConnected)
             .catch((error: unknown) => setError(error instanceof Error ? error.message : "Unable to finish authorization"))
             .finally(() => setStage(null));
-        }}>Finish authorized connection</Button>
+        }}>{t("Finish authorized connection")}</Button>
       )}
       <div className="flex flex-wrap gap-2">
         <Button
@@ -196,17 +196,17 @@ export function ManagedOAuthConnect({
         >
           <ExternalLink className="size-3" />
           {canRetry
-            ? "Retry connection"
+            ? t("Retry connection")
             : stage === "starting"
-              ? "Opening sign-in..."
+              ? t("Opening sign-in...")
               : stage === "authorizing"
-                ? "Waiting for authorization..."
+                ? t("Waiting for authorization...")
                 : stage === "completing"
-                  ? "Connecting account..."
+                  ? t("Connecting account...")
                   : botId
-                    ? "Reconnect"
+                    ? t("Reconnect")
                     : (descriptor.connectLabel ??
-                      `Connect ${descriptor.label}`)}
+                      t("Connect {{label}}", { label: descriptor.label }))}
         </Button>
         {stage && !fullPage && (
           <Button
@@ -217,9 +217,7 @@ export function ManagedOAuthConnect({
               setCanRetry(false);
               setStage(null);
             }}
-          >
-            Cancel
-          </Button>
+          >{t("Cancel")}</Button>
         )}
       </div>
     </div>
@@ -227,35 +225,36 @@ export function ManagedOAuthConnect({
 }
 
 export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
+  const { t } = useUiTranslation();
   const { getPlatform } = useChannelPlatformViews();
   const bootstrap = useManagedOnboarding(bot.platform);
   return (
-    <DetailSection title="Connected account">
+    <DetailSection title={t("Connected account")}>
       <ChannelBotHealthCard botId={bot.id} />
-      <DetailRow label="Handle" value={bot.platform_bot_username} />
+      <DetailRow label={t("Handle")} value={bot.platform_bot_username} />
       <DetailRow
-        label="Connection"
+        label={t("Connection")}
         value={bot.connection_id ?? "Missing"}
         copyable
       />
       <DetailRow
-        label="Message delivery"
+        label={t("Message delivery")}
         value={bot.webhook_registered ? "Real-time webhooks" : "Polling"}
       />
       {!bot.webhook_registered && (
         <>
           <DetailRow
-            label="Last polled"
+            label={t("Last polled")}
             value={bot.last_polled_at ?? "Not yet polled"}
           />
-          <DetailRow label="Next poll" value={bot.next_poll_at ?? "Paused"} />
+          <DetailRow label={t("Next poll")} value={bot.next_poll_at ?? "Paused"} />
           <DetailRow
-            label="Cursor"
+            label={t("Cursor")}
             value={bot.poll_cursor ?? "Not initialized"}
             copyable
           />
           <DetailRow
-            label="Consecutive errors"
+            label={t("Consecutive errors")}
             value={String(bot.poll_error_count ?? 0)}
           />
         </>
@@ -270,7 +269,7 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
         {bot.error && <ErrorBanner message={bot.error} />}
         {bootstrap.isError && (
           <ErrorBanner
-            message="Unable to load account connection settings"
+            message={t("Unable to load account connection settings")}
             onRetry={bootstrap.refetch}
           />
         )}
@@ -281,12 +280,11 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
             label={bot.label}
             orgId={orgId}
             botId={bot.id}
-            onConnected={() => toast.success("Account reconnected")}
+            onConnected={() => toast.success(translateUi("Account reconnected"))}
           />
         )}
         {bootstrap.data && !bootstrap.data.available && (
-          <p className="text-xs text-muted-foreground">
-            Account connection is not available until an admin configures{" "}
+          <p className="text-xs text-muted-foreground">{t("Account connection is not available until an admin configures")}{" "}
             {getPlatform(bot.platform).label}.
           </p>
         )}

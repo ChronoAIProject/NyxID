@@ -1,3 +1,4 @@
+import { useWizardTranslation } from "@/i18n/wizard";
 /**
  * Scope chip row — 9 pill-style checkboxes for the NyxID API-key scope
  * set. Ported from Mode A's `.wizard-scope-chip-row` in
@@ -34,6 +35,7 @@ export function ScopePicker({
   label = "Scopes",
   hint = "Must match the backend's allowed scope set. Pick at least one.",
 }: ScopePickerProps) {
+  const { t } = useWizardTranslation();
   function toggle(scope: ApiKeyScope) {
     const next = new Set(value)
     if (next.has(scope)) {
@@ -48,10 +50,10 @@ export function ScopePicker({
 
   return (
     <div className="flex flex-col gap-1.5">
-      <Label>{label}</Label>
+      <Label>{t(label)}</Label>
       <div
         role="group"
-        aria-label="Scopes"
+        aria-label={t("Scopes")}
         aria-invalid={isEmpty}
         className={
           "flex flex-wrap gap-2 rounded-lg p-2 transition-colors duration-300 " +
@@ -76,7 +78,7 @@ export function ScopePicker({
           isEmpty ? "text-xs text-destructive" : "text-xs text-muted-foreground"
         }
       >
-        {isEmpty ? "At least one scope is required." : hint}
+        {isEmpty ? t("At least one scope is required.") : t(hint)}
       </p>
     </div>
   )

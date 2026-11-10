@@ -1,28 +1,41 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translate as t } from "@/i18n";
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { DecisionReceipt } from "./decision-receipt";
 import { AuthoredSkillCard } from "./authored-skill-card";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { ACTION_RISK_LABEL, confirmationReason } from "@/lib/assistant/nyxbot-labels";
-import type { NyxAgentAcknowledgement, NyxAgentAccessMode } from "@/schemas/assistant-nyxagent";
+import {
+  ACTION_RISK_LABEL,
+  confirmationReason,
+} from "@/lib/assistant/nyxbot-labels";
+import type {
+  NyxAgentAcknowledgement,
+  NyxAgentAccessMode,
+} from "@/schemas/assistant-nyxagent";
 
 function title(row: NyxAgentAcknowledgement): string {
   // A specialist's request that NyxBot decides.
   if (row.decider === "orchestrator") {
     if (row.kind === "service") {
-      return `Allow this agent to use ${row.service_name ?? row.service_slug ?? "this service"}?`;
+      return t("Allow this agent to use {{service}}?", {
+        service: row.service_name ?? row.service_slug ?? t("this service"),
+      });
     }
-    if (row.kind === "account") return "Allow this agent to read your NyxID account?";
-    return `Confirm: ${row.summary}`;
+    if (row.kind === "account")
+      return t("Allow this agent to read your NyxID account?");
+    return t("Confirm: {{summary}}", { summary: row.summary });
   }
   if (row.kind === "service")
-    return `Allow this chat to use ${row.service_name ?? "this service"}?`;
+    return t("Allow this chat to use {{service}}?", {
+      service: row.service_name ?? t("this service"),
+    });
   if (row.kind === "account") {
-    return (
-      "Allow this chat to manage your NyxID account " +
-      "(keys, channel bots, services, nodes, approval settings)?"
+    return t(
+      "Allow this chat to manage your NyxID account (keys, channel bots, services, nodes, approval settings)?",
     );
   }
-  return `Confirm: ${row.summary}`;
+  return t("Confirm: {{summary}}", { summary: row.summary });
 }
 
 export function NyxAgentAcknowledgementCard({
@@ -34,16 +47,33 @@ export function NyxAgentAcknowledgementCard({
   readonly acknowledgement: NyxAgentAcknowledgement;
   readonly accessMode?: NyxAgentAccessMode;
   readonly deciding: boolean;
-  readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
+  readonly onDecision: (
+    choice: "allow" | "deny",
+    acceptReducedScope?: boolean,
+  ) => Promise<unknown>;
 }) {
+  const { t } = useAppTranslation();
   const [error, setError] = useState<string>();
-  const confirmationsBypassed = accessMode === "autopilot" && acknowledgement.decider === "user";
-  if (acknowledgement.authored_skill) return <AuthoredSkillCard acknowledgement={acknowledgement} confirmationsBypassed={confirmationsBypassed} deciding={deciding} onDecision={onDecision} />;
+  const confirmationsBypassed =
+    accessMode === "autopilot" && acknowledgement.decider === "user";
+  if (acknowledgement.authored_skill)
+    return (
+      <AuthoredSkillCard
+        acknowledgement={acknowledgement}
+        confirmationsBypassed={confirmationsBypassed}
+        deciding={deciding}
+        onDecision={onDecision}
+      />
+    );
   const label = title(acknowledgement);
   const routed = acknowledgement.decider === "orchestrator";
   if (acknowledgement.status !== "pending" || confirmationsBypassed) {
-    return <DecisionReceipt acknowledgement={acknowledgement}
-      retired={confirmationsBypassed && acknowledgement.status === "pending"} />;
+    return (
+      <DecisionReceipt
+        acknowledgement={acknowledgement}
+        retired={confirmationsBypassed && acknowledgement.status === "pending"}
+      />
+    );
   }
 
   async function decide(choice: "allow" | "deny") {
@@ -51,7 +81,11 @@ export function NyxAgentAcknowledgementCard({
     try {
       await onDecision(choice);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not save your decision. Try again.");
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : t("Could not save your decision. Try again."),
+      );
     }
   }
 
@@ -62,7 +96,7 @@ export function NyxAgentAcknowledgementCard({
     >
       {routed ? (
         <p className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
-          Requested from NyxBot
+          {t("Requested from NyxBot")}
         </p>
       ) : null}
       <p className="text-13 font-medium text-foreground">{label}</p>
@@ -77,7 +111,7 @@ export function NyxAgentAcknowledgementCard({
                   : "font-medium text-foreground"
             }
           >
-            {ACTION_RISK_LABEL[acknowledgement.confirmation.risk]}
+            {t(ACTION_RISK_LABEL[acknowledgement.confirmation.risk])}
           </span>
           {" · "}
           {confirmationReason(acknowledgement.confirmation)}
@@ -96,29 +130,53 @@ export function NyxAgentAcknowledgementCard({
       <p className="text-12 text-muted-foreground">
         {acknowledgement.kind === "skills"
           ? routed
-            ? "Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode."
-            : "Allowing records your decision only; it attaches nothing by itself. Add the skill in the agent's Skills editor."
+            ? t(
+                "Allowing this proposal asks NyxBot to resolve the exact version. Adding or re-pinning the skill follows NyxBot's permission mode.",
+              )
+            : t(
+                "Allowing records your decision only; it attaches nothing by itself. Add the skill in the agent's Skills editor.",
+              )
           : acknowledgement.kind === "operations"
-          ? "This changes the specialist's operations on every thread. Widening follows NyxBot's permission mode."
-          : routed
-          ? "NyxBot decides this specialist's request against what you asked for. " +
-            "You can decide it here instead; the agent resumes on its own."
-          : acknowledgement.kind === "action"
-            ? "This confirmation applies once, to this action only."
-            : "This permission applies to this chat only."}
-        {routed ? "" : " Allowing lets the assistant continue as soon as it finishes its reply."}
+            ? t(
+                "This changes the specialist's operations on every thread. Widening follows NyxBot's permission mode.",
+              )
+            : routed
+              ? t(
+                  "NyxBot decides this specialist's request against what you asked for.",
+                ) +
+                " " +
+                t(
+                  "You can decide it here instead; the agent resumes on its own.",
+                )
+              : acknowledgement.kind === "action"
+                ? t("This confirmation applies once, to this action only.")
+                : t("This permission applies to this chat only.")}
+        {routed
+          ? ""
+          : " " +
+            t(
+              "Allowing lets the assistant continue as soon as it finishes its reply.",
+            )}
       </p>
       {error ? (
         <p role="alert" className="text-12 text-destructive">
-          {error}
+          {translateUi(error)}
         </p>
       ) : null}
       <div className="flex justify-end gap-2">
-        <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>
-          Deny
+        <Button
+          variant="outline"
+          disabled={deciding}
+          onClick={() => void decide("deny")}
+        >
+          {t("Deny")}
         </Button>
-        <Button variant="primary" disabled={deciding} onClick={() => void decide("allow")}>
-          Allow
+        <Button
+          variant="primary"
+          disabled={deciding}
+          onClick={() => void decide("allow")}
+        >
+          {t("Allow")}
         </Button>
       </div>
     </section>

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, RotateCcw, X } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
@@ -61,6 +62,7 @@ const ERROR_COPY = {
 } as const;
 
 export function OAuthCompletePage() {
+  const { t } = useUiTranslation();
   const [search] = useState(() =>
     oauthCompletionSearchSchema.parse(
       Object.fromEntries(new URLSearchParams(window.location.search)),
@@ -168,14 +170,10 @@ export function OAuthCompletePage() {
 
   if (!validCompletion) {
     return (
-      <OAuthResultShell icon="neutral" title="Nothing to complete">
-        <p>
-          This window isn't part of an active connection attempt. If you were
-          connecting a service, its status appears in your NyxID chat — this
-          window can be closed.
-        </p>
+      <OAuthResultShell icon="neutral" title={t("Nothing to complete")}>
+        <p>{t("This window isn't part of an active connection attempt. If you were connecting a service, its status appears in your NyxID chat — this window can be closed.")}</p>
         <Button asChild className="mt-5 w-full">
-          <a href="/">Back to NyxID</a>
+          <a href="/">{t("Back to NyxID")}</a>
         </Button>
       </OAuthResultShell>
     );
@@ -196,24 +194,20 @@ export function OAuthCompletePage() {
   return (
     <OAuthResultShell
       icon={success ? "neutral" : "error"}
-      title={!success && serviceName ? `${serviceName}: ${title}` : title}
+      title={!success && serviceName ? t("{{serviceName}}: {{title}}", { serviceName: serviceName, title: title }) : title}
     >
       <p role="status" aria-live="polite">
         {success
           ? serviceName
-            ? `Return to your NyxID chat — the ${serviceName} connection's status appears there and updates automatically.`
-            : "Return to NyxID while the connection is verified."
-          : (errorCopy?.[1] ?? "Return to NyxID and try again.")}
+            ? t("Return to your NyxID chat — the {{serviceName}} connection's status appears there and updates automatically.", { serviceName: serviceName })
+            : t("Return to NyxID while the connection is verified.")
+          : (errorCopy?.[1] ?? t("Return to NyxID and try again."))}
       </p>
       {!success && retryable && expectedProviderOrigin === null ? (
-        <div className="mt-5 rounded-md border border-border bg-muted/40 px-3 py-2 text-12 text-foreground">
-          Return to your NyxID tab and start the connection again there.
-        </div>
+        <div className="mt-5 rounded-md border border-border bg-muted/40 px-3 py-2 text-12 text-foreground">{t("Return to your NyxID tab and start the connection again there.")}</div>
       ) : null}
       {manualReturn ? (
-        <div className="mt-5 rounded-md border border-border bg-muted/40 px-3 py-2 text-12 text-foreground">
-          Return to your NyxID tab to continue. You can close this window.
-        </div>
+        <div className="mt-5 rounded-md border border-border bg-muted/40 px-3 py-2 text-12 text-foreground">{t("Return to your NyxID tab to continue. You can close this window.")}</div>
       ) : (
         <div className="mt-5 flex flex-col gap-2">
           {success ? (
@@ -221,17 +215,14 @@ export function OAuthCompletePage() {
               autoFocus
               disabled={pendingAction !== null}
               onClick={() => sendAction("view_result")}
-            >
-              View connection
-            </Button>
+            >{t("View connection")}</Button>
           ) : canRetryHere ? (
             <Button
               autoFocus
               disabled={pendingAction !== null}
               onClick={() => sendAction("retry")}
             >
-              <RotateCcw /> Try again
-            </Button>
+              <RotateCcw />{t(" Try again")}</Button>
           ) : null}
           <Button
             variant="ghost"
@@ -242,11 +233,10 @@ export function OAuthCompletePage() {
             }}
           >
             {success ? (
-              "Stay here"
+              t("Stay here")
             ) : (
               <>
-                <X /> Close
-              </>
+                <X />{t(" Close")}</>
             )}
           </Button>
         </div>

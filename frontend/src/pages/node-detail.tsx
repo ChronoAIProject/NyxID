@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { MachineSummary } from "@/components/shared/machine-summary";
 import { useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
@@ -97,6 +100,7 @@ const NODE_CREDENTIAL_PUSH_DEFAULT_VALUES = {
 } satisfies PushNodeCredentialFormInput;
 
 export function NodeDetailPage() {
+  const { t } = useUiTranslation();
   const { nodeId } = useParams({ strict: false }) as { nodeId: string };
   const navigate = useNavigate();
 
@@ -151,11 +155,11 @@ export function NodeDetailPage() {
   async function handleDelete() {
     try {
       await deleteMutation.mutateAsync(nodeId);
-      toast.success("Node deleted");
+      toast.success(translateUi("Node deleted"));
       void navigate({ to: "/nodes" });
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to delete node",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to delete node"),
       );
     } finally {
       setShowDeleteDialog(false);
@@ -169,10 +173,10 @@ export function NodeDetailPage() {
         auth_token: result.auth_token,
         signing_secret: result.signing_secret,
       });
-      toast.success("Node credentials rotated");
+      toast.success(translateUi("Node credentials rotated"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to rotate token",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to rotate token"),
       );
       setShowRotateDialog(false);
     }
@@ -186,7 +190,7 @@ export function NodeDetailPage() {
         data: { new_owner_user_id: transferTargetOwnerId },
       });
       toast.success(
-        `Node transferred to ${nodeOwnerLabel(result.new_owner, currentUserId)}`,
+        translateUi("Node transferred to {{value}}", { value: nodeOwnerLabel(result.new_owner, currentUserId) }),
       );
       setShowTransferDialog(false);
       setTransferOwnerId(null);
@@ -194,7 +198,7 @@ export function NodeDetailPage() {
       void navigate({ to: "/nodes" });
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to transfer node",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to transfer node"),
       );
     }
   }
@@ -202,7 +206,7 @@ export function NodeDetailPage() {
   async function handlePushCredential(data: PushNodeCredentialFormData) {
     try {
       const created = await pushCredentialMutation.mutateAsync(data);
-      toast.success("Credential push created");
+      toast.success(translateUi("Credential push created"));
       credentialPushForm.reset(NODE_CREDENTIAL_PUSH_DEFAULT_VALUES);
       window.location.assign(
         await buildStandaloneCredentialAcceptUrl(
@@ -213,7 +217,7 @@ export function NodeDetailPage() {
       );
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to push credential",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to push credential"),
       );
     }
   }
@@ -221,12 +225,12 @@ export function NodeDetailPage() {
   async function handleCancelPendingCredential(pendingCredentialId: string) {
     try {
       await cancelPendingCredentialMutation.mutateAsync(pendingCredentialId);
-      toast.success("Pending credential canceled");
+      toast.success(translateUi("Pending credential canceled"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError
+        translateErrorMessage(err instanceof ApiError
           ? err.message
-          : "Failed to cancel pending credential",
+          : "Failed to cancel pending credential"),
       );
     }
   }
@@ -243,12 +247,12 @@ export function NodeDetailPage() {
   if (error || !node) {
     return (
       <div className="space-y-8">
-        <PageHeader title="Node Not Found" />
+        <PageHeader title={t("Node Not Found")} />
         <ErrorBanner
           message={
             error instanceof ApiError
               ? error.message
-              : "Node not found or failed to load."
+              : t("Node not found or failed to load.")
           }
           onRetry={refetch}
         />
@@ -262,8 +266,8 @@ export function NodeDetailPage() {
         title={node.name}
         description={
           canManage
-            ? "Manage node settings and credentials."
-            : "View node status and metrics."
+            ? t("Manage node settings and credentials.")
+            : t("View node status and metrics.")
         }
         actions={
           canManage ? (
@@ -279,9 +283,7 @@ export function NodeDetailPage() {
               >
                 <ButtonIcon>
                   <ArrowRightLeft className="h-3 w-3" />
-                </ButtonIcon>
-                Transfer
-              </Button>
+                </ButtonIcon>{t("Transfer")}</Button>
               <Button
                 variant="outline"
                 className="text-text-tertiary hover:text-muted-foreground"
@@ -289,18 +291,14 @@ export function NodeDetailPage() {
               >
                 <ButtonIcon>
                   <KeyRound className="h-3 w-3" />
-                </ButtonIcon>
-                Rotate Credentials
-              </Button>
+                </ButtonIcon>{t("Rotate Credentials")}</Button>
               <Button
                 variant="destructive"
                 onClick={() => setShowDeleteDialog(true)}
               >
                 <ButtonIcon variant="destructive">
                   <Trash2 className="h-3 w-3 text-destructive" />
-                </ButtonIcon>
-                Delete
-              </Button>
+                </ButtonIcon>{t("Delete")}</Button>
             </div>
           ) : undefined
         }
@@ -308,26 +306,26 @@ export function NodeDetailPage() {
 
       {node.machine ? <MachineSummary node={node} /> : null}
       {/* Node Info */}
-      <DetailSection title="Node Information">
+      <DetailSection title={t("Node Information")}>
         <DetailRow
-          label="Owner"
+          label={t("Owner")}
           value={nodeOwnerLabel(node.owner, currentUserId)}
         />
         <div className="flex items-center justify-between px-5 py-3 text-13">
-          <span className="text-muted-foreground">Status</span>
+          <span className="text-muted-foreground">{t("Status")}</span>
           <NodeStatusBadge
             status={node.status}
             isConnected={node.is_connected}
           />
         </div>
-        <DetailRow label="Created" value={formatDate(node.created_at)} />
+        <DetailRow label={t("Created")} value={formatDate(node.created_at)} />
         <DetailRow
-          label="Last Heartbeat"
+          label={t("Last Heartbeat")}
           value={formatRelativeTime(node.last_heartbeat_at)}
         />
         {node.dispatch && (
           <DetailRow
-            label="Proxy Dispatch"
+            label={t("Proxy Dispatch")}
             value={
               node.dispatch.dispatchable
                 ? "Ready"
@@ -337,7 +335,7 @@ export function NodeDetailPage() {
         )}
         {node.capabilities && (
           <DetailRow
-            label="Capabilities"
+            label={t("Capabilities")}
             value={
               node.capabilities_resolved === false
                 ? "Pending status update"
@@ -356,29 +354,29 @@ export function NodeDetailPage() {
         )}
         {node.connected_at && (
           <DetailRow
-            label="Connected Since"
+            label={t("Connected Since")}
             value={formatRelativeTime(node.connected_at)}
           />
         )}
         {node.metadata?.agent_version && (
           <DetailRow
-            label="Agent Version"
+            label={t("Agent Version")}
             value={node.metadata.agent_version}
           />
         )}
         {node.metadata?.os && (
           <DetailRow
-            label="OS"
+            label={t("OS")}
             value={`${node.metadata.os}${node.metadata.arch ? ` (${node.metadata.arch})` : ""}`}
           />
         )}
         {node.metadata?.ip_address && (
-          <DetailRow label="IP Address" value={node.metadata.ip_address} />
+          <DetailRow label={t("IP Address")} value={node.metadata.ip_address} />
         )}
       </DetailSection>
 
       {/* Shared with */}
-      <DetailSection title="Shared with">
+      <DetailSection title={t("Shared with")}>
         {adminsLoading ? (
           <div className="px-5 py-3 space-y-2">
             <Skeleton className="h-8 w-full" />
@@ -398,20 +396,18 @@ export function NodeDetailPage() {
                   </span>
                 </div>
                 <Badge variant="secondary">
-                  {admin.role === "owner" ? "Owner" : "Admin"}
+                  {admin.role === "owner" ? t("Owner") : t("Admin")}
                 </Badge>
               </div>
             ))}
           </>
         ) : (
-          <p className="px-5 py-3 text-12 text-muted-foreground">
-            No admins are currently listed for this node.
-          </p>
+          <p className="px-5 py-3 text-12 text-muted-foreground">{t("No admins are currently listed for this node.")}</p>
         )}
       </DetailSection>
 
       {/* Metrics */}
-      <DetailSection title="Metrics">
+      <DetailSection title={t("Metrics")}>
         {node.metrics && node.metrics.total_requests > 0 ? (
           <>
             <div className="grid grid-cols-2 gap-3 p-4 sm:grid-cols-4">
@@ -422,9 +418,7 @@ export function NodeDetailPage() {
                 >
                   {String(node.metrics.total_requests)}
                 </p>
-                <p className="text-11 text-muted-foreground mt-1">
-                  Total Requests
-                </p>
+                <p className="text-11 text-muted-foreground mt-1">{t("Total Requests")}</p>
               </div>
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
@@ -433,20 +427,15 @@ export function NodeDetailPage() {
                 >
                   {(node.metrics.success_rate * 100).toFixed(1)}%
                 </p>
-                <p className="text-11 text-muted-foreground mt-1">
-                  Success Rate
-                </p>
+                <p className="text-11 text-muted-foreground mt-1">{t("Success Rate")}</p>
               </div>
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
                   className="text-22 font-bold text-foreground"
                   style={{ letterSpacing: "-0.02em" }}
                 >
-                  {node.metrics.avg_latency_ms.toFixed(0)}ms
-                </p>
-                <p className="text-11 text-muted-foreground mt-1">
-                  Avg Latency
-                </p>
+                  {node.metrics.avg_latency_ms.toFixed(0)}{t("ms")}</p>
+                <p className="text-11 text-muted-foreground mt-1">{t("Avg Latency")}</p>
               </div>
               <div className="rounded-xl border border-border/50 bg-overlay p-4 text-center">
                 <p
@@ -455,15 +444,13 @@ export function NodeDetailPage() {
                 >
                   {String(node.metrics.error_count)}
                 </p>
-                <p className="text-11 text-muted-foreground mt-1">Errors</p>
+                <p className="text-11 text-muted-foreground mt-1">{t("Errors")}</p>
               </div>
             </div>
             {node.metrics.last_error && (
               <div className="mx-4 mb-4 rounded-xl bg-destructive/10 p-4">
                 <div className="flex items-center gap-2 text-xs font-medium text-destructive">
-                  <Activity className="h-3 w-3" />
-                  Last Error
-                  {node.metrics.last_error_at && (
+                  <Activity className="h-3 w-3" />{t("Last Error")}{node.metrics.last_error_at && (
                     <span className="font-normal text-muted-foreground">
                       {formatRelativeTime(node.metrics.last_error_at)}
                     </span>
@@ -476,7 +463,7 @@ export function NodeDetailPage() {
             )}
             {node.metrics.last_success_at && (
               <DetailRow
-                label="Last Successful Request"
+                label={t("Last Successful Request")}
                 value={
                   formatRelativeTime(node.metrics.last_success_at) ?? "Never"
                 }
@@ -486,17 +473,14 @@ export function NodeDetailPage() {
         ) : (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <SolarPanelIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">
-              No metrics recorded yet. Metrics will appear after the first proxy
-              request.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("No metrics recorded yet. Metrics will appear after the first proxy request.")}</p>
           </div>
         )}
       </DetailSection>
 
       {canManage && (
         <div className="space-y-6">
-          <DetailSection title="Push Credential to Node">
+          <DetailSection title={t("Push Credential to Node")}>
             <Form {...credentialPushForm}>
               <form
                 className="p-5 space-y-4"
@@ -506,19 +490,16 @@ export function NodeDetailPage() {
                   )
                 }
               >
-              <p className="text-12 text-muted-foreground">
-                Create pending credential metadata, then enter the secret on the
-                accept page for browser-side encryption.
-              </p>
+              <p className="text-12 text-muted-foreground">{t("Create pending credential metadata, then enter the secret on the accept page for browser-side encryption.")}</p>
               <div className="grid gap-4 md:grid-cols-2">
                 <FormField
                   control={credentialPushForm.control}
                   name="service_slug"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Service slug</FormLabel>
+                      <FormLabel>{t("Service slug")}</FormLabel>
                       <FormControl>
-                        <Input {...field} placeholder="openclaw" />
+                        <Input {...field} placeholder={"openclaw"} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -529,9 +510,9 @@ export function NodeDetailPage() {
                   name="field_name"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Field name</FormLabel>
+                      <FormLabel>{t("Field name")}</FormLabel>
                       <FormControl>
-                        <Input readOnly={credentialPushForm.watch("injection_method") === "ifttt-webhook"} {...field} placeholder="X-API-Key" />
+                        <Input readOnly={credentialPushForm.watch("injection_method") === "ifttt-webhook"} {...field} placeholder={"X-API-Key"} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -542,7 +523,7 @@ export function NodeDetailPage() {
                   name="injection_method"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Injection method</FormLabel>
+                      <FormLabel>{t("Injection method")}</FormLabel>
                       <Select
                         value={field.value}
                         onValueChange={(value) => {
@@ -572,14 +553,10 @@ export function NodeDetailPage() {
                           </SelectTrigger>
                         </FormControl>
                         <SelectContent>
-                          <SelectItem value="header">Header</SelectItem>
-                          <SelectItem value="query-param">
-                            Query param
-                          </SelectItem>
-                          <SelectItem value="path-prefix">
-                            Path prefix
-                          </SelectItem>
-                          <SelectItem value="ifttt-webhook">IFTTT Webhooks</SelectItem>
+                          <SelectItem value="header">{t("Header")}</SelectItem>
+                          <SelectItem value="query-param">{t("Query param")}</SelectItem>
+                          <SelectItem value="path-prefix">{t("Path prefix")}</SelectItem>
+                          <SelectItem value="ifttt-webhook">{t("IFTTT Webhooks")}</SelectItem>
                         </SelectContent>
                       </Select>
                       <FormMessage />
@@ -591,7 +568,7 @@ export function NodeDetailPage() {
                   name="target_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Target URL</FormLabel>
+                      <FormLabel>{t("Target URL")}</FormLabel>
                       <FormControl>
                         <Input
                           {...field}
@@ -608,12 +585,12 @@ export function NodeDetailPage() {
                   name="label"
                   render={({ field }) => (
                     <FormItem className="md:col-span-2">
-                      <FormLabel>Label</FormLabel>
+                      <FormLabel>{t("Label")}</FormLabel>
                       <FormControl>
                         <Input
                           {...field}
                           value={field.value ?? ""}
-                          placeholder="Production gateway"
+                          placeholder={t("Production gateway")}
                         />
                       </FormControl>
                       <FormMessage />
@@ -633,15 +610,13 @@ export function NodeDetailPage() {
                 >
                   <ButtonIcon variant="primary">
                     <Send className="h-3 w-3" />
-                  </ButtonIcon>
-                  Push
-                </Button>
+                  </ButtonIcon>{t("Push")}</Button>
               </div>
               </form>
             </Form>
           </DetailSection>
 
-          <DetailSection title="Pending Credentials">
+          <DetailSection title={t("Pending Credentials")}>
             {pendingCredentialsLoading ? (
               <div className="px-5 py-3 space-y-2">
                 <Skeleton className="h-10 w-full" />
@@ -650,21 +625,19 @@ export function NodeDetailPage() {
             ) : !pendingCredentials || pendingCredentials.length === 0 ? (
               <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
                 <SwitchIcon className="h-48 w-48 text-muted-foreground" />
-                <p className="text-12 text-muted-foreground">
-                  No pending credentials are waiting for this node.
-                </p>
+                <p className="text-12 text-muted-foreground">{t("No pending credentials are waiting for this node.")}</p>
               </div>
             ) : (
               <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Slug</TableHead>
-                      <TableHead>Method</TableHead>
-                      <TableHead>Field</TableHead>
-                      <TableHead>Age</TableHead>
-                      <TableHead>Target</TableHead>
-                      <TableHead className="w-[96px]">Actions</TableHead>
+                      <TableHead>{t("Slug")}</TableHead>
+                      <TableHead>{t("Method")}</TableHead>
+                      <TableHead>{t("Field")}</TableHead>
+                      <TableHead>{t("Age")}</TableHead>
+                      <TableHead>{t("Target")}</TableHead>
+                      <TableHead className="w-[96px]">{t("Actions")}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -708,9 +681,7 @@ export function NodeDetailPage() {
                                   `/nodes/${nodeId}`,
                                 ).then((url) => window.location.assign(url));
                               }}
-                            >
-                              Accept
-                            </Button>
+                            >{t("Accept")}</Button>
                             <Button
                               variant="ghost"
                               className="text-muted-foreground hover:text-destructive"
@@ -722,9 +693,7 @@ export function NodeDetailPage() {
                               isLoading={
                                 cancelPendingCredentialMutation.isPending
                               }
-                            >
-                              Cancel
-                            </Button>
+                            >{t("Cancel")}</Button>
                           </div>
                         </TableCell>
                       </TableRow>
@@ -750,39 +719,29 @@ export function NodeDetailPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Transfer Ownership</DialogTitle>
-            <DialogDescription>
-              Move &quot;{node.name}&quot; to another owner. Existing node
-              credentials keep working, but service routing is detached where
-              ownership no longer matches.
-            </DialogDescription>
+            <DialogTitle>{t("Transfer Ownership")}</DialogTitle>
+            <DialogDescription>{t("Move \"")}{node.name}{t("\" to another owner. Existing node credentials keep working, but service routing is detached where ownership no longer matches.")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <p className="text-12 font-medium text-foreground">
-                Destination owner
-              </p>
+              <p className="text-12 font-medium text-foreground">{t("Destination owner")}</p>
               <OrgScopeSelect
                 value={transferOwnerId}
                 onChange={(value) => {
                   setTransferOwnerId(value);
                   setTransferConfirmed(false);
                 }}
-                label="Destination owner"
+                label={t("Destination owner")}
               />
             </div>
             <div className="rounded-lg border border-border bg-muted/40 p-3 text-12">
-              <p className="font-medium text-foreground">Transfer preview</p>
+              <p className="font-medium text-foreground">{t("Transfer preview")}</p>
               <ul className="mt-2 space-y-1 text-muted-foreground">
                 <li>
-                  {String(transferServiceDetachCount)} AI Services will lose
-                  their node routing.
-                </li>
+                  {String(transferServiceDetachCount)}{t(" AI Services will lose their node routing.")}</li>
               </ul>
               {transferIsNoop && (
-                <p className="mt-2 text-xs text-destructive">
-                  Choose a different owner before transferring.
-                </p>
+                <p className="mt-2 text-xs text-destructive">{t("Choose a different owner before transferring.")}</p>
               )}
             </div>
             <label className="flex items-start gap-2 text-12 text-muted-foreground">
@@ -792,10 +751,7 @@ export function NodeDetailPage() {
                   setTransferConfirmed(checked === true)
                 }
               />
-              <span>
-                I understand that cross-owner AI Services will stop routing
-                through this node.
-              </span>
+              <span>{t("I understand that cross-owner AI Services will stop routing through this node.")}</span>
             </label>
           </div>
           <DialogFooter>
@@ -806,9 +762,7 @@ export function NodeDetailPage() {
                 setTransferOwnerId(null);
                 setTransferConfirmed(false);
               }}
-            >
-              Cancel
-            </Button>
+            >{t("Cancel")}</Button>
             <Button
               variant="primary"
               onClick={() => void handleTransferNode()}
@@ -816,9 +770,7 @@ export function NodeDetailPage() {
                 !transferConfirmed || transferIsNoop || !transferTargetOwnerId
               }
               isLoading={transferMutation.isPending}
-            >
-              Transfer
-            </Button>
+            >{t("Transfer")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -827,27 +779,19 @@ export function NodeDetailPage() {
       <Dialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete Node</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to delete &quot;{node.name}&quot;? This will
-              disconnect the node and detach any AI Services routed through it.
-              This action cannot be undone.
-            </DialogDescription>
+            <DialogTitle>{t("Delete Node")}</DialogTitle>
+            <DialogDescription>{t("Are you sure you want to delete \"")}{node.name}{t("\"? This will disconnect the node and detach any AI Services routed through it. This action cannot be undone.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button
               variant="outline"
               onClick={() => setShowDeleteDialog(false)}
-            >
-              Cancel
-            </Button>
+            >{t("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
-            >
-              Delete
-            </Button>
+            >{t("Delete")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -866,26 +810,20 @@ export function NodeDetailPage() {
           {rotatedCredentials ? (
             <>
               <DialogHeader>
-                <DialogTitle>Node Credentials Rotated</DialogTitle>
-                <DialogDescription>
-                  Copy both values now. The old credentials have been
-                  invalidated immediately, and these secrets will not be shown
-                  again.
-                </DialogDescription>
+                <DialogTitle>{t("Node Credentials Rotated")}</DialogTitle>
+                <DialogDescription>{t("Copy both values now. The old credentials have been invalidated immediately, and these secrets will not be shown again.")}</DialogDescription>
               </DialogHeader>
               <div className="space-y-3">
                 <CopyableField
-                  label="New Auth Token"
+                  label={t("New Auth Token")}
                   value={rotatedCredentials.auth_token}
                 />
                 <CopyableField
-                  label="New Signing Secret"
+                  label={t("New Signing Secret")}
                   value={rotatedCredentials.signing_secret}
                 />
                 <div className="rounded-lg bg-muted p-3">
-                  <p className="mb-1 text-xs font-medium text-text-tertiary">
-                    Run on your node
-                  </p>
+                  <p className="mb-1 text-xs font-medium text-text-tertiary">{t("Run on your node")}</p>
                   <code className="text-xs text-foreground break-all">
                     nyxid node rekey --auth-token{" "}
                     {rotatedCredentials.auth_token} --signing-secret{" "}
@@ -893,10 +831,7 @@ export function NodeDetailPage() {
                   </code>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  <strong>Lost it?</strong> If you don&apos;t copy this now,
-                  you&apos;ll need to rotate the credential to get a new one.
-                  (Old value stops working immediately on rotate.)
-                </p>
+                  <strong>{t("Lost it?")}</strong>{t(" If you don't copy this now, you'll need to rotate the credential to get a new one. (Old value stops working immediately on rotate.)")}</p>
               </div>
               <DialogFooter>
                 <Button
@@ -905,35 +840,25 @@ export function NodeDetailPage() {
                     setShowRotateDialog(false);
                     setRotatedCredentials(null);
                   }}
-                >
-                  Done
-                </Button>
+                >{t("Done")}</Button>
               </DialogFooter>
             </>
           ) : (
             <>
               <DialogHeader>
-                <DialogTitle>Rotate Node Credentials</DialogTitle>
-                <DialogDescription>
-                  This will generate a new auth token and signing secret, then
-                  invalidate the current credentials immediately. The node must
-                  be updated and restarted with the new values.
-                </DialogDescription>
+                <DialogTitle>{t("Rotate Node Credentials")}</DialogTitle>
+                <DialogDescription>{t("This will generate a new auth token and signing secret, then invalidate the current credentials immediately. The node must be updated and restarted with the new values.")}</DialogDescription>
               </DialogHeader>
               <DialogFooter>
                 <Button
                   variant="outline"
                   onClick={() => setShowRotateDialog(false)}
-                >
-                  Cancel
-                </Button>
+                >{t("Cancel")}</Button>
                 <Button
                   variant="primary"
                   onClick={() => void handleRotateToken()}
                   isLoading={rotateMutation.isPending}
-                >
-                  Rotate Token
-                </Button>
+                >{t("Rotate Token")}</Button>
               </DialogFooter>
             </>
           )}

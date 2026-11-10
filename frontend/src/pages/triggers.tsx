@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -101,20 +104,20 @@ function titleCase(value: string): string {
 }
 
 function deliveryLabel(trigger: TriggerResponse): string {
-  if (trigger.delivery.type === "assistant") return "NyxBot / specialist";
+  if (trigger.delivery.type === "assistant") return translateUi("NyxBot / specialist");
   return trigger.delivery.type === "agent"
-    ? "Agent"
+    ? translateUi("Agent")
     : trigger.delivery.type === "webhook"
       ? "Webhook"
-      : "Notification";
+      : translateUi("Notification");
 }
 
 function verificationLabel(trigger: TriggerResponse): string {
-  if (trigger.verification.mode === "schedule") return "Scheduled";
+  if (trigger.verification.mode === "schedule") return translateUi("Scheduled");
   if (trigger.verification.mode === "hmac_sha256") return "HMAC-SHA256";
   return trigger.verification.location === "bearer"
-    ? "Bearer token"
-    : "Query token";
+    ? translateUi("Bearer token")
+    : translateUi("Query token");
 }
 
 function TriggerActions({
@@ -130,6 +133,7 @@ function TriggerActions({
   readonly onToggle: () => void;
   readonly onDelete: () => void;
 }) {
+  const { t } = useUiTranslation();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -138,31 +142,25 @@ function TriggerActions({
           variant="ghost"
           size="icon"
           className="h-7 w-7"
-          aria-label={`More actions for ${trigger.label}`}
+          aria-label={t("More actions for {{label}}", { label: trigger.label })}
         >
           <MoreVertical className="h-3.5 w-3.5" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuItem onClick={onView}>
-          <Eye />
-          View details
-        </DropdownMenuItem>
+          <Eye />{t("View details")}</DropdownMenuItem>
         <DropdownMenuItem onClick={onRotate}>
-          <RotateCw />
-          Rotate secret
-        </DropdownMenuItem>
+          <RotateCw />{t("Rotate secret")}</DropdownMenuItem>
         <DropdownMenuItem onClick={onToggle}>
           <Power />
-          {trigger.status === "active" ? "Disable" : "Enable"}
+          {trigger.status === "active" ? t("Disable") : t("Enable")}
         </DropdownMenuItem>
         <DropdownMenuItem
           className="text-destructive focus:text-destructive"
           onClick={onDelete}
         >
-          <Trash2 />
-          Delete
-        </DropdownMenuItem>
+          <Trash2 />{t("Delete")}</DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -177,47 +175,46 @@ function TriggerDetail({
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useUiTranslation();
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
         <SheetHeader>
           <SheetTitle className="text-15">{trigger?.label}</SheetTitle>
-          <SheetDescription>
-            Ingress verification and delivery configuration.
-          </SheetDescription>
+          <SheetDescription>{t("Ingress verification and delivery configuration.")}</SheetDescription>
         </SheetHeader>
         {trigger && (
           <div className="mt-6 space-y-4">
-            <DetailSection title="Trigger">
+            <DetailSection title={t("Trigger")}>
               <DetailRow
-                label="Status"
+                label={t("Status")}
                 value={titleCase(trigger.status)}
                 badge
               />
               <DetailRow
-                label="Delivery"
+                label={t("Delivery")}
                 value={deliveryLabel(trigger)}
                 badge
               />
               <DetailRow
-                label="Verification"
+                label={t("Verification")}
                 value={verificationLabel(trigger)}
               />
               <DetailRow
-                label="Inbound URL"
+                label={t("Inbound URL")}
                 value={trigger.inbound_url ?? "No inbound URL"}
                 copyable
                 mono
               />
             </DetailSection>
-            <DetailSection title="Metadata">
-              <DetailRow label="Trigger ID" value={trigger.id} copyable mono />
+            <DetailSection title={t("Metadata")}>
+              <DetailRow label={t("Trigger ID")} value={trigger.id} copyable mono />
               <DetailRow
-                label="Created"
+                label={t("Created")}
                 value={formatDateTime(trigger.created_at)}
               />
               <DetailRow
-                label="Updated"
+                label={t("Updated")}
                 value={formatDateTime(trigger.updated_at)}
               />
             </DetailSection>
@@ -237,6 +234,7 @@ function TriggerCreateDialog({
   readonly onOpenChange: (open: boolean) => void;
   readonly onCreated: (values: readonly OneTimeSecretValue[]) => void;
 }) {
+  const { t } = useUiTranslation();
   const createMutation = useCreateTrigger();
   const form = useAppForm<TriggerForm>({
     resolver: zodResolver(triggerFormSchema),
@@ -264,10 +262,10 @@ function TriggerCreateDialog({
       onOpenChange(false);
       form.reset(TRIGGER_DEFAULT_VALUES);
       onCreated(oneTimeValues);
-      toast.success("Trigger created");
+      toast.success(translateUi("Trigger created"));
     } catch (error) {
       toast.error(
-        error instanceof ApiError ? error.message : "Failed to create trigger",
+        translateErrorMessage(error instanceof ApiError ? error.message : "Failed to create trigger"),
       );
     }
   }
@@ -281,10 +279,8 @@ function TriggerCreateDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Create Trigger</DialogTitle>
-          <DialogDescription>
-            Verify an inbound event and choose where NyxID should deliver it.
-          </DialogDescription>
+          <DialogTitle>{t("Create Trigger")}</DialogTitle>
+          <DialogDescription>{t("Verify an inbound event and choose where NyxID should deliver it.")}</DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form className="space-y-4" onSubmit={form.handleSubmit(create)}>
@@ -293,9 +289,9 @@ function TriggerCreateDialog({
               name="label"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Label</FormLabel>
+                  <FormLabel>{t("Label")}</FormLabel>
                   <FormControl>
-                    <Input {...field} placeholder="Repository activity" />
+                    <Input {...field} placeholder={t("Repository activity")} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -306,7 +302,7 @@ function TriggerCreateDialog({
               name="verification_mode"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Verification</FormLabel>
+                  <FormLabel>{t("Verification")}</FormLabel>
                   <Select value={field.value} onValueChange={field.onChange}>
                     <FormControl>
                       <SelectTrigger>
@@ -314,9 +310,9 @@ function TriggerCreateDialog({
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      <SelectItem value="bearer">Bearer token</SelectItem>
-                      <SelectItem value="query">Query token</SelectItem>
-                      <SelectItem value="hmac">HMAC-SHA256</SelectItem>
+                      <SelectItem value="bearer">{t("Bearer token")}</SelectItem>
+                      <SelectItem value="query">{t("Query token")}</SelectItem>
+                      <SelectItem value="hmac">{t("HMAC-SHA256")}</SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -329,9 +325,9 @@ function TriggerCreateDialog({
                 name="signature_header"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Signature Header</FormLabel>
+                    <FormLabel>{t("Signature Header")}</FormLabel>
                     <FormControl>
-                      <Input {...field} placeholder="X-Hub-Signature-256" />
+                      <Input {...field} placeholder={"X-Hub-Signature-256"} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -343,7 +339,7 @@ function TriggerCreateDialog({
               name="delivery_type"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Delivery Target</FormLabel>
+                  <FormLabel>{t("Delivery Target")}</FormLabel>
                   <Select value={field.value} onValueChange={field.onChange}>
                     <FormControl>
                       <SelectTrigger>
@@ -351,9 +347,9 @@ function TriggerCreateDialog({
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      <SelectItem value="notification">Notification</SelectItem>
-                      <SelectItem value="agent">Agent conversation</SelectItem>
-                      <SelectItem value="webhook">Webhook</SelectItem>
+                      <SelectItem value="notification">{t("Notification")}</SelectItem>
+                      <SelectItem value="agent">{t("Agent conversation")}</SelectItem>
+                      <SelectItem value="webhook">{t("Webhook")}</SelectItem>
                     </SelectContent>
                   </Select>
                   <FormMessage />
@@ -366,7 +362,7 @@ function TriggerCreateDialog({
                 name="webhook_url"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Webhook URL</FormLabel>
+                    <FormLabel>{t("Webhook URL")}</FormLabel>
                     <FormControl>
                       <Input
                         {...field}
@@ -385,9 +381,9 @@ function TriggerCreateDialog({
                 name="conversation_id"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Conversation ID</FormLabel>
+                    <FormLabel>{t("Conversation ID")}</FormLabel>
                     <FormControl>
-                      <Input {...field} placeholder="conversation-id" />
+                      <Input {...field} placeholder={"conversation-id"} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -399,9 +395,7 @@ function TriggerCreateDialog({
                 type="button"
                 variant="outline"
                 onClick={() => handleOpenChange(false)}
-              >
-                Cancel
-              </Button>
+              >{t("Cancel")}</Button>
               <Button
                 type="submit"
                 variant="primary"
@@ -411,9 +405,7 @@ function TriggerCreateDialog({
                   createMutation.isPending
                 }
                 isLoading={createMutation.isPending}
-              >
-                Create
-              </Button>
+              >{t("Create")}</Button>
             </DialogFooter>
           </form>
         </Form>
@@ -423,6 +415,7 @@ function TriggerCreateDialog({
 }
 
 export function TriggersPage() {
+  const { t } = useUiTranslation();
   const triggersQuery = useTriggers();
   const updateMutation = useUpdateTrigger();
   const deleteMutation = useDeleteTrigger();
@@ -457,10 +450,10 @@ export function TriggersPage() {
     const status = trigger.status === "active" ? "disabled" : "active";
     try {
       await updateMutation.mutateAsync({ id: trigger.id, data: { status } });
-      toast.success(`Trigger ${status === "active" ? "enabled" : "disabled"}`);
+      toast.success(translateUi("Trigger {{value}}", { value: status === "active" ? "enabled" : "disabled" }));
     } catch (error) {
       toast.error(
-        error instanceof ApiError ? error.message : "Failed to update trigger",
+        translateErrorMessage(error instanceof ApiError ? error.message : "Failed to update trigger"),
       );
     }
   }
@@ -473,12 +466,12 @@ export function TriggersPage() {
       reveal("Save Rotated Trigger Secret", [
         { label: "Inbound Secret", value: response.secret },
       ]);
-      toast.success("Trigger secret rotated");
+      toast.success(translateUi("Trigger secret rotated"));
     } catch (error) {
       toast.error(
-        error instanceof ApiError
+        translateErrorMessage(error instanceof ApiError
           ? error.message
-          : "Failed to rotate trigger secret",
+          : "Failed to rotate trigger secret"),
       );
     }
   }
@@ -488,10 +481,10 @@ export function TriggersPage() {
     try {
       await deleteMutation.mutateAsync(deleteTarget.id);
       setDeleteTarget(null);
-      toast.success("Trigger deleted");
+      toast.success(translateUi("Trigger deleted"));
     } catch (error) {
       toast.error(
-        error instanceof ApiError ? error.message : "Failed to delete trigger",
+        translateErrorMessage(error instanceof ApiError ? error.message : "Failed to delete trigger"),
       );
     }
   }
@@ -509,15 +502,13 @@ export function TriggersPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Triggers"
-        description="Relay verified inbound events to agents, webhooks, or notifications."
+        title={t("Triggers")}
+        description={t("Relay verified inbound events to agents, webhooks, or notifications.")}
         actions={
           <>
-            <Link to="/assistant/automations" className="text-12 text-primary-text underline">
-              Automations
-            </Link>
+            <Link to="/assistant/automations" className="text-12 text-primary-text underline">{t("Automations")}</Link>
             <AddCtaButton
-              label="Create Trigger"
+              label={t("Create Trigger")}
               onClick={() => setCreateOpen(true)}
             />
           </>
@@ -531,14 +522,14 @@ export function TriggersPage() {
         </div>
       ) : triggersQuery.error ? (
         <ErrorBanner
-          message="Failed to load triggers."
+          message={t("Failed to load triggers.")}
           onRetry={() => void triggersQuery.refetch()}
         />
       ) : triggers.length === 0 ? (
         <TeachingEmptyState
           icon={DishAntennaIcon}
-          title="No triggers yet"
-          description="Create an authenticated ingress endpoint and choose where events should go."
+          title={t("No triggers yet")}
+          description={t("Create an authenticated ingress endpoint and choose where events should go.")}
           primaryCta={{
             label: "Create Your First Trigger",
             onClick: () => setCreateOpen(true),
@@ -574,8 +565,7 @@ export function TriggersPage() {
                         {deliveryLabel(trigger)}
                       </Badge>
                     </div>
-                    <p className="text-11 text-text-tertiary">
-                      Created {formatDateTime(trigger.created_at)}
+                    <p className="text-11 text-text-tertiary">{t("Created ")}{formatDateTime(trigger.created_at)}
                     </p>
                   </div>
                 </div>
@@ -587,11 +577,11 @@ export function TriggersPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Label</TableHead>
-                  <TableHead>Delivery</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Created</TableHead>
-                  <TableHead className="w-12 text-right">Actions</TableHead>
+                  <TableHead>{t("Label")}</TableHead>
+                  <TableHead>{t("Delivery")}</TableHead>
+                  <TableHead>{t("Status")}</TableHead>
+                  <TableHead>{t("Created")}</TableHead>
+                  <TableHead className="w-12 text-right">{t("Actions")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -640,7 +630,7 @@ export function TriggersPage() {
         open={secretOpen}
         onOpenChange={setSecretOpen}
         title={secretTitle}
-        description="These values are shown only once. Copy and store them securely now."
+        description={t("These values are shown only once. Copy and store them securely now.")}
         values={secretValues}
       />
 
@@ -652,22 +642,16 @@ export function TriggersPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Rotate trigger secret?</DialogTitle>
-            <DialogDescription>
-              The current inbound secret will stop working immediately.
-            </DialogDescription>
+            <DialogTitle>{t("Rotate trigger secret?")}</DialogTitle>
+            <DialogDescription>{t("The current inbound secret will stop working immediately.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRotateTarget(null)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setRotateTarget(null)}>{t("Cancel")}</Button>
             <Button
               variant="primary"
               isLoading={rotateMutation.isPending}
               onClick={() => void rotateSecret()}
-            >
-              Rotate Secret
-            </Button>
+            >{t("Rotate Secret")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -680,23 +664,16 @@ export function TriggersPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete trigger?</DialogTitle>
-            <DialogDescription>
-              The inbound URL and secret will stop accepting events. This action
-              cannot be undone.
-            </DialogDescription>
+            <DialogTitle>{t("Delete trigger?")}</DialogTitle>
+            <DialogDescription>{t("The inbound URL and secret will stop accepting events. This action cannot be undone.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>{t("Cancel")}</Button>
             <Button
               variant="destructive"
               isLoading={deleteMutation.isPending}
               onClick={() => void deleteTrigger()}
-            >
-              Delete Trigger
-            </Button>
+            >{t("Delete Trigger")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

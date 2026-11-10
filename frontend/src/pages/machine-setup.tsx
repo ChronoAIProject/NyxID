@@ -1,3 +1,5 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
 import { RemoteMachineCreate } from "@/components/machines/remote-machine-create";
 import { useVerifiedUpdaterImage } from "@/hooks/use-machines";
@@ -67,6 +69,7 @@ const states: Record<string, string> = {
 };
 
 export function MachineSetupPage() {
+  const { t } = useUiTranslation();
   const search = useSearch({ strict: false }) as {
     setup?: string;
     where?: "hosted";
@@ -168,19 +171,15 @@ export function MachineSetupPage() {
       data-ph-no-capture
     >
       <PageHeader
-        title="Add a machine"
+        title={t("Add a machine")}
         description={
           hosted
-            ? "Configure a personal NyxID hosted machine and review its billing and data policies."
-            : "Review the choices, then run one command on the machine."
+            ? t("Configure a personal NyxID hosted machine and review its billing and data policies.")
+            : t("Review the choices, then run one command on the machine.")
         }
       />
       {hosted ? (
-        <p className="rounded-lg border border-warning/30 bg-warning/5 p-4 text-12 text-muted-foreground">
-          Agents can run code and access this Machine’s workspace. Prompt
-          injection is possible. All authorized clients share the OS and
-          workspace; file roots do not isolate shell commands.
-        </p>
+        <p className="rounded-lg border border-warning/30 bg-warning/5 p-4 text-12 text-muted-foreground">{t("Agents can run code and access this Machine’s workspace. Prompt injection is possible. All authorized clients share the OS and workspace; file roots do not isolate shell commands.")}</p>
       ) : (
         <SetupSafety />
       )}
@@ -197,27 +196,19 @@ export function MachineSetupPage() {
             value="this_computer"
             disabled={locked}
             className="px-2 sm:px-3"
-          >
-            This computer
-          </TabsTrigger>
-          <TabsTrigger value="vm" disabled={locked} className="px-2 sm:px-3">
-            Remote VM
-          </TabsTrigger>
+          >{t("This computer")}</TabsTrigger>
+          <TabsTrigger value="vm" disabled={locked} className="px-2 sm:px-3">{t("Remote VM")}</TabsTrigger>
           <TabsTrigger
             value="docker"
             disabled={locked}
             className="px-2 sm:px-3"
-          >
-            Docker
-          </TabsTrigger>
+          >{t("Docker")}</TabsTrigger>
           {remoteAdmission && (
             <TabsTrigger
               value="hosted"
               disabled={locked}
               className="px-2 sm:px-3"
-            >
-              NyxID hosted
-            </TabsTrigger>
+            >{t("NyxID hosted")}</TabsTrigger>
           )}
         </TabsList>
       </Tabs>
@@ -238,13 +229,13 @@ export function MachineSetupPage() {
               name="owner_id"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Machine owner</FormLabel>
+                  <FormLabel>{t("Machine owner")}</FormLabel>
                   <FormControl>
                     <OrgScopeSelect
                       value={field.value ?? null}
                       onChange={field.onChange}
                       disabled={locked}
-                      label="Machine owner"
+                      label={t("Machine owner")}
                     />
                   </FormControl>
                   <FormMessage />
@@ -256,7 +247,7 @@ export function MachineSetupPage() {
               name="name"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Machine name</FormLabel>
+                  <FormLabel>{t("Machine name")}</FormLabel>
                   <FormControl>
                     <Input {...field} disabled={locked} autoComplete="off" />
                   </FormControl>
@@ -265,9 +256,7 @@ export function MachineSetupPage() {
               )}
             />
             <fieldset disabled={locked} className="space-y-3">
-              <legend className="mb-2 text-12 font-medium">
-                Enable on this machine
-              </legend>
+              <legend className="mb-2 text-12 font-medium">{t("Enable on this machine")}</legend>
               {(["shell", "files", "browser", "computer"] as const).map(
                 (capability) => (
                   <label
@@ -295,7 +284,7 @@ export function MachineSetupPage() {
               name="grant_to"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Select a specialist for this machine</FormLabel>
+                  <FormLabel>{t("Select a specialist for this machine")}</FormLabel>
                   <Select
                     value={field.value ?? "none"}
                     disabled={locked}
@@ -309,9 +298,7 @@ export function MachineSetupPage() {
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
-                      <SelectItem value="none">
-                        No specialist assignment
-                      </SelectItem>
+                      <SelectItem value="none">{t("No specialist assignment")}</SelectItem>
                       {agents.data?.agents
                         .filter(
                           (agent) =>
@@ -329,10 +316,7 @@ export function MachineSetupPage() {
                 </FormItem>
               )}
             />
-            <p className="text-12 text-muted-foreground">
-              Agent permissions are configured separately in agent settings. New
-              assignments start with no allowed capabilities.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("Agent permissions are configured separately in agent settings. New assignments start with no allowed capabilities.")}</p>
             <label className="flex items-start gap-2 text-12">
               <Checkbox
                 checked={form.watch("automatic_updates") ?? true}
@@ -341,30 +325,16 @@ export function MachineSetupPage() {
                   form.setValue("automatic_updates", value === true)
                 }
               />
-              <span>
-                Update automatically when idle (recommended). Updates wait for
-                work and desktop sessions to end, and notify you.
-              </span>
+              <span>{t("Update automatically when idle (recommended). Updates wait for work and desktop sessions to end, and notify you.")}</span>
             </label>
             {where === "docker" ? (
-              <p className="text-12 text-muted-foreground">
-                The command also installs a small updater companion. Its Docker
-                socket grants host-root access; only the node supervisor can
-                request an update, and the helper accepts only a release
-                version, verifies the official image attestation and restores
-                the previous container if reconnection fails. Your identity and
-                workspace volumes are preserved.
-              </p>
+              <p className="text-12 text-muted-foreground">{t("The command also installs a small updater companion. Its Docker socket grants host-root access; only the node supervisor can request an update, and the helper accepts only a release version, verifies the official image attestation and restores the previous container if reconnection fails. Your identity and workspace volumes are preserved.")}</p>
             ) : null}
             {where !== "docker" &&
             (capabilities.includes("computer") ||
               capabilities.includes("browser")) ? (
               <p className="text-12 text-muted-foreground">
-                {SINGLE_USER_WARNING} Saved-login typing starts off; allow it
-                later in Nodes settings. Setup asks once for administrator
-                access to install browser policies. On macOS, also allow Screen
-                Recording and Accessibility.
-              </p>
+                {SINGLE_USER_WARNING}{t(" Saved-login typing starts off; allow it later in Nodes settings. Setup asks once for administrator access to install browser policies. On macOS, also allow Screen Recording and Accessibility.")}</p>
             ) : null}
             {!locked ? (
               <Button
@@ -372,26 +342,21 @@ export function MachineSetupPage() {
                 variant="primary"
                 isLoading={issuing}
                 disabled={!capabilities.length || !form.watch("name")}
-              >
-                Create my setup command
-              </Button>
+              >{t("Create my setup command")}</Button>
             ) : null}
           </form>
         </Form>
       )}
       {!hosted && command ? (
         <div className="space-y-2">
-          <CopyableField label="Run on your machine" value={command} />
-          <p className="text-11 text-text-tertiary">
-            Single-use command, shown only here. Do not paste it into chat. It
-            expires in 15 minutes.
-          </p>
+          <CopyableField label={t("Run on your machine")} value={command} />
+          <p className="text-11 text-text-tertiary">{t("Single-use command, shown only here. Do not paste it into chat. It expires in 15 minutes.")}</p>
         </div>
       ) : null}
       {setup.data ? <SetupProgress setup={setup.data} /> : null}
       {error || setup.error ? (
         <p role="alert" className="text-12 text-destructive">
-          {error ?? setup.error?.message}
+          {translateUi(error ?? setup.error?.message ?? "")}
         </p>
       ) : null}
     </div>
@@ -399,6 +364,7 @@ export function MachineSetupPage() {
 }
 
 export function MachinePairPage() {
+  const { t } = useUiTranslation();
   const search = useSearch({ strict: false }) as { code?: string };
   const [code, setCode] = useState(search.code ?? "");
   const [details, setDetails] = useState<MachineSetup>();
@@ -418,8 +384,8 @@ export function MachinePairPage() {
   return (
     <div className="max-w-xl space-y-6">
       <PageHeader
-        title="Pair this machine"
-        description="Approve only a setup you started."
+        title={t("Pair this machine")}
+        description={t("Approve only a setup you started.")}
       />
       <form
         onSubmit={(event) => {
@@ -428,7 +394,7 @@ export function MachinePairPage() {
         className="flex gap-2"
       >
         <Input
-          aria-label="Pairing code"
+          aria-label={t("Pairing code")}
           value={code}
           maxLength={16}
           disabled={Boolean(decision.data) || preview.isPending}
@@ -441,20 +407,18 @@ export function MachinePairPage() {
           type="submit"
           isLoading={preview.isPending}
           disabled={!code || Boolean(decision.data)}
-        >
-          Review
-        </Button>
+        >{t("Review")}</Button>
       </form>
       {details ? (
         <div className="space-y-4 rounded-xl border border-border bg-card p-4 text-12">
           <dl className="grid grid-cols-2 gap-2">
-            <dt>Hostname</dt>
+            <dt>{t("Hostname")}</dt>
             <dd>{details.hostname}</dd>
-            <dt>Operating system</dt>
+            <dt>{t("Operating system")}</dt>
             <dd>{details.os}</dd>
-            <dt>IP address</dt>
+            <dt>{t("IP address")}</dt>
             <dd>{details.ip}</dd>
-            <dt>Requested access</dt>
+            <dt>{t("Requested access")}</dt>
             <dd>{details.choices.capabilities.join(", ")}</dd>
           </dl>
           <p className="text-muted-foreground">{MACHINE_SAFETY}</p>
@@ -464,10 +428,7 @@ export function MachinePairPage() {
               disabled={Boolean(decision.data)}
               onCheckedChange={(value) => setAutomatic(value === true)}
             />
-            <span>
-              Update automatically when idle (recommended). Waits for jobs,
-              turns and live desktop sessions to end, and notifies you.
-            </span>
+            <span>{t("Update automatically when idle (recommended). Waits for jobs, turns and live desktop sessions to end, and notifies you.")}</span>
           </label>
           {!decision.data ? (
             <>
@@ -475,38 +436,32 @@ export function MachinePairPage() {
                 <Checkbox
                   checked={confirmed}
                   onCheckedChange={(value) => setConfirmed(value === true)}
-                />
-                I started this setup and recognize this machine.
-              </label>
+                />{t("I started this setup and recognize this machine.")}</label>
               <div className="flex gap-2">
                 <Button
                   variant="primary"
                   disabled={!confirmed}
                   isLoading={decision.isPending}
                   onClick={() => void decide(true).catch(() => undefined)}
-                >
-                  Approve pairing
-                </Button>
+                >{t("Approve pairing")}</Button>
                 <Button
                   variant="destructive"
                   disabled={decision.isPending}
                   onClick={() => void decide(false).catch(() => undefined)}
-                >
-                  Decline
-                </Button>
+                >{t("Decline")}</Button>
               </div>
             </>
           ) : (
             <p role="status">
               {states[status.data?.status ?? decision.data.status] ??
-                "Waiting for the machine…"}
+                t("Waiting for the machine…")}
             </p>
           )}
         </div>
       ) : null}
       {preview.error || decision.error ? (
         <p role="alert" className="text-12 text-destructive">
-          {(preview.error ?? decision.error)?.message}
+          {translateUi((preview.error ?? decision.error)?.message ?? "")}
         </p>
       ) : null}
     </div>
@@ -514,6 +469,7 @@ export function MachinePairPage() {
 }
 
 function SetupSafety() {
+  const { t } = useUiTranslation();
   return (
     <div className="space-y-3">
       <p className="rounded-lg border border-warning/30 bg-warning/5 p-4 text-12 text-muted-foreground">
@@ -522,41 +478,31 @@ function SetupSafety() {
       <p className="text-12 text-muted-foreground">
         {SINGLE_USER_SHELL_WARNING}
       </p>
-      <p className="text-12 text-muted-foreground">
-        The Docker command downloads NyxID’s seccomp profile and passes
-        --security-opt seccomp to enable Chromium’s user-namespace sandbox. It
-        grants no additional container capabilities.
-      </p>
-      <p className="text-12 text-muted-foreground">
-        The image is pinned to this server’s release. After a server upgrade,
-        recreate the container with the matching image and the same identity and
-        workspace volumes to keep this machine connected.
-      </p>
+      <p className="text-12 text-muted-foreground">{t("The Docker command downloads NyxID’s seccomp profile and passes --security-opt seccomp to enable Chromium’s user-namespace sandbox. It grants no additional container capabilities.")}</p>
+      <p className="text-12 text-muted-foreground">{t("The image is pinned to this server’s release. After a server upgrade, recreate the container with the matching image and the same identity and workspace volumes to keep this machine connected.")}</p>
     </div>
   );
 }
 
 function SetupProgress({ setup }: { readonly setup: MachineSetup }) {
+  const { t } = useUiTranslation();
   return (
     <div
       role="status"
       className="space-y-2 rounded-xl border border-border p-4 text-12"
     >
-      <p>{states[setup.status] ?? "Waiting for setup…"}</p>
+      <p>{states[setup.status] ?? t("Waiting for setup…")}</p>
       {setup.machine ? (
-        <p>
-          Enabled:{" "}
+        <p>{t("Enabled:")}{" "}
           {(["shell", "files", "browser", "computer"] as const)
             .filter((c) => setup.machine?.[c])
             .join(", ")}
         </p>
       ) : null}
       {setup.conversation_id ? (
-        <Link to="/assistant" search={{ c: setup.conversation_id }}>
-          Back to NyxBot
-        </Link>
+        <Link to="/assistant" search={{ c: setup.conversation_id }}>{t("Back to NyxBot")}</Link>
       ) : (
-        <Link to="/nodes">View nodes</Link>
+        <Link to="/nodes">{t("View nodes")}</Link>
       )}
     </div>
   );

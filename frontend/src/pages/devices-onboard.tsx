@@ -1,3 +1,7 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -50,6 +54,7 @@ import {
 const PERSONAL_OWNER_VALUE = "__personal__";
 
 export function DevicesOnboardPage() {
+  const { t } = useUiTranslation();
   const onboardDevice = useOnboardDevice();
   const revokeOnboardDevice = useRevokeOnboardDevice();
   const { data: orgs, isLoading: isOrgsLoading } = useOrgs();
@@ -134,7 +139,7 @@ export function DevicesOnboardPage() {
           values.wifi_password,
         ),
       });
-      toast.success("Provisioning QR generated");
+      toast.success(translateUi("Provisioning QR generated"));
     } catch (error) {
       form.setError("root", { message: deviceOnboardErrorMessage(error) });
     }
@@ -145,9 +150,9 @@ export function DevicesOnboardPage() {
     try {
       await revokeOnboardDevice.mutateAsync(onboardedDevice.bootstrap_id);
       setOnboardedDevice(null);
-      toast.success("Provisioning QR revoked");
+      toast.success(translateUi("Provisioning QR revoked"));
     } catch (error) {
-      toast.error(deviceOnboardRevokeErrorMessage(error));
+      toast.error(translateErrorMessage(deviceOnboardRevokeErrorMessage(error)));
     }
   }
 
@@ -156,7 +161,7 @@ export function DevicesOnboardPage() {
       {onboardedDevice && qrDataUrl ? (
         <div className="hidden min-h-screen items-center justify-center bg-white p-8 print:flex">
           <img
-            alt="Device onboarding QR code"
+            alt={t("Device onboarding QR code")}
             className="h-auto w-[78vmin] max-w-[520px]"
             src={qrDataUrl}
           />
@@ -168,12 +173,8 @@ export function DevicesOnboardPage() {
         style={{ maxWidth: "min(48rem, calc(100vw - 2rem))" }}
       >
         <header className="flex flex-col gap-1">
-          <h1 className="text-24 font-semibold leading-tight text-foreground sm:text-28">
-            Onboard device
-          </h1>
-          <p className="break-words text-13 text-muted-foreground">
-            Generate a one-scan provisioning QR for a headless device.
-          </p>
+          <h1 className="text-24 font-semibold leading-tight text-foreground sm:text-28">{t("Onboard device")}</h1>
+          <p className="break-words text-13 text-muted-foreground">{t("Generate a one-scan provisioning QR for a headless device.")}</p>
         </header>
 
         {onboardedDevice ? (
@@ -188,11 +189,8 @@ export function DevicesOnboardPage() {
         ) : (
           <Card className="rounded-lg">
             <CardHeader>
-              <CardTitle>QR provisioning</CardTitle>
-              <CardDescription>
-                NyxID creates a short-lived bootstrap token. WiFi details are
-                added to the QR in this browser.
-              </CardDescription>
+              <CardTitle>{t("QR provisioning")}</CardTitle>
+              <CardDescription>{t("NyxID creates a short-lived bootstrap token. WiFi details are added to the QR in this browser.")}</CardDescription>
             </CardHeader>
             <CardContent>
               <Form {...form}>
@@ -209,7 +207,7 @@ export function DevicesOnboardPage() {
                     name="org_id"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Owner</FormLabel>
+                        <FormLabel>{t("Owner")}</FormLabel>
                         <Select
                           disabled={isOrgsLoading}
                           value={field.value ?? PERSONAL_OWNER_VALUE}
@@ -225,13 +223,11 @@ export function DevicesOnboardPage() {
                         >
                           <FormControl>
                             <SelectTrigger className="h-11 text-sm">
-                              <SelectValue placeholder="Personal account" />
+                              <SelectValue placeholder={t("Personal account")} />
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
-                            <SelectItem value={PERSONAL_OWNER_VALUE}>
-                              Personal account
-                            </SelectItem>
+                            <SelectItem value={PERSONAL_OWNER_VALUE}>{t("Personal account")}</SelectItem>
                             {adminOrgs.map((org) => (
                               <SelectItem key={org.id} value={org.id}>
                                 {org.display_name || org.slug}
@@ -249,13 +245,13 @@ export function DevicesOnboardPage() {
                     name="label"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Label</FormLabel>
+                        <FormLabel>{t("Label")}</FormLabel>
                         <FormControl>
                           <Input
                             {...field}
                             className="h-11 text-sm"
                             maxLength={128}
-                            placeholder="Kitchen Camera"
+                            placeholder={t("Kitchen Camera")}
                             value={field.value ?? ""}
                           />
                         </FormControl>
@@ -270,14 +266,14 @@ export function DevicesOnboardPage() {
                       name="wifi_ssid"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>WiFi SSID</FormLabel>
+                          <FormLabel>{t("WiFi SSID")}</FormLabel>
                           <FormControl>
                             <Input
                               {...field}
                               autoComplete="off"
                               className="h-11 text-sm"
                               maxLength={32}
-                              placeholder="MyHomeNetwork"
+                              placeholder={t("MyHomeNetwork")}
                               value={field.value ?? ""}
                             />
                           </FormControl>
@@ -291,7 +287,7 @@ export function DevicesOnboardPage() {
                       name="wifi_password"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>WiFi password</FormLabel>
+                          <FormLabel>{t("WiFi password")}</FormLabel>
                           <FormControl>
                             <Input
                               {...field}
@@ -299,7 +295,7 @@ export function DevicesOnboardPage() {
                               className="h-11 text-sm"
                               maxLength={63}
                               minLength={8}
-                              placeholder="At least 8 characters"
+                              placeholder={t("At least 8 characters")}
                               type="password"
                               value={field.value ?? ""}
                             />
@@ -337,24 +333,16 @@ export function DevicesOnboardPage() {
                         : [];
                       return (
                         <FormItem>
-                          <FormLabel>
-                            Grant proxy access to (optional)
-                          </FormLabel>
-                          <FormDescription className="text-12 leading-relaxed">
-                            Pick which of your services this device should be
-                            allowed to proxy through. You can add more later
-                            from the API Keys page.
-                          </FormDescription>
+                          <FormLabel>{t("Grant proxy access to (optional)")}</FormLabel>
+                          <FormDescription className="text-12 leading-relaxed">{t("Pick which of your services this device should be allowed to proxy through. You can add more later from the API Keys page.")}</FormDescription>
                           <div className="relative max-h-56 space-y-1 overflow-y-auto rounded-lg border border-border bg-muted/25 p-2">
                             {isServicesLoading ? (
-                              <p className="px-2 py-3 text-12 text-muted-foreground">
-                                Loading services...
-                              </p>
+                              <p className="px-2 py-3 text-12 text-muted-foreground">{t("Loading services...")}</p>
                             ) : grantableServices.length === 0 ? (
                               <p className="px-2 py-3 text-12 text-muted-foreground">
                                 {selectedOwner
-                                  ? "This org has no services available for device access."
-                                  : "Your personal account has no services available for device access."}
+                                  ? t("This org has no services available for device access.")
+                                  : t("Your personal account has no services available for device access.")}
                               </p>
                             ) : (
                               grantableServices
@@ -404,11 +392,7 @@ export function DevicesOnboardPage() {
                     }}
                   />
 
-                  <p className="rounded-lg border border-border bg-muted/25 px-3 py-2 text-12 leading-relaxed text-muted-foreground">
-                    Your WiFi password stays in this browser. NyxID receives
-                    only the owner, label, and optional service grants needed to
-                    create a short-lived bootstrap token.
-                  </p>
+                  <p className="rounded-lg border border-border bg-muted/25 px-3 py-2 text-12 leading-relaxed text-muted-foreground">{t("Your WiFi password stays in this browser. NyxID receives only the owner, label, and optional service grants needed to create a short-lived bootstrap token.")}</p>
 
                   <div className="flex justify-end">
                     <Button
@@ -420,9 +404,7 @@ export function DevicesOnboardPage() {
                     >
                       <ButtonIcon variant="primary">
                         <QrCode />
-                      </ButtonIcon>
-                      Generate QR
-                    </Button>
+                      </ButtonIcon>{t("Generate QR")}</Button>
                   </div>
                 </form>
               </Form>
@@ -449,6 +431,7 @@ function OnboardSuccess({
   readonly onPrint: () => void;
   readonly onRevoke: () => void;
 }) {
+  const { t } = useUiTranslation();
   return (
     <Card className="rounded-lg">
       <CardHeader>
@@ -457,10 +440,8 @@ function OnboardSuccess({
             <CheckCircle2 className="h-5 w-5 text-emerald-400" />
           </div>
           <div className="min-w-0">
-            <CardTitle>Device onboarded</CardTitle>
-            <CardDescription>
-              Scan this QR from the headless device camera before it expires.
-            </CardDescription>
+            <CardTitle>{t("Device onboarded")}</CardTitle>
+            <CardDescription>{t("Scan this QR from the headless device camera before it expires.")}</CardDescription>
           </div>
         </div>
       </CardHeader>
@@ -468,24 +449,24 @@ function OnboardSuccess({
         <div className="flex justify-center rounded-lg border border-border bg-white p-4">
           {qrDataUrl ? (
             <img
-              alt="Device onboarding QR code"
+              alt={t("Device onboarding QR code")}
               className="h-auto w-full max-w-[360px]"
               src={qrDataUrl}
             />
           ) : (
             <div className="flex h-[360px] w-full max-w-[360px] items-center justify-center text-13 text-muted-foreground">
-              {qrError ? "QR code rendering failed." : "Rendering QR..."}
+              {qrError ? t("QR code rendering failed.") : t("Rendering QR...")}
             </div>
           )}
         </div>
 
         <dl className="grid gap-3 text-13 sm:grid-cols-2">
-          <DetailRow label="Device" value={device.label} />
+          <DetailRow label={t("Device")} value={device.label} />
           <DetailRow
-            label="Bootstrap"
+            label={t("Bootstrap")}
             value={maskIdentifier(device.bootstrap_id)}
           />
-          <DetailRow label="Expires" value={formatExpiry(device.expires_at)} />
+          <DetailRow label={t("Expires")} value={formatExpiry(device.expires_at)} />
         </dl>
 
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
@@ -499,9 +480,7 @@ function OnboardSuccess({
           >
             <ButtonIcon variant="destructive">
               <XCircle />
-            </ButtonIcon>
-            Revoke QR
-          </Button>
+            </ButtonIcon>{t("Revoke QR")}</Button>
           <Button
             className="h-11 w-full text-sm sm:w-auto"
             disabled={!qrDataUrl}
@@ -511,9 +490,7 @@ function OnboardSuccess({
           >
             <ButtonIcon>
               <Printer />
-            </ButtonIcon>
-            Print fullscreen
-          </Button>
+            </ButtonIcon>{t("Print fullscreen")}</Button>
         </div>
       </CardContent>
     </Card>
@@ -560,7 +537,7 @@ function buildFullProvisioningPayload(
 function formatExpiry(value: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString();
+  return parsed.toLocaleString(getFormattingLocale());
 }
 
 function deviceOnboardErrorMessage(error: unknown): string {

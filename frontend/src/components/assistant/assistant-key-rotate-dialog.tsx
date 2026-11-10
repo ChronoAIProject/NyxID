@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { Check, Copy, KeyRound, RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -119,6 +121,7 @@ function KeyRotationResult({
   readonly onRetryVerification: () => void;
   readonly onFinish: (keyId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
   const hasSecret = !result.replayed && Boolean(result.fullKey);
@@ -142,7 +145,7 @@ function KeyRotationResult({
           <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
           <div className="min-w-0 space-y-1">
             <p className="text-13 font-medium">
-              {result.replayed ? "Existing replacement key" : "Assistant key rotated"}
+              {result.replayed ? t("Existing replacement key") : t("Assistant key rotated")}
             </p>
             <p className="break-all font-mono text-12 text-muted-foreground">
               {result.resource.keyId}
@@ -159,8 +162,8 @@ function KeyRotationResult({
               type="button"
               variant="outline"
               size="icon"
-              title="Copy replacement API key"
-              aria-label="Copy replacement API key"
+              title={t("Copy replacement API key")}
+              aria-label={t("Copy replacement API key")}
               onClick={() => void copySecret()}
             >
               {copied ? <Check className="text-success" /> : <Copy />}
@@ -171,14 +174,12 @@ function KeyRotationResult({
               checked={saved}
               onCheckedChange={(value) => setSaved(value === true)}
             />
-            <span>I saved this replacement key in a secure location.</span>
+            <span>{t("I saved this replacement key in a secure location.")}</span>
           </label>
         </div>
       )}
       {verified ? (
-        <p className="text-11 text-success">
-          Exact rotation lineage verified.
-        </p>
+        <p className="text-11 text-success">{t("Exact rotation lineage verified.")}</p>
       ) : null}
       <DialogFooter>
         {!verified ? (
@@ -188,9 +189,7 @@ function KeyRotationResult({
             isLoading={verifying}
             onClick={onRetryVerification}
           >
-            <RefreshCw />
-            Retry verification
-          </Button>
+            <RefreshCw />{t("Retry verification")}</Button>
         ) : null}
         <Button
           type="button"
@@ -198,7 +197,7 @@ function KeyRotationResult({
           disabled={!verified || (hasSecret && !saved)}
           onClick={() => onFinish(result.resource.keyId)}
         >
-          {hasSecret ? "I have saved it" : "Report replacement key"}
+          {hasSecret ? t("I have saved it") : t("Report replacement key")}
         </Button>
       </DialogFooter>
     </>
@@ -222,6 +221,7 @@ export function AssistantKeyRotateDialog({
   readonly params: AssistantKeyRotateParams;
   readonly onComplete: (keyId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
@@ -340,23 +340,23 @@ export function AssistantKeyRotateDialog({
       >
         <DialogHeader>
           <DialogTitle>
-            {result?.replayed ? "API key already rotated" : "Rotate API key"}
+            {result?.replayed ? t("API key already rotated") : t("Rotate API key")}
           </DialogTitle>
           <DialogDescription>
             {result
               ? result.replayed
-                ? "The original one-time replacement secret is no longer available."
+                ? t("The original one-time replacement secret is no longer available.")
                 : result.fullKey
-                  ? "This replacement key is shown only once. Copy and store it securely now."
-                  : "NyxID has securely stored the replacement key for the assistant."
-              : "Confirm the exact predecessor before replacing its credential."}
+                  ? t("This replacement key is shown only once. Copy and store it securely now.")
+                  : t("NyxID has securely stored the replacement key for the assistant.")
+              : t("Confirm the exact predecessor before replacing its credential.")}
           </DialogDescription>
         </DialogHeader>
 
         {!result ? (
           <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">Predecessor</span>
+              <span className="text-muted-foreground">{t("Predecessor")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -364,33 +364,26 @@ export function AssistantKeyRotateDialog({
                 {params.keyId}
               </Badge>
             </div>
-            <p className="text-11 leading-relaxed text-muted-foreground">
-              NyxID preserves the key's authority and disables this exact
-              predecessor atomically.
-            </p>
+            <p className="text-11 leading-relaxed text-muted-foreground">{t("NyxID preserves the key's authority and disables this exact predecessor atomically.")}</p>
           </div>
         ) : null}
 
         {error ? (
           <p role="alert" className="text-11 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
 
         {!result ? (
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={close}>
-              Cancel
-            </Button>
+            <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
             <Button
               type="button"
               variant="primary"
               isLoading={submitting}
               disabled={submitting}
               onClick={() => void rotateKey()}
-            >
-              Rotate key
-            </Button>
+            >{t("Rotate key")}</Button>
           </DialogFooter>
         ) : null}
         {result ? (

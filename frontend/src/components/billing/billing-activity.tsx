@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Line, LineChart, XAxis, YAxis } from "recharts";
 import { useApiKeysUsage } from "@/hooks/use-api-keys";
@@ -26,7 +28,7 @@ const chartConfig = {
 } satisfies ChartConfig;
 
 function dateLabel(date: string) {
-  return new Date(`${date}T00:00:00Z`).toLocaleDateString(undefined, {
+  return new Date(`${date}T00:00:00Z`).toLocaleDateString(getFormattingLocale(), {
     month: "short",
     day: "numeric",
     timeZone: "UTC",
@@ -54,6 +56,7 @@ function agentActivityPoints(agents: readonly ApiKeyUsage[]) {
 }
 
 export function BillingActivity() {
+  const { t } = useUiTranslation();
   const [days, setDays] = useState(7);
   const [agentId, setAgentId] = useState("all");
   const activity = useApiKeysUsage(days);
@@ -66,28 +69,25 @@ export function BillingActivity() {
     <Card className="billing-activity">
       <CardHeader className="usage-explorer-heading">
         <div>
-          <CardTitle>Daily agent activity</CardTitle>
-          <CardDescription>
-            Personal agent requests across all services. Billing filters apply
-            to the breakdown below.
-          </CardDescription>
+          <CardTitle>{t("Daily agent activity")}</CardTitle>
+          <CardDescription>{t("Personal agent requests across all services. Billing filters apply to the breakdown below.")}</CardDescription>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <AnalyticsSelect
-            label="Activity time range"
+            label={t("Activity time range")}
             value={String(days)}
             onChange={(value) => setDays(Number(value))}
             options={[
-              { value: "7", label: "Last 7 days" },
-              { value: "30", label: "Last 30 days" },
+              { value: "7", label: t("Last 7 days") },
+              { value: "30", label: t("Last 30 days") },
             ]}
           />
           <AnalyticsSelect
-            label="Activity agent"
+            label={t("Activity agent")}
             value={selected?.api_key_id ?? "all"}
             onChange={setAgentId}
             options={[
-              { value: "all", label: "All personal agents" },
+              { value: "all", label: t("All personal agents") },
               ...agents.map((agent) => ({
                 value: agent.api_key_id,
                 label: agent.api_key_name,
@@ -101,36 +101,29 @@ export function BillingActivity() {
           <Skeleton className="h-[160px] w-full" />
         ) : activity.error ? (
           <ErrorBanner
-            message="Could not load daily agent activity."
+            message={t("Could not load daily agent activity.")}
             onRetry={() => void activity.refetch()}
           />
         ) : points.length === 0 ? (
-          <p className="text-12 text-muted-foreground">
-            No agent activity in this window.
-          </p>
+          <p className="text-12 text-muted-foreground">{t("No agent activity in this window.")}</p>
         ) : (
           <>
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3 text-11">
               <p className="font-mono tabular-nums">
-                {number(requests)} requests · {number(errors)} errors
-              </p>
+                {number(requests)}{t(" requests · ")}{number(errors)}{t(" errors")}</p>
               <div className="flex gap-4 text-muted-foreground">
                 <span className="inline-flex items-center gap-1.5">
                   <span
                     className="h-0.5 w-3"
                     style={{ background: chartConfig.requests.color }}
-                  />
-                  Requests
-                </span>
+                  />{t("Requests")}</span>
                 <span className="inline-flex items-center gap-1.5">
-                  <span className="h-0.5 w-3 bg-destructive" />
-                  Errors
-                </span>
+                  <span className="h-0.5 w-3 bg-destructive" />{t("Errors")}</span>
               </div>
             </div>
             <div
               role="img"
-              aria-label={`Daily activity: ${number(requests)} requests and ${number(errors)} errors across ${points.length} UTC days`}
+              aria-label={t("Daily activity: {{value}} requests and {{value1}} errors across {{length}} UTC days", { value: number(requests), value1: number(errors), length: points.length })}
             >
               <ChartContainer
                 config={chartConfig}
@@ -182,19 +175,15 @@ export function BillingActivity() {
               </ChartContainer>
             </div>
             <details className="mt-3 text-11">
-              <summary className="text-muted-foreground">
-                View daily values
-              </summary>
+              <summary className="text-muted-foreground">{t("View daily values")}</summary>
               <div className="mt-3 max-h-64 overflow-auto">
                 <table className="w-full text-left tabular-nums">
-                  <caption className="sr-only">
-                    Agent activity per UTC day
-                  </caption>
+                  <caption className="sr-only">{t("Agent activity per UTC day")}</caption>
                   <thead>
                     <tr>
-                      <th className="py-2 font-medium">Date (UTC)</th>
-                      <th className="py-2 text-right font-medium">Requests</th>
-                      <th className="py-2 text-right font-medium">Errors</th>
+                      <th className="py-2 font-medium">{t("Date (UTC)")}</th>
+                      <th className="py-2 text-right font-medium">{t("Requests")}</th>
+                      <th className="py-2 text-right font-medium">{t("Errors")}</th>
                     </tr>
                   </thead>
                   <tbody>

@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { localTime } from "@/lib/automation-time";
 import { DatePicker } from "@/components/ui/date-picker";
 import { Input } from "@/components/ui/input";
@@ -16,22 +18,23 @@ export function AutomationDateTime({
   readonly optional?: boolean;
   readonly timezone: string;
 }) {
+  const { t } = useUiTranslation();
   const [date = "", time = "09:00"] = value.split("T");
   return (
     <fieldset className="space-y-1 text-12">
       <legend>
         {label}
-        {optional ? " (optional)" : ""}
+        {optional ? t(" (optional)") : ""}
       </legend>
       <div className="flex gap-2">
         <DatePicker
-          ariaLabel={`${label} date`}
+          ariaLabel={translateUi("{{value0}} date", { value0: label })}
           value={date || null}
           onChange={(next) => onChange(next ? `${next}T${time}` : "")}
         />
         <Input
           type="time"
-          aria-label={`${label} time`}
+          aria-label={t("{{label}} time", { label: label })}
           value={time}
           onChange={(event) =>
             onChange(
@@ -44,11 +47,9 @@ export function AutomationDateTime({
           <Button
             type="button"
             variant="ghost"
-            aria-label={`Clear ${label}`}
+            aria-label={t("Clear {{label}}", { label: label })}
             onClick={() => onChange("")}
-          >
-            Clear
-          </Button>
+          >{t("Clear")}</Button>
         )}
       </div>
     </fieldset>

@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState, useRef } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate, Link } from "@tanstack/react-router";
@@ -108,6 +110,7 @@ export function AuthFlow({
   socialError,
   initialInviteCode,
 }: AuthFlowProps) {
+  const { t } = useUiTranslation();
   const normalizedInitialInviteCode =
     initialInviteCode?.trim().toUpperCase() ?? "";
   const { data: publicConfig } = usePublicConfig({ refetchInterval: 30_000 });
@@ -288,12 +291,8 @@ export function AuthFlow({
            ================================================================ */
         <div>
           <div className="mb-8">
-            <h1 className="text-28 font-bold tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-              Welcome back
-            </h1>
-            <p className="mt-1 text-13 text-muted-foreground">
-              Sign in to your account
-            </p>
+            <h1 className="text-28 font-bold tracking-tight" style={{ letterSpacing: "-0.03em" }}>{t("Welcome back")}</h1>
+            <p className="mt-1 text-13 text-muted-foreground">{t("Sign in to your account")}</p>
           </div>
 
           {socialError && (
@@ -302,8 +301,8 @@ export function AuthFlow({
               data-testid="social-error"
               className="mb-4 rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
             >
-              {SOCIAL_ERROR_MESSAGES[socialError] ??
-                "Social sign-in failed. Please try again."}
+              {t(SOCIAL_ERROR_MESSAGES[socialError] ??
+                "Social sign-in failed. Please try again.")}
             </div>
           )}
 
@@ -327,7 +326,7 @@ export function AuthFlow({
                     role="alert"
                     className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
                   >
-                    {loginForm.formState.errors.root.message}
+                    {translateUi(loginForm.formState.errors.root.message ?? "")}
                   </div>
                 )}
 
@@ -336,11 +335,11 @@ export function AuthFlow({
                   name="email"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Email</FormLabel>
+                      <FormLabel>{t("Email")}</FormLabel>
                       <FormControl>
                         <Input
                           type="email"
-                          placeholder="you@example.com"
+                          placeholder={t("you@example.com")}
                           autoComplete="email"
                           {...field}
                           ref={(el) => {
@@ -362,18 +361,16 @@ export function AuthFlow({
                   render={({ field }) => (
                     <FormItem>
                       <div className="flex items-center justify-between">
-                        <FormLabel>Password</FormLabel>
+                        <FormLabel>{t("Password")}</FormLabel>
                         <Link
                           to={"/forgot-password" as string}
                           className="text-xs font-medium text-nyx-secondary-400 hover:text-nyx-300"
-                        >
-                          Forgot password?
-                        </Link>
+                        >{t("Forgot password?")}</Link>
                       </div>
                       <FormControl>
                         <Input
                           type="password"
-                          placeholder="Enter your password"
+                          placeholder={t("Enter your password")}
                           autoComplete="current-password"
                           {...field}
                         />
@@ -388,9 +385,7 @@ export function AuthFlow({
                   variant="primary"
                   className="mt-1 h-[44px] w-full text-13 shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
                   isLoading={loginMutation.isPending}
-                >
-                  Sign in
-                </Button>
+                >{t("Sign in")}</Button>
               </form>
             </Form>
           </LoginMethods>
@@ -409,12 +404,8 @@ export function AuthFlow({
           className={`w-1/2 shrink-0 transition-[visibility] duration-300 ${showEmailForm ? "invisible" : "visible"}`}
         >
           <div className="mb-8">
-            <h1 className="text-28 font-bold tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-              Create your account
-            </h1>
-            <p className="mt-1 text-13 text-muted-foreground">
-              Start securing your digital identity
-            </p>
+            <h1 className="text-28 font-bold tracking-tight" style={{ letterSpacing: "-0.03em" }}>{t("Create your account")}</h1>
+            <p className="mt-1 text-13 text-muted-foreground">{t("Start securing your digital identity")}</p>
           </div>
 
           {/* Step 1: Invite Code (only when invite gate is enabled) */}
@@ -448,9 +439,7 @@ export function AuthFlow({
                   "1"
                 )}
               </div>
-              <p className="mb-3 text-13 font-medium leading-6 text-muted-foreground">
-                Enter your invite code
-              </p>
+              <p className="mb-3 text-13 font-medium leading-6 text-muted-foreground">{t("Enter your invite code")}</p>
               <FormField
                 control={registerForm.control}
                 name="inviteCode"
@@ -458,7 +447,7 @@ export function AuthFlow({
                   <FormItem>
                     <FormControl>
                       <Input
-                        placeholder="NYX-XXXXXXXX"
+                        placeholder={"NYX-XXXXXXXX"}
                         autoComplete="off"
                         spellCheck={false}
                         className={`h-12 font-mono text-base tracking-wider ${
@@ -484,22 +473,15 @@ export function AuthFlow({
                 )}
               />
               {inviteError && (
-                <p className="mt-2 text-12 font-medium text-destructive">
-                  An invite code is required to use NyxID at this time.
-                </p>
+                <p className="mt-2 text-12 font-medium text-destructive">{t("An invite code is required to use NyxID at this time.")}</p>
               )}
-              <p className="mt-2 text-11 leading-relaxed text-muted-foreground">
-                NyxID is in closed beta.{" "}
+              <p className="mt-2 text-11 leading-relaxed text-muted-foreground">{t("NyxID is in closed beta.")}{" "}
                 <a
                   href="https://discord.gg/QMvcs8UQBW"
                   target="_blank"
                   rel="noopener noreferrer"
                   className="cursor-pointer font-medium text-nyx-secondary-400 hover:text-nyx-300"
-                >
-                  Join our Discord
-                </a>{" "}
-                to request an invite code.
-              </p>
+                >{t("Join our Discord")}</a>{" "}{t("to request an invite code.")}</p>
             </div>
           </Form>
           )}
@@ -511,9 +493,7 @@ export function AuthFlow({
             <div className="absolute left-0 top-0 flex h-6 w-6 items-center justify-center rounded-full border border-nyx-500/15 bg-nyx-500/10 text-11 font-semibold text-nyx-secondary-400">
               2
             </div>
-            <p className="mb-3 text-13 font-medium leading-6 text-muted-foreground">
-              Choose how to sign up
-            </p>
+            <p className="mb-3 text-13 font-medium leading-6 text-muted-foreground">{t("Choose how to sign up")}</p>
             </>
             )}
 
@@ -530,7 +510,7 @@ export function AuthFlow({
               {emailAuthEnabled && (
                 <LoginProviderRow
                   icon={<Mail className="h-4 w-4" />}
-                  label="Continue with Email"
+                  label={t("Continue with Email")}
                   onClick={() => { if (requireInviteCode()) slideToPanel(2); }}
                 />
               )}
@@ -538,15 +518,12 @@ export function AuthFlow({
           </div>
 
           {/* Footer */}
-          <div className="mt-8 text-center text-13 text-muted-foreground">
-            Already have an account?{" "}
+          <div className="mt-8 text-center text-13 text-muted-foreground">{t("Already have an account?")}{" "}
             <button
               type="button"
               onClick={() => slideToPanel(0)}
               className="cursor-pointer font-medium text-foreground underline underline-offset-2 hover:text-nyx-secondary-400"
-            >
-              Sign in
-            </button>
+            >{t("Sign in")}</button>
           </div>
         </div>
 
@@ -563,7 +540,7 @@ export function AuthFlow({
               type="button"
               onClick={() => slideToPanel(1)}
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-transparent text-muted-foreground transition-colors duration-300 hover:border-border/80 hover:bg-overlay hover:text-foreground"
-              aria-label="Back to sign-up methods"
+              aria-label={t("Back to sign-up methods")}
             >
               <svg
                 className="h-4 w-4"
@@ -578,12 +555,8 @@ export function AuthFlow({
               </svg>
             </button>
             <div>
-              <h2 className="text-lg font-semibold tracking-tight">
-                Email registration
-              </h2>
-              <p className="text-xs text-muted-foreground">
-                Create your account with email and password
-              </p>
+              <h2 className="text-lg font-semibold tracking-tight">{t("Email registration")}</h2>
+              <p className="text-xs text-muted-foreground">{t("Create your account with email and password")}</p>
             </div>
           </div>
 
@@ -609,9 +582,7 @@ export function AuthFlow({
               type="button"
               onClick={() => slideToPanel(1)}
               className="ml-auto border-0 bg-transparent text-11 font-medium text-muted-foreground transition-colors duration-300 hover:text-foreground"
-            >
-              Edit
-            </button>
+            >{t("Edit")}</button>
           </div>
           )}
 
@@ -629,7 +600,7 @@ export function AuthFlow({
                   role="alert"
                   className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
                 >
-                  {registerForm.formState.errors.root.message}
+                  {translateUi(registerForm.formState.errors.root.message ?? "")}
                 </div>
               )}
 
@@ -638,10 +609,10 @@ export function AuthFlow({
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-xs">Full Name</FormLabel>
+                    <FormLabel className="text-xs">{t("Full Name")}</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder="John Doe"
+                        placeholder={t("John Doe")}
                         autoComplete="name"
                         className="h-[42px] text-[0.84375rem]"
                         {...field}
@@ -663,11 +634,11 @@ export function AuthFlow({
                 name="email"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-xs">Email</FormLabel>
+                    <FormLabel className="text-xs">{t("Email")}</FormLabel>
                     <FormControl>
                       <Input
                         type="email"
-                        placeholder="you@example.com"
+                        placeholder={t("you@example.com")}
                         autoComplete="email"
                         className="h-[42px] text-[0.84375rem]"
                         {...field}
@@ -683,11 +654,11 @@ export function AuthFlow({
                 name="password"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-xs">Password</FormLabel>
+                    <FormLabel className="text-xs">{t("Password")}</FormLabel>
                     <FormControl>
                       <Input
                         type="password"
-                        placeholder="Min 8 characters"
+                        placeholder={t("Min 8 characters")}
                         autoComplete="new-password"
                         className="h-[42px] text-[0.84375rem]"
                         {...field}
@@ -701,7 +672,7 @@ export function AuthFlow({
                           aria-valuenow={strength.score}
                           aria-valuemin={0}
                           aria-valuemax={6}
-                          aria-label={`Password strength: ${strength.label}`}
+                          aria-label={t("Password strength: {{label}}", { label: strength.label })}
                         >
                           {Array.from({ length: 6 }).map((_, i) => (
                             <div
@@ -729,13 +700,11 @@ export function AuthFlow({
                 name="confirmPassword"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel className="text-xs">
-                      Confirm Password
-                    </FormLabel>
+                    <FormLabel className="text-xs">{t("Confirm Password")}</FormLabel>
                     <FormControl>
                       <Input
                         type="password"
-                        placeholder="Re-enter your password"
+                        placeholder={t("Re-enter your password")}
                         autoComplete="new-password"
                         className="h-[42px] text-[0.84375rem]"
                         {...field}
@@ -751,22 +720,17 @@ export function AuthFlow({
                 variant="primary"
                 className="mt-1 h-[44px] w-full text-13 shadow-[0_2px_12px_rgba(90,42,241,0.25)] hover:opacity-90 hover:shadow-[0_4px_20px_rgba(90,42,241,0.35)]"
                 isLoading={registerMutation.isPending}
-              >
-                Create Account
-              </Button>
+              >{t("Create Account")}</Button>
             </form>
           </Form>
 
           {/* Footer */}
-          <div className="mt-8 text-center text-13 text-muted-foreground">
-            Already have an account?{" "}
+          <div className="mt-8 text-center text-13 text-muted-foreground">{t("Already have an account?")}{" "}
             <button
               type="button"
               onClick={() => slideToPanel(0)}
               className="cursor-pointer font-medium text-foreground underline underline-offset-2 hover:text-nyx-secondary-400"
-            >
-              Sign in
-            </button>
+            >{t("Sign in")}</button>
           </div>
         </div>
         </div>

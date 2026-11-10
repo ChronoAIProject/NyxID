@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import {
   useSaProviders,
@@ -38,6 +41,7 @@ interface SaConnectedProvidersProps {
 }
 
 export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
+  const { t } = useUiTranslation();
   const { data: saProviders, isLoading: providersLoading } =
     useSaProviders(saId);
   const { data: allProviders } = useProviders();
@@ -69,13 +73,13 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
         apiKey,
         label,
       });
-      toast.success(`Connected ${connectDialogProvider.name}`);
+      toast.success(translateUi("Connected {{name}}", { name: connectDialogProvider.name }));
       setConnectDialogProvider(null);
     } catch (err) {
       if (err instanceof ApiError) {
-        toast.error(err.message);
+        toast.error(translateErrorMessage(err.message));
       } else {
-        toast.error("Failed to connect provider");
+        toast.error(translateUi("Failed to connect provider"));
       }
     }
   }
@@ -99,9 +103,9 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
       hardRedirect(response.authorization_url);
     } catch (err) {
       if (err instanceof ApiError) {
-        toast.error(err.message);
+        toast.error(translateErrorMessage(err.message));
       } else {
-        toast.error("Failed to initiate OAuth connection");
+        toast.error(translateUi("Failed to initiate OAuth connection"));
       }
     }
   }
@@ -109,19 +113,19 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
   async function handleDisconnectSaProvider(providerId: string) {
     try {
       await disconnectMutation.mutateAsync({ saId, providerId });
-      toast.success("Provider disconnected");
+      toast.success(translateUi("Provider disconnected"));
     } catch (err) {
       if (err instanceof ApiError) {
-        toast.error(err.message);
+        toast.error(translateErrorMessage(err.message));
       } else {
-        toast.error("Failed to disconnect provider");
+        toast.error(translateUi("Failed to disconnect provider"));
       }
     }
   }
 
   return (
     <>
-      <DetailSection title="Connected Providers">
+      <DetailSection title={t("Connected Providers")}>
         <div className="p-4">
         {providersLoading ? (
           <Skeleton className="h-24 w-full" />
@@ -130,12 +134,12 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Provider</TableHead>
-                  <TableHead>Type</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Label</TableHead>
-                  <TableHead>Connected</TableHead>
-                  <TableHead>Actions</TableHead>
+                  <TableHead>{t("Provider")}</TableHead>
+                  <TableHead>{t("Type")}</TableHead>
+                  <TableHead>{t("Status")}</TableHead>
+                  <TableHead>{t("Label")}</TableHead>
+                  <TableHead>{t("Connected")}</TableHead>
+                  <TableHead>{t("Actions")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -172,9 +176,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
                         }
                         disabled={disconnectMutation.isPending}
                       >
-                        <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>
-                        Disconnect
-                      </Button>
+                        <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>{t("Disconnect")}</Button>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -182,9 +184,7 @@ export function SaConnectedProviders({ saId }: SaConnectedProvidersProps) {
             </Table>
           </div>
         ) : (
-          <p className="text-12 text-muted-foreground">
-            No providers connected to this service account.
-          </p>
+          <p className="text-12 text-muted-foreground">{t("No providers connected to this service account.")}</p>
         )}
 
         {availableProviders.length > 0 && (
@@ -239,13 +239,12 @@ function ConnectProviderDropdown({
   readonly providers: readonly ProviderConfig[];
   readonly onSelect: (provider: ProviderConfig) => void;
 }) {
+  const { t } = useUiTranslation();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button variant="outline" className="text-text-tertiary hover:text-muted-foreground">
-          <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>
-          Connect Provider
-        </Button>
+          <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>{t("Connect Provider")}</Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent style={{ maxHeight: "16rem", overflowY: "auto" }}>
         {providers.map((p) => (

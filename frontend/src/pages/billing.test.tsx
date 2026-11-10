@@ -1,3 +1,4 @@
+import "@/i18n";
 import { withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { act, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useEffect } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate } from "@tanstack/react-router";
@@ -24,6 +26,7 @@ interface MfaVerifyFormProps {
 }
 
 export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const verifyMutation = useMfaVerify();
   const mfaToken = useAuthStore((s) => s.mfaToken);
@@ -75,12 +78,8 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
         <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">
           <ShieldCheck className="h-6 w-6 text-primary-text" aria-hidden="true" />
         </div>
-        <h1 className="text-28 font-normal tracking-tight">
-          MFA verification
-        </h1>
-        <p className="text-12 text-muted-foreground">
-          Enter the 6-digit code from your authenticator app
-        </p>
+        <h1 className="text-28 font-normal tracking-tight">{t("MFA verification")}</h1>
+        <p className="text-12 text-muted-foreground">{t("Enter the 6-digit code from your authenticator app")}</p>
       </div>
 
       <Form {...form}>
@@ -90,7 +89,7 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
               role="alert"
               className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
             >
-              {form.formState.errors.root.message}
+              {translateUi(form.formState.errors.root.message ?? "")}
             </div>
           )}
 
@@ -99,14 +98,14 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
             name="code"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Verification Code</FormLabel>
+                <FormLabel>{t("Verification Code")}</FormLabel>
                 <FormControl>
                   <Input
                     placeholder="000000"
                     maxLength={6}
                     autoComplete="one-time-code"
                     inputMode="numeric"
-                    aria-label="Enter 6-digit verification code"
+                    aria-label={t("Enter 6-digit verification code")}
                     className="text-center font-mono text-lg tracking-widest"
                     {...field}
                     ref={codeInputRef}
@@ -123,17 +122,13 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
               type="submit"
               className="w-full"
               isLoading={verifyMutation.isPending}
-            >
-              Verify
-            </Button>
+            >{t("Verify")}</Button>
             <Button
               type="button"
               variant="ghost"
               className="w-full"
               onClick={handleCancel}
-            >
-              Back to Login
-            </Button>
+            >{t("Back to Login")}</Button>
           </div>
         </form>
       </Form>

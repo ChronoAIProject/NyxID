@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
 import { useEffect, useMemo, useState } from "react";
 import { useWatch } from "react-hook-form";
@@ -49,6 +51,7 @@ import {
 const PERSONAL_OWNER_VALUE = "__personal__";
 
 export function DevicesBindPage() {
+  const { t } = useUiTranslation();
   const search = useSearch({ strict: false }) as { user_code?: string };
   const approveDevice = useApproveDevice();
   const { data: orgs, isLoading: isOrgsLoading } = useOrgs();
@@ -126,7 +129,7 @@ export function DevicesBindPage() {
     try {
       const response = await approveDevice.mutateAsync(values);
       setApprovedDevice(response);
-      toast.success("Device approved");
+      toast.success(translateUi("Device approved"));
     } catch (error) {
       const message = deviceApprovalErrorMessage(error);
       // Rejections about the typed code itself belong on the field (red
@@ -145,12 +148,8 @@ export function DevicesBindPage() {
       style={{ maxWidth: "min(48rem, calc(100vw - 2rem))" }}
     >
       <header className="flex flex-col gap-1">
-        <h1 className="text-24 font-semibold leading-tight text-foreground sm:text-28">
-          Bind device
-        </h1>
-        <p className="break-words text-13 text-muted-foreground">
-          Approve a device-code request and create scoped device credentials.
-        </p>
+        <h1 className="text-24 font-semibold leading-tight text-foreground sm:text-28">{t("Bind device")}</h1>
+        <p className="break-words text-13 text-muted-foreground">{t("Approve a device-code request and create scoped device credentials.")}</p>
       </header>
 
       {approvedDevice ? (
@@ -158,10 +157,8 @@ export function DevicesBindPage() {
       ) : (
         <Card className="rounded-lg">
           <CardHeader>
-            <CardTitle>Device request</CardTitle>
-            <CardDescription>
-              Codes are case-insensitive and may include dashes or spaces.
-            </CardDescription>
+            <CardTitle>{t("Device request")}</CardTitle>
+            <CardDescription>{t("Codes are case-insensitive and may include dashes or spaces.")}</CardDescription>
           </CardHeader>
           <CardContent>
             <Form {...form}>
@@ -178,7 +175,7 @@ export function DevicesBindPage() {
                   name="user_code"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>User code</FormLabel>
+                      <FormLabel>{t("User code")}</FormLabel>
                       <FormControl>
                         <Input
                           {...field}
@@ -186,7 +183,7 @@ export function DevicesBindPage() {
                           className="h-11 font-mono text-base"
                           inputMode="text"
                           maxLength={14}
-                          placeholder="XXXX-XXXX-XXXX"
+                          placeholder={"XXXX-XXXX-XXXX"}
                           value={field.value ?? ""}
                           onChange={(event) =>
                             field.onChange(
@@ -205,7 +202,7 @@ export function DevicesBindPage() {
                   name="org_id"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Owner</FormLabel>
+                      <FormLabel>{t("Owner")}</FormLabel>
                       <Select
                         disabled={isOrgsLoading}
                         value={field.value ?? PERSONAL_OWNER_VALUE}
@@ -218,13 +215,11 @@ export function DevicesBindPage() {
                       >
                         <FormControl>
                           <SelectTrigger className="h-11 text-sm">
-                            <SelectValue placeholder="Personal account" />
+                            <SelectValue placeholder={t("Personal account")} />
                           </SelectTrigger>
                         </FormControl>
                         <SelectContent>
-                          <SelectItem value={PERSONAL_OWNER_VALUE}>
-                            Personal account
-                          </SelectItem>
+                          <SelectItem value={PERSONAL_OWNER_VALUE}>{t("Personal account")}</SelectItem>
                           {adminOrgs.map((org) => (
                             <SelectItem key={org.id} value={org.id}>
                               {org.display_name || org.slug}
@@ -242,13 +237,13 @@ export function DevicesBindPage() {
                   name="label"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Label</FormLabel>
+                      <FormLabel>{t("Label")}</FormLabel>
                       <FormControl>
                         <Input
                           {...field}
                           className="h-11 text-sm"
                           maxLength={200}
-                          placeholder="Hallway camera"
+                          placeholder={t("Hallway camera")}
                           value={field.value ?? ""}
                         />
                       </FormControl>
@@ -284,22 +279,16 @@ export function DevicesBindPage() {
                       : [];
                     return (
                       <FormItem>
-                        <FormLabel>Grant proxy access to (optional)</FormLabel>
-                        <FormDescription className="text-12 leading-relaxed">
-                          Pick which of your services this device should be
-                          allowed to proxy through. You can add more later from
-                          the API Keys page.
-                        </FormDescription>
+                        <FormLabel>{t("Grant proxy access to (optional)")}</FormLabel>
+                        <FormDescription className="text-12 leading-relaxed">{t("Pick which of your services this device should be allowed to proxy through. You can add more later from the API Keys page.")}</FormDescription>
                         <div className="relative max-h-56 space-y-1 overflow-y-auto rounded-lg border border-border bg-muted/25 p-2">
                           {isServicesLoading ? (
-                            <p className="px-2 py-3 text-12 text-muted-foreground">
-                              Loading services...
-                            </p>
+                            <p className="px-2 py-3 text-12 text-muted-foreground">{t("Loading services...")}</p>
                           ) : grantableServices.length === 0 ? (
                             <p className="px-2 py-3 text-12 text-muted-foreground">
                               {selectedOwner
-                                ? "This org has no services available for device access."
-                                : "Your personal account has no services available for device access."}
+                                ? t("This org has no services available for device access.")
+                                : t("Your personal account has no services available for device access.")}
                             </p>
                           ) : (
                             grantableServices
@@ -359,9 +348,7 @@ export function DevicesBindPage() {
                   >
                     <ButtonIcon variant="primary">
                       <ShieldCheck />
-                    </ButtonIcon>
-                    Approve device
-                  </Button>
+                    </ButtonIcon>{t("Approve device")}</Button>
                 </div>
               </form>
             </Form>
@@ -373,6 +360,7 @@ export function DevicesBindPage() {
 }
 
 function ApprovalSuccess({ device }: { readonly device: ApproveDeviceResponse }) {
+  const { t } = useUiTranslation();
   return (
     <Card className="rounded-lg">
       <CardHeader>
@@ -381,19 +369,17 @@ function ApprovalSuccess({ device }: { readonly device: ApproveDeviceResponse })
             <CheckCircle2 className="h-5 w-5 text-emerald-400" />
           </div>
           <div className="min-w-0">
-            <CardTitle>Device approved</CardTitle>
-            <CardDescription>
-              Device will pick up credentials on its next poll.
-            </CardDescription>
+            <CardTitle>{t("Device approved")}</CardTitle>
+            <CardDescription>{t("Device will pick up credentials on its next poll.")}</CardDescription>
           </div>
         </div>
       </CardHeader>
       <CardContent>
         <dl className="grid gap-3 text-13 sm:grid-cols-2">
-          <DetailRow label="Device" value={device.device_label} />
-          <DetailRow label="HW ID" value={device.hw_id} />
-          <DetailRow label="API key" value={maskIdentifier(device.api_key_id)} />
-          <DetailRow label="Node" value={maskIdentifier(device.node_id)} />
+          <DetailRow label={t("Device")} value={device.device_label} />
+          <DetailRow label={t("HW ID")} value={device.hw_id} />
+          <DetailRow label={t("API key")} value={maskIdentifier(device.api_key_id)} />
+          <DetailRow label={t("Node")} value={maskIdentifier(device.node_id)} />
         </dl>
       </CardContent>
     </Card>

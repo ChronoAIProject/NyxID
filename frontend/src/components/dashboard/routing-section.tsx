@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { Router } from "lucide-react";
 import { toast } from "sonner";
@@ -51,9 +54,12 @@ export function RoutingSection({
   nodeId,
   serviceId,
   readOnly = false,
-  title = "Routing",
-  description = "How requests reach the endpoint",
+  title: titleLocaleDefault,
+  description: descriptionLocaleDefault,
 }: RoutingSectionProps) {
+  const title = titleLocaleDefault === undefined ? translateUi("Routing") : titleLocaleDefault;
+  const description = descriptionLocaleDefault === undefined ? translateUi("How requests reach the endpoint") : descriptionLocaleDefault;
+  const { t } = useUiTranslation();
   const [picking, setPicking] = useState(false);
   const { data: nodes } = useNodes();
   const updateService = useUpdateUserService();
@@ -70,7 +76,7 @@ export function RoutingSection({
         onError: (err) => {
           const message =
             err instanceof ApiError ? err.message : "Failed to update routing";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -92,7 +98,7 @@ export function RoutingSection({
           {!readOnly && !picking && (
             <Button variant="outline" className="text-text-tertiary hover:text-muted-foreground" onClick={() => setPicking(true)}>
               <ButtonIcon><Router className="h-3 w-3" /></ButtonIcon>
-              {nodeId ? "Change Route" : "Route via Node"}
+              {nodeId ? t("Change Route") : t("Route via Node")}
             </Button>
           )}
         </div>
@@ -101,22 +107,22 @@ export function RoutingSection({
       <CardContent className="space-y-3">
         <div className="flex items-center gap-2">
           <Badge variant={nodeId ? "default" : "secondary"}>
-            {nodeId ? `Via node: ${currentNodeName}` : "Direct"}
+            {nodeId ? t("Via node: {{currentNodeName}}", { currentNodeName: currentNodeName }) : t("Direct")}
           </Badge>
         </div>
 
         {!readOnly && picking && (
           <div className="space-y-2">
-            <Label className="text-xs">Select routing</Label>
+            <Label className="text-xs">{t("Select routing")}</Label>
             <Select
               onValueChange={handleSelectNode}
               defaultValue={nodeId ?? "direct"}
             >
               <SelectTrigger>
-                <SelectValue placeholder="Select routing" />
+                <SelectValue placeholder={t("Select routing")} />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="direct">Direct (no node)</SelectItem>
+                <SelectItem value="direct">{t("Direct (no node)")}</SelectItem>
                 {allNodes.map((n) => (
                   <SelectItem
                     key={n.id}
@@ -129,17 +135,13 @@ export function RoutingSection({
               </SelectContent>
             </Select>
             {allNodes.length === 0 && (
-              <p className="text-xs text-muted-foreground">
-                No nodes registered. Register a node first.
-              </p>
+              <p className="text-xs text-muted-foreground">{t("No nodes registered. Register a node first.")}</p>
             )}
             <div className="flex justify-end">
               <Button
                 variant="outline"
                 onClick={() => setPicking(false)}
-              >
-                Cancel
-              </Button>
+              >{t("Cancel")}</Button>
             </div>
           </div>
         )}

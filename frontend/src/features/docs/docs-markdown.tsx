@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import {
   Children,
   isValidElement,
@@ -79,6 +81,7 @@ function fenceLanguage(children: ReactNode): string | null {
  * neither of which anyone pastes into a terminal.
  */
 function DocCodeBlock({ children }: { readonly children: ReactNode }) {
+  const { t } = useUiTranslation();
   const preRef = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
   const lang = fenceLanguage(children);
@@ -90,10 +93,10 @@ function DocCodeBlock({ children }: { readonly children: ReactNode }) {
     try {
       await copyToClipboard(text);
       setCopied(true);
-      toast.success("Copied to clipboard");
+      toast.success(translateUi("Copied to clipboard"));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error("Failed to copy");
+      toast.error(translateUi("Failed to copy"));
     }
   }
 
@@ -117,7 +120,7 @@ function DocCodeBlock({ children }: { readonly children: ReactNode }) {
           ) : (
             <Copy className="h-3.5 w-3.5" />
           )}
-          <span className="sr-only">Copy code snippet</span>
+          <span className="sr-only">{t("Copy code snippet")}</span>
         </Button>
       )}
     </div>

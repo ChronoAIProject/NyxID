@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { RotateCcw, SkipForward, StopCircle } from "lucide-react";
 import { ActionCard } from "@/components/assistant/blocks/action-card";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
@@ -73,6 +74,7 @@ export function ChatActorControls({
   readonly onBlockAction: (actionRequestId: string, note: string) => void;
   readonly onResolveAction: (report: ActionReport) => Promise<void>;
 }) {
+  const { t } = useUiTranslation();
   if (!projection) return null;
   const actions = [...projection.actions.values()];
   const controllableSteps = [...projection.steps.values()].filter(
@@ -89,11 +91,9 @@ export function ChatActorControls({
   if (!hasControls) return null;
 
   return (
-    <section aria-label="Actor controls" className="space-y-3">
+    <section aria-label={t("Actor controls")} className="space-y-3">
       {disabled ? (
-        <p role="status" className="text-11 text-muted-foreground">
-          Waiting for current state before controls can be used.
-        </p>
+        <p role="status" className="text-11 text-muted-foreground">{t("Waiting for current state before controls can be used.")}</p>
       ) : null}
       {projection.task ? (
         <TaskPlanCard
@@ -156,8 +156,7 @@ export function ChatActorControls({
                 disabled={disabled}
                 onClick={() => void onControlStep("step.retry", step)}
               >
-                <RotateCcw /> Retry
-              </Button>
+                <RotateCcw />{t(" Retry")}</Button>
             ) : null}
             {step.availableActions.skip ? (
               <Button
@@ -167,8 +166,7 @@ export function ChatActorControls({
                 disabled={disabled}
                 onClick={() => void onControlStep("step.skip", step)}
               >
-                <SkipForward /> Skip
-              </Button>
+                <SkipForward />{t(" Skip")}</Button>
             ) : null}
             {step.availableActions.stop ? (
               <Button
@@ -178,8 +176,7 @@ export function ChatActorControls({
                 disabled={disabled}
                 onClick={() => void onStop()}
               >
-                <StopCircle /> Stop
-              </Button>
+                <StopCircle />{t(" Stop")}</Button>
             ) : null}
           </div>
         </section>

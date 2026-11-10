@@ -1,3 +1,4 @@
+import { useWizardTranslation } from "@/i18n/wizard";
 import { useOrgs } from "@/hooks/use-orgs";
 import {
   Select,
@@ -50,6 +51,7 @@ export function OrgScopeSelect({
   allowAll = false,
   personalLabel = "Personal",
 }: OrgScopeSelectProps) {
+  const { t } = useWizardTranslation();
   const { data: orgs, isLoading } = useOrgs();
 
   const eligibleOrgs = (orgs ?? []).filter(
@@ -64,19 +66,19 @@ export function OrgScopeSelect({
       }
       disabled={disabled || isLoading}
     >
-      <SelectTrigger id={id} aria-label={label} aria-describedby={ariaDescribedBy}>
-        <SelectValue placeholder={personalLabel} />
+      <SelectTrigger id={id} aria-label={t(label)} aria-describedby={ariaDescribedBy}>
+        <SelectValue placeholder={t(personalLabel)} />
       </SelectTrigger>
       <SelectContent>
         {allowAll && (
           <>
-            <SelectItem value="all">View all</SelectItem>
+            <SelectItem value="all">{t("View all")}</SelectItem>
             <SelectSeparator asChild className="border-0">
               <hr />
             </SelectSeparator>
           </>
         )}
-        <SelectItem value={PERSONAL_VALUE}>{personalLabel}</SelectItem>
+        <SelectItem value={PERSONAL_VALUE}>{t(personalLabel)}</SelectItem>
         {eligibleOrgs.map((org) => (
           <SelectItem key={org.id} value={org.id}>
             {org.display_name || org.id}

@@ -1,3 +1,4 @@
+import { useWizardTranslation } from "@/i18n/wizard";
 // Reusable DisplayOnce panel: renders a one-time secret with a
 // copy-to-clipboard affordance, masks the secret until the user clicks
 // "Reveal", and owns the "I saved it" → complete-pairing button.
@@ -42,35 +43,30 @@ export function DisplayOncePanel({
   onAcknowledge,
   isAcknowledging,
 }: DisplayOnceProps) {
+  const { t } = useWizardTranslation();
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
         <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
           <Lock className="h-4 w-4" />
-          <span className="text-12 font-medium">Shown once — save it now</span>
+          <span className="text-12 font-medium">{t("Shown once — save it now")}</span>
         </div>
-        <h2 className="font-serif text-28 font-normal">{title}</h2>
-        <p className="text-12 text-muted-foreground">{description}</p>
+        <h2 className="font-serif text-28 font-normal">{t(title)}</h2>
+        <p className="text-12 text-muted-foreground">{t(description)}</p>
       </div>
 
-      <SecretField label="Secret" value={secret} />
+      <SecretField label={t("Secret")} value={secret} />
       {secondarySecret ? (
-        <SecretField label={secondarySecret.label} value={secondarySecret.value} />
+        <SecretField label={t(secondarySecret.label)} value={secondarySecret.value} />
       ) : null}
 
       <div className="flex flex-col gap-2">
         <Button variant="primary" onClick={onAcknowledge} disabled={isAcknowledging} className="w-full">
-          {isAcknowledging ? "Notifying CLI..." : ackButtonLabel}
+          {isAcknowledging ? t("Notifying CLI...") : t(ackButtonLabel)}
         </Button>
+        <p className="text-xs text-muted-foreground">{t("This value will not be shown again. Confirm you have saved it before closing this tab.")}</p>
         <p className="text-xs text-muted-foreground">
-          This value will not be shown again. Confirm you have saved it before closing this
-          tab.
-        </p>
-        <p className="text-xs text-muted-foreground">
-          <strong>Lost it?</strong> If you don&apos;t copy this now,
-          you&apos;ll need to rotate the credential to get a new one. (Old
-          value stops working immediately on rotate.)
-        </p>
+          <strong>{t("Lost it?")}</strong>{t(" If you don't copy this now, you'll need to rotate the credential to get a new one. (Old value stops working immediately on rotate.)")}</p>
       </div>
     </div>
   )
@@ -90,6 +86,7 @@ export function RecoveryCodesPanel({
   readonly codes: readonly string[]
   readonly onAcknowledged: () => void
 }) {
+  const { t } = useWizardTranslation();
   const [revealed, setRevealed] = useState(false)
   const [copied, setCopied] = useState(false)
 
@@ -107,8 +104,8 @@ export function RecoveryCodesPanel({
 
   function downloadTxt() {
     const header =
-      "NyxID MFA recovery codes — store these securely.\n" +
-      "Each code can be used ONCE if you lose access to your authenticator.\n\n"
+      t("NyxID MFA recovery codes — store these securely.") + "\n" +
+      t("Each code can be used ONCE if you lose access to your authenticator.") + "\n\n"
     const blob = new Blob([header + codes.join("\n") + "\n"], {
       type: "text/plain",
     })
@@ -127,19 +124,16 @@ export function RecoveryCodesPanel({
       <div className="flex flex-col gap-2">
         <div className="flex items-center gap-2 text-amber-600 dark:text-amber-500">
           <Lock className="h-4 w-4" />
-          <span className="text-sm font-medium">Shown once — save them now</span>
+          <span className="text-sm font-medium">{t("Shown once — save them now")}</span>
         </div>
-        <h2 className="font-serif text-28 font-normal">Save your recovery codes</h2>
-        <p className="text-sm text-muted-foreground">
-          Each code is single-use and lets you sign in if you lose access to your
-          authenticator. Store them in a password manager or print them. They are{" "}
-          <strong>not</strong> shown again.
-        </p>
+        <h2 className="font-serif text-28 font-normal">{t("Save your recovery codes")}</h2>
+        <p className="text-sm text-muted-foreground">{t("Each code is single-use and lets you sign in if you lose access to your authenticator. Store them in a password manager or print them. They are")}{" "}
+          <strong>{t("not")}</strong>{t(" shown again.")}</p>
       </div>
 
       <div className="flex flex-col gap-2">
         <div className="flex items-center justify-between">
-          <Label>Recovery codes</Label>
+          <Label>{t("Recovery codes")}</Label>
           <Button
             type="button"
             variant="outline"
@@ -148,7 +142,7 @@ export function RecoveryCodesPanel({
               setRevealed((r) => !r)
             }}
           >
-            {revealed ? "Hide" : "Reveal"}
+            {revealed ? t("Hide") : t("Reveal")}
           </Button>
         </div>
         <div className="grid grid-cols-1 gap-1.5 rounded-md border bg-muted/40 p-3 font-mono text-sm sm:grid-cols-2">
@@ -167,29 +161,25 @@ export function RecoveryCodesPanel({
           onClick={() => void copyAll()}
           className="flex-1"
         >
-          {copied ? "Copied!" : "Copy all"}
+          {copied ? t("Copied!") : t("Copy all")}
         </Button>
         <Button
           type="button"
           variant="outline"
           onClick={downloadTxt}
           className="flex-1"
-        >
-          Download .txt
-        </Button>
+        >{t("Download .txt")}</Button>
       </div>
 
-      <Button onClick={onAcknowledged}>I have saved them — close</Button>
-      <p className="text-xs text-muted-foreground">
-        After closing, these codes cannot be retrieved. Re-run{" "}
-        <code className="font-mono">nyxid mfa setup</code> to mint a new set if you didn't
-        save them.
-      </p>
+      <Button onClick={onAcknowledged}>{t("I have saved them — close")}</Button>
+      <p className="text-xs text-muted-foreground">{t("After closing, these codes cannot be retrieved. Re-run")}{" "}
+        <code className="font-mono">nyxid mfa setup</code>{t(" to mint a new set if you didn't save them.")}</p>
     </div>
   )
 }
 
 function SecretField({ label, value }: { readonly label: string; readonly value: string }) {
+  const { t } = useWizardTranslation();
   const [revealed, setRevealed] = useState(false)
   const [copied, setCopied] = useState(false)
 
@@ -211,7 +201,7 @@ function SecretField({ label, value }: { readonly label: string; readonly value:
   return (
     <div className="flex flex-col gap-2">
       <label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        {label}
+        {t(label)}
       </label>
       <div className="flex items-center gap-2">
         <code className="flex-1 overflow-x-auto rounded-lg border bg-muted/40 px-3 py-2 font-mono text-12">
@@ -224,7 +214,7 @@ function SecretField({ label, value }: { readonly label: string; readonly value:
           onClick={() => {
             setRevealed((r) => !r)
           }}
-          aria-label={revealed ? "Hide" : "Reveal"}
+          aria-label={revealed ? t("Hide") : t("Reveal")}
         >
           {revealed ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
         </Button>
@@ -233,7 +223,7 @@ function SecretField({ label, value }: { readonly label: string; readonly value:
           variant="outline"
           size="icon"
           onClick={() => void handleCopy()}
-          aria-label="Copy to clipboard"
+          aria-label={t("Copy to clipboard")}
         >
           {copied ? <Check className="h-4 w-4 text-green-600" /> : <Copy className="h-4 w-4" />}
         </Button>

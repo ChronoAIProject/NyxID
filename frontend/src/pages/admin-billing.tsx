@@ -1,3 +1,7 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -71,10 +75,11 @@ function errorText(error: unknown, fallback: string): string {
 
 function formatTime(value: string): string {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString(getFormattingLocale());
 }
 
 export function AdminBillingPage() {
+  const { t } = useUiTranslation();
   const search = useSearch({ strict: false });
   const navigate = useNavigate();
   const tab = parseTab(
@@ -86,8 +91,8 @@ export function AdminBillingPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Billing"
-        description="Every billed service's effective prices with their source, the Lago rate cache, and global defaults."
+        title={t("Billing")}
+        description={t("Every billed service's effective prices with their source, the Lago rate cache, and global defaults.")}
       />
       <Tabs
         value={tab}
@@ -100,9 +105,9 @@ export function AdminBillingPage() {
         }}
       >
         <TabsList>
-          <TabsTrigger value="overview">Services</TabsTrigger>
-          <TabsTrigger value="rates">Rate cache</TabsTrigger>
-          <TabsTrigger value="settings">Settings</TabsTrigger>
+          <TabsTrigger value="overview">{t("Services")}</TabsTrigger>
+          <TabsTrigger value="rates">{t("Rate cache")}</TabsTrigger>
+          <TabsTrigger value="settings">{t("Settings")}</TabsTrigger>
         </TabsList>
         <TabsContent value="overview" className="space-y-4">
           <ServicesTab canWrite={canWrite} />
@@ -119,6 +124,7 @@ export function AdminBillingPage() {
 }
 
 function ServicesTab({ canWrite }: { readonly canWrite: boolean }) {
+  const { t } = useUiTranslation();
   const overview = useAdminBillingOverview();
   const resync = useResyncAdminBillingService();
   const [query, setQuery] = useState("");
@@ -136,15 +142,11 @@ function ServicesTab({ canWrite }: { readonly canWrite: boolean }) {
   return (
     <Card>
       <CardHeader className="space-y-3">
-        <CardTitle>Billed services</CardTitle>
-        <p className="text-12 text-muted-foreground">
-          Precedence per credential class: a synced lane price, else legacy
-          platform billing while a lane is unsynced or absent, else free.
-          BILLING_ENABLED and BILLING_RESALE_ENABLED override everything.
-        </p>
+        <CardTitle>{t("Billed services")}</CardTitle>
+        <p className="text-12 text-muted-foreground">{t("Precedence per credential class: a synced lane price, else legacy platform billing while a lane is unsynced or absent, else free. BILLING_ENABLED and BILLING_RESALE_ENABLED override everything.")}</p>
         <Input
-          aria-label="Search services"
-          placeholder="Search services"
+          aria-label={t("Search services")}
+          placeholder={t("Search services")}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
@@ -163,18 +165,18 @@ function ServicesTab({ canWrite }: { readonly canWrite: boolean }) {
         {overview.data && rows.length === 0 && (
           <p className="text-12 text-muted-foreground">
             {overview.data.length === 0
-              ? "No catalog service has billing configuration."
-              : "No service matches the search."}
+              ? t("No catalog service has billing configuration.")
+              : t("No service matches the search.")}
           </p>
         )}
         {rows.length > 0 && (
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Service</TableHead>
-                <TableHead>Effective billing by credential</TableHead>
+                <TableHead>{t("Service")}</TableHead>
+                <TableHead>{t("Effective billing by credential")}</TableHead>
                 {canWrite && (
-                  <TableHead className="text-right">Actions</TableHead>
+                  <TableHead className="text-right">{t("Actions")}</TableHead>
                 )}
               </TableRow>
             </TableHeader>
@@ -188,7 +190,7 @@ function ServicesTab({ canWrite }: { readonly canWrite: boolean }) {
                         {service.slug}
                       </div>
                       {!service.is_active && (
-                        <Badge variant="secondary">Inactive</Badge>
+                        <Badge variant="secondary">{t("Inactive")}</Badge>
                       )}
                     </TableCell>
                     <TableCell className="align-top">
@@ -206,8 +208,8 @@ function ServicesTab({ canWrite }: { readonly canWrite: boolean }) {
                           }
                         >
                           {editing === service.id
-                            ? "Close editor"
-                            : "Edit prices"}
+                            ? t("Close editor")
+                            : t("Edit prices")}
                         </Button>
                         <Button
                           size="sm"
@@ -218,18 +220,16 @@ function ServicesTab({ canWrite }: { readonly canWrite: boolean }) {
                               onSuccess: (result) =>
                                 result.synced
                                   ? toast.success(
-                                      `${service.name} prices synced to Lago`,
+                                      translateUi("{{name}} prices synced to Lago", { name: service.name }),
                                     )
                                   : toast.warning(
-                                      `${service.name}: nothing synced; check the sync errors`,
+                                      translateUi("{{name}}: nothing synced; check the sync errors", { name: service.name }),
                                     ),
                               onError: (error) =>
-                                toast.error(errorText(error, "Resync failed")),
+                                toast.error(translateErrorMessage(errorText(error, "Resync failed"))),
                             })
                           }
-                        >
-                          Resync
-                        </Button>
+                        >{t("Resync")}</Button>
                       </TableCell>
                     )}
                   </TableRow>
@@ -287,6 +287,7 @@ function LaneForm({
   readonly name: string;
   readonly onDone: () => void;
 }) {
+  const { t } = useUiTranslation();
   const update = useUpdateAdminBillingService();
   const form = useAppForm<BillingLaneFormData>({
     defaultValues: {
@@ -305,11 +306,11 @@ function LaneForm({
       { serviceId: service.id, billing },
       {
         onSuccess: () => {
-          toast.success(`${name} prices saved`);
+          toast.success(translateUi("{{name}} prices saved", { name: name }));
           onDone();
         },
         onError: (error) =>
-          toast.error(errorText(error, "Failed to save prices")),
+          toast.error(translateErrorMessage(errorText(error, "Failed to save prices"))),
       },
     );
   });
@@ -326,12 +327,8 @@ function LaneForm({
           <Button
             type="submit"
             disabled={!form.formState.isDirty || update.isPending}
-          >
-            Save prices
-          </Button>
-          <Button type="button" variant="outline" onClick={onDone}>
-            Cancel
-          </Button>
+          >{t("Save prices")}</Button>
+          <Button type="button" variant="outline" onClick={onDone}>{t("Cancel")}</Button>
         </div>
       </form>
     </Form>
@@ -339,11 +336,12 @@ function LaneForm({
 }
 
 function RatesTab() {
+  const { t } = useUiTranslation();
   const rates = useAdminBillingRates();
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Lago rate cache</CardTitle>
+        <CardTitle>{t("Lago rate cache")}</CardTitle>
       </CardHeader>
       <CardContent>
         {rates.isLoading && <Skeleton className="h-24 w-full" />}
@@ -354,20 +352,18 @@ function RatesTab() {
           />
         )}
         {rates.data?.length === 0 && (
-          <p className="text-12 text-muted-foreground">
-            No rates are cached yet.
-          </p>
+          <p className="text-12 text-muted-foreground">{t("No rates are cached yet.")}</p>
         )}
         {rates.data && rates.data.length > 0 && (
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Metric code</TableHead>
-                <TableHead>Model</TableHead>
-                <TableHead>Credits per unit</TableHead>
-                <TableHead>Synced</TableHead>
-                <TableHead>Stale after</TableHead>
-                <TableHead>State</TableHead>
+                <TableHead>{t("Metric code")}</TableHead>
+                <TableHead>{t("Model")}</TableHead>
+                <TableHead>{t("Credits per unit")}</TableHead>
+                <TableHead>{t("Synced")}</TableHead>
+                <TableHead>{t("Stale after")}</TableHead>
+                <TableHead>{t("State")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -376,17 +372,17 @@ function RatesTab() {
                   <TableCell className="font-mono text-12">
                     {rate.lago_metric_code}
                   </TableCell>
-                  <TableCell>{rate.model ?? "Any"}</TableCell>
+                  <TableCell>{rate.model ?? t("Any")}</TableCell>
                   <TableCell>{rate.credits_per_unit}</TableCell>
                   <TableCell>{formatTime(rate.synced_at)}</TableCell>
                   <TableCell>{formatTime(rate.stale_after)}</TableCell>
                   <TableCell className="space-x-1">
                     {rate.retired_at ? (
-                      <Badge variant="destructive">Retired</Badge>
+                      <Badge variant="destructive">{t("Retired")}</Badge>
                     ) : rate.stale ? (
-                      <Badge variant="warning">Stale</Badge>
+                      <Badge variant="warning">{t("Stale")}</Badge>
                     ) : (
-                      <Badge variant="success">Current</Badge>
+                      <Badge variant="success">{t("Current")}</Badge>
                     )}
                   </TableCell>
                 </TableRow>
@@ -400,6 +396,7 @@ function RatesTab() {
 }
 
 function SettingsTab({ canWrite }: { readonly canWrite: boolean }) {
+  const { t } = useUiTranslation();
   const config = useAdminBillingConfig();
   if (config.isLoading) return <Skeleton className="h-40 w-full" />;
   if (config.error || !config.data)
@@ -418,34 +415,29 @@ function SettingsTab({ canWrite }: { readonly canWrite: boolean }) {
     <div className="space-y-4">
       <Card>
         <CardHeader>
-          <CardTitle>Global defaults</CardTitle>
+          <CardTitle>{t("Global defaults")}</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="flex flex-wrap items-center gap-2 text-13">
-            <span>
-              New-wallet overdraft cap: <strong>{cap.effective}</strong> credits
-            </span>
+            <span>{t("New-wallet overdraft cap: ")}<strong>{cap.effective}</strong>{t(" credits")}</span>
             <SourceBadge source={cap.source} />
           </div>
-          <p className="text-12 text-muted-foreground">
-            Applies when a wallet is first provisioned (first charge, top-up
-            checkout, or backfill). Existing wallets keep their cap. Empty uses
-            BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS ({cap.env}).
+          <p className="text-12 text-muted-foreground">{t("Applies when a wallet is first provisioned (first charge, top-up checkout, or backfill). Existing wallets keep their cap. Empty uses BILLING_DEFAULT_OVERDRAFT_CAP_CREDITS (")}{cap.env}).
           </p>
           {canWrite && <SettingsForm config={data} />}
         </CardContent>
       </Card>
       <Card>
         <CardHeader>
-          <CardTitle>Deployment environment (read-only)</CardTitle>
+          <CardTitle>{t("Deployment environment (read-only)")}</CardTitle>
         </CardHeader>
         <CardContent>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Variable</TableHead>
-                <TableHead>Value</TableHead>
-                <TableHead>Source</TableHead>
+                <TableHead>{t("Variable")}</TableHead>
+                <TableHead>{t("Value")}</TableHead>
+                <TableHead>{t("Source")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -454,10 +446,10 @@ function SettingsTab({ canWrite }: { readonly canWrite: boolean }) {
                   <TableCell className="font-mono text-12">{row.key}</TableCell>
                   <TableCell>
                     {row.secret_set === null
-                      ? (row.value ?? "Not set")
+                      ? (row.value ?? t("Not set"))
                       : row.secret_set
-                        ? "Set (hidden)"
-                        : "Not set"}
+                        ? t("Set (hidden)")
+                        : t("Not set")}
                   </TableCell>
                   <TableCell>
                     <SourceBadge source={row.source} />
@@ -473,6 +465,7 @@ function SettingsTab({ canWrite }: { readonly canWrite: boolean }) {
 }
 
 function SettingsForm({ config }: { readonly config: BillingConfig }) {
+  const { t } = useUiTranslation();
   const update = useUpdateAdminBillingConfig();
   const stored = config.default_overdraft_cap_credits.global;
   const defaults: BillingSettingsForm = {
@@ -491,9 +484,9 @@ function SettingsForm({ config }: { readonly config: BillingConfig }) {
   }, [form, stored]);
   const onSubmit = form.handleSubmit((data) =>
     update.mutate(billingSettingsPatch(data), {
-      onSuccess: () => toast.success("Global billing defaults saved"),
+      onSuccess: () => toast.success(translateUi("Global billing defaults saved")),
       onError: (error) =>
-        toast.error(errorText(error, "Failed to save defaults")),
+        toast.error(translateErrorMessage(errorText(error, "Failed to save defaults"))),
     }),
   );
   return (
@@ -504,17 +497,15 @@ function SettingsForm({ config }: { readonly config: BillingConfig }) {
           name="default_overdraft_cap_credits"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Global overdraft cap (credits)</FormLabel>
+              <FormLabel>{t("Global overdraft cap (credits)")}</FormLabel>
               <FormControl>
                 <Input
                   {...field}
                   inputMode="numeric"
-                  placeholder={`Environment default (${config.default_overdraft_cap_credits.env})`}
+                  placeholder={t("Environment default ({{env}})", { env: config.default_overdraft_cap_credits.env })}
                 />
               </FormControl>
-              <FormDescription>
-                Leave empty to use the environment default.
-              </FormDescription>
+              <FormDescription>{t("Leave empty to use the environment default.")}</FormDescription>
               <FormMessage />
             </FormItem>
           )}
@@ -527,9 +518,7 @@ function SettingsForm({ config }: { readonly config: BillingConfig }) {
         <Button
           type="submit"
           disabled={!form.formState.isDirty || update.isPending}
-        >
-          Save global defaults
-        </Button>
+        >{t("Save global defaults")}</Button>
       </form>
     </Form>
   );

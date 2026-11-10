@@ -1,3 +1,7 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AssistantErrorNotice } from "./assistant-error-notice";
 import { assistantErrorSummary } from "@/lib/assistant/request-error";
@@ -128,6 +132,7 @@ export function GroupMessageRow({
   readonly members?: readonly AssistantGroupMember[];
   readonly onOpenAgent: (agentId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const feedback = useAssistantFeedback("group", groupId, message.id);
   const [vote, setVote] = useState<"up" | "down" | undefined>(
     message.feedback?.vote,
@@ -140,7 +145,7 @@ export function GroupMessageRow({
       <div className="min-w-0 px-8">
         <p
           role="note"
-          aria-label="Group notice"
+          aria-label={t("Group notice")}
           className="text-center text-11 text-text-tertiary"
         >
           {message.text}
@@ -157,7 +162,11 @@ export function GroupMessageRow({
     return (
       <div className="group/message ml-[30px] flex flex-col items-end gap-1">
         <div className="max-w-[78%] whitespace-pre-wrap break-words rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground">
-          {message.author ? <p className="mb-1 text-11 font-medium text-muted-foreground">{message.author.display_name}</p> : null}
+          {message.author ? (
+            <p className="mb-1 text-11 font-medium text-muted-foreground">
+              {message.author.display_name}
+            </p>
+          ) : null}
           {message.recipient_agent_ids?.length ? (
             <p className="mb-1 text-11 text-muted-foreground">
               {recipientLine(message.recipient_agent_ids, members)}
@@ -192,7 +201,7 @@ export function GroupMessageRow({
   const handle = agentHandle(agent);
   return (
     <article
-      aria-label={`Message from ${title}`}
+      aria-label={t("Message from {{title}}", { title: title })}
       className="grid grid-cols-[30px_minmax(0,1fr)] items-start"
     >
       <button
@@ -211,7 +220,7 @@ export function GroupMessageRow({
             <span className="text-11 text-text-tertiary">{handle}</span>
           ) : null}
           {agent.kind === "nyxbot" ? (
-            <span className="text-10 text-text-tertiary">Personal agent</span>
+            <span className="text-10 text-text-tertiary">{t("Personal agent")}</span>
           ) : null}
           <MessageTime value={message.created_at} />
         </div>
@@ -242,7 +251,7 @@ export function GroupMessageRow({
                 key={next}
                 type="button"
                 disabled={feedback.isPending}
-                aria-label={next === "up" ? "Helpful" : "Not helpful"}
+                aria-label={next === "up" ? t("Helpful") : t("Not helpful")}
                 aria-pressed={vote === next}
                 onClick={() => {
                   const selected = vote === next ? undefined : next;
@@ -266,19 +275,17 @@ export function GroupMessageRow({
             ))}
             <button
               type="button"
-              aria-label="Add feedback comment"
+              aria-label={t("Add feedback comment")}
               aria-expanded={commentOpen}
               onClick={() => setCommentOpen((open) => !open)}
               className="ml-1 rounded px-2 py-1 text-10 text-text-tertiary hover:bg-overlay"
-            >
-              Comment
-            </button>
+            >{t("Comment")}</button>
           </div>
           {commentOpen ? (
             <div className="mt-2 flex max-w-sm gap-2 rounded-lg border border-border bg-overlay p-2">
               <textarea
                 autoFocus
-                aria-label="Optional feedback comment"
+                aria-label={t("Optional feedback comment")}
                 value={comment}
                 maxLength={1000}
                 onKeyDown={(event) => {
@@ -286,7 +293,11 @@ export function GroupMessageRow({
                 }}
                 onChange={(event) => setComment(event.target.value)}
                 className="min-h-14 flex-1 resize-y bg-transparent text-11 outline-none"
-                placeholder={vote ? "Optional comment" : "Choose helpful or not helpful first"}
+                placeholder={
+                  vote
+                    ? t("Optional comment")
+                    : t("Choose helpful or not helpful first")
+                }
               />
               <button
                 type="button"
@@ -302,15 +313,11 @@ export function GroupMessageRow({
                     })
                     .catch(() => setFeedbackError(true));
                 }}
-              >
-                Send
-              </button>
+              >{t("Send")}</button>
             </div>
           ) : null}
           {feedbackError ? (
-            <p role="alert" className="mt-1 text-11 text-destructive">
-              Unable to save feedback. Try again.
-            </p>
+            <p role="alert" className="mt-1 text-11 text-destructive">{t("Unable to save feedback. Try again.")}</p>
           ) : null}
         </div>
       </div>
@@ -334,6 +341,7 @@ function GroupTranscript({
   readonly onOpenAgent: (agentId: string) => void;
   readonly bottomInset: number;
 }) {
+  const { t } = useUiTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
   const lastScrollTop = useRef(0);
@@ -380,7 +388,7 @@ function GroupTranscript({
     try {
       await onLoadOlder();
     } catch {
-      toast.error("Could not load earlier messages. Try again.");
+      toast.error(translateUi("Could not load earlier messages. Try again."));
     } finally {
       setLoadingOlder(false);
       // Keep the reader's place once older messages are prepended.
@@ -410,14 +418,10 @@ function GroupTranscript({
             className="self-center"
             isLoading={loadingOlder}
             onClick={() => void loadOlder()}
-          >
-            Load earlier messages
-          </Button>
+          >{t("Load earlier messages")}</Button>
         ) : null}
         {!messages.length ? (
-          <p className="flex flex-1 items-center justify-center px-6 text-center text-12 text-text-tertiary">
-            Say hello. Mention an agent with @ to ask it directly.
-          </p>
+          <p className="flex flex-1 items-center justify-center px-6 text-center text-12 text-text-tertiary">{t("Say hello. Mention an agent with @ to ask it directly.")}</p>
         ) : null}
         {messages.map((message) => (
           <GroupMessageRow
@@ -432,7 +436,7 @@ function GroupTranscript({
         {working.length ? (
           <div
             role="status"
-            aria-label="Agents working"
+            aria-label={t("Agents working")}
             className="grid grid-cols-[30px_minmax(0,1fr)] items-center"
           >
             <span className="flex w-6 justify-center">
@@ -456,14 +460,15 @@ function MemberButton({
   readonly member: AssistantGroupMember;
   readonly onOpen: () => void;
 }) {
+  const { t } = useUiTranslation();
   return (
     <button
       type="button"
       onClick={onOpen}
-      aria-label={`${agentTitle(member)}${member.destroyed ? " (destroyed)" : ""} — agent details`}
+      aria-label={t("{{value}}{{value1}} — agent details", { value: agentTitle(member), value1: member.destroyed ? t(" (destroyed)") : "" })}
       title={
         agentHandle(member)
-          ? `${agentTitle(member)} (${agentHandle(member)!})`
+          ? t("{{value}} ({{value1}})", { value: agentTitle(member), value1: agentHandle(member)! })
           : agentTitle(member)
       }
       className={cn(
@@ -491,6 +496,7 @@ function GroupHeader({
   readonly onOpenAgent: (agentId: string) => void;
   readonly onOpenSettings: () => void;
 }) {
+  const { t } = useUiTranslation();
   const lead = group.members.find(
     (member) => member.id === group.lead_agent_id,
   );
@@ -503,7 +509,7 @@ function GroupHeader({
             {group.name}
           </h2>
           <div
-            aria-label="Members"
+            aria-label={t("Members")}
             role="group"
             className="flex items-center gap-1"
           >
@@ -521,23 +527,21 @@ function GroupHeader({
                 aria-hidden="true"
                 className="h-1.5 w-1.5 animate-pulse rounded-full bg-success"
               />
-              {working} working
-            </span>
+              {working}{t(" working")}</span>
           ) : null}
           <Button
             size="sm"
             variant="ghost"
             className="ml-auto"
-            aria-label="Group settings"
+            aria-label={t("Group settings")}
             onClick={onOpenSettings}
           >
-            <Settings2 aria-hidden="true" />
-            Settings
-          </Button>
+            <Settings2 aria-hidden="true" />{t("Settings")}</Button>
         </div>
         <p className="text-11 text-text-tertiary">
-          {lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.
-        </p>
+          {lead
+            ? t("Messages go to {{value}}", { value: agentTitle(lead) })
+            : t("Messages go to the first agent")}{t("; selected recipients stay active until changed. @mention someone to change them.")}</p>
       </div>
     </div>
   );
@@ -569,6 +573,7 @@ export function GroupPendingActions({
     decision: "allow" | "deny",
   ) => Promise<void>;
 }) {
+  const { t } = useUiTranslation();
   const actorId = useAuthStore((state) => state.user?.id);
   if (!actions.length) return null;
   return (
@@ -581,7 +586,7 @@ export function GroupPendingActions({
       />
       <div
         className="mx-auto w-full max-w-3xl space-y-1.5 px-4 pb-2"
-        aria-label="Actions waiting for you"
+        aria-label={t("Actions waiting for you")}
       >
         {actions.map((action) => {
           const member = members.find(
@@ -593,21 +598,32 @@ export function GroupPendingActions({
             <div
               key={action.acknowledgement_id ?? action.approval_request_id}
               role="region"
-              aria-label={`Confirm: ${action.summary}`}
+              aria-label={t("Confirm: {{summary}}", { summary: action.summary })}
               className="flex items-center gap-3 rounded-lg border border-border bg-overlay px-3 py-2"
             >
               <p className="min-w-0 flex-1 text-12 text-foreground">
-                <span className="font-medium">{who}</span> wants to:{" "}
+                <span className="font-medium">{who}</span>{t(" wants to:")}{" "}
                 {action.summary}
               </p>
               {action.authored_skill ? (
-                action.acknowledgement_id && (!action.triggering_person || action.triggering_person.id === actorId) ? (
-                  <Button size="sm" variant="outline" asChild><Link to="/assistant" search={{ c: action.conversation_id, card: action.acknowledgement_id }}>Review draft</Link></Button>
-                ) : <span className="text-11 text-muted-foreground">Awaiting {action.triggering_person?.display_name ?? "owner"} review</span>
+                action.acknowledgement_id &&
+                (!action.triggering_person ||
+                  action.triggering_person.id === actorId) ? (
+                  <Button size="sm" variant="outline" asChild>
+                    <Link
+                      to="/assistant"
+                      search={{
+                        c: action.conversation_id,
+                        card: action.acknowledgement_id,
+                      }}
+                    >{t("Review draft")}</Link>
+                  </Button>
+                ) : (
+                  <span className="text-11 text-muted-foreground">{t("Awaiting ")}{action.triggering_person?.display_name ?? t("owner")}{" "}{t("review")}</span>
+                )
               ) : action.triggering_person ? (
                 <>
-                  <span className="text-11 text-muted-foreground">
-                    Awaiting {action.triggering_person.display_name}
+                  <span className="text-11 text-muted-foreground">{t("Awaiting ")}{action.triggering_person.display_name}
                   </span>
                   {action.can_decide ? (
                     <>
@@ -616,36 +632,28 @@ export function GroupPendingActions({
                         variant="outline"
                         disabled={sending}
                         onClick={() => void onDecide?.(action, "deny")}
-                      >
-                        Deny
-                      </Button>
+                      >{t("Deny")}</Button>
                       <Button
                         size="sm"
                         disabled={sending}
                         onClick={() => void onDecide?.(action, "allow")}
-                      >
-                        Allow
-                      </Button>
+                      >{t("Allow")}</Button>
                     </>
                   ) : null}
                 </>
               ) : action.confirm_phrase ? (
                 <>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={sending}
-                onClick={() => void onAnswer(`no ${code}`)}
-              >
-                Cancel
-              </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={sending}
+                    onClick={() => void onAnswer(`no ${code}`)}
+                  >{t("Cancel")}</Button>
                   <Button
                     size="sm"
                     disabled={sending}
                     onClick={() => void onAnswer(action.confirm_phrase!)}
-                  >
-                Confirm
-              </Button>
+                  >{t("Confirm")}</Button>
                 </>
               ) : null}
             </div>
@@ -671,15 +679,16 @@ export function GroupRecipientPills({
   readonly onRemove: (id: string) => void;
   readonly onAdd: (id: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const live = members.filter((member) => !member.destroyed);
   const others = live.filter((member) => !recipientIds.includes(member.id));
   return (
     <div
       role="group"
-      aria-label="Message recipients"
+      aria-label={t("Message recipients")}
       className="mb-2 flex flex-wrap items-center gap-1.5"
     >
-      <span className="text-11 text-muted-foreground">To</span>
+      <span className="text-11 text-muted-foreground">{t("To")}</span>
       {recipientIds.flatMap((id) => {
         const member = live.find((row) => row.id === id);
         return member
@@ -690,7 +699,7 @@ export function GroupRecipientPills({
                 size="sm"
                 variant="secondary"
                 className="rounded-full"
-                aria-label={`Remove recipient ${agentTitle(member)}`}
+                aria-label={t("Remove recipient {{value}}", { value: agentTitle(member) })}
                 onClick={() => onRemove(id)}
               >
                 {agentTitle(member)} ×
@@ -699,9 +708,7 @@ export function GroupRecipientPills({
           : [];
       })}
       {recipientIds.length ? null : (
-        <span role="status" className="text-11 text-destructive">
-          Choose at least one recipient.
-        </span>
+        <span role="status" className="text-11 text-destructive">{t("Choose at least one recipient.")}</span>
       )}
       {others.length ? (
         <DropdownMenu>
@@ -711,14 +718,15 @@ export function GroupRecipientPills({
               size="sm"
               variant="ghost"
               className="rounded-full"
-              aria-label="Add recipient"
-            >
-              + Add
-            </Button>
+              aria-label={t("Add recipient")}
+            >{t("+ Add")}</Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
             {others.map((member) => (
-              <DropdownMenuItem key={member.id} onSelect={() => onAdd(member.id)}>
+              <DropdownMenuItem
+                key={member.id}
+                onSelect={() => onAdd(member.id)}
+              >
                 {agentTitle(member)}
               </DropdownMenuItem>
             ))}
@@ -736,16 +744,20 @@ export function NyxAgentGroupPage({
   readonly groupId: string;
   readonly mock: boolean;
 }) {
+  const { t } = useAppTranslation();
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
   const agents = useNyxBotAgents();
   const transcript = useNyxBotGroupMessages(groupId);
   const [deciding, setDeciding] = useState(false);
-  const [requestError, setRequestError] = useState<{ owner: string | undefined; message: string }>();
+  const [requestError, setRequestError] = useState<{
+    owner: string | undefined;
+    message: string;
+  }>();
   function reportError(error: unknown, fallback: string) {
     const message = error instanceof Error ? error.message : fallback;
     setRequestError({ owner: user?.id, message });
-    toast.error(assistantErrorSummary(message));
+    toast.error(translateErrorMessage(assistantErrorSummary(message)));
   }
   const decideApproval = useDecideApproval();
   const composerRef = useRef<HTMLDivElement>(null);
@@ -757,8 +769,8 @@ export function NyxAgentGroupPage({
   // Group payloads name agents by handle; their display names live on the agent list.
   const group =
     transcript.data && !transcript.error
-    ? groupWithDisplayNames(transcript.data.group, agents.data?.agents)
-    : undefined;
+      ? groupWithDisplayNames(transcript.data.group, agents.data?.agents)
+      : undefined;
   const messages = (
     transcript.error ? [] : (transcript.data?.messages ?? [])
   ).map((message) =>
@@ -794,8 +806,8 @@ export function NyxAgentGroupPage({
   function goTo(search: { c?: string } = {}) {
     void navigateWithBuildUpdate(() =>
       navigate({
-      to: "/assistant" as never,
-      search: { ...search, ...(mock ? { mock: 1 } : {}) } as never,
+        to: "/assistant" as never,
+        search: { ...search, ...(mock ? { mock: 1 } : {}) } as never,
       }),
     );
   }
@@ -811,7 +823,7 @@ export function NyxAgentGroupPage({
 
   return (
     <AssistantShell
-      title={group?.name ?? "Group"}
+      title={group?.name ?? t("Group")}
       headerActions={<NyxBotSettingsButton />}
       sidebar={
         <AssistantEngineSidebar
@@ -825,7 +837,15 @@ export function NyxAgentGroupPage({
       }
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
-        <AssistantErrorNotice message={transcript.error ? `Could not open this group. ${transcript.error.message}` : requestError?.owner === user?.id ? requestError?.message : undefined} />
+        <AssistantErrorNotice
+          message={
+            transcript.error
+              ? t("Could not open this group. {{message}}", { message: translateErrorMessage(transcript.error.message) })
+              : requestError?.owner === user?.id
+                ? requestError?.message
+                : undefined
+          }
+        />
         {group ? (
           <>
             <GroupHeader
@@ -858,14 +878,10 @@ export function NyxAgentGroupPage({
           </>
         ) : transcript.error ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-            <Button variant="outline" size="sm" onClick={() => goTo()}>
-              Back to home
-            </Button>
+            <Button variant="outline" size="sm" onClick={() => goTo()}>{t("Back to home")}</Button>
           </div>
         ) : (
-          <div className="flex flex-1 items-center justify-center text-12 text-text-tertiary">
-            Loading group...
-          </div>
+          <div className="flex flex-1 items-center justify-center text-12 text-text-tertiary">{t("Loading group...")}</div>
         )}
         <AgentDetailsSheet
           agentId={detailsAgentId}
@@ -916,7 +932,9 @@ export function NyxAgentGroupPage({
             }}
           />
           <UploadComposer
-            footerControls={<AccessModeSwitcher disabled={transcript.post.isPending} />}
+            footerControls={
+              <AccessModeSwitcher disabled={transcript.post.isPending} />
+            }
             key={`${user?.id}:${groupId}`}
             scope={{ kind: "groups", id: groupId }}
             active={false}
@@ -927,13 +945,13 @@ export function NyxAgentGroupPage({
             }
             ownerUserId={user?.id ?? null}
             draftKey={`group:${groupId}`}
-            placeholder={GROUP_COMPOSER_PLACEHOLDER}
+            placeholder={t(GROUP_COMPOSER_PLACEHOLDER)}
             mentions={mentions}
             onSend={async (text, uploads) => {
               setRequestError(undefined);
               if (recipients.edited && !recipients.ids.length) {
                 const error = new Error("Choose at least one recipient.");
-                toast.error(error.message);
+                toast.error(translateErrorMessage(error.message));
                 throw error;
               }
               try {

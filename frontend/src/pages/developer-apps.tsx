@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -98,6 +101,7 @@ function StatCard({
 }
 
 export function DeveloperAppsPage() {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const { data, isLoading, error, refetch } = useDeveloperApps();
   const createMutation = useCreateDeveloperApp();
@@ -126,13 +130,13 @@ export function DeveloperAppsPage() {
 
   async function handleCreate() {
     if (!name.trim()) {
-      toast.error("Application name is required");
+      toast.error(translateUi("Application name is required"));
       return;
     }
 
     const parsedUris = parseRedirectUris(redirectUrisText);
     if (parsedUris.error) {
-      toast.error(parsedUris.error);
+      toast.error(translateErrorMessage(parsedUris.error));
       return;
     }
 
@@ -144,7 +148,7 @@ export function DeveloperAppsPage() {
         allowed_scopes: selectedScopes,
       });
 
-      toast.success("Developer app created");
+      toast.success(translateUi("Developer app created"));
       if (created.client_secret) {
         setCreatedClientId(created.id);
         setCreatedClientSecret(created.client_secret);
@@ -157,9 +161,9 @@ export function DeveloperAppsPage() {
       setSelectedScopes(["openid", "profile", "email"]);
     } catch (error) {
       if (error instanceof ApiError) {
-        toast.error(error.message);
+        toast.error(translateErrorMessage(error.message));
       } else {
-        toast.error("Failed to create app");
+        toast.error(translateUi("Failed to create app"));
       }
     }
   }
@@ -168,12 +172,8 @@ export function DeveloperAppsPage() {
     <div className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-            Developer Apps
-          </h2>
-          <p className="text-12 text-muted-foreground">
-            Register and manage OAuth applications for your products.
-          </p>
+          <h2 className="text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>{t("Developer Apps")}</h2>
+          <p className="text-12 text-muted-foreground">{t("Register and manage OAuth applications for your products.")}</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2">
@@ -182,38 +182,30 @@ export function DeveloperAppsPage() {
               checked={showInactive}
               onCheckedChange={setShowInactive}
             />
-            <label htmlFor="show-inactive" className="text-12 text-muted-foreground cursor-pointer">
-              Show inactive
-            </label>
+            <label htmlFor="show-inactive" className="text-12 text-muted-foreground cursor-pointer">{t("Show inactive")}</label>
           </div>
-          <AddCtaButton label="New Application" onClick={() => setCreateOpen(true)} />
+          <AddCtaButton label={t("New Application")} onClick={() => setCreateOpen(true)} />
           <Dialog open={createOpen} onOpenChange={setCreateOpen}>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>Create Developer App</DialogTitle>
-                <DialogDescription>
-                  Register a new OAuth application for your product.
-                </DialogDescription>
+                <DialogTitle>{t("Create Developer App")}</DialogTitle>
+                <DialogDescription>{t("Register a new OAuth application for your product.")}</DialogDescription>
               </DialogHeader>
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <label className="text-12 font-medium" htmlFor="app-name">
-                    Application Name
-                  </label>
+                  <label className="text-12 font-medium" htmlFor="app-name">{t("Application Name")}</label>
                   <Input
                     id="app-name"
                     value={name}
                     onChange={(event) => setName(event.target.value)}
-                    placeholder="My SaaS App"
+                    placeholder={t("My SaaS App")}
                   />
                 </div>
                 <div className="space-y-2">
                   <label
                     className="text-12 font-medium"
                     htmlFor="redirect-uris"
-                  >
-                    Redirect URIs (one per line)
-                  </label>
+                  >{t("Redirect URIs (one per line)")}</label>
                   <textarea
                     id="redirect-uris"
                     value={redirectUrisText}
@@ -227,7 +219,7 @@ export function DeveloperAppsPage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-12 font-medium">Client Type</label>
+                  <label className="text-12 font-medium">{t("Client Type")}</label>
                   <Select
                     value={clientType}
                     onValueChange={(value: "public" | "confidential") =>
@@ -238,17 +230,14 @@ export function DeveloperAppsPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="public">Public (PKCE)</SelectItem>
-                      <SelectItem value="confidential">Confidential</SelectItem>
+                      <SelectItem value="public">{t("Public (PKCE)")}</SelectItem>
+                      <SelectItem value="confidential">{t("Confidential")}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
                 <div className="space-y-3">
-                  <label className="text-12 font-medium">Allowed Scopes</label>
-                  <p className="text-xs text-muted-foreground">
-                    OIDC scopes this app can request. Determines what user data
-                    and NyxID capabilities are included in tokens.
-                  </p>
+                  <label className="text-12 font-medium">{t("Allowed Scopes")}</label>
+                  <p className="text-xs text-muted-foreground">{t("OIDC scopes this app can request. Determines what user data and NyxID capabilities are included in tokens.")}</p>
                   <div className="space-y-2">
                     {OIDC_SCOPES.map((scope) => (
                       <div key={scope.id} className="flex items-start gap-2">
@@ -271,9 +260,7 @@ export function DeveloperAppsPage() {
                           >
                             {scope.label}
                             {scope.required && (
-                              <span className="ml-1 text-xs text-muted-foreground">
-                                (required)
-                              </span>
+                              <span className="ml-1 text-xs text-muted-foreground">{t("(required)")}</span>
                             )}
                           </label>
                           {"hint" in scope && scope.hint && (
@@ -292,16 +279,12 @@ export function DeveloperAppsPage() {
                   type="button"
                   variant="outline"
                   onClick={() => setCreateOpen(false)}
-                >
-                  Cancel
-                </Button>
+                >{t("Cancel")}</Button>
                 <Button
                   variant="primary"
                   onClick={() => void handleCreate()}
                   isLoading={createMutation.isPending}
-                >
-                  Create App
-                </Button>
+                >{t("Create App")}</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
@@ -316,21 +299,21 @@ export function DeveloperAppsPage() {
 
       <div className="grid gap-4 md:grid-cols-3">
         <StatCard
-          title="Total Apps"
+          title={t("Total Apps")}
           value={apps.length}
-          description="All registered applications"
+          description={t("All registered applications")}
           icon={Code}
         />
         <StatCard
-          title="Active Apps"
+          title={t("Active Apps")}
           value={activeCount}
-          description="Ready for production traffic"
+          description={t("Ready for production traffic")}
           icon={ShieldCheck}
         />
         <StatCard
-          title="Confidential Apps"
+          title={t("Confidential Apps")}
           value={confidentialCount}
-          description="Require client secret"
+          description={t("Require client secret")}
           icon={Shield}
         />
       </div>
@@ -338,7 +321,7 @@ export function DeveloperAppsPage() {
       <div className="grid gap-4 xl:grid-cols-2">
         {!isLoading && error && (
           <div className="xl:col-span-2">
-            <ErrorBanner message="Failed to load developer apps. Please refresh and try again." onRetry={refetch} />
+            <ErrorBanner message={t("Failed to load developer apps. Please refresh and try again.")} onRetry={refetch} />
           </div>
         )}
 
@@ -364,11 +347,10 @@ export function DeveloperAppsPage() {
                 <div className="flex items-center justify-between gap-3">
                   <CardTitle>{app.client_name}</CardTitle>
                   <Badge variant={app.is_active ? "success" : "secondary"}>
-                    {app.is_active ? "Active" : "Inactive"}
+                    {app.is_active ? t("Active") : t("Inactive")}
                   </Badge>
                 </div>
-                <CardDescription className="break-all">
-                  Client ID:{" "}
+                <CardDescription className="break-all">{t("Client ID:")}{" "}
                   <span className="text-xs text-foreground">
                     {app.id}
                   </span>
@@ -378,8 +360,7 @@ export function DeveloperAppsPage() {
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant="secondary">{app.client_type}</Badge>
                   <Badge variant="secondary">
-                    {app.redirect_uris.length} redirect URIs
-                  </Badge>
+                    {app.redirect_uris.length}{t(" redirect URIs")}</Badge>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {(app.allowed_scopes || "")
@@ -406,9 +387,7 @@ export function DeveloperAppsPage() {
                       })
                     }
                   >
-                    <ButtonIcon><ExternalLink className="h-3 w-3" /></ButtonIcon>
-                    View Details
-                  </Button>
+                    <ButtonIcon><ExternalLink className="h-3 w-3" /></ButtonIcon>{t("View Details")}</Button>
                 </div>
               </CardContent>
             </Card>
@@ -419,12 +398,12 @@ export function DeveloperAppsPage() {
             <WebsiteLayoutIcon className="h-64 w-64 text-muted-foreground" />
             <div className="space-y-1">
               <p className="text-12 font-medium text-muted-foreground">
-                {apps.length === 0 ? "No Developer Apps" : "No Active Apps"}
+                {apps.length === 0 ? t("No Developer Apps") : t("No Active Apps")}
               </p>
               <p className="text-xs text-muted-foreground">
                 {apps.length === 0
-                  ? "Create your first application."
-                  : "Enable 'Show inactive' to view deactivated apps."}
+                  ? t("Create your first application.")
+                  : t("Enable 'Show inactive' to view deactivated apps.")}
               </p>
             </div>
           </div>

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import type { SshServiceConfig } from "@/types/api";
 import { CopyableField } from "@/components/shared/copyable-field";
@@ -14,6 +15,7 @@ export function SshServiceInstructions({
   serviceSlug,
   sshConfig,
 }: SshServiceInstructionsProps) {
+  const { t } = useUiTranslation();
   const { data: publicConfig } = usePublicConfig();
   const nyxidBaseUrl = deriveNyxidBaseUrl(publicConfig?.node_ws_url);
 
@@ -62,30 +64,26 @@ export function SshServiceInstructions({
       {/* Client Setup */}
       <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
         <div className="space-y-1">
-          <h4 className="text-13 font-semibold">Client Setup</h4>
-          <p className="text-xs text-muted-foreground">
-            Install the NyxID CLI on your local machine and authenticate.
-          </p>
+          <h4 className="text-13 font-semibold">{t("Client Setup")}</h4>
+          <p className="text-xs text-muted-foreground">{t("Install the NyxID CLI on your local machine and authenticate.")}</p>
         </div>
         <CopyableField
-          label="1. Install CLI"
+          label={t("1. Install CLI")}
           value={installCommand}
         />
         <div className="space-y-1">
-          <p className="text-xs font-medium text-muted-foreground">
-            2. Authenticate (choose one)
-          </p>
+          <p className="text-xs font-medium text-muted-foreground">{t("2. Authenticate (choose one)")}</p>
         </div>
         <CopyableField
-          label="Option A: Browser login (recommended)"
+          label={t("Option A: Browser login (recommended)")}
           value={loginCommand}
         />
         <CopyableField
-          label="Option B: API key"
+          label={t("Option B: API key")}
           value={apiKeyCommand}
         />
         <CopyableField
-          label="3. Connect"
+          label={t("3. Connect")}
           value={
             sshConfig.certificate_auth_enabled
               ? certificateCommand
@@ -94,15 +92,13 @@ export function SshServiceInstructions({
         />
         {sshConfig.certificate_auth_enabled && (
           <>
-            <p className="text-xs text-muted-foreground">
-              Replace{" "}
+            <p className="text-xs text-muted-foreground">{t("Replace")}{" "}
               <code className="rounded bg-muted px-1 text-10">
                 {keyPlaceholder}
-              </code>{" "}
-              with your SSH private key path ({keyHint}).
+              </code>{" "}{t("with your SSH private key path (")}{keyHint}).
             </p>
             <CopyableField
-              label="Optional: Generate SSH config stanza"
+              label={t("Optional: Generate SSH config stanza")}
               value={configCommand}
             />
           </>
@@ -113,112 +109,69 @@ export function SshServiceInstructions({
       {sshConfig.certificate_auth_enabled && (
         <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
           <div className="space-y-1">
-            <h4 className="text-13 font-semibold">
-              Target Machine Setup (Passwordless Login)
-            </h4>
-            <p className="text-xs text-muted-foreground">
-              Run these commands on the SSH target machine to trust NyxID
-              certificates. Each principal maps to a Unix user -- only users
-              listed in the authorized principals file can log in via that
-              principal.
-            </p>
+            <h4 className="text-13 font-semibold">{t("Target Machine Setup (Passwordless Login)")}</h4>
+            <p className="text-xs text-muted-foreground">{t("Run these commands on the SSH target machine to trust NyxID certificates. Each principal maps to a Unix user -- only users listed in the authorized principals file can log in via that principal.")}</p>
           </div>
           <CopyableField
-            label="1. Install NyxID CA public key"
+            label={t("1. Install NyxID CA public key")}
             value={trustedCaCommand}
           />
           <CopyableField
-            label="2. Configure sshd to trust NyxID CA"
+            label={t("2. Configure sshd to trust NyxID CA")}
             value={sshdConfigCommand}
           />
           <CopyableField
-            label="3. Create authorized principals for each user"
+            label={t("3. Create authorized principals for each user")}
             value={principalsCommand}
           />
           <CopyableField
-            label="4. Restart SSH daemon (Linux)"
+            label={t("4. Restart SSH daemon (Linux)")}
             value={restartSshdLinux}
           />
           <CopyableField
-            label="4. Restart SSH daemon (macOS)"
+            label={t("4. Restart SSH daemon (macOS)")}
             value={restartSshdMac}
           />
-          <p className="text-xs text-muted-foreground">
-            macOS: ensure Remote Login is enabled in System Settings &gt;
-            General &gt; Sharing (&nbsp;or{" "}
+          <p className="text-xs text-muted-foreground">{t("macOS: ensure Remote Login is enabled in System Settings > General > Sharing ( or")}{" "}
             <code className="rounded bg-muted px-1 text-10">
               sudo systemsetup -setremotelogin on
-            </code>
-            ). The sshd_config path is{" "}
+            </code>{t("). The sshd_config path is")}{" "}
             <code className="rounded bg-muted px-1 text-10">
               /etc/ssh/sshd_config
-            </code>{" "}
-            (same as Linux). On recent macOS, SIP may restrict direct edits to
-            /etc/ssh/ -- use{" "}
-            <code className="rounded bg-muted px-1 text-10">sudo</code> to
-            write config files. Ensure CA key file permissions are{" "}
-            <code className="rounded bg-muted px-1 text-10">644</code> and
-            auth_principals directories are{" "}
+            </code>{" "}{t("(same as Linux). On recent macOS, SIP may restrict direct edits to /etc/ssh/ -- use")}{" "}
+            <code className="rounded bg-muted px-1 text-10">sudo</code>{t(" to write config files. Ensure CA key file permissions are")}{" "}
+            <code className="rounded bg-muted px-1 text-10">644</code>{t(" and auth_principals directories are")}{" "}
             <code className="rounded bg-muted px-1 text-10">755</code>.
           </p>
-          <p className="text-xs text-muted-foreground">
-            How it works: NyxID signs short-lived certificates with a specific
-            principal (e.g., &quot;{primaryPrincipal}&quot;). The target machine
-            checks that the certificate is signed by the trusted CA AND that the
-            principal is listed in{" "}
+          <p className="text-xs text-muted-foreground">{t("How it works: NyxID signs short-lived certificates with a specific principal (e.g., \"")}{primaryPrincipal}{t("\"). The target machine checks that the certificate is signed by the trusted CA AND that the principal is listed in")}{" "}
             <code className="rounded bg-muted px-1 text-10">
               /etc/ssh/auth_principals/{primaryPrincipal}
-            </code>
-            . This means even if someone has a valid NyxID certificate, they can
-            only access accounts whose principals file includes their
-            certificate&apos;s principal. NyxID verifies the user&apos;s
-            identity (via JWT or API key) before signing any certificate, and
-            only signs principals from the service&apos;s allowed list.
-          </p>
+            </code>{t(". This means even if someone has a valid NyxID certificate, they can only access accounts whose principals file includes their certificate's principal. NyxID verifies the user's identity (via JWT or API key) before signing any certificate, and only signs principals from the service's allowed list.")}</p>
         </div>
       )}
 
       {/* Node-Agent Setup (for unreachable targets) */}
       <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
         <div className="space-y-1">
-          <h4 className="text-13 font-semibold">Node Agent (Required)</h4>
-          <p className="text-xs text-muted-foreground">
-            A node agent is required for web terminal, command execution
-            (API/MCP), and SSH tunneling. Deploy a node agent on a machine that
-            can reach the SSH target. The node agent connects outbound to NyxID
-            via WebSocket and handles all SSH operations locally -- no inbound
-            ports required on the target network. The NyxID server never makes
-            direct SSH connections.
-          </p>
+          <h4 className="text-13 font-semibold">{t("Node Agent (Required)")}</h4>
+          <p className="text-xs text-muted-foreground">{t("A node agent is required for web terminal, command execution (API/MCP), and SSH tunneling. Deploy a node agent on a machine that can reach the SSH target. The node agent connects outbound to NyxID via WebSocket and handles all SSH operations locally -- no inbound ports required on the target network. The NyxID server never makes direct SSH connections.")}</p>
         </div>
         <CopyableField
-          label="1. Install node agent"
+          label={t("1. Install node agent")}
           value={nodeInstallCommand}
         />
-        <p className="text-xs text-muted-foreground">
-          2. Generate a registration token from the{" "}
-          <a href="/nodes" className="underline">
-            Nodes page
-          </a>{" "}
-          using &quot;Register Node&quot;.
-        </p>
+        <p className="text-xs text-muted-foreground">{t("2. Generate a registration token from the")}{" "}
+          <a href="/nodes" className="underline">{t("Nodes page")}</a>{" "}{t("using \"Register Node\".")}</p>
         <CopyableField
-          label="3. On the node machine: register"
+          label={t("3. On the node machine: register")}
           value={nodeRegisterCommand}
         />
         <CopyableField
-          label="4. Start the agent"
+          label={t("4. Start the agent")}
           value={nodeStartCommand}
         />
-        <p className="text-xs text-muted-foreground">
-          5. Bind this SSH service to the node from the{" "}
-          <a href="/nodes" className="underline">
-            Nodes page
-          </a>{" "}
-          &gt; select your node &gt; add a service binding for &quot;
-          {serviceSlug}&quot;. When a user connects, NyxID routes the SSH tunnel
-          through the node agent instead of connecting directly.
-        </p>
+        <p className="text-xs text-muted-foreground">{t("5. Bind this SSH service to the node from the")}{" "}
+          <a href="/nodes" className="underline">{t("Nodes page")}</a>{" "}{t("> select your node > add a service binding for \"")}{serviceSlug}{t("\". When a user connects, NyxID routes the SSH tunnel through the node agent instead of connecting directly.")}</p>
       </div>
     </div>
   );

@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -68,6 +70,7 @@ export function InsightsUnavailable({
 }: {
   readonly state: ServiceInsightsState;
 }) {
+  const { t } = useUiTranslation();
   return (
     <div
       className="flex items-center justify-between gap-4 p-3 text-xs text-muted-foreground"
@@ -75,17 +78,15 @@ export function InsightsUnavailable({
     >
       <p>
         {state.status === "loading"
-          ? "Loading billing and caller information…"
+          ? t("Loading billing and caller information…")
           : state.status === "restricted"
-            ? "You do not have permission to view these connection insights."
+            ? t("You do not have permission to view these connection insights.")
             : state.status === "unavailable"
-              ? "This server does not provide connection billing and caller insights yet."
-              : "Connection insights could not be loaded."}
+              ? t("This server does not provide connection billing and caller insights yet.")
+              : t("Connection insights could not be loaded.")}
       </p>
       {state.status !== "loading" && (
-        <Button size="sm" variant="outline" onClick={state.refresh}>
-          Retry
-        </Button>
+        <Button size="sm" variant="outline" onClick={state.refresh}>{t("Retry")}</Button>
       )}
     </div>
   );
@@ -122,7 +123,7 @@ function trendLabel(measure: TrendMeasure) {
 }
 
 const shortDay = (day: string) =>
-  new Date(`${day}T00:00:00Z`).toLocaleDateString(undefined, {
+  new Date(`${day}T00:00:00Z`).toLocaleDateString(getFormattingLocale(), {
     month: "short",
     day: "numeric",
     timeZone: "UTC",
@@ -150,31 +151,30 @@ function UsageDayTooltip({
   readonly active?: boolean;
   readonly payload?: readonly { payload: { source: ServiceUsageDay } }[];
 }) {
+  const { t } = useUiTranslation();
   const day = active ? payload?.[0]?.payload.source : undefined;
   if (!day) return null;
   return (
     <div className="rounded-lg border border-border/60 bg-popover px-2.5 py-1.5 text-xs shadow-md">
-      <p className="font-medium">{shortDay(day.day)} (UTC)</p>
+      <p className="font-medium">{shortDay(day.day)}{t(" (UTC)")}</p>
       <p className="tabular-nums">
-        {day.calls.toLocaleString()} {day.calls === 1 ? "call" : "calls"}
+        {day.calls.toLocaleString(getFormattingLocale())} {day.calls === 1 ? t("call") : t("calls")}
       </p>
       {day.quantities.map(({ metric, quantity }) => (
         <p key={metric} className="text-muted-foreground tabular-nums">
-          {quantity.toLocaleString()} {metricLabel(metric, quantity)}
+          {quantity.toLocaleString(getFormattingLocale())} {metricLabel(metric, quantity)}
         </p>
       ))}
       {day.charged == null ? (
-        <p className="text-muted-foreground">Credits still being calculated</p>
+        <p className="text-muted-foreground">{t("Credits still being calculated")}</p>
       ) : (
         hasCredits(day.charged) && (
           <p className="text-muted-foreground tabular-nums">
-            {formatExactCredits(day.charged)} credits
-          </p>
+            {formatExactCredits(day.charged)}{t(" credits")}</p>
         )
       )}
       {fundingParts(day).length > 0 && (
-        <p className="text-muted-foreground tabular-nums">
-          Paid from{" "}
+        <p className="text-muted-foreground tabular-nums">{t("Paid from")}{" "}
           {fundingParts(day)
             .map(
               ([label, value]) =>
@@ -194,6 +194,7 @@ function UsageTrendChart({
   readonly series: ServiceUsageDay[];
   readonly measures: readonly TrendMeasure[];
 }) {
+  const { t } = useUiTranslation();
   const [picked, setPicked] = useState<TrendMeasure>("calls");
   const measure = measures.includes(picked) ? picked : "calls";
   const data = series.map((day) => ({
@@ -203,11 +204,11 @@ function UsageTrendChart({
   }));
   const label = trendLabel(measure);
   return (
-    <figure aria-label={`${label} per day`} className="space-y-2">
+    <figure aria-label={t("{{label}} per day", { label: label })} className="space-y-2">
       {measures.length > 1 && (
         <div
           role="group"
-          aria-label="Chart shows"
+          aria-label={t("Chart shows")}
           className="inline-flex rounded-md border border-border/60 p-0.5"
         >
           {measures.map((option) => (
@@ -251,7 +252,7 @@ function UsageTrendChart({
             allowDecimals={measure === "credits"}
             tickCount={3}
             tickFormatter={(value: number) =>
-              value.toLocaleString(undefined, {
+              value.toLocaleString(getFormattingLocale(), {
                 notation: "compact",
                 maximumSignificantDigits: 3,
               })
@@ -277,7 +278,7 @@ function UsageTrendChart({
         {data
           .filter((point) => point.value)
           .map((point) => `${shortDay(point.day)}: ${point.value} ${label}`)
-          .join(", ") || `No ${label.toLowerCase()} in this period`}
+          .join(", ") || t("No {{value}} in this period", { value: label.toLowerCase() })}
       </figcaption>
     </figure>
   );
@@ -291,6 +292,7 @@ const FUNDING_COLORS: Record<string, string> = {
 
 /** One bar split by where the period's credits came from. */
 function FundingBar({ summary }: { readonly summary: ServiceUsageSummary }) {
+  const { t } = useUiTranslation();
   const parts = fundingParts(summary).map(([label, value]) => ({
     label,
     value,
@@ -300,7 +302,7 @@ function FundingBar({ summary }: { readonly summary: ServiceUsageSummary }) {
   if (total === 0n) return null;
   return (
     <div className="space-y-1.5">
-      <p className="text-muted-foreground">Where the credits came from</p>
+      <p className="text-muted-foreground">{t("Where the credits came from")}</p>
       <div
         className="flex h-2 overflow-hidden rounded-full bg-muted"
         aria-hidden="true"
@@ -331,7 +333,7 @@ function FundingBar({ summary }: { readonly summary: ServiceUsageSummary }) {
           </li>
         ))}
         {!hasCredits(summary.wallet) && (
-          <li className="text-muted-foreground">Nothing from your wallet</li>
+          <li className="text-muted-foreground">{t("Nothing from your wallet")}</li>
         )}
       </ul>
     </div>
@@ -346,6 +348,7 @@ function BreakdownBars({
   readonly title: string;
   readonly items: readonly { label: string; value: number }[];
 }) {
+  const { t } = useUiTranslation();
   const max = Math.max(1, ...items.map((item) => item.value));
   const shown = items.slice(0, 5);
   return (
@@ -367,15 +370,14 @@ function BreakdownBars({
               />
             </span>
             <span className="text-right tabular-nums">
-              {item.value.toLocaleString()}
+              {item.value.toLocaleString(getFormattingLocale())}
             </span>
           </li>
         ))}
       </ul>
       {items.length > shown.length && (
         <p className="text-11 text-muted-foreground">
-          +{items.length - shown.length} more
-        </p>
+          +{items.length - shown.length}{t(" more")}</p>
       )}
     </div>
   );
@@ -390,13 +392,14 @@ const windowChartConfig = {
  * works before the server reports usage by day.
  */
 function UsageWindows({ slug }: { readonly slug: string }) {
+  const { t } = useUiTranslation();
   const day = useBillingUsage("24h");
   const week = useBillingUsage("7d");
   const month = useBillingUsage("30d");
   const quarter = useBillingUsage("90d");
   const queries = [day, week, month, quarter];
   if (queries.some((query) => query.isPending))
-    return <p className="text-muted-foreground">Loading recent trend…</p>;
+    return <p className="text-muted-foreground">{t("Loading recent trend…")}</p>;
   if (!day.data || !week.data || !month.data || !quarter.data) return null;
   const windows = serviceUsageTrend(
     {
@@ -408,10 +411,8 @@ function UsageWindows({ slug }: { readonly slug: string }) {
     slug,
   );
   return (
-    <figure aria-label="Average calls per day" className="space-y-1.5">
-      <p className="text-muted-foreground">
-        Recent trend · average calls per day
-      </p>
+    <figure aria-label={t("Average calls per day")} className="space-y-1.5">
+      <p className="text-muted-foreground">{t("Recent trend · average calls per day")}</p>
       <ChartContainer
         config={windowChartConfig}
         className="aspect-auto h-28 w-full"
@@ -434,7 +435,7 @@ function UsageWindows({ slug }: { readonly slug: string }) {
             axisLine={false}
             tickCount={3}
             tickFormatter={(value: number) =>
-              value.toLocaleString(undefined, { maximumFractionDigits: 1 })
+              value.toLocaleString(getFormattingLocale(), { maximumFractionDigits: 1 })
             }
           />
           <ChartTooltip
@@ -454,11 +455,9 @@ function UsageWindows({ slug }: { readonly slug: string }) {
         {windows
           .map(
             (slot) =>
-              `${slot.label}: ${slot.calls.toLocaleString()} ${slot.calls === 1 ? "call" : "calls"}`,
+              `${slot.label}: ${slot.calls.toLocaleString(getFormattingLocale())} ${slot.calls === 1 ? t("call") : t("calls")}`,
           )
-          .join(" · ")}
-        . A day-by-day graph replaces this once NyxID reports usage by day.
-      </figcaption>
+          .join(" · ")}{t(". A day-by-day graph replaces this once NyxID reports usage by day.")}</figcaption>
     </figure>
   );
 }
@@ -470,18 +469,17 @@ function WindowTooltip({
   readonly active?: boolean;
   readonly payload?: readonly { payload: ServiceUsageWindow }[];
 }) {
+  const { t } = useUiTranslation();
   const slot = active ? payload?.[0]?.payload : undefined;
   if (!slot) return null;
   return (
     <div className="rounded-lg border border-border/60 bg-popover px-2.5 py-1.5 text-xs shadow-md">
       <p className="font-medium">{slot.label}</p>
       <p className="tabular-nums">
-        {slot.calls.toLocaleString()} {slot.calls === 1 ? "call" : "calls"}
+        {slot.calls.toLocaleString(getFormattingLocale())} {slot.calls === 1 ? t("call") : t("calls")}
       </p>
       <p className="text-muted-foreground tabular-nums">
-        {slot.perDay.toLocaleString(undefined, { maximumFractionDigits: 1 })}{" "}
-        per day on average
-      </p>
+        {slot.perDay.toLocaleString(getFormattingLocale(), { maximumFractionDigits: 1 })}{" "}{t("per day on average")}</p>
     </div>
   );
 }
@@ -494,6 +492,7 @@ function ConnectionUsage({
   /** The connection is free on NyxID today, so charged usage needs a reason. */
   readonly freeNow: boolean;
 }) {
+  const { t } = useUiTranslation();
   const [period, setPeriod] = useState<BillingUsagePeriod>("30d");
   // One daily request feeds both the totals and the chart.
   const usage = useBillingUsage(period, period === "24h" ? undefined : "day");
@@ -516,14 +515,12 @@ function ConnectionUsage({
         <h5
           id={`usage-history-${connection.id}`}
           className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary"
-        >
-          Usage history
-        </h5>
+        >{t("Usage history")}</h5>
         <Select
           value={period}
           onValueChange={(value) => setPeriod(value as BillingUsagePeriod)}
         >
-          <SelectTrigger aria-label="Usage period" className="h-8 w-40">
+          <SelectTrigger aria-label={t("Usage period")} className="h-8 w-40">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -536,41 +533,38 @@ function ConnectionUsage({
         </Select>
       </div>
       {usage.isPending ? (
-        <p className="text-muted-foreground">Loading usage…</p>
+        <p className="text-muted-foreground">{t("Loading usage…")}</p>
       ) : usage.isError ? (
-        <p className="text-muted-foreground">Usage couldn’t load.</p>
+        <p className="text-muted-foreground">{t("Usage couldn’t load.")}</p>
       ) : !summary ? (
-        <p className="text-muted-foreground">
-          No usage recorded through <code>{connection.slug}</code> in this
-          period.
-        </p>
+        <p className="text-muted-foreground">{t("No usage recorded through ")}<code>{connection.slug}</code>{t(" in this period.")}</p>
       ) : (
         <>
           <dl className="grid gap-3 sm:grid-cols-3">
             <div>
-              <dt className="text-muted-foreground">Calls</dt>
+              <dt className="text-muted-foreground">{t("Calls")}</dt>
               <dd className="mt-1 text-sm font-medium tabular-nums">
-                {summary.calls.toLocaleString()}
+                {summary.calls.toLocaleString(getFormattingLocale())}
               </dd>
             </div>
             <div>
-              <dt className="text-muted-foreground">Usage</dt>
+              <dt className="text-muted-foreground">{t("Usage")}</dt>
               <dd className="mt-1 text-sm font-medium tabular-nums">
                 {summary.quantities
                   .map(
                     ({ metric, quantity }) =>
-                      `${quantity.toLocaleString()} ${metricLabel(metric, quantity)}`,
+                      `${quantity.toLocaleString(getFormattingLocale())} ${metricLabel(metric, quantity)}`,
                   )
                   .join(" · ")}
               </dd>
             </div>
             <div>
-              <dt className="text-muted-foreground">NyxID credits used</dt>
+              <dt className="text-muted-foreground">{t("NyxID credits used")}</dt>
               <dd className="mt-1 text-sm font-medium tabular-nums">
                 {!summary.billable
-                  ? "None"
+                  ? t("None")
                   : summary.charged == null
-                    ? "Still being calculated"
+                    ? t("Still being calculated")
                     : formatExactCredits(summary.charged)}
               </dd>
             </div>
@@ -596,16 +590,13 @@ function ConnectionUsage({
           {freeNow &&
             summary.charged != null &&
             hasCredits(summary.charged) && (
-              <p className="text-amber-600 dark:text-amber-400">
-                Credits were charged in this period even though this connection
-                is free on NyxID now. They may come from an earlier price, or
-                from another connection that shares{" "}
+              <p className="text-amber-600 dark:text-amber-400">{t("Credits were charged in this period even though this connection is free on NyxID now. They may come from an earlier price, or from another connection that shares")}{" "}
                 <code>{connection.slug}</code>.
               </p>
             )}
           {(summary.agents.length > 1 || !!summary.agents[0]?.name) && (
             <BreakdownBars
-              title="Who made the calls"
+              title={t("Who made the calls")}
               items={summary.agents.map(({ name, calls }) => ({
                 label: name ?? "You, signed in",
                 value: calls,
@@ -614,7 +605,7 @@ function ConnectionUsage({
           )}
           {summary.models.length > 1 ? (
             <BreakdownBars
-              title="Calls by model"
+              title={t("Calls by model")}
               items={summary.models.map(({ name, calls }) => ({
                 label: name,
                 value: calls,
@@ -622,8 +613,7 @@ function ConnectionUsage({
             />
           ) : (
             summary.models[0] && (
-              <p className="text-muted-foreground">
-                Model:{" "}
+              <p className="text-muted-foreground">{t("Model:")}{" "}
                 <span className="text-foreground">
                   {summary.models[0].name}
                 </span>
@@ -632,11 +622,7 @@ function ConnectionUsage({
           )}
         </>
       )}
-      <p className="text-11 text-muted-foreground">
-        Counts calls made through <code>{connection.slug}</code> that were
-        billed to your personal account. Other connections using the same
-        address are counted together.
-        {org && ` Usage billed to ${org} isn’t included.`}
+      <p className="text-11 text-muted-foreground">{t("Counts calls made through ")}<code>{connection.slug}</code>{t(" that were billed to your personal account. Other connections using the same address are counted together.")}{org && t(" Usage billed to {{org}} isn’t included.", { org: org })}
       </p>
     </section>
   );
@@ -653,6 +639,7 @@ function ConnectionBillingPanel({
   readonly state: ServiceInsightsState;
   readonly catalog?: ConfiguredCatalogEntry;
 }) {
+  const { t } = useUiTranslation();
   const [caller, setCaller] = useState("you");
   const selectedState = useServiceInsights(
     [connection],
@@ -676,28 +663,26 @@ function ConnectionBillingPanel({
   return (
     <section
       className="space-y-4 p-3"
-      aria-label={`Billing for ${connection.label}`}
+      aria-label={t("Billing for {{label}}", { label: connection.label })}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h4 className="inline-flex items-center gap-2 text-sm font-medium">
-          <CreditCard className="size-4 text-primary-text" /> Billing
-        </h4>
+          <CreditCard className="size-4 text-primary-text" />{t(" Billing")}</h4>
         {insight.billing?.context !== "configuration" &&
           !!insight.usage?.access.keys.length && (
             <div className="flex items-center gap-2 text-xs">
-              <span className="text-muted-foreground">Show for</span>
+              <span className="text-muted-foreground">{t("Show for")}</span>
               <Select value={caller} onValueChange={setCaller}>
                 <SelectTrigger
-                  aria-label="Preview billing for"
+                  aria-label={t("Preview billing for")}
                   className="h-8 w-52"
                 >
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="you">You</SelectItem>
+                  <SelectItem value="you">{t("You")}</SelectItem>
                   {insight.usage?.access.keys.map((key) => (
-                    <SelectItem key={key.id} value={key.id}>
-                      Agent key: {key.name}
+                    <SelectItem key={key.id} value={key.id}>{t("Agent key: ")}{key.name}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -709,11 +694,11 @@ function ConnectionBillingPanel({
         <>
           <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
             <p className="text-sm font-medium">
-              {chargedAnyway ? "Credits were charged recently" : plain.headline}
+              {chargedAnyway ? t("Credits were charged recently") : plain.headline}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
               {chargedAnyway
-                ? `${formatExactCredits(recentCharged!)} NyxID credits were charged in the last 7 days for calls through ${connection.slug}, so don't treat this connection as free. ${plain.detail}`
+                ? t("{{value}} NyxID credits were charged in the last 7 days for calls through {{slug}}, so don't treat this connection as free. {{detail}}", { value: formatExactCredits(recentCharged!), slug: connection.slug, detail: plain.detail })
                 : plain.detail}
             </p>
           </div>
@@ -724,12 +709,10 @@ function ConnectionBillingPanel({
             <h5
               id={`billing-details-${connection.id}`}
               className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary"
-            >
-              Details
-            </h5>
+            >{t("Details")}</h5>
             <dl className="grid gap-3 text-xs sm:grid-cols-3">
               <div>
-                <dt className="text-muted-foreground">Whose key or app</dt>
+                <dt className="text-muted-foreground">{t("Whose key or app")}</dt>
                 <dd className="mt-1 font-medium">{plain.key.title}</dd>
                 {plain.key.note && (
                   <dd className="mt-0.5 text-11 text-muted-foreground">
@@ -738,11 +721,11 @@ function ConnectionBillingPanel({
                 )}
               </div>
               <div>
-                <dt className="text-muted-foreground">Who pays NyxID</dt>
+                <dt className="text-muted-foreground">{t("Who pays NyxID")}</dt>
                 <dd className="mt-1 font-medium">{plain.payer}</dd>
               </div>
               <div>
-                <dt className="text-muted-foreground">NyxID price</dt>
+                <dt className="text-muted-foreground">{t("NyxID price")}</dt>
                 <dd className="mt-1 font-medium">{plain.price}</dd>
               </div>
             </dl>
@@ -779,6 +762,7 @@ export function ConnectionInsightPanel({
   readonly state: ServiceInsightsState;
   readonly catalog?: ConfiguredCatalogEntry;
 }) {
+  const { t } = useUiTranslation();
   const [showAllKeys, setShowAllKeys] = useState(false);
   if (!insight || (view === "billing" ? !insight.billing : !insight.usage))
     return <InsightsUnavailable state={state} />;
@@ -797,33 +781,31 @@ export function ConnectionInsightPanel({
     return (
       <section
         className="space-y-3 p-3"
-        aria-label={`Agent key access for ${connection.label}`}
+        aria-label={t("Agent key access for {{label}}", { label: connection.label })}
       >
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h4 className="inline-flex items-center gap-2 text-sm font-medium">
             <UsersRound className="size-4 text-primary-text" />{" "}
             {usage.access.basis === "configuration"
-              ? "Agent keys in scope"
-              : "Agent keys with access"}
+              ? t("Agent keys in scope")
+              : t("Agent keys with access")}
           </h4>
           <span className="text-11 text-muted-foreground">
             {usage.access.visibility === "own_keys"
-              ? "Your keys only"
-              : "Keys you manage"}{" "}
-            · current scope
-          </span>
+              ? t("Your keys only")
+              : t("Keys you manage")}{" "}{t("· current scope")}</span>
         </div>
         {usage.access.keys.length ? (
           <div className="overflow-x-auto">
             <table
               className="w-full text-left text-xs"
-              aria-label="Agent keys with access"
+              aria-label={t("Agent keys with access")}
             >
               <thead className="text-muted-foreground">
                 <tr>
-                  <th className="py-2 pr-3 font-medium">Agent key</th>
-                  <th className="px-3 py-2 font-medium">Access through</th>
-                  <th className="px-3 py-2 font-medium">Credential</th>
+                  <th className="py-2 pr-3 font-medium">{t("Agent key")}</th>
+                  <th className="px-3 py-2 font-medium">{t("Access through")}</th>
+                  <th className="px-3 py-2 font-medium">{t("Credential")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -853,11 +835,11 @@ export function ConnectionInsightPanel({
                     </td>
                     <td className="px-3 py-2.5">
                       {key.credential_override === null ? (
-                        "Override not reported"
+                        t("Override not reported")
                       ) : key.credential_override ? (
-                        <Badge variant="secondary">Credential override</Badge>
+                        <Badge variant="secondary">{t("Credential override")}</Badge>
                       ) : (
-                        "Connection default"
+                        t("Connection default")
                       )}
                     </td>
                   </tr>
@@ -868,10 +850,10 @@ export function ConnectionInsightPanel({
         ) : (
           <p className="text-xs text-muted-foreground">
             {usage.access.visibility === "unavailable"
-              ? "Agent key inventory could not be loaded."
+              ? t("Agent key inventory could not be loaded.")
               : usage.access.incomplete
-                ? "No matching keys in the available inventory. Some key inventories could not be checked."
-                : "No agent keys in your permitted inventory currently include this connection in their scope."}
+                ? t("No matching keys in the available inventory. Some key inventories could not be checked.")
+                : t("No agent keys in your permitted inventory currently include this connection in their scope.")}
           </p>
         )}
         {usage.access.keys.length > 3 && (
@@ -881,71 +863,59 @@ export function ConnectionInsightPanel({
             onClick={() => setShowAllKeys(!showAllKeys)}
           >
             {showAllKeys
-              ? "Show fewer keys"
-              : `Show all ${usage.access.keys.length} keys`}
+              ? t("Show fewer keys")
+              : t("Show all {{length}} keys", { length: usage.access.keys.length })}
           </Button>
         )}
         {usage.access.truncated && (
-          <p className="text-xs text-muted-foreground">
-            Showing a limited set of keys. Open Agent keys to review the full
-            inventory.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("Showing a limited set of keys. Open Agent keys to review the full inventory.")}</p>
         )}
         <p className="text-11 text-muted-foreground">
           {usage.access.basis === "configuration"
-            ? "Configured scope; live permissions and credentials are checked at execution. "
+            ? t("Configured scope; live permissions and credentials are checked at execution. ")
             : ""}
           {usage.access.incomplete && usage.access.keys.length > 0
-            ? "Some key inventories could not be checked. "
-            : ""}
-          Scope access does not prove a working connection or previous use. Open
-          a key to manage its service scope or credential override.
-        </p>
+            ? t("Some key inventories could not be checked. ")
+            : ""}{t("Scope access does not prove a working connection or previous use. Open a key to manage its service scope or credential override.")}</p>
       </section>
     );
   if (usage.activity.tracking === "unavailable")
     return (
       <section
         className="space-y-2 p-3 text-xs"
-        aria-label={`Recent requests for ${connection.label}`}
+        aria-label={t("Recent requests for {{label}}", { label: connection.label })}
       >
-        <h4 className="font-medium">Request attribution unavailable</h4>
-        <p className="text-muted-foreground">
-          This server does not yet report which agent key or application used
-          this exact connection. Configured key access is shown separately; it
-          is not evidence of use.
-        </p>
+        <h4 className="font-medium">{t("Request attribution unavailable")}</h4>
+        <p className="text-muted-foreground">{t("This server does not yet report which agent key or application used this exact connection. Configured key access is shown separately; it is not evidence of use.")}</p>
       </section>
     );
   return (
     <section
       className="space-y-3 p-3"
-      aria-label={`Recent requests for ${connection.label}`}
+      aria-label={t("Recent requests for {{label}}", { label: connection.label })}
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h4 className="inline-flex items-center gap-2 text-sm font-medium">
-          <Activity className="size-4 text-primary-text" /> Recent requests
-        </h4>
+          <Activity className="size-4 text-primary-text" />{t(" Recent requests")}</h4>
         <span className="text-11 text-muted-foreground">
           {usage.activity.visibility === "own_requests"
-            ? "Your requests"
-            : "Visible requests"}{" "}
-          · {usage.activity.period_days} days
-        </span>
+            ? t("Your requests")
+            : t("Visible requests")}{" "}
+          · {usage.activity.period_days}{t(" days")}</span>
       </div>
       {usage.activity.requests.length ? (
         <div className="overflow-x-auto">
           <table
             className="w-full text-left text-xs"
-            aria-label="Recent connection requests"
+            aria-label={t("Recent connection requests")}
           >
             <thead className="text-muted-foreground">
               <tr>
-                <th className="py-2 pr-3 font-medium">Caller</th>
-                <th className="px-3 py-2 font-medium">Type / application</th>
-                <th className="px-3 py-2 font-medium">Recorded layer</th>
-                <th className="px-3 py-2 font-medium">Time</th>
-                <th className="px-3 py-2 font-medium">Outcome</th>
+                <th className="py-2 pr-3 font-medium">{t("Caller")}</th>
+                <th className="px-3 py-2 font-medium">{t("Type / application")}</th>
+                <th className="px-3 py-2 font-medium">{t("Recorded layer")}</th>
+                <th className="px-3 py-2 font-medium">{t("Time")}</th>
+                <th className="px-3 py-2 font-medium">{t("Outcome")}</th>
               </tr>
             </thead>
             <tbody>
@@ -960,8 +930,8 @@ export function ConnectionInsightPanel({
                       <span className="mt-0.5 block text-muted-foreground">
                         {request.caller.app_name ??
                           (request.caller.app_id
-                            ? "Application name not recorded"
-                            : "Application not recorded")}
+                            ? t("Application name not recorded")
+                            : t("Application not recorded"))}
                       </span>
                     )}
                   </td>
@@ -987,28 +957,20 @@ export function ConnectionInsightPanel({
           </table>
         </div>
       ) : (
-        <p className="text-xs text-muted-foreground">
-          No requests with exact connection attribution were recorded in this
-          period.
-        </p>
+        <p className="text-xs text-muted-foreground">{t("No requests with exact connection attribution were recorded in this period.")}</p>
       )}
       {usage.activity.request_count > 0 && (
         <p className="text-11 text-muted-foreground">
-          {usage.activity.request_count.toLocaleString()} recorded
-          {usage.activity.request_count === 1 ? " request" : " requests"}
+          {usage.activity.request_count.toLocaleString(getFormattingLocale())}{t(" recorded")}{usage.activity.request_count === 1 ? t(" request") : t(" requests")}
           {usage.activity.truncated
-            ? ` · showing the latest ${usage.activity.requests.length}`
-            : " in this period"}
+            ? t(" · showing the latest {{length}}", { length: usage.activity.requests.length })
+            : t(" in this period")}
         </p>
       )}
       <p className="text-11 text-muted-foreground">
         {usage.activity.tracking === "partial"
-          ? "Tracking is partial. Older requests and unsupported request paths may not identify this connection. "
-          : ""}
-        A shared agent key identifies the key, not every application using it. A
-        received response does not confirm stream completion or a settled
-        charge.
-      </p>
+          ? t("Tracking is partial. Older requests and unsupported request paths may not identify this connection. ")
+          : ""}{t("A shared agent key identifies the key, not every application using it. A received response does not confirm stream completion or a settled charge.")}</p>
     </section>
   );
 }

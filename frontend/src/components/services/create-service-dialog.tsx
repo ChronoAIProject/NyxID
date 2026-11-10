@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import type { ProviderConfig } from "@/types/api";
 import { PlatformServiceFields } from "./platform-service-fields";
 import { useNavigate } from "@tanstack/react-router";
@@ -58,6 +61,7 @@ export function CreateServiceDialog({
   readonly onOpenChange: (open: boolean) => void;
   readonly provider?: Pick<ProviderConfig, "id" | "name">;
 }) {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const createMutation = useCreateService();
   const form = useAppForm<CreateServiceFormData>({
@@ -137,7 +141,7 @@ export function CreateServiceDialog({
               service_category: data.service_category ?? "connection",
             });
 
-      toast.success("Service created successfully");
+      toast.success(translateUi("Service created successfully"));
       onOpenChange(false);
       form.reset();
       void navigate({
@@ -146,7 +150,7 @@ export function CreateServiceDialog({
       });
     } catch (error) {
       toast.error(
-        error instanceof ApiError ? error.message : "Failed to create service",
+        translateErrorMessage(error instanceof ApiError ? error.message : "Failed to create service"),
       );
     }
   }
@@ -157,13 +161,10 @@ export function CreateServiceDialog({
         <DialogHeader>
           <DialogTitle>
             {provider
-              ? `Create service for ${provider.name}`
-              : "Create Service"}
+              ? t("Create service for {{name}}", { name: provider.name })
+              : t("Create Service")}
           </DialogTitle>
-          <DialogDescription>
-            Pick the service type first, then configure the fields NyxID should
-            manage.
-          </DialogDescription>
+          <DialogDescription>{t("Pick the service type first, then configure the fields NyxID should manage.")}</DialogDescription>
         </DialogHeader>
 
         <Form {...form}>
@@ -173,7 +174,7 @@ export function CreateServiceDialog({
               name="service_type"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Service Type</FormLabel>
+                  <FormLabel>{t("Service Type")}</FormLabel>
                   <Select
                     value={field.value}
                     onValueChange={(value) => {
@@ -190,7 +191,7 @@ export function CreateServiceDialog({
                   >
                     <FormControl>
                       <SelectTrigger>
-                        <SelectValue placeholder="Select service type" />
+                        <SelectValue placeholder={t("Select service type")} />
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
@@ -213,9 +214,9 @@ export function CreateServiceDialog({
               name="name"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Service Name</FormLabel>
+                  <FormLabel>{t("Service Name")}</FormLabel>
                   <FormControl>
-                    <Input placeholder="My Service" {...field} />
+                    <Input placeholder={t("My Service")} {...field} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -227,11 +228,11 @@ export function CreateServiceDialog({
               name="description"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Description</FormLabel>
+                  <FormLabel>{t("Description")}</FormLabel>
                   <FormControl>
                     <textarea
                       className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
-                      placeholder="Optional description"
+                      placeholder={t("Optional description")}
                       {...field}
                     />
                   </FormControl>
@@ -248,10 +249,10 @@ export function CreateServiceDialog({
                     name="host"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>SSH Host</FormLabel>
+                        <FormLabel>{t("SSH Host")}</FormLabel>
                         <FormControl>
                           <Input
-                            placeholder="ssh.internal.example"
+                            placeholder={"ssh.internal.example"}
                             {...field}
                           />
                         </FormControl>
@@ -265,7 +266,7 @@ export function CreateServiceDialog({
                     name="port"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>SSH Port</FormLabel>
+                        <FormLabel>{t("SSH Port")}</FormLabel>
                         <FormControl>
                           <Input type="number" min={1} max={65535} {...field} />
                         </FormControl>
@@ -279,9 +280,7 @@ export function CreateServiceDialog({
                   <Label
                     htmlFor="create-ssh-cert-auth"
                     className="text-12 font-normal"
-                  >
-                    Enable short-lived SSH certificates
-                  </Label>
+                  >{t("Enable short-lived SSH certificates")}</Label>
                   <Switch
                     id="create-ssh-cert-auth"
                     checked={certificateAuthEnabled}
@@ -298,7 +297,7 @@ export function CreateServiceDialog({
                       name="certificate_ttl_minutes"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Certificate TTL (minutes)</FormLabel>
+                          <FormLabel>{t("Certificate TTL (minutes)")}</FormLabel>
                           <FormControl>
                             <Input type="number" min={15} max={60} {...field} />
                           </FormControl>
@@ -312,14 +311,11 @@ export function CreateServiceDialog({
                       name="allowed_principals"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Allowed Principals</FormLabel>
+                          <FormLabel>{t("Allowed Principals")}</FormLabel>
                           <FormControl>
-                            <Input placeholder="ubuntu, deploy" {...field} />
+                            <Input placeholder={t("ubuntu, deploy")} {...field} />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
-                            Comma-separated SSH usernames NyxID is allowed to
-                            sign.
-                          </p>
+                          <p className="text-xs text-muted-foreground">{t("Comma-separated SSH usernames NyxID is allowed to sign.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -334,7 +330,7 @@ export function CreateServiceDialog({
                   name="base_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Base URL</FormLabel>
+                      <FormLabel>{t("Base URL")}</FormLabel>
                       <FormControl>
                         <Input
                           placeholder="https://api.example.com"
@@ -351,7 +347,7 @@ export function CreateServiceDialog({
                   name="auth_type"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Auth Type</FormLabel>
+                      <FormLabel>{t("Auth Type")}</FormLabel>
                       <Select
                         value={field.value}
                         onValueChange={(value) => {
@@ -381,7 +377,7 @@ export function CreateServiceDialog({
                       >
                         <FormControl>
                           <SelectTrigger>
-                            <SelectValue placeholder="Select auth type" />
+                            <SelectValue placeholder={t("Select auth type")} />
                           </SelectTrigger>
                         </FormControl>
                         <SelectContent>
@@ -396,20 +392,12 @@ export function CreateServiceDialog({
                         </SelectContent>
                       </Select>
                       {authType === "body" && (
-                        <p className="text-xs text-muted-foreground">
-                          NyxID will merge{" "}
-                          <code>{`{<field>: <credential>}`}</code> into the JSON
-                          request body. Used for Lark/Feishu tenant token
-                          exchange where <code>app_secret</code> must travel in
-                          the body.
-                        </p>
+                        <p className="text-xs text-muted-foreground">{t("NyxID will merge")}{" "}
+                          <code>{`{<field>: <credential>}`}</code>{t(" into the JSON request body. Used for Lark/Feishu tenant token exchange where ")}<code>app_secret</code>{t(" must travel in the body.")}</p>
                       )}
                       {authType === "bot_bearer" && (
-                        <p className="text-xs text-muted-foreground">
-                          Sends{" "}
-                          <code>Authorization: Bot &lt;credential&gt;</code>{" "}
-                          (Discord bot token format -- note the <code>Bot</code>{" "}
-                          prefix, not <code>Bearer</code>).
+                        <p className="text-xs text-muted-foreground">{t("Sends")}{" "}
+                          <code>Authorization: Bot &lt;credential&gt;</code>{" "}{t("(Discord bot token format -- note the ")}<code>Bot</code>{" "}{t("prefix, not ")}<code>Bearer</code>).
                         </p>
                       )}
                       <FormMessage />
@@ -423,19 +411,16 @@ export function CreateServiceDialog({
                     name="auth_scheme"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Authorization scheme</FormLabel>
+                        <FormLabel>{t("Authorization scheme")}</FormLabel>
                         <FormControl>
                           <Input
                             {...field}
                             value={field.value ?? ""}
-                            placeholder="Bearer"
+                            placeholder={t("Bearer")}
                             maxLength={64}
                           />
                         </FormControl>
-                        <p className="text-12 text-muted-foreground">
-                          Leave blank for Bearer. Use the scheme documented by
-                          the vendor.
-                        </p>
+                        <p className="text-12 text-muted-foreground">{t("Leave blank for Bearer. Use the scheme documented by the vendor.")}</p>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -448,17 +433,15 @@ export function CreateServiceDialog({
                     name="auth_key_name"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Body Field Name</FormLabel>
+                        <FormLabel>{t("Body Field Name")}</FormLabel>
                         <FormControl>
                           <Input
-                            placeholder="app_secret"
+                            placeholder={"app_secret"}
                             {...field}
                             value={field.value ?? ""}
                           />
                         </FormControl>
-                        <p className="text-xs text-muted-foreground">
-                          The JSON field where the credential will be injected.
-                          For Lark/Feishu use <code>app_secret</code>.
+                        <p className="text-xs text-muted-foreground">{t("The JSON field where the credential will be injected. For Lark/Feishu use ")}<code>app_secret</code>.
                         </p>
                         <FormMessage />
                       </FormItem>
@@ -479,14 +462,14 @@ export function CreateServiceDialog({
                       name="service_category"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Service Category</FormLabel>
+                          <FormLabel>{t("Service Category")}</FormLabel>
                           <Select
                             value={field.value ?? "connection"}
                             onValueChange={field.onChange}
                           >
                             <FormControl>
                               <SelectTrigger>
-                                <SelectValue placeholder="Select category" />
+                                <SelectValue placeholder={t("Select category")} />
                               </SelectTrigger>
                             </FormControl>
                             <SelectContent>
@@ -512,7 +495,7 @@ export function CreateServiceDialog({
               name="visibility"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Visibility</FormLabel>
+                  <FormLabel>{t("Visibility")}</FormLabel>
                   <Select
                     value={
                       field.value ??
@@ -522,7 +505,7 @@ export function CreateServiceDialog({
                   >
                     <FormControl>
                       <SelectTrigger>
-                        <SelectValue placeholder="Select visibility" />
+                        <SelectValue placeholder={t("Select visibility")} />
                       </SelectTrigger>
                     </FormControl>
                     <SelectContent>
@@ -533,9 +516,7 @@ export function CreateServiceDialog({
                       ))}
                     </SelectContent>
                   </Select>
-                  <p className="text-xs text-muted-foreground">
-                    Private services are only visible to you.
-                  </p>
+                  <p className="text-xs text-muted-foreground">{t("Private services are only visible to you.")}</p>
                   <FormMessage />
                 </FormItem>
               )}
@@ -546,16 +527,12 @@ export function CreateServiceDialog({
                 type="button"
                 variant="outline"
                 onClick={() => onOpenChange(false)}
-              >
-                Cancel
-              </Button>
+              >{t("Cancel")}</Button>
               <Button
                 variant="primary"
                 type="submit"
                 isLoading={createMutation.isPending}
-              >
-                Create service
-              </Button>
+              >{t("Create service")}</Button>
             </DialogFooter>
           </form>
         </Form>

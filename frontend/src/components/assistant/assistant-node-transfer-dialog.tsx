@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { ArrowRight, ShieldAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -42,6 +44,7 @@ export function AssistantNodeTransferDialog({
   readonly params: AssistantNodeTransferParams;
   readonly onComplete: (nodeId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const submittingRef = useRef(false);
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -127,15 +130,15 @@ export function AssistantNodeTransferDialog({
         <DialogHeader>
           <DialogTitle>
             {result
-              ? "Credential node transferred"
-              : "Transfer credential node"}
+              ? t("Credential node transferred")
+              : t("Transfer credential node")}
           </DialogTitle>
           <DialogDescription>
             {result?.movedOutOfScope
-              ? "The node is no longer readable from this account, confirming that ownership moved out of its access scope."
+              ? t("The node is no longer readable from this account, confirming that ownership moved out of its access scope.")
               : result
-                ? "The canonical node projection confirms the new owner."
-                : "The new owner receives control of this node, its routing authority, and its active bindings."}
+                ? t("The canonical node projection confirms the new owner.")
+                : t("The new owner receives control of this node, its routing authority, and its active bindings.")}
           </DialogDescription>
         </DialogHeader>
 
@@ -162,16 +165,14 @@ export function AssistantNodeTransferDialog({
                 onCheckedChange={(value) => setConfirmed(value === true)}
               />
               <span className="flex items-start gap-1.5 text-destructive">
-                <ShieldAlert className="mt-0.5 size-3 shrink-0" />I understand
-                the current owner will lose control of this node.
-              </span>
+                <ShieldAlert className="mt-0.5 size-3 shrink-0" />{t("I understand the current owner will lose control of this node.")}</span>
             </label>
           </div>
         ) : null}
 
         {error ? (
           <p role="alert" className="text-11 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
         <DialogFooter>
@@ -183,23 +184,17 @@ export function AssistantNodeTransferDialog({
                 onComplete(result.id);
                 close();
               }}
-            >
-              Done
-            </Button>
+            >{t("Done")}</Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
               <Button
                 type="button"
                 variant="destructive"
                 isLoading={submitting}
                 disabled={submitting || !confirmed}
                 onClick={() => void submit()}
-              >
-                Transfer node
-              </Button>
+              >{t("Transfer node")}</Button>
             </>
           )}
         </DialogFooter>

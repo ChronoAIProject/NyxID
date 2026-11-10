@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { formatExactCredits, formatCompactCredits } from "./credits";
 import { usageRangeError } from "@/schemas/admin-usage";
 import type {
@@ -9,30 +11,30 @@ import type {
 } from "@/schemas/usage-analytics";
 
 export const MEASURE_LABELS: Record<AnalyticsPanel["measure"], string> = {
-  cost: "Gross cost",
-  requests: "Requests",
-  events: "Billing events",
-  exact_cost_events: "Exact-cost events",
-  legacy_cost_events: "Legacy billing events",
-  unknown_cost_events: "Uncosted events",
-  total_tokens: "Total tokens",
-  prompt_tokens: "Input tokens",
-  completion_tokens: "Output tokens",
-  cached_tokens: "Cache-read tokens",
-  cache_creation_tokens: "Cache-write tokens",
-  audio_input_tokens: "Voice input (audio tokens)",
-  audio_output_tokens: "Voice output (audio tokens)",
-  quantity: "Billed units",
-  wallet_cost: "Wallet cost",
-  grant_cost: "Grant cost",
-  allowance_cost: "Allowance cost",
+  get cost() { return translateUi("Gross cost"); },
+  get requests() { return translateUi("Requests"); },
+  get events() { return translateUi("Billing events"); },
+  get exact_cost_events() { return translateUi("Exact-cost events"); },
+  get legacy_cost_events() { return translateUi("Legacy billing events"); },
+  get unknown_cost_events() { return translateUi("Uncosted events"); },
+  get total_tokens() { return translateUi("Total tokens"); },
+  get prompt_tokens() { return translateUi("Input tokens"); },
+  get completion_tokens() { return translateUi("Output tokens"); },
+  get cached_tokens() { return translateUi("Cache-read tokens"); },
+  get cache_creation_tokens() { return translateUi("Cache-write tokens"); },
+  get audio_input_tokens() { return translateUi("Voice input (audio tokens)"); },
+  get audio_output_tokens() { return translateUi("Voice output (audio tokens)"); },
+  get quantity() { return translateUi("Billed units"); },
+  get wallet_cost() { return translateUi("Wallet cost"); },
+  get grant_cost() { return translateUi("Grant cost"); },
+  get allowance_cost() { return translateUi("Allowance cost"); },
 };
 export const INTERVAL_LABELS = {
-  auto: "Auto",
-  hour: "Hourly",
-  day: "Daily",
-  week: "Weekly",
-  month: "Monthly",
+  get auto() { return translateUi("Auto"); },
+  get hour() { return translateUi("Hourly"); },
+  get day() { return translateUi("Daily"); },
+  get week() { return translateUi("Weekly"); },
+  get month() { return translateUi("Monthly"); },
 };
 export const MEASURE_DESCRIPTIONS: Record<AnalyticsPanel["measure"], string> = {
   cost: "Total usage cost before grants and allowances, in credits.",
@@ -99,10 +101,10 @@ export function partialBucket(bucket: string, data: AnalyticsResult): boolean {
   );
 }
 export const BREAKDOWN_LABELS = {
-  service: "Service",
-  user: "Acting user",
-  owner: "Billing account",
-  credential_class: "Credential class",
+  get service() { return translateUi("Service"); },
+  get user() { return translateUi("Acting user"); },
+  get owner() { return translateUi("Billing account"); },
+  get credential_class() { return translateUi("Credential class"); },
 };
 export const TEMPLATE_COPY: Record<
   AnalyticsLayout,
@@ -266,7 +268,7 @@ export function formatAnalyticsValue(
   if (typeof value === "string")
     return compact ? formatCompactCredits(value) : formatExactCredits(value);
   const amount = unit === "microcredits" ? value / 1_000_000 : value;
-  return new Intl.NumberFormat(undefined, {
+  return new Intl.NumberFormat(getFormattingLocale(), {
     notation: compact ? "compact" : "standard",
     maximumFractionDigits: compact ? 1 : unit === "microcredits" ? 6 : 0,
   }).format(amount);
@@ -279,7 +281,7 @@ export function bucketLabel(
   granularity: AnalyticsResult["granularity"],
   full = false,
 ): string {
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(getFormattingLocale(), {
     timeZone: "UTC",
     month: "short",
     ...(granularity !== "month" ? { day: "numeric" as const } : {}),

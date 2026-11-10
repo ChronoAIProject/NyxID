@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
@@ -35,6 +37,7 @@ function stripFrontMatter(md: string): { content: string; effectiveDate: string 
 }
 
 export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
+  const { t } = useUiTranslation();
   useApplyTheme();
   const logoHref = useLogoHref();
   const [content, setContent] = useState<string>("");
@@ -80,7 +83,7 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
           </Link>
           <h1 className="text-2xl font-bold text-foreground">{title}</h1>
           {effectiveDate && (
-            <p className="text-xs text-text-tertiary">Effective date: {effectiveDate}</p>
+            <p className="text-xs text-text-tertiary">{t("Effective date: ")}{effectiveDate}</p>
           )}
         </div>
 
@@ -89,9 +92,8 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
           data-doc-key={docKey}
         >
           {error ? (
-            <p className="text-sm text-destructive">
-              Failed to load the {title.toLowerCase()}: {error}.{" "}
-              <a href={mdPath} className="underline">View source</a>.
+            <p className="text-sm text-destructive">{t("Failed to load the ")}{title.toLowerCase()}: {translateUi(error)}.{" "}
+              <a href={mdPath} className="underline">{t("View source")}</a>.
             </p>
           ) : content ? (
             <ReactMarkdown
@@ -130,7 +132,7 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
               {content}
             </ReactMarkdown>
           ) : (
-            <p className="text-sm text-muted-foreground">Loading…</p>
+            <p className="text-sm text-muted-foreground">{t("Loading…")}</p>
           )}
         </div>
 
@@ -139,9 +141,7 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
             to="/"
             className="flex items-center gap-1.5 text-xs text-violet-400 transition-colors hover:text-violet-300"
           >
-            <ArrowLeft className="h-3 w-3" />
-            Back to NyxID
-          </Link>
+            <ArrowLeft className="h-3 w-3" />{t("Back to NyxID")}</Link>
         </div>
       </div>
     </div>

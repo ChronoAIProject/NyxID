@@ -1,3 +1,5 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useWizardTranslation } from "@/i18n/wizard";
 // Upstream OAuth scope picker (NyxID#917 follow-up).
 //
 // Renders a provider's curated `scope_catalog` as selectable pills with the
@@ -143,6 +145,7 @@ export function UpstreamScopePicker({
   providerName,
   platformAllowlist,
 }: UpstreamScopePickerProps) {
+  const { t } = useWizardTranslation();
   const [customInput, setCustomInput] = useState("");
   const selection = includeRequiredScopes(value, catalog);
   const required = new Set(
@@ -194,7 +197,7 @@ export function UpstreamScopePicker({
       const blocked = parsed.filter((s) => !allowset.has(s));
       if (blocked.length > 0) {
         setCustomError(
-          `${blocked.join(", ")} — not available on NyxID's shared app. Use your own OAuth app to request ${blocked.length > 1 ? "these" : "it"}.`,
+          t("{{scopes}} — not available on NyxID's shared app. Use your own OAuth app to request these permissions.", { scopes: blocked.join(", ") }),
         );
         return;
       }
@@ -210,9 +213,9 @@ export function UpstreamScopePicker({
 
   return (
     <div className="flex flex-col gap-2">
-      <Label className="text-xs">Scopes</Label>
+      <Label className="text-xs">{t("Scopes")}</Label>
       {pills.length > 0 ? (
-        <div role="group" aria-label="Scopes" className="flex flex-wrap gap-1.5">
+        <div role="group" aria-label={t("Scopes")} className="flex flex-wrap gap-1.5">
           {pills.map((p) => {
             const isRequired = required.has(p.scope);
             const gated = isGated(p.scope, p.locked);
@@ -225,11 +228,11 @@ export function UpstreamScopePicker({
                 disabled={p.locked || isRequired || gated}
                 title={
                   gated
-                    ? `${p.description ?? p.scope} — available only with your own OAuth app`
+                    ? t("{{scope}} — available only with your own OAuth app", { scope: p.description ?? p.scope })
                     : isRequired
-                      ? `${p.description ?? p.scope} — required for this service`
+                      ? t("{{scope}} — required for this service", { scope: p.description ?? p.scope })
                       : p.locked
-                        ? `${p.description ?? p.scope} — already granted; can't be removed here`
+                        ? t("{{scope}} — already granted; can't be removed here", { scope: p.description ?? p.scope })
                         : (p.description ?? p.scope)
                 }
                 onClick={() => {
@@ -256,26 +259,18 @@ export function UpstreamScopePicker({
                       aria-hidden="true"
                       className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
                     />
-                    <span className="sr-only">(write or admin access) </span>
+                    <span className="sr-only">{t("(write or admin access) ")}</span>
                   </>
                 ) : null}
                 <span className="truncate">{p.label}</span>
                 {gated ? (
-                  <span className="shrink-0 text-11 italic text-text-tertiary">
-                    own app
-                  </span>
+                  <span className="shrink-0 text-11 italic text-text-tertiary">{t("own app")}</span>
                 ) : isRequired ? (
-                  <span className="shrink-0 text-11 text-muted-foreground">
-                    required
-                  </span>
+                  <span className="shrink-0 text-11 text-muted-foreground">{t("required")}</span>
                 ) : p.locked ? (
-                  <span className="shrink-0 text-11 text-muted-foreground">
-                    granted
-                  </span>
+                  <span className="shrink-0 text-11 text-muted-foreground">{t("granted")}</span>
                 ) : p.isDefault ? (
-                  <span className="shrink-0 text-11 text-muted-foreground">
-                    default
-                  </span>
+                  <span className="shrink-0 text-11 text-muted-foreground">{t("default")}</span>
                 ) : null}
                 {isOn && !p.locked && !isRequired ? (
                   <X className="h-3 w-3 shrink-0 opacity-50 group-hover:opacity-100" />
@@ -291,17 +286,12 @@ export function UpstreamScopePicker({
           <span
             aria-hidden="true"
             className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning"
-          />
-          Dot marks a write or admin-level scope.
-        </p>
+          />{t("Dot marks a write or admin-level scope.")}</p>
       ) : null}
 
       {allowset !== null && pills.some((p) => isGated(p.scope, p.locked)) ? (
-        <p className="text-11 text-muted-foreground">
-          Scopes marked “own app” aren’t offered on NyxID’s shared{" "}
-          {providerName ?? "provider"} app. Connect with your own OAuth app to
-          request them.
-        </p>
+        <p className="text-11 text-muted-foreground">{t("Scopes marked “own app” aren’t offered on NyxID’s shared")}{" "}
+          {providerName ?? t("provider")}{t(" app. Connect with your own OAuth app to request them.")}</p>
       ) : null}
 
       <div className="flex items-center gap-1.5">
@@ -329,37 +319,28 @@ export function UpstreamScopePicker({
           disabled={customInput.trim().length === 0}
           className="h-9 shrink-0 px-3"
         >
-          <Plus className="h-3.5 w-3.5" />
-          Add
-        </Button>
+          <Plus className="h-3.5 w-3.5" />{t("Add")}</Button>
       </div>
       {customError ? (
-        <p className="text-11 text-destructive">{customError}</p>
+        <p className="text-11 text-destructive">{translateUi(customError)}</p>
       ) : null}
       {grantedSet && hasChanges ? (
         <div className="flex flex-col gap-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-12">
-          <span className="text-11 font-medium uppercase tracking-wide text-muted-foreground">
-            Changes
-          </span>
+          <span className="text-11 font-medium uppercase tracking-wide text-muted-foreground">{t("Changes")}</span>
           {added.length > 0 ? (
             <p className="text-foreground">
-              <span className="text-success">+ Adding:</span>{" "}
+              <span className="text-success">{t("+ Adding:")}</span>{" "}
               {added.map(labelFor).join(", ")}
             </p>
           ) : null}
           {removed.length > 0 ? (
             <>
               <p className="text-foreground">
-                <span className="text-destructive">− Removing:</span>{" "}
+                <span className="text-destructive">{t("− Removing:")}</span>{" "}
                 {removed.map(labelFor).join(", ")}
               </p>
-              <p className="text-11 text-warning">
-                Removing a permission re-authorizes this connection and will
-                stop any app that relies on it. NyxID will use only the
-                remaining permissions; the old access at{" "}
-                {providerName ?? "the provider"} stays until you revoke it
-                there.
-              </p>
+              <p className="text-11 text-warning">{t("Removing a permission re-authorizes this connection and will stop any app that relies on it. NyxID will use only the remaining permissions; the old access at")}{" "}
+                {providerName ?? t("the provider")}{t(" stays until you revoke it there.")}</p>
             </>
           ) : null}
         </div>
@@ -367,12 +348,12 @@ export function UpstreamScopePicker({
 
       <p className="text-xs text-muted-foreground">
         {locked.size > 0
-          ? "Scopes marked “granted” are already authorized and locked — this provider can’t narrow them by re-authorizing, so they can’t be removed here. Add anything missing above."
+          ? t("Scopes marked “granted” are already authorized and locked — this provider can’t narrow them by re-authorizing, so they can’t be removed here. Add anything missing above.")
           : grantedSet
-            ? "Tick to add a permission, untick to remove one, then update. Changes re-authorize this connection at the provider."
+            ? t("Tick to add a permission, untick to remove one, then update. Changes re-authorize this connection at the provider.")
             : pills.length > 0
-              ? "Selected scopes are requested at sign-in. Defaults are pre-selected — deselect to drop one. Add anything missing above; the upstream provider decides whether to grant them."
-              : "Comma- or space-separated. The upstream provider decides whether to grant them."}
+              ? t("Selected scopes are requested at sign-in. Defaults are pre-selected — deselect to drop one. Add anything missing above; the upstream provider decides whether to grant them.")
+              : t("Comma- or space-separated. The upstream provider decides whether to grant them.")}
       </p>
     </div>
   );

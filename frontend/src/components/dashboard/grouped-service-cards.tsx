@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Link } from "@tanstack/react-router";
 import type { ServiceGroupOrder } from "@/hooks/use-service-group-order";
 import { ServiceAgentOrderPanel } from "./service-agent-order-panel";
@@ -99,6 +100,7 @@ function GroupCard({
   readonly renderConnectionActions?: (key: KeyInfo) => ReactNode;
   readonly filtersRef: RefObject<HTMLDivElement | null>;
 }) {
+  const { t } = useUiTranslation();
   const identity = useAuthStore((state) => state.user?.id);
   const preferred = preferredConnection(group.connections);
   const ordering = agentOrder?.groupId === group.id ? agentOrder : undefined;
@@ -253,41 +255,41 @@ function GroupCard({
     (item) => item?.usage?.activity.visibility === "own_requests",
   );
   const keysText = configuredKeys.length
-    ? `${configuredKeys.length}${accessIncomplete ? "+" : ""} agent ${configuredKeys.length === 1 ? "key" : "keys"}`
+    ? t(configuredKeys.length === 1 ? "{{count}}{{more}} agent key" : "{{count}}{{more}} agent keys", { count: configuredKeys.length, more: accessIncomplete ? "+" : "" })
     : accessIncomplete
-      ? "Agent keys unverified"
-      : "0 agent keys";
+      ? t("Agent keys unverified")
+      : t("0 agent keys");
   const useText = latestUse
-    ? `${ownUseOnly ? "Your last use" : "Last use"} ${formatRelativeTime(latestUse.occurred_at)}`
+    ? t(ownUseOnly ? "Your last use {{time}}" : "Last use {{time}}", { time: formatRelativeTime(latestUse.occurred_at) })
     : useTracked
-      ? "No use recorded · 30d"
-      : "Last use not reported";
+      ? t("No use recorded · 30d")
+      : t("Last use not reported");
   const agents =
     insights.status === "loading"
-      ? { text: "Loading…", title: "Loading agent keys and use" }
+      ? { text: t("Loading…"), title: t("Loading agent keys and use") }
       : insights.status === "restricted"
-        ? { text: "Restricted", title: "Agent key access is restricted" }
+        ? { text: t("Restricted"), title: t("Agent key access is restricted") }
         : insights.status !== "ready"
           ? {
               text: "—",
               title:
                 insights.status === "unavailable"
-                  ? "Agent keys and use are not reported by this server"
-                  : "Agent keys and use couldn't load",
+                  ? t("Agent keys and use are not reported by this server")
+                  : t("Agent keys and use couldn't load"),
             }
           : {
               text: keysText,
               title: [
                 configuredKeys.length
-                  ? `Keys with access: ${configuredKeys.join(", ")}`
+                  ? t("Keys with access: {{keys}}", { keys: configuredKeys.join(", ") })
                   : accessIncomplete
-                    ? "Key access incomplete"
-                    : "No agent keys with access",
+                    ? t("Key access incomplete")
+                    : t("No agent keys with access"),
                 latestUse
                   ? `${ownUseOnly ? "Your last use" : "Last use"}: ${callerLabel(latestUse.caller)}${latestUse.caller.app_name ? ` · ${latestUse.caller.app_name}` : ""} · ${outcomeLabel(latestUse.outcome)} · ${latestUse.occurred_at}`
                   : useTracked
-                    ? "No recorded use with exact connection attribution in the last 30 days"
-                    : "Use is not reported by this server",
+                    ? t("No recorded use with exact connection attribution in the last 30 days")
+                    : t("Use is not reported by this server"),
               ].join("\n"),
             };
   const openSummary = (
@@ -380,20 +382,20 @@ function GroupCard({
                 </h3>
                 <p className="mt-0.5 text-xs text-muted-foreground">
                   {matchingCount < count
-                    ? `${matchingCount} of ${count}`
+                    ? t("{{matchingCount}} of {{count}}", { matchingCount: matchingCount, count: count })
                     : count}{" "}
-                  {count === 1 ? "connection" : "connections"}
+                  {count === 1 ? t("connection") : t("connections")}
                 </p>
               </div>
               {group.connections.some((connection) => connection.offering_kind === "tool") && (
-                <Badge variant="secondary">Tool · your key</Badge>
+                <Badge variant="secondary">{t("Tool · your key")}</Badge>
               )}
               {!expanded && preferred?.preference_rank === 1 && (
                 <button
                   type="button"
                   onClick={() => onToggle(cardRef.current)}
                   className="min-w-0 rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-                  aria-label={`Preferred: ${preferred.label}`}
+                  aria-label={t("Preferred: {{label}}", { label: preferred.label })}
                   title={group.connections
                     .filter((connection) => connection.preference_rank != null)
                     .map(
@@ -402,18 +404,18 @@ function GroupCard({
                     )
                     .join("\n")}
                 >
-                  <Badge variant="accent">Preferred: {preferred.label}</Badge>
+                  <Badge variant="accent">{t("Preferred: ")}{preferred.label}</Badge>
                 </button>
               )}
               {disabled > 0 && (
-                <Badge variant="secondary">{disabled} disabled</Badge>
+                <Badge variant="secondary">{disabled}{t(" disabled")}</Badge>
               )}
             </Glide>
             {!expanded && (
               <Glide className="shrink-0">
                 <p className="line-clamp-2 h-8 text-xs leading-4 text-muted-foreground">
                   {search.trim()
-                    ? `Matches: ${connections.map((key) => key.label).join(" · ")}`
+                    ? t("Matches: {{value}}", { value: connections.map((key) => key.label).join(" · ") })
                     : group.description}
                 </p>
               </Glide>
@@ -460,7 +462,7 @@ function GroupCard({
                         }}
                         aria-expanded={expanded}
                         aria-controls={contentId}
-                        aria-label={`Show agent keys and use for ${group.name}`}
+                        aria-label={t("Show agent keys and use for {{name}}", { name: group.name })}
                         className="flex h-6 w-full min-w-0 items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
                       >
                         <Clock3
@@ -477,7 +479,7 @@ function GroupCard({
                         <span className="shrink-0 whitespace-nowrap text-muted-foreground">
                           {insights.status === "ready"
                             ? useText
-                            : "Last use unavailable"}
+                            : t("Last use unavailable")}
                         </span>
                       </button>
                     </TooltipTrigger>
@@ -493,15 +495,15 @@ function GroupCard({
               <Glide className="flex h-6 min-w-0 items-center justify-between gap-2">
                 <button
                   type="button"
-                  aria-label={`Show last edit for ${group.name}`}
+                  aria-label={t("Show last edit for {{name}}", { name: group.name })}
                   aria-controls={contentId}
                   onClick={() =>
                     openSummary("history", lastEdit?.connection.id)
                   }
                   title={
                     lastEdit
-                      ? `${lastEdit.edit.action_label ?? "Last edited"} · ${lastEdit.edit.at} · ${lastEdit.edit.actor.name} · ${lastEdit.connection.label}`
-                      : "No edit attribution was reported for these connections"
+                      ? t("{{value}} · {{at}} · {{name}} · {{label}}", { value: lastEdit.edit.action_label ?? t("Last edited"), at: lastEdit.edit.at, name: lastEdit.edit.actor.name, label: lastEdit.connection.label })
+                      : t("No edit attribution was reported for these connections")
                   }
                   className="flex min-w-0 items-center gap-2 rounded-sm text-left text-xs focus-visible:outline-2 focus-visible:outline-ring"
                 >
@@ -511,13 +513,13 @@ function GroupCard({
                   />
                   <span className="truncate text-muted-foreground">
                     {lastEdit
-                      ? `Last edit ${formatRelativeTime(lastEdit.edit.at)} · ${lastEdit.edit.actor.name}`
-                      : "Last edit not recorded"}
+                      ? t("Last edit {{value}} · {{name}}", { value: formatRelativeTime(lastEdit.edit.at), name: lastEdit.edit.actor.name })
+                      : t("Last edit not recorded")}
                   </span>
                 </button>
                 <ServiceAvatarStack
                   items={sources}
-                  label={`Show sources for ${group.name}`}
+                  label={t("Show sources for {{name}}", { name: group.name })}
                 />
               </Glide>
             </div>
@@ -539,7 +541,7 @@ function GroupCard({
                 }}
                 aria-expanded={expanded && !routingOpen}
                 aria-controls={contentId}
-                aria-label={`${expanded && !routingOpen ? "Collapse" : "Expand"} ${group.name} connections`}
+                aria-label={t("{{value}} {{name}} connections", { value: expanded && !routingOpen ? t("Collapse") : t("Expand"), name: group.name })}
               >
                 <ChevronRight
                   className={cn(
@@ -548,24 +550,21 @@ function GroupCard({
                   )}
                 />
                 {expanded && !routingOpen
-                  ? "Hide connections"
-                  : `View ${matchingCount} ${matchingCount === 1 ? "connection" : "connections"}`}
+                  ? t("Hide connections")
+                  : t("View {{matchingCount}} {{value}}", { matchingCount: matchingCount, value: matchingCount === 1 ? t("connection") : t("connections") })}
               </Button>
             </Glide>
             <Glide className="ml-auto flex flex-wrap items-center gap-2 pr-2">
               {matchingCount < count && (
                 <span className="text-11 text-muted-foreground">
-                  {matchingCount} of {count} match
-                </span>
+                  {matchingCount}{t(" of ")}{count}{t(" match")}</span>
               )}
               <Link
                 to="/keys/services/$groupId"
                 params={{ groupId: group.id }}
-                aria-label={`View all ${group.name} service details`}
+                aria-label={t("View all {{name}} service details", { name: group.name })}
                 className="text-xs text-primary-text hover:underline"
-              >
-                Service details
-              </Link>
+              >{t("Service details")}</Link>
             </Glide>
           </div>
           {expanded && agentOrder && (
@@ -584,13 +583,11 @@ function GroupCard({
                     disabled={Boolean(agentOrder.reason)}
                     title={
                       agentOrder.reason ??
-                      "Reorder discovery within this service"
+                      t("Reorder discovery within this service")
                     }
                     onClick={() => agentOrder.start(group)}
                   >
-                    <ListOrdered className="size-3.5" aria-hidden="true" />
-                    Reorder discovery
-                  </Button>
+                    <ListOrdered className="size-3.5" aria-hidden="true" />{t("Reorder discovery")}</Button>
                 )
               }
             />
@@ -605,9 +602,7 @@ function GroupCard({
         <CardReveal open={open || isOrdering} onClosed={onClosed}>
           <div className="bg-background/30">
             {ordering && (
-              <p className="p-3 text-11 text-muted-foreground">
-                Kept visible while ordering
-              </p>
+              <p className="p-3 text-11 text-muted-foreground">{t("Kept visible while ordering")}</p>
             )}
             {routingOpen && !ordering ? (
               <FadeIn key="routing">
@@ -637,9 +632,7 @@ function GroupCard({
                           : undefined,
                     }}
                     className="ml-auto text-xs text-primary-text hover:underline"
-                  >
-                    Manage in Service Pools
-                  </Link>
+                  >{t("Manage in Service Pools")}</Link>
                 </div>
                 {selectedPool ? (
                   <ServicePoolRoutingPanel
@@ -651,16 +644,14 @@ function GroupCard({
                 ) : (
                   <p className="p-4 text-xs text-muted-foreground">
                     {routing.loading
-                      ? "Loading saved pools…"
+                      ? t("Loading saved pools…")
                       : routing.incomplete
-                        ? "Some pools could not be inspected. Organization pool settings require admin access."
-                        : "These connections use their individual slugs. Create a pool to give compatible connections one route with rotation or priority failover."}
+                        ? t("Some pools could not be inspected. Organization pool settings require admin access.")
+                        : t("These connections use their individual slugs. Create a pool to give compatible connections one route with rotation or priority failover.")}
                   </p>
                 )}
                 {selectedPool && routing.incomplete && (
-                  <p className="px-4 pb-4 text-xs text-muted-foreground">
-                    Additional organization pools may require admin access.
-                  </p>
+                  <p className="px-4 pb-4 text-xs text-muted-foreground">{t("Additional organization pools may require admin access.")}</p>
                 )}
               </FadeIn>
             ) : (
@@ -716,6 +707,7 @@ export function GroupedServiceCards({
   readonly actions?: ReactNode | ((compact: boolean) => ReactNode);
   readonly renderTable?: (keys: readonly KeyInfo[]) => ReactNode;
 }) {
+  const { t } = useUiTranslation();
   const view = useServiceView();
   const containerRef = useRef<HTMLDivElement>(null);
   const filtersRef = useRef<HTMLDivElement>(null);
@@ -823,9 +815,9 @@ export function GroupedServiceCards({
         actions={actions}
       >
         <span className="text-xs text-muted-foreground" aria-live="polite">
-          {visible.length} {visible.length === 1 ? "service" : "services"} ·{" "}
-          {matchingKeys.length} matching{" "}
-          {matchingKeys.length === 1 ? "connection" : "connections"}
+          {visible.length} {visible.length === 1 ? t("service") : t("services")} ·{" "}
+          {matchingKeys.length}{t(" matching")}{" "}
+          {matchingKeys.length === 1 ? t("connection") : t("connections")}
         </span>
         {expandedId && (
           <Button
@@ -834,9 +826,7 @@ export function GroupedServiceCards({
             onClick={() => {
               if (!agentOrder || agentOrder.guard()) sequence.request(null);
             }}
-          >
-            Collapse
-          </Button>
+          >{t("Collapse")}</Button>
         )}
       </ServiceViewToolbar>
       {visible.length ? (
@@ -881,9 +871,9 @@ export function GroupedServiceCards({
         <p className="py-10 text-center text-sm text-muted-foreground">
           {keys.length
             ? filters.source === "personal"
-              ? "No services with a personal connection match this view. Choose All services to include services available only through an organization or the platform."
-              : "No services match these filters. Clear filters to see all services."
-            : "No connected services."}
+              ? t("No services with a personal connection match this view. Choose All services to include services available only through an organization or the platform.")
+              : t("No services match these filters. Clear filters to see all services.")
+            : t("No connected services.")}
         </p>
       )}
     </div>

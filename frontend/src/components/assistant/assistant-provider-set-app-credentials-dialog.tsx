@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { z } from "zod";
@@ -64,6 +66,7 @@ export function AssistantProviderSetAppCredentialsDialog({
   readonly params: AssistantProviderSetAppCredentialsParams;
   readonly onComplete: (providerId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const form = useAppForm<CredentialFormValues>({
     defaultValues: { clientId: "", clientSecret: "" },
   });
@@ -193,12 +196,12 @@ export function AssistantProviderSetAppCredentialsDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {resultId ? "OAuth app credentials saved" : "Set OAuth app credentials"}
+            {resultId ? t("OAuth app credentials saved") : t("Set OAuth app credentials")}
           </DialogTitle>
           <DialogDescription>
             {resultId
-              ? "NyxID stored the credentials and returned only the provider reference."
-              : "Enter your OAuth app credentials here. They are never returned to the assistant."}
+              ? t("NyxID stored the credentials and returned only the provider reference.")
+              : t("Enter your OAuth app credentials here. They are never returned to the assistant.")}
           </DialogDescription>
         </DialogHeader>
         {!resultId ? (
@@ -208,7 +211,7 @@ export function AssistantProviderSetAppCredentialsDialog({
             onSubmit={form.handleSubmit((values) => void submit(values))}
           >
             <div className="space-y-2">
-              <Label htmlFor="assistant-provider-client-id">Client ID</Label>
+              <Label htmlFor="assistant-provider-client-id">{t("Client ID")}</Label>
               <Input
                 id="assistant-provider-client-id"
                 autoComplete="off"
@@ -217,7 +220,7 @@ export function AssistantProviderSetAppCredentialsDialog({
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="assistant-provider-client-secret">Client secret</Label>
+              <Label htmlFor="assistant-provider-client-secret">{t("Client secret")}</Label>
               <Input
                 id="assistant-provider-client-secret"
                 type="password"
@@ -228,26 +231,22 @@ export function AssistantProviderSetAppCredentialsDialog({
             </div>
           </form>
         ) : null}
-        {error ? <p role="alert" className="text-11 text-destructive">{error}</p> : null}
-        {verified ? <p className="text-11 text-success">Credential evidence verified.</p> : null}
+        {error ? <p role="alert" className="text-11 text-destructive">{translateUi(error)}</p> : null}
+        {verified ? <p className="text-11 text-success">{t("Credential evidence verified.")}</p> : null}
         <DialogFooter>
           {!resultId ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>Cancel</Button>
-              <Button type="submit" form="assistant-provider-credentials-form" variant="primary" isLoading={submitting} disabled={submitting}>
-                Save credentials
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+              <Button type="submit" form="assistant-provider-credentials-form" variant="primary" isLoading={submitting} disabled={submitting}>{t("Save credentials")}</Button>
             </>
           ) : (
             <>
               {!verified && expectedVersionRef.current !== null ? (
                 <Button type="button" variant="outline" isLoading={verifying} onClick={() => void verify(resultId, expectedVersionRef.current!)}>
-                  <RefreshCw />
-                  Retry verification
-                </Button>
+                  <RefreshCw />{t("Retry verification")}</Button>
               ) : null}
               <Button type="button" variant="primary" disabled={!verified} onClick={() => { onComplete(resultId); close(); }}>
-                {replayed ? "Report saved credentials" : "Done"}
+                {replayed ? t("Report saved credentials") : t("Done")}
               </Button>
             </>
           )}

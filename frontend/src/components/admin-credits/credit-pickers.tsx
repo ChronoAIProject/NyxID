@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useDeferredValue, useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { useGroups } from "@/hooks/use-rbac";
@@ -16,6 +17,7 @@ export function UserPicker({
   readonly selected: readonly string[];
   readonly onChange: (ids: string[]) => void;
 }) {
+  const { t } = useUiTranslation();
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim());
   const peopleQuery = useAdminUsers(
@@ -59,7 +61,7 @@ export function UserPicker({
         <Input
           value={search}
           onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search owners"
+          placeholder={t("Search owners")}
           className="border-0 pl-9 focus-visible:ring-0"
         />
       </div>
@@ -77,13 +79,10 @@ export function UserPicker({
                   onChange(selected.filter((value) => value !== id))
                 }
               />
-              <span>
-                Selected owner:{" "}
+              <span>{t("Selected owner:")}{" "}
                 {users.find((user) => user.id === id)?.display_name ||
                   users.find((user) => user.id === id)?.email ||
-                  id}{" "}
-                (outside current results)
-              </span>
+                  id}{" "}{t("(outside current results)")}</span>
             </label>
           ))}
         {filtered.map((user) => {
@@ -108,26 +107,21 @@ export function UserPicker({
                   {user.display_name || user.slug || user.email}
                 </span>
                 <span className="block truncate text-11 text-muted-foreground">
-                  {user.slug ? `Organization / ${user.slug}` : user.email}
+                  {user.slug ? t("Organization / {{slug}}", { slug: user.slug }) : user.email}
                 </span>
               </span>
             </label>
           );
         })}
         {filtered.length === 0 && !loading ? (
-          <p className="px-3 py-6 text-center text-12 text-muted-foreground">
-            No owners found.
-          </p>
+          <p className="px-3 py-6 text-center text-12 text-muted-foreground">{t("No owners found.")}</p>
         ) : null}
         {loading ? (
-          <p className="px-3 py-3 text-center text-11 text-muted-foreground">
-            Searching...
-          </p>
+          <p className="px-3 py-3 text-center text-11 text-muted-foreground">{t("Searching...")}</p>
         ) : null}
       </div>
       <div className="shrink-0 border-t border-border px-3 py-1.5 text-11 text-muted-foreground">
-        {selected.length} selected
-      </div>
+        {selected.length}{t(" selected")}</div>
     </div>
   );
 }
@@ -143,6 +137,7 @@ export function ServicePicker({
   readonly onChange: (ids: string[]) => void;
   readonly multiple?: boolean;
 }) {
+  const { t } = useUiTranslation();
   const [search, setSearch] = useState("");
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
@@ -161,7 +156,7 @@ export function ServicePicker({
         <Input
           value={search}
           onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search services"
+          placeholder={t("Search services")}
           className="border-0 pl-9 focus-visible:ring-0"
         />
       </div>
@@ -179,11 +174,8 @@ export function ServicePicker({
                   onChange(selected.filter((value) => value !== id))
                 }
               />
-              <span>
-                Selected service:{" "}
-                {services.find((service) => service.id === id)?.name ?? id}{" "}
-                (outside current results)
-              </span>
+              <span>{t("Selected service:")}{" "}
+                {services.find((service) => service.id === id)?.name ?? id}{" "}{t("(outside current results)")}</span>
             </label>
           ))}
         {filtered.map((service) => {
@@ -221,9 +213,7 @@ export function ServicePicker({
           );
         })}
         {filtered.length === 0 ? (
-          <p className="px-3 py-6 text-center text-12 text-muted-foreground">
-            No services found.
-          </p>
+          <p className="px-3 py-6 text-center text-12 text-muted-foreground">{t("No services found.")}</p>
         ) : null}
       </div>
     </div>
@@ -308,6 +298,7 @@ function MemberPicker({
   readonly loading: boolean;
   readonly error: boolean;
 }) {
+  const { t } = useUiTranslation();
   const needle = search.trim().toLowerCase();
   const filtered = items.filter((item) =>
     `${item.name} ${item.detail}`.toLowerCase().includes(needle),
@@ -319,7 +310,7 @@ function MemberPicker({
         <Input
           value={search}
           onChange={(event) => onSearch(event.target.value)}
-          placeholder={`Search ${kind}s`}
+          placeholder={t(kind === "organization" ? "Search organizations" : kind === "group" ? "Search groups" : "Search people")}
           className="border-0 pl-9 focus-visible:ring-0"
         />
       </div>
@@ -337,11 +328,8 @@ function MemberPicker({
                   onChange(selected.filter((value) => value !== id))
                 }
               />
-              <span>
-                Selected {kind}:{" "}
-                {items.find((item) => item.id === id)?.name ?? id} (outside
-                current results)
-              </span>
+              <span>{t("Selected ")}{kind}:{" "}
+                {items.find((item) => item.id === id)?.name ?? id}{t(" (outside current results)")}</span>
             </label>
           ))}
         {filtered.map((item) => (
@@ -370,24 +358,18 @@ function MemberPicker({
           </label>
         ))}
         {error ? (
-          <p role="alert" className="px-3 py-3 text-12 text-destructive">
-            Failed to load {kind}s.
+          <p role="alert" className="px-3 py-3 text-12 text-destructive">{t("Failed to load ")}{kind}s.
           </p>
         ) : null}
         {!error && !loading && filtered.length === 0 ? (
-          <p className="px-3 py-6 text-center text-12 text-muted-foreground">
-            No {kind}s found.
-          </p>
+          <p className="px-3 py-6 text-center text-12 text-muted-foreground">{t("No ")}{kind}{t("s found.")}</p>
         ) : null}
         {loading ? (
-          <p className="px-3 py-3 text-center text-11 text-muted-foreground">
-            Searching...
-          </p>
+          <p className="px-3 py-3 text-center text-11 text-muted-foreground">{t("Searching...")}</p>
         ) : null}
       </div>
       <div className="shrink-0 border-t border-border px-3 py-1.5 text-11 text-muted-foreground">
-        {selected.length} selected
-      </div>
+        {selected.length}{t(" selected")}</div>
     </div>
   );
 }

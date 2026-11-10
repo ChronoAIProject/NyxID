@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { PublicationOperations } from "@/components/services/tool-publication";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
@@ -40,6 +42,7 @@ import { CatalogToolMetadata } from "@/components/services/catalog-tool-metadata
 import { ServiceIcon } from "@/components/service-icon";
 
 export function AdminToolsPage() {
+  const { t } = useUiTranslation();
   const { data: services = [], isLoading, error, refetch } = useServices(true);
   const user = useAuthStore((state) => state.user);
   const admin = canManageTools(user);
@@ -52,25 +55,25 @@ export function AdminToolsPage() {
   );
   const suppliers = Array.from(new Set(tools.map((s) => s.supplier ?? s.name)));
   if (!admin)
-    return <ErrorBanner message="Tools management authority required" />;
+    return <ErrorBanner message={t("Tools management authority required")} />;
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Tools"
-        description="Prepare tools and operations. Admins approve audience, prices and publication."
+        title={t("Tools")}
+        description={t("Prepare tools and operations. Admins approve audience, prices and publication.")}
         actions={
-          <AddCtaButton label="Add tool" onClick={() => setAdding(true)} />
+          <AddCtaButton label={t("Add tool")} onClick={() => setAdding(true)} />
         }
       />
       {isLoading ? (
         <Skeleton className="h-48" />
       ) : error ? (
-        <ErrorBanner message="Unable to load tool catalog" onRetry={refetch} />
+        <ErrorBanner message={t("Unable to load tool catalog")} onRetry={refetch} />
       ) : (
         <Tabs defaultValue="providers" className="space-y-6">
           <TabsList>
-            <TabsTrigger value="providers">Providers</TabsTrigger>
-            <TabsTrigger value="tools">Tools</TabsTrigger>
+            <TabsTrigger value="providers">{t("Providers")}</TabsTrigger>
+            <TabsTrigger value="tools">{t("Tools")}</TabsTrigger>
           </TabsList>
           <TabsContent value="providers" className="space-y-4">
             {suppliers.map((supplier) => (
@@ -83,9 +86,7 @@ export function AdminToolsPage() {
                   {
                     tools.filter((t) => (t.supplier ?? t.name) === supplier)
                       .length
-                  }{" "}
-                  tools
-                </p>
+                  }{" "}{t("tools")}</p>
                 {tools
                   .filter((t) => (t.supplier ?? t.name) === supplier)
                   .map((tool) => (
@@ -99,9 +100,9 @@ export function AdminToolsPage() {
               <table className="w-full text-left text-12">
                 <thead className="bg-overlay text-text-tertiary">
                   <tr>
-                    <th className="p-4">Tool</th>
-                    <th className="p-4">Supplier</th>
-                    <th className="p-4">Operations</th>
+                    <th className="p-4">{t("Tool")}</th>
+                    <th className="p-4">{t("Supplier")}</th>
+                    <th className="p-4">{t("Operations")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -119,14 +120,10 @@ export function AdminToolsPage() {
                           <Link
                             to="/services/$serviceId/edit"
                             params={{ serviceId: tool.id }}
-                          >
-                            Service settings
-                          </Link>
+                          >{t("Service settings")}</Link>
                         </Button>
                         <details>
-                          <summary className="cursor-pointer">
-                            Edit metadata
-                          </summary>
+                          <summary className="cursor-pointer">{t("Edit metadata")}</summary>
                           <CatalogToolMetadata service={tool} />
                         </details>
                       </td>
@@ -144,9 +141,7 @@ export function AdminToolsPage() {
       )}
       {createdTool && <CreatedToolStatus tool={createdTool} />}
       {!isLoading && tools.length === 0 && (
-        <p className="rounded-lg border border-dashed border-border p-6 text-12 text-muted-foreground">
-          No tools yet. Add a tool and publish validated operations.
-        </p>
+        <p className="rounded-lg border border-dashed border-border p-6 text-12 text-muted-foreground">{t("No tools yet. Add a tool and publish validated operations.")}</p>
       )}
       <AddToolDialog
         open={adding}
@@ -158,6 +153,7 @@ export function AdminToolsPage() {
   );
 }
 function ProviderStatus({ tool }: { tool: DownstreamService }) {
+  const { t } = useUiTranslation();
   const { data: operations = [] } = useEndpoints(tool.id);
   const published = operations.filter(
     (e) => e.publication === "published" && e.is_active,
@@ -186,18 +182,16 @@ function ProviderStatus({ tool }: { tool: DownstreamService }) {
     <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/50 py-3 text-12">
       <span>{tool.name}</span>
       <span>
-        {published} published · {drafts} draft
-      </span>
-      <span>
-        Credential{" "}
+        {published}{t(" published · ")}{drafts}{t(" draft")}</span>
+      <span>{t("Credential")}{" "}
         {tool.auth_method === "none"
-          ? "not required"
+          ? t("not required")
           : tool.credential_configured
-            ? "configured"
-            : "missing"}
+            ? t("configured")
+            : t("missing")}
       </span>
       <Badge variant={blocker === "Ready" ? "success" : "warning"}>
-        {blocker}
+        {t(blocker)}
       </Badge>
     </div>
   );
@@ -213,6 +207,7 @@ function AddToolDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useUiTranslation();
   const { data: topics = [] } = useToolTopics();
   const mutation = useCatalogToolMutation();
   const user = useAuthStore((state) => state.user);
@@ -236,11 +231,8 @@ function AddToolDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Add tool</DialogTitle>
-          <DialogDescription>
-            Create a tool, then configure its credential and pricing in Service
-            settings.
-          </DialogDescription>
+          <DialogTitle>{t("Add tool")}</DialogTitle>
+          <DialogDescription>{t("Create a tool, then configure its credential and pricing in Service settings.")}</DialogDescription>
         </DialogHeader>
         <form
           className="space-y-3"
@@ -281,42 +273,36 @@ function AddToolDialog({
               onCreated(created);
               onOpenChange(false);
               form.reset();
-              toast.success("Tool created");
+              toast.success(translateUi("Tool created"));
             } catch {
-              toast.error("Tool creation failed");
+              toast.error(translateUi("Tool creation failed"));
             }
           })}
         >
-          <label className="block text-12">
-            Creation method
-            <Select
+          <label className="block text-12">{t("Creation method")}<Select
               value={form.watch("creation_mode")}
               onValueChange={(value) =>
                 form.setValue("creation_mode", value as "twin" | "new")
               }
             >
-              <SelectTrigger aria-label="Creation method">
+              <SelectTrigger aria-label={t("Creation method")}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="twin">
-                  From an existing catalog service
-                </SelectItem>
-                <SelectItem value="new">New service</SelectItem>
+                <SelectItem value="twin">{t("From an existing catalog service")}</SelectItem>
+                <SelectItem value="new">{t("New service")}</SelectItem>
               </SelectContent>
             </Select>
           </label>
           {form.watch("creation_mode") === "twin" && (
-            <label className="block text-12">
-              Source service
-              <Select
+            <label className="block text-12">{t("Source service")}<Select
                 value={form.watch("twin_of_service_id")}
                 onValueChange={(value) =>
                   form.setValue("twin_of_service_id", value)
                 }
               >
-                <SelectTrigger aria-label="Source service">
-                  <SelectValue placeholder="Choose a service" />
+                <SelectTrigger aria-label={t("Source service")}>
+                  <SelectValue placeholder={t("Choose a service")} />
                 </SelectTrigger>
                 <SelectContent>
                   {services
@@ -335,10 +321,7 @@ function AddToolDialog({
                     ))}
                 </SelectContent>
               </Select>
-              <p className="mt-1 text-11 text-muted-foreground">
-                Copies transport and operations as drafts. Credentials stay with
-                the source.
-              </p>
+              <p className="mt-1 text-11 text-muted-foreground">{t("Copies transport and operations as drafts. Credentials stay with the source.")}</p>
             </label>
           )}
           {["name", "slug", "supplier"].map((name) => (
@@ -353,13 +336,9 @@ function AddToolDialog({
           ))}
           {form.watch("creation_mode") === "new" && (
             <fieldset className="space-y-3">
-              <label className="block text-12">
-                Base URL
-                <Input {...form.register("base_url")} />
+              <label className="block text-12">{t("Base URL")}<Input {...form.register("base_url")} />
               </label>
-              <label className="block text-12">
-                Auth method
-                <Select
+              <label className="block text-12">{t("Auth method")}<Select
                   value={form.watch("auth_method")}
                   onValueChange={(value) =>
                     form.setValue(
@@ -368,23 +347,19 @@ function AddToolDialog({
                     )
                   }
                 >
-                  <SelectTrigger aria-label="Auth method">
+                  <SelectTrigger aria-label={t("Auth method")}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="none">None</SelectItem>
-                    <SelectItem value="bearer">Bearer</SelectItem>
-                    <SelectItem value="header">Header</SelectItem>
+                    <SelectItem value="none">{t("None")}</SelectItem>
+                    <SelectItem value="bearer">{t("Bearer")}</SelectItem>
+                    <SelectItem value="header">{t("Header")}</SelectItem>
                   </SelectContent>
                 </Select>
               </label>
-              <label className="block text-12">
-                Key header
-                <Input {...form.register("auth_key_name")} />
+              <label className="block text-12">{t("Key header")}<Input {...form.register("auth_key_name")} />
               </label>
-              <label className="block text-12">
-                OpenAPI spec URL
-                <Input {...form.register("openapi_spec_url")} />
+              <label className="block text-12">{t("OpenAPI spec URL")}<Input {...form.register("openapi_spec_url")} />
               </label>
             </fieldset>
           )}
@@ -418,9 +393,7 @@ function AddToolDialog({
               type="button"
               variant="ghost"
               onClick={() => onOpenChange(false)}
-            >
-              Cancel
-            </Button>
+            >{t("Cancel")}</Button>
             <Button
               variant="primary"
               type="submit"
@@ -433,9 +406,7 @@ function AddToolDialog({
                   : !form.watch("twin_of_service_id"))
               }
               isLoading={mutation.isPending}
-            >
-              Create tool
-            </Button>
+            >{t("Create tool")}</Button>
           </DialogFooter>
         </form>
       </DialogContent>
@@ -444,6 +415,7 @@ function AddToolDialog({
 }
 
 function CreatedToolStatus({ tool }: { tool: DownstreamService }) {
+  const { t } = useUiTranslation();
   const { data: operations = [] } = useEndpoints(tool.id);
   const admin = useAuthStore((state) => state.user?.is_admin) ?? false;
   return (
@@ -452,26 +424,24 @@ function CreatedToolStatus({ tool }: { tool: DownstreamService }) {
       role="status"
     >
       <p>
-        {tool.name} created ·{" "}
+        {tool.name}{t(" created ·")}{" "}
         {
           operations.filter((operation) => operation.publication === "draft")
             .length
-        }{" "}
-        draft operations
-      </p>
+        }{" "}{t("draft operations")}</p>
       <div className="mt-3 flex gap-2">
         <Button variant="secondary" asChild>
           <Link to="/services/$serviceId/edit" params={{ serviceId: tool.id }}>
             {admin
-              ? "Configure credential and pricing"
-              : "Configure credential"}
+              ? t("Configure credential and pricing")
+              : t("Configure credential")}
           </Link>
         </Button>
         <Button variant="ghost" asChild>
           <Link to="/services/$serviceId" params={{ serviceId: tool.id }}>
             {admin
-              ? "Review and publish operations"
-              : "Review and validate operations"}
+              ? t("Review and publish operations")
+              : t("Review and validate operations")}
           </Link>
         </Button>
       </div>

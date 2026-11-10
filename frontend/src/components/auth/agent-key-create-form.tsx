@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -44,6 +45,7 @@ export function AgentKeyCreateForm({
   disabled: boolean;
   onReview: (data: CreateApiKeyFormData) => void;
 }) {
+  const { t } = useUiTranslation();
   const [expiryChoice, setExpiryChoice] = useState(
     initialValues ? (initialValues.expires_at ? "custom" : "none") : "90",
   );
@@ -75,7 +77,7 @@ export function AgentKeyCreateForm({
               name="target_org_id"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Owner</FormLabel>
+                  <FormLabel>{t("Owner")}</FormLabel>
                   <Select
                     value={field.value ?? "personal"}
                     onValueChange={(value) => {
@@ -91,7 +93,7 @@ export function AgentKeyCreateForm({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="personal">Personal</SelectItem>
+                      <SelectItem value="personal">{t("Personal")}</SelectItem>
                       {options.orgs.map((org) => (
                         <SelectItem key={org.id} value={org.id}>
                           {org.name}
@@ -122,9 +124,7 @@ export function AgentKeyCreateForm({
             <label
               className="text-12 font-medium"
               htmlFor="agent-key-expiry-choice"
-            >
-              Key expiry
-            </label>
+            >{t("Key expiry")}</label>
             <Select
               value={expiryChoice}
               onValueChange={(value) => {
@@ -146,11 +146,10 @@ export function AgentKeyCreateForm({
               <SelectContent>
                 {["7", "30", "90", "365"].map((days) => (
                   <SelectItem key={days} value={days}>
-                    {days} days
-                  </SelectItem>
+                    {days}{t(" days")}</SelectItem>
                 ))}
-                <SelectItem value="custom">Custom date</SelectItem>
-                <SelectItem value="none">No expiry</SelectItem>
+                <SelectItem value="custom">{t("Custom date")}</SelectItem>
+                <SelectItem value="none">{t("No expiry")}</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -166,14 +165,14 @@ export function AgentKeyCreateForm({
                     <FormItem>
                       <FormLabel>
                         {name === "rate_limit_per_second"
-                          ? "Requests per second"
-                          : "Burst"}
+                          ? t("Requests per second")
+                          : t("Burst")}
                       </FormLabel>
                       <Input
                         type="number"
                         min={1}
                         step={1}
-                        placeholder="Default"
+                        placeholder={t("Default")}
                         value={field.value ?? ""}
                         onChange={(event) =>
                           field.onChange(
@@ -195,7 +194,7 @@ export function AgentKeyCreateForm({
             name="platform"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Platform</FormLabel>
+                <FormLabel>{t("Platform")}</FormLabel>
                 <Select
                   value={field.value ?? "generic"}
                   onValueChange={field.onChange}
@@ -225,9 +224,7 @@ export function AgentKeyCreateForm({
                 form.watch("scopes").length === 0
               }
             >
-              <ArrowRight className="size-3" />
-              Review permissions
-            </Button>
+              <ArrowRight className="size-3" />{t("Review permissions")}</Button>
           </div>
         </fieldset>
       </form>

@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState, useEffect, useCallback } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import QRCode from "qrcode";
@@ -37,6 +40,7 @@ interface MfaSetupDialogProps {
 }
 
 export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
+  const { t } = useUiTranslation();
   const [step, setStep] = useState<MfaStep>("setup");
   const [setupData, setSetupData] = useState<MfaSetupResponse | null>(null);
   const [recoveryCodes, setRecoveryCodes] = useState<readonly string[]>([]);
@@ -74,9 +78,9 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
       setStep("verify");
     } catch (error) {
       if (error instanceof ApiError) {
-        toast.error(error.message);
+        toast.error(translateErrorMessage(error.message));
       } else {
-        toast.error("Failed to set up MFA");
+        toast.error(translateUi("Failed to set up MFA"));
       }
     }
   }
@@ -89,7 +93,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
       setRecoveryCodes(result.recovery_codes);
       void queryClient.invalidateQueries({ queryKey: ["user"] });
       setStep("recovery");
-      toast.success("MFA enabled successfully");
+      toast.success(translateUi("MFA enabled successfully"));
     } catch (error) {
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
@@ -106,7 +110,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
       await copyToClipboard(code);
       setCopiedIndex(index);
     } catch {
-      toast.error("Failed to copy to clipboard");
+      toast.error(translateUi("Failed to copy to clipboard"));
     }
   }, []);
 
@@ -141,18 +145,13 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
 
         {step === "setup" && (
           <div className="space-y-4">
-            <p className="text-12 text-muted-foreground">
-              You will need an authenticator app like Google Authenticator,
-              Authy, or 1Password to complete setup.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("You will need an authenticator app like Google Authenticator, Authy, or 1Password to complete setup.")}</p>
             <Button
               variant="primary"
               onClick={handleSetup}
               className="w-full"
               isLoading={setupMutation.isPending}
-            >
-              Begin Setup
-            </Button>
+            >{t("Begin Setup")}</Button>
           </div>
         )}
 
@@ -162,7 +161,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
               <div className="flex justify-center">
                 <img
                   src={qrDataUrl}
-                  alt="Scan this QR code with your authenticator app to set up two-factor authentication"
+                  alt={t("Scan this QR code with your authenticator app to set up two-factor authentication")}
                   className="rounded-lg"
                   width={200}
                   height={200}
@@ -172,9 +171,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
 
             {setupData?.secret && (
               <div className="space-y-1">
-                <p className="text-xs text-muted-foreground">
-                  Or enter this code manually:
-                </p>
+                <p className="text-xs text-muted-foreground">{t("Or enter this code manually:")}</p>
                 <code className="block rounded-lg bg-muted p-2 text-center font-mono text-12 select-all">
                   {setupData.secret}
                 </code>
@@ -191,7 +188,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                     role="alert"
                     className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive"
                   >
-                    {form.formState.errors.root.message}
+                    {translateUi(form.formState.errors.root.message ?? "")}
                   </div>
                 )}
 
@@ -200,14 +197,14 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                   name="code"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Verification Code</FormLabel>
+                      <FormLabel>{t("Verification Code")}</FormLabel>
                       <FormControl>
                         <Input
                           placeholder="000000"
                           maxLength={6}
                           inputMode="numeric"
                           autoComplete="one-time-code"
-                          aria-label="Enter 6-digit verification code"
+                          aria-label={t("Enter 6-digit verification code")}
                           className="text-center font-mono text-lg tracking-widest"
                           {...field}
                         />
@@ -217,9 +214,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                   )}
                 />
 
-                <Button variant="primary" type="submit" className="w-full" disabled={!form.formState.isValid || form.formState.isSubmitting}>
-                  Verify and Enable
-                </Button>
+                <Button variant="primary" type="submit" className="w-full" disabled={!form.formState.isValid || form.formState.isSubmitting}>{t("Verify and Enable")}</Button>
               </form>
             </Form>
           </div>
@@ -230,7 +225,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
             <div
               className="grid grid-cols-2 gap-2"
               role="list"
-              aria-label="Recovery codes"
+              aria-label={t("Recovery codes")}
             >
               {recoveryCodes.map((code, index) => (
                 <button
@@ -238,7 +233,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
                   type="button"
                   onClick={() => void handleCopyCode(code, index)}
                   className="flex items-center justify-between rounded-lg bg-muted px-3 py-2 font-mono text-12 transition-colors duration-300 hover:bg-muted/80"
-                  aria-label={`Copy recovery code ${String(index + 1)}`}
+                  aria-label={t("Copy recovery code {{value}}", { value: String(index + 1) })}
                 >
                   <span>{code}</span>
                   {copiedIndex === index ? (
@@ -256,9 +251,7 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
               ))}
             </div>
 
-            <Button variant="primary" onClick={handleClose} className="w-full">
-              Done
-            </Button>
+            <Button variant="primary" onClick={handleClose} className="w-full">{t("Done")}</Button>
           </div>
         )}
       </DialogContent>

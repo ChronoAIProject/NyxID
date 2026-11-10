@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import type { ReactNode } from "react";
 import { ExternalLink } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
@@ -37,6 +38,7 @@ export function ChannelConnectionShell({
   readonly guideUrl?: string | null;
   readonly children: ReactNode;
 }) {
+  const { t } = useUiTranslation();
   useApplyTheme();
   return (
     <div className="flex min-h-dvh flex-col bg-background px-4 py-6 text-foreground sm:py-10">
@@ -50,22 +52,20 @@ export function ChannelConnectionShell({
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-                >
-                  Channel setup guide
-                  <ExternalLink className="size-3" aria-hidden="true" />
+                >{t("Channel setup guide")}<ExternalLink className="size-3" aria-hidden="true" />
                 </a>
               </div>
             )}
             <div
               className="mb-6 flex items-start justify-center"
               role="img"
-              aria-label={`NyxID connects to ${platformName ?? "your channel"}`}
+              aria-label={t("NyxID connects to {{value}}", { value: platformName ?? t("your channel") })}
             >
               <div className="flex w-20 flex-col items-center gap-2.5">
                 <div className="connection-identity-icon flex size-18 items-center justify-center overflow-hidden rounded-full border border-border bg-background">
                   <NyxidIcon className="size-9" alt="" />
                 </div>
-                <span className="text-12 font-medium">NyxID</span>
+                <span className="text-12 font-medium">{t("NyxID")}</span>
               </div>
               <ConnectionArc complete={complete} />
               <div className="flex w-20 flex-col items-center gap-2.5">
@@ -73,7 +73,7 @@ export function ChannelConnectionShell({
                   <ChannelIcon platform={platform} />
                 </div>
                 <span className="text-center text-12 font-medium">
-                  {platformName ?? "Channel"}
+                  {platformName ?? t("Channel")}
                 </span>
               </div>
             </div>
@@ -81,34 +81,31 @@ export function ChannelConnectionShell({
               <h1 className="font-display text-22 font-medium leading-tight tracking-tight sm:text-28">
                 {platform === "telegram"
                   ? complete
-                    ? "Your Telegram bot is connected"
-                    : "Connect your Telegram bot"
+                    ? t("Your Telegram bot is connected")
+                    : t("Connect your Telegram bot")
                   : platformName
                     ? complete
-                      ? `Your ${platformName} channel bot is created`
-                      : `Create your ${platformName} channel bot`
-                    : "Set up your channel bot"}
+                      ? t("Your {{platformName}} channel bot is created", { platformName: platformName })
+                      : t("Create your {{platformName}} channel bot", { platformName: platformName })
+                    : t("Set up your channel bot")}
               </h1>
               <p className="text-12 leading-relaxed text-muted-foreground">
                 {complete
-                  ? "Finish any platform setup, then choose an agent to respond to your messages."
+                  ? t("Finish any platform setup, then choose an agent to respond to your messages.")
                   : platform === "telegram-new"
-                    ? "Create a bot in Telegram and connect it to your AI agents through NyxID."
-                    : `Connect your ${platformName ?? "channel"} bot to NyxID so your AI agents can receive and reply to messages.`}
+                    ? t("Create a bot in Telegram and connect it to your AI agents through NyxID.")
+                    : t("Connect your {{value}} bot to NyxID so your AI agents can receive and reply to messages.", { value: platformName ?? t("channel") })}
               </p>
             </div>
             {children}
           </div>
           {email && (
-            <div className="border-t border-border/60 px-5 py-3 text-center text-11 text-muted-foreground sm:px-8">
-              Signed in as{" "}
+            <div className="border-t border-border/60 px-5 py-3 text-center text-11 text-muted-foreground sm:px-8">{t("Signed in as")}{" "}
               <span className="break-all text-foreground">{email}</span>
             </div>
           )}
         </main>
-        <footer className="mt-6 flex h-7 items-center justify-center text-center text-11 text-muted-foreground">
-          Channel connections by NyxID
-        </footer>
+        <footer className="mt-6 flex h-7 items-center justify-center text-center text-11 text-muted-foreground">{t("Channel connections by NyxID")}</footer>
       </div>
     </div>
   );

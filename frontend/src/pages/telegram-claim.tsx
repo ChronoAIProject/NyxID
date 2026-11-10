@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useWatch } from "react-hook-form";
@@ -26,12 +28,14 @@ const EXISTING_SETUP =
   "Finish or cancel your existing Telegram creation request first";
 
 export function TelegramClaimPage() {
+  const { t } = useUiTranslation();
   const actor = useAuthStore((state) => state.user?.id);
-  if (!actor) return <p role="status">Loading your account…</p>;
+  if (!actor) return <p role="status">{t("Loading your account…")}</p>;
   return <TelegramClaimForm key={actor} />;
 }
 
 export function TelegramClaimForm() {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const [code, setCode] = useState(
     () => readTelegramClaimHandoff()?.code ?? "",
@@ -157,7 +161,7 @@ export function TelegramClaimForm() {
 
   return (
     <section
-      aria-label="Connect Telegram bot"
+      aria-label={t("Connect Telegram bot")}
       className="mx-auto w-full max-w-2xl space-y-6 pb-6"
     >
       <Button
@@ -168,15 +172,14 @@ export function TelegramClaimForm() {
           void navigate({ to: "/channel-bots", search: {}, replace: true });
         }}
       >
-        <ArrowLeft className="size-4" /> Back to Channel Bots
-      </Button>
+        <ArrowLeft className="size-4" />{t(" Back to Channel Bots")}</Button>
       <PageHeader
         title={
           preview.data
-            ? `Connect @${preview.data.bot_username}`
-            : "Connect your Telegram bot"
+            ? t("Connect @{{bot_username}}", { bot_username: preview.data.bot_username })
+            : t("Connect your Telegram bot")
         }
-        description="Choose where your bot will appear in NyxID, then connect it."
+        description={t("Choose where your bot will appear in NyxID, then connect it.")}
       />
       {(notice || preview.error || redeem.error || cancel.error) && (
         <ErrorBanner
@@ -185,7 +188,7 @@ export function TelegramClaimForm() {
             cancel.error?.message ??
             redeem.error?.message ??
             preview.error?.message ??
-            "Unable to connect"
+            t("Unable to connect")
           }
         />
       )}
@@ -199,7 +202,7 @@ export function TelegramClaimForm() {
           }}
         >
           <div className="space-y-2">
-            <Label htmlFor="telegram-claim-code">Claim code</Label>
+            <Label htmlFor="telegram-claim-code">{t("Claim code")}</Label>
             <Input
               id="telegram-claim-code"
               data-sensitive
@@ -216,10 +219,7 @@ export function TelegramClaimForm() {
                 setNotice(null);
               }}
             />
-            <p className="text-xs text-muted-foreground">
-              Use the code from your private Telegram setup chat. Only enter
-              codes for bots you created.
-            </p>
+            <p className="text-xs text-muted-foreground">{t("Use the code from your private Telegram setup chat. Only enter codes for bots you created.")}</p>
           </div>
           <Button
             type="submit"
@@ -227,7 +227,7 @@ export function TelegramClaimForm() {
             isLoading={preview.isPending}
             disabled={busy || !code.trim()}
           >
-            {preview.error ? "Retry" : "Check code"}
+            {preview.error ? t("Retry") : t("Check code")}
           </Button>
         </form>
       ) : (
@@ -237,7 +237,7 @@ export function TelegramClaimForm() {
           onSubmit={form.handleSubmit(connect)}
         >
           <div className="space-y-2">
-            <Label htmlFor="telegram-claim-label">Bot label in NyxID</Label>
+            <Label htmlFor="telegram-claim-label">{t("Bot label in NyxID")}</Label>
             <Input
               id="telegram-claim-label"
               maxLength={128}
@@ -246,41 +246,36 @@ export function TelegramClaimForm() {
             />
             {form.formState.errors.label && (
               <p className="text-xs text-destructive">
-                {form.formState.errors.label.message}
+                {translateUi(form.formState.errors.label.message ?? "")}
               </p>
             )}
           </div>
           <div className="space-y-2">
-            <Label>Connect to</Label>
+            <Label>{t("Connect to")}</Label>
             <OrgScopeSelect
-              label="Connect to"
+              label={t("Connect to")}
               value={orgId ?? null}
               disabled={locked || busy}
               onChange={(next) =>
                 form.setValue("target_org_id", next ?? undefined)
               }
             />
-            <p className="text-xs text-muted-foreground">
-              Your personal account or an organization you manage.
-            </p>
+            <p className="text-xs text-muted-foreground">{t("Your personal account or an organization you manage.")}</p>
           </div>
-          <p className="text-xs text-muted-foreground">
-            Once connected, choose an AI agent in the bot’s settings to handle
-            replies.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("Once connected, choose an AI agent in the bot’s settings to handle replies.")}</p>
           <Button
             type="submit"
             variant="primary"
             isLoading={redeem.isPending}
             disabled={busy || !code || !label.trim()}
           >
-            {locked && redeem.error ? "Retry connection" : "Connect"}
+            {locked && redeem.error ? t("Retry connection") : t("Connect")}
           </Button>
         </form>
       )}
       {conflict && pending && (
         <div className="space-y-3 rounded-xl border border-border bg-card p-4">
-          <p className="text-sm">Existing setup: {pending.label}</p>
+          <p className="text-sm">{t("Existing setup: ")}{pending.label}</p>
           <Button
             variant="outline"
             onClick={() =>
@@ -289,9 +284,7 @@ export function TelegramClaimForm() {
                 search: { connect: "telegram-new", request_id: pending.id },
               })
             }
-          >
-            Resume existing setup
-          </Button>
+          >{t("Resume existing setup")}</Button>
           {!["provisioning", "connected", "suspended"].includes(
             pending.status,
           ) && (
@@ -306,9 +299,7 @@ export function TelegramClaimForm() {
                   })
                   .catch(() => {});
               }}
-            >
-              Cancel setup
-            </Button>
+            >{t("Cancel setup")}</Button>
           )}
         </div>
       )}

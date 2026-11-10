@@ -18,6 +18,8 @@
  *   --primary     → text-primary-text
  */
 
+import { useWizardTranslation } from "@/i18n/wizard"
+import { WizardLanguagePicker } from "./language-picker"
 import type { ReactNode } from "react"
 import { WizardFooter } from "./wizard-footer"
 import { formatStepLabel, type WizardStep } from "./step-label"
@@ -32,17 +34,21 @@ export interface WizardShellProps {
 }
 
 export function WizardShell({ step, context, localOrigin, children }: WizardShellProps) {
+  const { t } = useWizardTranslation()
   useApplyTheme()
   return (
     <div className="min-h-screen bg-background text-foreground">
     <div className="mx-auto flex max-h-screen w-full max-w-[1040px] flex-col px-6 pt-10 pb-6">
-      <header className="mb-6 flex items-center justify-between">
+      <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center">
           <NyxidLogo className="h-9 w-auto" />
         </div>
+        <div className="ml-auto flex min-w-0 items-center justify-end gap-3">
         {step ? (
-          <div className="text-12 text-muted-foreground">{formatStepLabel(step)}</div>
+          <div className="text-12 text-muted-foreground">{formatStepLabel(step, t)}</div>
         ) : null}
+        <WizardLanguagePicker />
+        </div>
       </header>
       {/*
         No `flex-1` — main hugs its content, so a short step ends the card

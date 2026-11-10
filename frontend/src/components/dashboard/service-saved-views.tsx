@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useAppForm } from "@/components/ui/form";
@@ -24,6 +26,7 @@ export function ServiceSavedViews({
   readonly view: ReturnType<typeof useServiceView>;
   readonly onRestore: (filters?: ServiceViewFilters, viewId?: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const [open, setOpen] = useState(false);
   const form = useAppForm<{ name: string }>({
     resolver: zodResolver(serviceViewNameFormSchema),
@@ -49,11 +52,9 @@ export function ServiceSavedViews({
           <Button
             variant="outline"
             className="rounded-full"
-            aria-label="Saved views"
+            aria-label={t("Saved views")}
           >
-            <Bookmark className="size-3.5" aria-hidden="true" />
-            Saved views
-            <span className="rounded-full bg-muted px-1.5 text-10 tabular-nums">
+            <Bookmark className="size-3.5" aria-hidden="true" />{t("Saved views")}<span className="rounded-full bg-muted px-1.5 text-10 tabular-nums">
               {view.workspace.views.length}
             </span>
             <ChevronDown className="size-3" aria-hidden="true" />
@@ -64,11 +65,8 @@ export function ServiceSavedViews({
           className="w-96 max-w-[calc(100vw-2rem)] space-y-3"
         >
           <div>
-            <h3 className="text-13 font-semibold">Saved views</h3>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Save named filter combinations. The default opens when you return
-              to AI Services.
-            </p>
+            <h3 className="text-13 font-semibold">{t("Saved views")}</h3>
+            <p className="mt-1 text-xs text-muted-foreground">{t("Save named filter combinations. The default opens when you return to AI Services.")}</p>
           </div>
           <div className="max-h-64 space-y-2 overflow-y-auto">
             {view.workspace.views.map((saved) => (
@@ -90,13 +88,13 @@ export function ServiceSavedViews({
                       {active?.id === saved.id && (
                         <Check
                           className="size-3 text-success"
-                          aria-label="Active"
+                          aria-label={t("Active")}
                         />
                       )}
                     </span>
                     <span className="mt-1 block text-11 font-normal text-muted-foreground">
                       {view.workspace.default_id === saved.id
-                        ? "Default · "
+                        ? t("Default · ")
                         : ""}
                       {
                         {
@@ -107,7 +105,7 @@ export function ServiceSavedViews({
                         }[saved.filters.source]
                       }
                       {saved.filters.search
-                        ? ` · “${saved.filters.search}”`
+                        ? t(" · “{{search}}”", { search: saved.filters.search })
                         : ""}
                     </span>
                   </button>
@@ -116,13 +114,13 @@ export function ServiceSavedViews({
                     size="sm"
                     aria-label={
                       view.workspace.default_id === saved.id
-                        ? `Remove default: ${saved.name}`
-                        : `Set as default: ${saved.name}`
+                        ? t("Remove default: {{name}}", { name: saved.name })
+                        : t("Set as default: {{name}}", { name: saved.name })
                     }
                     title={
                       view.workspace.default_id === saved.id
-                        ? "Remove default"
-                        : "Set as default"
+                        ? t("Remove default")
+                        : t("Set as default")
                     }
                     disabled={disabled}
                     onClick={() =>
@@ -145,7 +143,7 @@ export function ServiceSavedViews({
                   <Button
                     variant="ghost"
                     size="sm"
-                    aria-label={`Delete view: ${saved.name}`}
+                    aria-label={t("Delete view: {{name}}", { name: saved.name })}
                     disabled={disabled}
                     onClick={() => setPendingDelete(saved.id)}
                   >
@@ -154,7 +152,7 @@ export function ServiceSavedViews({
                 </div>
                 {pendingDelete === saved.id && (
                   <div className="mt-2 flex items-center gap-2 text-xs">
-                    <span>Delete this view?</span>
+                    <span>{t("Delete this view?")}</span>
                     <Button
                       size="sm"
                       variant="destructive"
@@ -163,25 +161,19 @@ export function ServiceSavedViews({
                         view.deleteSavedView(saved.id);
                         setPendingDelete(null);
                       }}
-                    >
-                      Delete
-                    </Button>
+                    >{t("Delete")}</Button>
                     <Button
                       size="sm"
                       variant="ghost"
                       onClick={() => setPendingDelete(null)}
-                    >
-                      Cancel
-                    </Button>
+                    >{t("Cancel")}</Button>
                   </div>
                 )}
               </div>
             ))}
           </div>
           {view.workspace.views.length === 0 && (
-            <p className="text-xs text-muted-foreground">
-              No saved views yet. Set your filters, then save a view below.
-            </p>
+            <p className="text-xs text-muted-foreground">{t("No saved views yet. Set your filters, then save a view below.")}</p>
           )}
           {selected && (
             <Button
@@ -192,9 +184,7 @@ export function ServiceSavedViews({
               }
               onClick={() => view.updateSavedView(selected.id)}
             >
-              <Save className="size-3.5" />
-              Update “{selected.name}” with current filters
-            </Button>
+              <Save className="size-3.5" />{t("Update “")}{selected.name}{t("” with current filters")}</Button>
           )}
           <form
             className="space-y-2 border-t border-border pt-3"
@@ -204,7 +194,7 @@ export function ServiceSavedViews({
               }
             })}
           >
-            <Label htmlFor="service-view-name">Save as a new view</Label>
+            <Label htmlFor="service-view-name">{t("Save as a new view")}</Label>
             <Input
               id="service-view-name"
               {...form.register("name")}
@@ -215,14 +205,14 @@ export function ServiceSavedViews({
                   ? "service-view-name-error"
                   : undefined
               }
-              placeholder="e.g. Team AI services"
+              placeholder={t("e.g. Team AI services")}
             />
             {form.formState.errors.name && (
               <p
                 id="service-view-name-error"
                 className="text-xs text-destructive"
               >
-                {form.formState.errors.name.message}
+                {translateUi(form.formState.errors.name.message ?? "")}
               </p>
             )}
             <Button
@@ -234,19 +224,13 @@ export function ServiceSavedViews({
                 view.workspace.views.length >= 20
               }
               isLoading={view.isSaving}
-            >
-              Save new view
-            </Button>
+            >{t("Save new view")}</Button>
             {view.workspace.views.length >= 20 && (
-              <p className="text-xs text-muted-foreground">
-                You can save up to 20 views.
-              </p>
+              <p className="text-xs text-muted-foreground">{t("You can save up to 20 views.")}</p>
             )}
           </form>
           {!view.canSaveViews && (
-            <p className="text-11 text-muted-foreground">
-              Saving named views requires the updated server.
-            </p>
+            <p className="text-11 text-muted-foreground">{t("Saving named views requires the updated server.")}</p>
           )}
           {view.saveError && (
             <p role="alert" className="text-xs text-destructive">
@@ -262,7 +246,7 @@ export function ServiceSavedViews({
         >
           <Check className="size-3 text-success" />
           {active.name}
-          {active.id === view.workspace.default_id ? " · Default" : ""}
+          {active.id === view.workspace.default_id ? t(" · Default") : ""}
         </span>
       )}
     </div>

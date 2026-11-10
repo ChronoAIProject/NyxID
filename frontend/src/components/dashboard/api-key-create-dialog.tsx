@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -90,6 +92,7 @@ export function ApiKeyCreateDialog({
   readonly setupMode?: boolean;
   readonly initialServiceId?: string | null;
 } = {}) {
+  const { t } = useUiTranslation();
   const [internalOpen, setInternalOpen] = useState(false);
   const open = externalOpen ?? internalOpen;
   const setOpen = onExternalOpenChange ?? setInternalOpen;
@@ -178,12 +181,12 @@ export function ApiKeyCreateDialog({
       const result = await createMutation.mutateAsync(data);
       setCreatedKey(result.full_key);
       setCreatedKeyId(result.id);
-      toast.success("API key created successfully");
+      toast.success(translateUi("API key created successfully"));
     } catch (error) {
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
       } else {
-        toast.error("Failed to create API key");
+        toast.error(translateUi("Failed to create API key"));
       }
     }
   }
@@ -210,7 +213,7 @@ export function ApiKeyCreateDialog({
     >
       {!hideTrigger && (
         <DialogTrigger asChild>
-          <AddCtaButton label="Create API Key" onClick={() => {}} />
+          <AddCtaButton label={t("Create API Key")} onClick={() => {}} />
         </DialogTrigger>
       )}
       <DialogContent>
@@ -218,12 +221,10 @@ export function ApiKeyCreateDialog({
           <>
             <DialogHeader>
               <DialogTitle>
-                {setupMode ? "Agent Key Created" : "API Key Created"}
+                {setupMode ? t("Agent Key Created") : t("API Key Created")}
               </DialogTitle>
-              <DialogDescription>
-                Copy your API key now. You will not be able to see it again.
-                {setupMode
-                  ? " Open the Agent Key detail page next to review service scope, add credential bindings only when this agent needs overrides, and verify proxy access."
+              <DialogDescription>{t("Copy your API key now. You will not be able to see it again.")}{setupMode
+                  ? t(" Open the Agent Key detail page next to review service scope, add credential bindings only when this agent needs overrides, and verify proxy access.")
                   : ""}
               </DialogDescription>
             </DialogHeader>
@@ -250,26 +251,22 @@ export function ApiKeyCreateDialog({
                     to="/keys/api-key/$keyId"
                     params={{ keyId: createdKeyId }}
                     onClick={handleClose}
-                  >
-                    Review Scope & Bindings
-                  </Link>
+                  >{t("Review Scope & Bindings")}</Link>
                 </Button>
               )}
-              <Button variant="primary" onClick={handleClose}>
-                Done
-              </Button>
+              <Button variant="primary" onClick={handleClose}>{t("Done")}</Button>
             </DialogFooter>
           </>
         ) : (
           <>
             <DialogHeader>
               <DialogTitle>
-                {setupMode ? "Create Agent Key" : "Create API Key"}
+                {setupMode ? t("Create Agent Key") : t("Create API Key")}
               </DialogTitle>
               <DialogDescription>
                 {setupMode
-                  ? "Create a scoped Agent Key using the existing key creation and service-scope controls."
-                  : "Create a new API key to access the NyxID API."}
+                  ? t("Create a scoped Agent Key using the existing key creation and service-scope controls.")
+                  : t("Create a new API key to access the NyxID API.")}
               </DialogDescription>
             </DialogHeader>
 
@@ -280,7 +277,7 @@ export function ApiKeyCreateDialog({
               >
                 {form.formState.errors.root && (
                   <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
-                    {form.formState.errors.root.message}
+                    {translateUi(form.formState.errors.root.message ?? "")}
                   </div>
                 )}
 
@@ -292,7 +289,7 @@ export function ApiKeyCreateDialog({
                     name="platform"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Platform</FormLabel>
+                        <FormLabel>{t("Platform")}</FormLabel>
                         <div className="flex flex-wrap gap-2">
                           {PLATFORM_OPTIONS.map((platform) => (
                             <Badge
@@ -310,10 +307,7 @@ export function ApiKeyCreateDialog({
                             </Badge>
                           ))}
                         </div>
-                        <p className="text-xs text-muted-foreground">
-                          Stored on the key for audit attribution. You can
-                          change it later on the Agent Key detail page.
-                        </p>
+                        <p className="text-xs text-muted-foreground">{t("Stored on the key for audit attribution. You can change it later on the Agent Key detail page.")}</p>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -326,7 +320,7 @@ export function ApiKeyCreateDialog({
                     name="target_org_id"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Owner</FormLabel>
+                        <FormLabel>{t("Owner")}</FormLabel>
                         <FormControl>
                           <OrgScopeSelect
                             value={field.value ?? null}
@@ -344,14 +338,10 @@ export function ApiKeyCreateDialog({
                               form.setValue("allow_all_services", true);
                               form.setValue("allow_all_nodes", true);
                             }}
-                            label="Owner"
+                            label={t("Owner")}
                           />
                         </FormControl>
-                        <p className="text-xs text-muted-foreground">
-                          Org-owned keys are shared with every admin of that
-                          organization and can only scope to services owned by
-                          the same org.
-                        </p>
+                        <p className="text-xs text-muted-foreground">{t("Org-owned keys are shared with every admin of that organization and can only scope to services owned by the same org.")}</p>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -367,11 +357,8 @@ export function ApiKeyCreateDialog({
                   name="callback_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>
-                        Callback URL{" "}
-                        <span className="text-muted-foreground">
-                          (optional)
-                        </span>
+                      <FormLabel>{t("Callback URL")}{" "}
+                        <span className="text-muted-foreground">{t("(optional)")}</span>
                       </FormLabel>
                       <FormControl>
                         <Input
@@ -384,10 +371,7 @@ export function ApiKeyCreateDialog({
                           }
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
-                        Where NyxID sends channel relay messages. Required for
-                        Channel Bot routing.
-                      </p>
+                      <p className="text-xs text-muted-foreground">{t("Where NyxID sends channel relay messages. Required for Channel Bot routing.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -415,9 +399,7 @@ export function ApiKeyCreateDialog({
                 />
 
                 <DialogFooter>
-                  <Button type="button" variant="outline" onClick={handleClose}>
-                    Cancel
-                  </Button>
+                  <Button type="button" variant="outline" onClick={handleClose}>{t("Cancel")}</Button>
                   <Button
                     variant="primary"
                     type="submit"
@@ -427,7 +409,7 @@ export function ApiKeyCreateDialog({
                       setupRequiresServiceSelection
                     }
                   >
-                    {setupMode ? "Create Agent Key" : "Create Key"}
+                    {setupMode ? t("Create Agent Key") : t("Create Key")}
                   </Button>
                 </DialogFooter>
               </form>

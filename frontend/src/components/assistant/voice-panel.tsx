@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import {
@@ -29,7 +31,7 @@ function tariff(option: VoiceOption) {
           (p) => p.sync_status === "synced" && p.metric.includes("tokens"),
         )
       : [];
-    return `No NyxID ${extras.length ? "duration" : "voice"} charge; your provider's charges still apply${extras.map((p) => `; ${p.credits_per_unit} credits per reported ${metricLabel(p.metric, 1)}`).join("")}`;
+    return translateUi(extras.length ? "No NyxID duration charge; your provider's charges still apply" : "No NyxID voice charge; your provider's charges still apply") + extras.map((p) => translateUi("; {{rate}} credits per reported {{metric}}", { rate: p.credits_per_unit, metric: metricLabel(p.metric, 1) })).join("");
   }
   const prices = option.pricing
     ? [option.pricing, ...option.pricing.components]
@@ -49,8 +51,8 @@ function tariff(option: VoiceOption) {
         )),
   );
   return duration
-    ? `${duration.credits_per_unit} credits per second${extras.map((p) => ` plus ${p.credits_per_unit} credits per ${p.metric === "requests" ? "start" : metricLabel(p.metric, 1)}`).join("")}`
-    : "Voice tariff unavailable";
+    ? translateUi("{{rate}} credits per second", { rate: duration.credits_per_unit }) + extras.map((p) => translateUi(" plus {{rate}} credits per {{metric}}", { rate: p.credits_per_unit, metric: p.metric === "requests" ? translateUi("start") : metricLabel(p.metric, 1) })).join("")
+    : translateUi("Voice tariff unavailable");
 }
 
 /** Media remains mounted when minimized; starting always needs a gesture. */
@@ -63,6 +65,7 @@ export function VoicePanel({
   savedPreferences?: VoicePreferences | null;
   onClose: () => void;
 }) {
+  const { t } = useUiTranslation();
   const voice = useAssistantVoice(threadId);
   const [minimized, setMinimized] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -169,7 +172,7 @@ export function VoicePanel({
   const micControl = (
     <Button
       variant="outline"
-      aria-label={microphoneMuted ? "Unmute microphone" : "Mute microphone"}
+      aria-label={microphoneMuted ? t("Unmute microphone") : t("Mute microphone")}
       aria-pressed={microphoneMuted}
       disabled={voice.starting}
       onClick={() => {
@@ -181,7 +184,7 @@ export function VoicePanel({
       ) : (
         <Mic className="h-4 w-4" />
       )}
-      {microphoneMuted ? "Unmute" : "Mute"}
+      {microphoneMuted ? t("Unmute") : t("Mute")}
     </Button>
   );
   const endControl = (
@@ -192,23 +195,21 @@ export function VoicePanel({
         setMinimized(false);
       }}
     >
-      <PhoneOff className="h-4 w-4" />
-      End call
-    </Button>
+      <PhoneOff className="h-4 w-4" />{t("End call")}</Button>
   );
   if (minimized && active)
     return (
       <section
-        aria-label="Minimized voice call"
+        aria-label={t("Minimized voice call")}
         className="fixed bottom-6 right-4 z-40 flex max-w-[calc(100vw-2rem)] flex-wrap items-center gap-2 rounded-xl border border-border bg-card p-3 shadow-lg"
       >
         <span role="status">{status}</span>
-        <span aria-label="Call duration" className="font-mono tabular-nums">
+        <span aria-label={t("Call duration")} className="font-mono tabular-nums">
           {timer}
         </span>
         {inputMode === "push_to_talk" && (
           <Button
-            aria-label="Hold to talk"
+            aria-label={t("Hold to talk")}
             disabled={voice.starting || microphoneMuted}
             aria-pressed={voice.holding}
             onPointerDown={(e) => {
@@ -233,15 +234,13 @@ export function VoicePanel({
         {endControl}
         <Button
           variant="ghost"
-          aria-label="Restore voice panel"
+          aria-label={t("Restore voice panel")}
           onClick={() => setMinimized(false)}
         >
           <Maximize2 className="h-4 w-4" />
         </Button>
         {voice.snapshot?.session.idle_warning && (
-          <p role="status" className="w-full">
-            Speak to keep this call open.
-          </p>
+          <p role="status" className="w-full">{t("Speak to keep this call open.")}</p>
         )}
         {voice.error && (
           <p role="alert" className="w-full text-destructive">
@@ -252,19 +251,19 @@ export function VoicePanel({
     );
   return (
     <section
-      aria-label="Voice conversation"
+      aria-label={t("Voice conversation")}
       className="rounded-xl border border-border bg-card p-4 text-12"
     >
       <div className="flex items-center justify-between gap-3">
-        <h2 className="text-15 font-semibold">Talk to your assistant</h2>
+        <h2 className="text-15 font-semibold">{t("Talk to your assistant")}</h2>
         <span role="status">{status}</span>
-        <span aria-label="Call duration" className="font-mono tabular-nums">
+        <span aria-label={t("Call duration")} className="font-mono tabular-nums">
           {timer}
         </span>
         {active && (
           <Button
             variant="ghost"
-            aria-label="Minimize voice call"
+            aria-label={t("Minimize voice call")}
             onClick={() => {
               voice.hold(false);
               setMinimized(true);
@@ -280,40 +279,27 @@ export function VoicePanel({
             void voice.end();
             onClose();
           }}
-        >
-          Close
-        </Button>
+        >{t("Close")}</Button>
       </div>
-      <p className="mt-2 text-muted-foreground">
-        Audio goes to {isGrok ? "xAI through NyxID" : "OpenAI"}. NyxID keeps the
-        transcript, never an audio recording. Muting keeps the call running and
-        billed.
-      </p>
+      <p className="mt-2 text-muted-foreground">{t("Audio goes to ")}{isGrok ? t("xAI through NyxID") : t("OpenAI")}{t(". NyxID keeps the transcript, never an audio recording. Muting keeps the call running and billed.")}</p>
       {voice.conflictSession && !active && (
         <div className="mt-4 rounded-lg border border-warning/40 p-3">
-          <p role="status">A voice call is already active in this conversation.</p>
+          <p role="status">{t("A voice call is already active in this conversation.")}</p>
           <div className="mt-2 flex gap-2">
             {voice.conflictSession.resumable && (
-              <Button onClick={() => voice.rejoin()}>Rejoin</Button>
+              <Button onClick={() => voice.rejoin()}>{t("Rejoin")}</Button>
             )}
-            <Button variant="destructive" onClick={() => void voice.end()}>
-              End call
-            </Button>
+            <Button variant="destructive" onClick={() => void voice.end()}>{t("End call")}</Button>
           </div>
         </div>
       )}
       {isGrok && (
-        <p className="mt-2 text-muted-foreground">
-          Grok private beta: Hold to talk, with headphones recommended.
-          Automatic speaker mode is awaiting verification.
-        </p>
+        <p className="mt-2 text-muted-foreground">{t("Grok private beta: Hold to talk, with headphones recommended. Automatic speaker mode is awaiting verification.")}</p>
       )}
       {!active && (
         <div className="mt-4 flex flex-wrap gap-3">
-          <label>
-            Voice source
-            <select
-              aria-label="Voice source"
+          <label>{t("Voice source")}<select
+              aria-label={t("Voice source")}
               value={selectionKey}
               onChange={(e) => setSelected(e.target.value)}
               className="ml-2 h-8 rounded-lg border border-input bg-background px-3"
@@ -325,16 +311,14 @@ export function VoicePanel({
                   value={`${o.service_id}:${o.connection_id ?? o.key_source}:${o.model}`}
                 >
                   {o.model_label} ·{" "}
-                  {o.key_source === "own" ? "Your key" : "Platform key"}
-                  {!o.available ? " (not available yet)" : ""}
+                  {o.key_source === "own" ? t("Your key") : t("Platform key")}
+                  {!o.available ? t(" (not available yet)") : ""}
                 </option>
               ))}
             </select>
           </label>
-          <label>
-            Voice
-            <select
-              aria-label="Voice"
+          <label>{t("Voice")}<select
+              aria-label={t("Voice")}
               value={voiceName ?? ""}
               onChange={(e) =>
                 preferencesForm.setValue("voice", e.target.value)
@@ -348,10 +332,8 @@ export function VoicePanel({
               ))}
             </select>
           </label>
-          <label>
-            Microphone
-            <select
-              aria-label="Microphone mode"
+          <label>{t("Microphone")}<select
+              aria-label={t("Microphone mode")}
               value={inputMode}
               onChange={(e) =>
                 preferencesForm.setValue(
@@ -361,9 +343,8 @@ export function VoicePanel({
               }
               className="ml-2 h-8 rounded-lg border border-input bg-background px-3"
             >
-              <option value="push_to_talk">Hold to talk</option>
-              <option value="automatic" disabled={isGrok}>
-                Automatic{isGrok ? " (not available in Grok beta)" : ""}
+              <option value="push_to_talk">{t("Hold to talk")}</option>
+              <option value="automatic" disabled={isGrok}>{t("Automatic")}{isGrok ? t(" (not available in Grok beta)") : ""}
               </option>
             </select>
           </label>
@@ -380,28 +361,20 @@ export function VoicePanel({
                 event.target.checked,
               )
             }
-          />
-          Notify when tasks finish after this call (no message preview)
-        </label>
+          />{t("Notify when tasks finish after this call (no message preview)")}</label>
       )}
       {option && (
         <p className="mt-3 text-muted-foreground">
-          {tariff(option)}. Paid by{" "}
-          {option.billing_owner === "organization" ? "the organization" : "you"}
-          . Assistant tasks are billed separately. Calls end after 30 minutes or
-          3 minutes without user speech.
-        </p>
+          {tariff(option)}{t(". Paid by")}{" "}
+          {option.billing_owner === "organization" ? t("the organization") : t("you")}{t(". Assistant tasks are billed separately. Calls end after 30 minutes or 3 minutes without user speech.")}</p>
       )}
       {settingsError && (
         <p role="alert" className="mt-3 text-destructive">
-          {settingsError}
+          {translateUi(settingsError)}
         </p>
       )}
       {(!option || !option.available) && options.isSuccess && (
-        <p role="status" className="mt-3">
-          Select an available voice source to start. Your saved choice may no
-          longer be available.
-        </p>
+        <p role="status" className="mt-3">{t("Select an available voice source to start. Your saved choice may no longer be available.")}</p>
       )}
       {voice.error && (
         <p role="alert" className="mt-3 text-destructive">
@@ -409,14 +382,10 @@ export function VoicePanel({
         </p>
       )}
       {options.isError && (
-        <p role="alert" className="mt-3 text-destructive">
-          Voice options could not be loaded.
-        </p>
+        <p role="alert" className="mt-3 text-destructive">{t("Voice options could not be loaded.")}</p>
       )}
       {voice.snapshot?.session.idle_warning && (
-        <p role="status" className="mt-3 text-warning">
-          Speak to keep this call open. It will end shortly.
-        </p>
+        <p role="status" className="mt-3 text-warning">{t("Speak to keep this call open. It will end shortly.")}</p>
       )}
       <div className="mt-4 flex flex-wrap gap-2">
         {!active ? (
@@ -427,9 +396,7 @@ export function VoicePanel({
               void start();
             }}
           >
-            <Mic className="h-4 w-4" />
-            Start voice
-          </Button>
+            <Mic className="h-4 w-4" />{t("Start voice")}</Button>
         ) : (
           <>
             {inputMode === "push_to_talk" && (
@@ -450,15 +417,13 @@ export function VoicePanel({
                 }}
                 onKeyUp={() => voice.hold(false)}
               >
-                <Mic className="h-4 w-4" />
-                Hold to talk
-              </Button>
+                <Mic className="h-4 w-4" />{t("Hold to talk")}</Button>
             )}
             {micControl}
             <Button
               variant="outline"
               aria-label={
-                voice.speakerMuted ? "Enable speaker" : "Mute speaker"
+                voice.speakerMuted ? t("Enable speaker") : t("Mute speaker")
               }
               aria-pressed={voice.speakerMuted}
               onClick={() => voice.muteSpeaker(!voice.speakerMuted)}
@@ -467,25 +432,19 @@ export function VoicePanel({
                 <VolumeX className="h-4 w-4" />
               ) : (
                 <Volume2 className="h-4 w-4" />
-              )}
-              Speaker
-            </Button>
+              )}{t("Speaker")}</Button>
             <Button
               variant="outline"
               onClick={() => {
                 void voice.resumeAudio();
               }}
             >
-              <Volume2 className="h-4 w-4" />
-              Resume audio
-            </Button>
+              <Volume2 className="h-4 w-4" />{t("Resume audio")}</Button>
             {endControl}
           </>
         )}
       </div>
-      <p className="mt-2 text-muted-foreground">
-        If the assistant hears its own voice, use headphones or Hold to talk.
-      </p>
+      <p className="mt-2 text-muted-foreground">{t("If the assistant hears its own voice, use headphones or Hold to talk.")}</p>
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
         {(["user", "assistant"] as const).map((speaker) => (
           <div
@@ -493,56 +452,52 @@ export function VoicePanel({
             role="log"
             aria-live="polite"
             aria-label={
-              speaker === "user" ? "Your captions" : "Assistant captions"
+              speaker === "user" ? t("Your captions") : t("Assistant captions")
             }
             className="max-h-48 space-y-2 overflow-y-auto"
           >
             <h3 className="font-medium">
-              {speaker === "user" ? "You" : "Assistant"}
+              {speaker === "user" ? t("You") : t("Assistant")}
             </h3>
             {voice.snapshot?.captions
               .filter((c) => c.speaker === speaker)
               .map((c) => (
                 <p key={c.id}>
                   {c.text}
-                  {c.sealed && !c.complete ? " (interrupted)" : ""}
+                  {c.sealed && !c.complete ? t(" (interrupted)") : ""}
                 </p>
               ))}
           </div>
         ))}
       </div>
-      <ul className="mt-3 space-y-2" aria-label="Voice tasks">
-        {voice.snapshot?.tasks.map((t, i) => (
-          <li key={t.id} className="flex items-center justify-between gap-2">
+      <ul className="mt-3 space-y-2" aria-label={t("Voice tasks")}>
+        {voice.snapshot?.tasks.map((task, i) => (
+          <li key={task.id} className="flex items-center justify-between gap-2">
             <span className="min-w-0 truncate">
-              {t.title?.trim() || `Request ${i + 1}`} · {({
+              {task.title?.trim() || t("Request {{value}}", { value: i + 1 })} · {({
                 queued: "Queued",
                 claimed: "Running",
                 awaiting_confirmation: "Needs your OK",
                 completed: "Done",
                 cancelled: "Cancelled",
-              } as Record<string, string>)[t.state] ?? t.state}
-              {t.result_message_id ? (
+              } as Record<string, string>)[task.state] ?? task.state}
+              {task.result_message_id ? (
                 <a
                   className="ml-1 text-nyx-secondary-400 underline"
-                  href={`#message-${t.result_message_id}`}
-                >
-                  result
-                </a>
+                  href={`#message-${task.result_message_id}`}
+                >{t("result")}</a>
               ) : null}
             </span>
-            {!["completed", "cancelled"].includes(t.state) && (
+            {!["completed", "cancelled"].includes(task.state) && (
               <Button
                 size="sm"
                 variant="ghost"
-                aria-label={`Stop request ${i + 1}`}
+                aria-label={t("Stop request {{value}}", { value: i + 1 })}
                 onClick={() => {
-                  void voice.stopTask(t.id);
+                  void voice.stopTask(task.id);
                 }}
               >
-                <Square className="h-3 w-3" />
-                Stop
-              </Button>
+                <Square className="h-3 w-3" />{t("Stop")}</Button>
             )}
           </li>
         ))}

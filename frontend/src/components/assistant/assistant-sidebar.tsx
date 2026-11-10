@@ -1,3 +1,6 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translate as t } from "@/i18n";
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { AssistantAccountMenu } from "@/components/assistant/assistant-account-menu";
 import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
@@ -8,7 +11,10 @@ import { Input } from "@/components/ui/input";
 import { nyxAgentTitleSchema } from "@/schemas/assistant-nyxagent";
 import { isNyxAgentConversationId } from "@/lib/assistant/conversation-ids";
 import { AgentStatusDot } from "@/components/assistant/nyxbot-agent-panels";
-import { AgentAvatar, AgentAvatarStack } from "@/components/assistant/nyxbot-agent-avatar";
+import {
+  AgentAvatar,
+  AgentAvatarStack,
+} from "@/components/assistant/nyxbot-agent-avatar";
 import {
   AGENT_STATUS_LABEL,
   agentHandle,
@@ -18,7 +24,10 @@ import {
   type ChannelThreadGroup,
 } from "@/lib/assistant/nyxbot-labels";
 import { ChatKindIcon } from "@/components/assistant/nyxbot-channel-chats";
-import type { AssistantAgent, AssistantGroup } from "@/schemas/assistant-nyxagent";
+import type {
+  AssistantAgent,
+  AssistantGroup,
+} from "@/schemas/assistant-nyxagent";
 import {
   Activity,
   ChevronRight,
@@ -92,6 +101,7 @@ function ComingSoonItem({
   readonly label: string;
   readonly trailing?: ReactNode;
 }) {
+  const { t } = useAppTranslation();
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -104,7 +114,7 @@ function ComingSoonItem({
           {trailing}
         </div>
       </TooltipTrigger>
-      <TooltipContent side="right">Coming soon</TooltipContent>
+      <TooltipContent side="right">{t("Coming soon")}</TooltipContent>
     </Tooltip>
   );
 }
@@ -139,6 +149,7 @@ function ConversationRow({
   readonly onRequestDelete: () => void;
   readonly onRequestRename?: () => void;
 }) {
+  const { t } = useAppTranslation();
   const [menuOpen, setMenuOpen] = useState(false);
   const draft = useAssistantDraftStore((state) =>
     ownerUserId && state.ownerUserId === ownerUserId
@@ -179,7 +190,11 @@ function ConversationRow({
             className="h-3 w-3 shrink-0 text-text-tertiary"
           />
           <span className="min-w-0 truncate">{shownTitle}</span>
-          {conversation.platform_thread && <span className="shrink-0 rounded bg-muted px-1 text-10 text-muted-foreground">Telegram</span>}
+          {conversation.platform_thread && (
+            <span className="shrink-0 rounded bg-muted px-1 text-10 text-muted-foreground">
+              {t("Telegram")}
+            </span>
+          )}
         </span>
         {showDraft && (
           <span
@@ -187,7 +202,7 @@ function ConversationRow({
             className="mt-0.5 flex min-w-0 items-center gap-1 text-11 leading-4 text-text-tertiary"
           >
             <PencilLine aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
-            <span className="sr-only">Draft: </span>
+            <span className="sr-only">{t("Draft:")} </span>
             <span className="min-w-0 flex-1 truncate">{draftPreview}</span>
           </span>
         )}
@@ -196,7 +211,7 @@ function ConversationRow({
         <DropdownMenuTrigger asChild>
           <button
             type="button"
-            aria-label={`Options for ${shownTitle}`}
+            aria-label={t("Options for {{title}}", { title: shownTitle })}
             data-keep-drawer-open=""
             className={cn(
               "absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-md bg-card text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
@@ -213,11 +228,9 @@ function ConversationRow({
         {/* Above the z-[80] mobile sidebar drawer this can be opened from. */}
         <DropdownMenuContent align="end" className="min-w-[160px]">
           {onRequestRename ? (
-            <DropdownMenuItem
-              onSelect={onRequestRename}
-            >
+            <DropdownMenuItem onSelect={onRequestRename}>
               <PencilLine aria-hidden="true" />
-              Rename
+              {t("Rename")}
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuItem
@@ -225,7 +238,7 @@ function ConversationRow({
             className="text-destructive focus:text-destructive"
           >
             <Trash2 aria-hidden="true" />
-            Delete
+            {t("Delete")}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -266,10 +279,11 @@ function agentAccessibleName(agent: AssistantAgent): string {
   const title = agentTitle(agent);
   const handle = agentHandle(agent);
   const named = handle ? `${title} (${handle})` : title;
-  if (agent.kind === "nyxbot") return `${named} — your personal agent`;
+  if (agent.kind === "nyxbot")
+    return t("{{name}} — your personal agent", { name: named });
   const pending = agent.pending_acknowledgements;
-  return `${named}, specialist, ${AGENT_STATUS_LABEL[agent.status]}${
-    pending ? `, ${String(pending)} pending ${pending === 1 ? "request" : "requests"}` : ""
+  return `${t("{{name}}, specialist, {{status}}", { name: named, status: t(AGENT_STATUS_LABEL[agent.status]) })}${
+    pending ? `, ${t("{{count}} pending requests", { count: pending })}` : ""
   }`;
 }
 
@@ -293,13 +307,21 @@ function ChannelThreadsGroup({
   readonly activeThreadId: string | undefined;
   readonly renderThread: (conversation: Conversation) => ReactNode;
 }) {
-  const holdsActive = group.threads.some((thread) => thread.id === activeThreadId);
+  const { t } = useAppTranslation();
+  const holdsActive = group.threads.some(
+    (thread) => thread.id === activeThreadId,
+  );
   // A click opens or closes the section for the thread open at that moment;
   // opening another of its chats opens it again.
-  const [pinned, setPinned] = useState<{ open: boolean; active: string | undefined }>();
+  const [pinned, setPinned] = useState<{
+    open: boolean;
+    active: string | undefined;
+  }>();
   const [shown, setShown] = useState(CHANNEL_THREADS_SHOWN);
   const open =
-    pinned && (pinned.active === activeThreadId || !holdsActive) ? pinned.open : holdsActive;
+    pinned && (pinned.active === activeThreadId || !holdsActive)
+      ? pinned.open
+      : holdsActive;
   const running = group.threads.some((thread) => thread.active_turn);
   const visible = group.threads.filter(
     (thread, index) => index < shown || thread.id === activeThreadId,
@@ -312,42 +334,81 @@ function ChannelThreadsGroup({
       <button
         type="button"
         aria-expanded={open}
-        aria-label={`${group.label} on ${platform}, ${String(count)} ${count === 1 ? "chat" : "chats"}${running ? ", working" : ""}`}
+        aria-label={t("{{label}} on {{platform}}, {{value}} {{value3}}{{value4}}", { label: group.label, platform: platform, value: String(count), value3: count === 1 ? t("chat") : t("chats"), value4: running ? t(", working") : "" })}
         onClick={() => setPinned({ open: !open, active: activeThreadId })}
         data-keep-drawer-open=""
         className="flex w-full items-center gap-1.5 rounded-lg px-3 py-1.5 text-left text-12 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
       >
         <ChevronRight
           aria-hidden="true"
-          className={cn("h-3 w-3 shrink-0 transition-transform", open && "rotate-90")}
+          className={cn(
+            "h-3 w-3 shrink-0 transition-transform",
+            open && "rotate-90",
+          )}
         />
         <span className="min-w-0 flex-1 truncate">{group.label}</span>
         <span className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-4 text-text-tertiary">
           {platform}
         </span>
         {running ? (
-          <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary" />
+          <span
+            aria-hidden="true"
+            className="h-1.5 w-1.5 shrink-0 rounded-full bg-primary"
+          />
         ) : null}
         <span className="shrink-0 tabular-nums text-11">{count}</span>
       </button>
       {open ? (
         <div className="ml-3 space-y-0.5 border-l border-border/60 pl-1.5">
-          {Array.from(new Set(visible.map((thread) => thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id))).map((chatId) => {
-            const children = visible.filter((thread) => (thread.channel?.parent_chat_id ?? thread.channel?.chat_id ?? thread.id) === chatId);
-            const followed = children.some((thread) => thread.channel?.thread_id);
-            return <div key={chatId}>
-              {followed ? <p className="px-3 pt-1 text-11 text-text-tertiary">{children.find((thread) => thread.channel?.parent_title)?.channel?.parent_title ?? "Channel chat"}</p> : null}
-              <div className={followed ? "ml-2 border-l border-hairline pl-1" : undefined}>{children.map(renderThread)}</div>
-            </div>;
+          {Array.from(
+            new Set(
+              visible.map(
+                (thread) =>
+                  thread.channel?.parent_chat_id ??
+                  thread.channel?.chat_id ??
+                  thread.id,
+              ),
+            ),
+          ).map((chatId) => {
+            const children = visible.filter(
+              (thread) =>
+                (thread.channel?.parent_chat_id ??
+                  thread.channel?.chat_id ??
+                  thread.id) === chatId,
+            );
+            const followed = children.some(
+              (thread) => thread.channel?.thread_id,
+            );
+            return (
+              <div key={chatId}>
+                {followed ? (
+                  <p className="px-3 pt-1 text-11 text-text-tertiary">
+                    {children.find((thread) => thread.channel?.parent_title)
+                      ?.channel?.parent_title ?? t("Channel chat")}
+                  </p>
+                ) : null}
+                <div
+                  className={
+                    followed ? "ml-2 border-l border-hairline pl-1" : undefined
+                  }
+                >
+                  {children.map(renderThread)}
+                </div>
+              </div>
+            );
           })}
           {hidden > 0 ? (
             <button
               type="button"
-              onClick={() => setShown((value) => value + CHANNEL_THREADS_SHOWN * 4)}
+              onClick={() =>
+                setShown((value) => value + CHANNEL_THREADS_SHOWN * 4)
+              }
               data-keep-drawer-open=""
               className="w-full rounded-lg px-3 py-1 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
             >
-              Show {String(Math.min(hidden, CHANNEL_THREADS_SHOWN * 4))} more
+              {t("Show {{count}} more", {
+                count: Math.min(hidden, CHANNEL_THREADS_SHOWN * 4),
+              })}
             </button>
           ) : null}
         </div>
@@ -369,9 +430,14 @@ function AgentRow({
   readonly activeThreadId: string | undefined;
   readonly renderThread: (conversation: Conversation) => ReactNode;
 }) {
+  const { t } = useAppTranslation();
   const nyxbot = agent.kind === "nyxbot";
-  const platforms = [...new Set(agent.channels.map((channel) => channel.platform))];
-  const threads = selected ? splitChannelThreads(model.threads) : { own: [], bots: [] };
+  const platforms = [
+    ...new Set(agent.channels.map((channel) => channel.platform)),
+  ];
+  const threads = selected
+    ? splitChannelThreads(model.threads)
+    : { own: [], bots: [] };
   const pending = agent.pending_acknowledgements;
   const name = agentTitle(agent);
   const handle = agentHandle(agent);
@@ -379,7 +445,7 @@ function AgentRow({
   const subtitle = nyxbot
     ? handle
       ? `${handle} · personal agent`
-      : "Your personal agent"
+      : t("Your personal agent")
     : handle;
   return (
     <div>
@@ -419,7 +485,7 @@ function AgentRow({
             className="shrink-0 rounded-md border border-hairline bg-overlay px-1 text-9 font-medium leading-4 text-text-tertiary"
           >
             {channelPlatformName(platform)}
-            {platforms.length > 1 ? ` +${String(platforms.length - 1)}` : ""}
+            {platforms.length > 1 ? t(" +{{value}}", { value: String(platforms.length - 1) }) : ""}
           </span>
         ))}
         {pending > 0 ? (
@@ -431,13 +497,13 @@ function AgentRow({
       {selected ? (
         <div
           role="group"
-          aria-label={`Threads with ${name}`}
+          aria-label={t("Threads with {{name}}", { name })}
           className="mb-1 ml-3 mt-0.5 space-y-0.5 border-l border-border/60 pl-1.5"
         >
           {threads.own.map((conversation) => renderThread(conversation))}
           {model.threadsLoading && !model.threads.length ? (
             <p className="px-3 py-1.5 text-11 text-text-tertiary">
-              Loading threads...
+              {t("Loading threads...")}
             </p>
           ) : null}
           {threads.bots.map((group) => (
@@ -452,11 +518,11 @@ function AgentRow({
             <button
               type="button"
               onClick={() => model.onNewThread(agent.id)}
-              aria-label={`New chat with ${name}`}
+              aria-label={t("New chat with {{name}}", { name })}
               className="flex w-full items-center gap-2 rounded-lg px-3 py-1.5 text-left text-12 text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
             >
               <Plus aria-hidden="true" className="h-3 w-3" />
-              New chat
+              {t("New chat")}
             </button>
           )}
         </div>
@@ -474,8 +540,11 @@ function AgentsSection({
   readonly activeThreadId: string | undefined;
   readonly renderThread: (conversation: Conversation) => ReactNode;
 }) {
+  const { t } = useAppTranslation();
   const [showDestroyed, setShowDestroyed] = useState(false);
-  const destroyed = model.agents.filter((agent) => agent.status === "destroyed");
+  const destroyed = model.agents.filter(
+    (agent) => agent.status === "destroyed",
+  );
   const visible = model.agents
     .filter((agent) => showDestroyed || agent.status !== "destroyed")
     // NyxBot pinned first; the server already orders the rest.
@@ -483,19 +552,22 @@ function AgentsSection({
   return (
     <div className="space-y-0.5">
       {agentOwnerSections(visible).map((section) => (
-        <section key={section.id} aria-label={section.label}>
+        <section
+          key={section.id}
+          aria-label={section.id === "personal" ? t("Personal") : section.label}
+        >
           <p className="px-3 pb-1 pt-3 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-            {section.label}
+            {section.id === "personal" ? t("Personal") : section.label}
           </p>
           {section.agents.map((agent) => (
-        <AgentRow
-          key={agent.id}
-          agent={agent}
-          selected={agent.id === model.selectedAgentId}
-          model={model}
-          activeThreadId={activeThreadId}
-          renderThread={renderThread}
-        />
+            <AgentRow
+              key={agent.id}
+              agent={agent}
+              selected={agent.id === model.selectedAgentId}
+              model={model}
+              activeThreadId={activeThreadId}
+              renderThread={renderThread}
+            />
           ))}
         </section>
       ))}
@@ -506,7 +578,9 @@ function AgentsSection({
           onClick={() => setShowDestroyed((value) => !value)}
           className="w-full rounded-lg px-3 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
         >
-          {showDestroyed ? "Hide destroyed" : `Show destroyed (${String(destroyed.length)})`}
+          {showDestroyed
+            ? t("Hide destroyed")
+            : t("Show destroyed ({{count}})", { count: destroyed.length })}
         </button>
       ) : null}
     </div>
@@ -514,6 +588,7 @@ function AgentsSection({
 }
 
 function GroupsSection({ model }: { readonly model: SidebarGroups }) {
+  const { t } = useAppTranslation();
   const sections = new Map<string, typeof model.groups>();
   for (const group of model.groups) {
     const key = group.owner?.type === "org" ? group.owner.id : "personal";
@@ -521,40 +596,47 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
   }
   return (
     <div className="space-y-0.5">
-      {[...sections.entries()].map(([owner, groups]) => <div key={owner}>
-        <p className="px-3 pt-2 pb-1 text-10 font-medium text-text-tertiary">{owner === "personal" ? "Personal" : groups[0]?.owner?.name}</p>
-        {groups.map((group) => {
-        const working = group.working_agent_ids.length;
-        const selected = group.id === model.selectedGroupId;
-        return (
-          <button
-            key={group.id}
-            type="button"
-            onClick={() => model.onSelectGroup(group.id)}
-            aria-current={selected ? "page" : undefined}
-            aria-label={`${group.name}, group with ${group.members
-              .map((member) => agentTitle(member))
-              .join(", ")}${working ? `, ${String(working)} working` : ""}`}
-            className={cn(
-              "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-13 transition-colors",
-              selected
-                ? "bg-overlay-strong font-medium text-foreground"
-                : "text-muted-foreground hover:bg-overlay hover:text-foreground",
-            )}
-          >
-            <AgentAvatarStack agents={group.members} size="xs" max={3} />
-            <span className="min-w-0 flex-1 truncate">{group.name}</span>
-            {working ? (
-              <span
-                aria-hidden="true"
-                className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-success"
-              />
-            ) : null}
-          </button>
-        );
-      })}</div>)}
+      {[...sections.entries()].map(([owner, groups]) => (
+        <div key={owner}>
+          <p className="px-3 pt-2 pb-1 text-10 font-medium text-text-tertiary">
+            {owner === "personal" ? t("Personal") : groups[0]?.owner?.name}
+          </p>
+          {groups.map((group) => {
+            const working = group.working_agent_ids.length;
+            const selected = group.id === model.selectedGroupId;
+            return (
+              <button
+                key={group.id}
+                type="button"
+                onClick={() => model.onSelectGroup(group.id)}
+                aria-current={selected ? "page" : undefined}
+                aria-label={t("{{name}}, group with {{value}}{{value2}}", { name: group.name, value: group.members
+                  .map((member) => agentTitle(member))
+                  .join(", "), value2: working ? `, ${String(working)} working` : "" })}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-13 transition-colors",
+                  selected
+                    ? "bg-overlay-strong font-medium text-foreground"
+                    : "text-muted-foreground hover:bg-overlay hover:text-foreground",
+                )}
+              >
+                <AgentAvatarStack agents={group.members} size="xs" max={3} />
+                <span className="min-w-0 flex-1 truncate">{group.name}</span>
+                {working ? (
+                  <span
+                    aria-hidden="true"
+                    className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-success"
+                  />
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      ))}
       {model.loading && !model.groups.length ? (
-        <p className="px-3 py-1.5 text-11 text-text-tertiary">Loading groups...</p>
+        <p className="px-3 py-1.5 text-11 text-text-tertiary">
+          {t("Loading groups...")}
+        </p>
       ) : null}
       {!model.loading && !model.groups.length ? (
         <button
@@ -563,7 +645,7 @@ function GroupsSection({ model }: { readonly model: SidebarGroups }) {
           data-keep-drawer-open=""
           className="w-full rounded-lg px-3 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-overlay hover:text-muted-foreground"
         >
-          Chat with several agents at once
+          {t("Chat with several agents at once")}
         </button>
       ) : null}
     </div>
@@ -602,6 +684,7 @@ export function AssistantSidebar({
   /** NyxBot group chats (NyxAgent engine). */
   readonly groups?: SidebarGroups;
 }) {
+  const { t } = useAppTranslation();
   const { current: accountPanel } = useAccountPanel();
   const user = useAuthStore((state) => state.user);
   const counts = useAssistantWorkspaceCounts();
@@ -647,8 +730,14 @@ export function AssistantSidebar({
 
   function renderRow(conversation: Conversation) {
     if (renameTarget?.id === conversation.id && onRename) {
-      return <RenameChatInline key={conversation.id} conversation={conversation}
-        onClose={() => setRenameTarget(undefined)} onRename={onRename} />;
+      return (
+        <RenameChatInline
+          key={conversation.id}
+          conversation={conversation}
+          onClose={() => setRenameTarget(undefined)}
+          onRename={onRename}
+        />
+      );
     }
     return (
       <ConversationRow
@@ -658,9 +747,11 @@ export function AssistantSidebar({
         ownerUserId={user?.id ?? null}
         onSelect={() => onSelect(conversation.id)}
         onRequestDelete={() => setDeleteTarget(conversation)}
-        onRequestRename={onRename && isNyxAgentConversationId(conversation.id)
-          ? () => setRenameTarget(conversation)
-          : undefined}
+        onRequestRename={
+          onRename && isNyxAgentConversationId(conversation.id)
+            ? () => setRenameTarget(conversation)
+            : undefined
+        }
       />
     );
   }
@@ -682,12 +773,12 @@ export function AssistantSidebar({
             onClick={onNewChat}
           >
             <Plus />
-            New chat
+            {t("New chat")}
           </Button>
         </div>
       )}
 
-      <GroupLabel>Workspace</GroupLabel>
+      <GroupLabel>{t("Workspace")}</GroupLabel>
       <div className="space-y-0.5 px-2">
         {agents?.onHome ? (
           <button
@@ -703,7 +794,7 @@ export function AssistantSidebar({
             <House
               className={`h-4 w-4 shrink-0 ${agents.homeActive ? "text-nyx-secondary-400" : "text-text-tertiary"}`}
             />
-            <span className="truncate">Home</span>
+            <span className="truncate">{t("Home")}</span>
           </button>
         ) : (
           <Link
@@ -711,7 +802,7 @@ export function AssistantSidebar({
             className="flex items-center gap-3 rounded-lg px-3 py-2 text-13 text-muted-foreground hover:bg-overlay hover:text-foreground"
           >
             <House className="h-4 w-4" />
-            Home
+            {t("Home")}
           </Link>
         )}
         {(
@@ -719,13 +810,13 @@ export function AssistantSidebar({
             {
               view: "automations",
               to: "/assistant/automations",
-              label: "Automations",
+              label: t("Automations"),
               icon: CalendarClock,
             },
             {
               view: "machines",
               to: "/assistant/machines",
-              label: "Machines",
+              label: t("Machines"),
               icon: Monitor,
             },
           ] as const
@@ -764,11 +855,11 @@ export function AssistantSidebar({
           <LayoutGrid
             className={`h-4 w-4 shrink-0 ${pluginsActive ? "text-nyx-secondary-400" : "text-text-tertiary"}`}
           />
-          <span className="truncate">Plugins</span>
+          <span className="truncate">{t("Plugins")}</span>
         </Link>
         <ComingSoonItem
           icon={FileText}
-          label="Artifacts"
+          label={t("Artifacts")}
           trailing={
             <span className="font-mono text-9 text-text-tertiary">
               {counts.data?.artifacts ?? 0}
@@ -787,14 +878,14 @@ export function AssistantSidebar({
           <ShieldCheck
             className={`h-4 w-4 shrink-0 ${approvalsActive ? "text-nyx-secondary-400" : "text-text-tertiary"}`}
           />
-          <span className="min-w-0 flex-1 truncate">Approvals</span>
+          <span className="min-w-0 flex-1 truncate">{t("Approvals")}</span>
           {(counts.data?.pendingApprovals ?? 0) > 0 && (
             <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning">
               {counts.data?.pendingApprovals}
             </span>
           )}
         </Link>
-        <ComingSoonItem icon={Activity} label="Activity" />
+        <ComingSoonItem icon={Activity} label={t("Activity")} />
       </div>
 
       {notice ? (
@@ -809,10 +900,10 @@ export function AssistantSidebar({
         {agents ? (
           <>
             <div className="-ml-2 flex items-center justify-between">
-              <GroupLabel>Agents</GroupLabel>
+              <GroupLabel>{t("Agents")}</GroupLabel>
               <button
                 type="button"
-                aria-label="New agent"
+                aria-label={t("New agent")}
                 // The dialog is rendered by this sidebar; closing the mobile
                 // drawer would unmount it.
                 data-keep-drawer-open=""
@@ -832,10 +923,10 @@ export function AssistantSidebar({
         {groups ? (
           <>
             <div className="-ml-2 mt-2 flex items-center justify-between">
-              <GroupLabel>Groups</GroupLabel>
+              <GroupLabel>{t("Groups")}</GroupLabel>
               <button
                 type="button"
-                aria-label="New group"
+                aria-label={t("New group")}
                 data-keep-drawer-open=""
                 onClick={groups.onNewGroup}
                 className="flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground"
@@ -850,7 +941,7 @@ export function AssistantSidebar({
         {!agents ? (
           <>
             <div className="-mx-2">
-              <GroupLabel>Chats</GroupLabel>
+              <GroupLabel>{t("Chats")}</GroupLabel>
             </div>
             <div className="space-y-0.5">{conversations.map(renderRow)}</div>
           </>
@@ -863,17 +954,18 @@ export function AssistantSidebar({
           className="flex items-center gap-3 rounded-lg px-3 py-2 text-13 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground"
         >
           <SlidersHorizontal className="h-4 w-4 text-text-tertiary" />
-          <span className="flex-1">Studio</span>
+          <span className="flex-1">{t("Studio")}</span>
           <ChevronRight className="h-3.5 w-3.5" />
         </Link>
         <AssistantAccountMenu align="start" side="top">
           <button
             type="button"
-            aria-label="Account menu"
+            aria-label={t("Account menu")}
             data-keep-drawer-open=""
             className={cn(
               "mt-1 flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-overlay",
-              Boolean(accountPanel.panel) && "bg-overlay-strong font-medium text-foreground",
+              Boolean(accountPanel.panel) &&
+                "bg-overlay-strong font-medium text-foreground",
             )}
           >
             <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
@@ -881,13 +973,16 @@ export function AssistantSidebar({
             </div>
             <div className="min-w-0 flex-1">
               <p className="truncate text-12 font-medium text-foreground">
-                {user?.display_name ?? "User"}
+                {user?.display_name ?? t("User")}
               </p>
               <p className="truncate text-10 text-text-tertiary">
                 {user?.email ?? ""}
               </p>
             </div>
-            <ChevronsUpDown aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
+            <ChevronsUpDown
+              aria-hidden="true"
+              className="h-3.5 w-3.5 shrink-0 text-text-tertiary"
+            />
           </button>
         </AssistantAccountMenu>
       </div>
@@ -900,11 +995,16 @@ export function AssistantSidebar({
       >
         <DialogContent className="md:max-w-md">
           <DialogHeader>
-            <DialogTitle>Delete chat?</DialogTitle>
+            <DialogTitle>{t("Delete chat?")}</DialogTitle>
             <DialogDescription>
               {deleteTarget?.active_turn
-                ? `The running reply will stop. “${deleteTarget.title}” and its history are removed permanently.`
-                : `“${deleteTarget?.title}” and its history are removed permanently.`}
+                ? t(
+                    "The running reply will stop. “{{title}}” and its history are removed permanently.",
+                    { title: deleteTarget.title },
+                  )
+                : t("“{{title}}” and its history are removed permanently.", {
+                    title: deleteTarget?.title,
+                  })}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -913,7 +1013,7 @@ export function AssistantSidebar({
               variant="ghost"
               onClick={() => setDeleteTarget(undefined)}
             >
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button
               type="button"
@@ -925,7 +1025,7 @@ export function AssistantSidebar({
               }
               onClick={() => void confirmDelete()}
             >
-              Delete
+              {t("Delete")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -943,42 +1043,55 @@ function RenameChatInline({
   readonly onClose: () => void;
   readonly onRename: (id: string, title: string) => Promise<void>;
 }) {
+  const { t } = useAppTranslation();
   const form = useAppForm({
     resolver: zodResolver(nyxAgentTitleSchema),
     defaultValues: { title: conversation.title },
   });
   const [error, setError] = useState<string>();
   return (
-        <form className="space-y-2 rounded-lg border border-hairline p-2" aria-label="Rename chat" onKeyDown={(event) => { if (event.key === "Escape") onClose(); }} onSubmit={form.handleSubmit(async ({ title }) => {
-          try {
-            await onRename(conversation.id, title);
-            onClose();
-          } catch {
-            setError("Could not rename this chat. Try again.");
-          }
-        })}>
-          <label htmlFor="chat-title" className="text-12">
-            Title
-          </label>
-          <Input autoFocus id="chat-title" maxLength={200} {...form.register("title")} />
-          {error ? (
-            <p role="alert" className="mt-2 text-12 text-destructive">
-              {error}
-            </p>
-          ) : null}
-          <div className="flex justify-end gap-1">
-            <Button type="button" variant="ghost" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button
-              type="submit"
-              variant="primary"
-              isLoading={form.formState.isSubmitting}
-              disabled={!form.formState.isDirty || !form.watch("title").trim()}
-            >
-              Save
-            </Button>
-          </div>
-        </form>
+    <form
+      className="space-y-2 rounded-lg border border-hairline p-2"
+      aria-label={t("Rename chat")}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") onClose();
+      }}
+      onSubmit={form.handleSubmit(async ({ title }) => {
+        try {
+          await onRename(conversation.id, title);
+          onClose();
+        } catch {
+          setError(t("Could not rename this chat. Try again."));
+        }
+      })}
+    >
+      <label htmlFor="chat-title" className="text-12">
+        {t("Title")}
+      </label>
+      <Input
+        autoFocus
+        id="chat-title"
+        maxLength={200}
+        {...form.register("title")}
+      />
+      {error ? (
+        <p role="alert" className="mt-2 text-12 text-destructive">
+          {translateUi(error)}
+        </p>
+      ) : null}
+      <div className="flex justify-end gap-1">
+        <Button type="button" variant="ghost" onClick={onClose}>
+          {t("Cancel")}
+        </Button>
+        <Button
+          type="submit"
+          variant="primary"
+          isLoading={form.formState.isSubmitting}
+          disabled={!form.formState.isDirty || !form.watch("title").trim()}
+        >
+          {t("Save")}
+        </Button>
+      </div>
+    </form>
   );
 }

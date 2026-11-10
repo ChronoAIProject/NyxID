@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { AgentSkills } from "./agent-skills";
 import { AgentLearningReview } from "./agent-learning-review";
 import { MachineCapabilities } from "./machine-capabilities";
@@ -136,17 +139,17 @@ export function accessAuthorityCopy(
   agent: AssistantAgent,
   requestMode: "denied" | "routed_to_nyxbot" | undefined,
 ): string {
-  const sandbox = "This specialist is sandboxed: it cannot grant access to itself or to other agents.";
-  const direct = "When you talk to it directly, it tells you what it is missing and continues; you grant access below.";
+  const sandbox = translateUi("This specialist is sandboxed: it cannot grant access to itself or to other agents.");
+  const direct = translateUi("When you talk to it directly, it tells you what it is missing and continues; you grant access below.");
   if (agent.owner_kind === "org") {
-    const org = agent.owner_name ?? "the organization";
+    const org = agent.owner_name ?? translateUi("the organization");
     return agent.can_maintain === false
-      ? `${sandbox} Only a maintainer of ${org} (an Admin or Member) can approve or grant its access; you can view it but not change it.`
-      : `${sandbox} Maintainers of ${org}, including you, approve and grant its access here; your personal NyxBot cannot approve it on the organization's behalf.`;
+      ? translateUi("{{sandbox}} Only a maintainer of {{org}} (an Admin or Member) can approve or grant its access; you can view it but not change it.", { sandbox, org })
+      : translateUi("{{sandbox}} Maintainers of {{org}}, including you, approve and grant its access here; your personal NyxBot cannot approve it on the organization's behalf.", { sandbox, org });
   }
   return requestMode === "routed_to_nyxbot"
-    ? `${sandbox} ${direct} Only for work NyxBot assigned, or in a group with NyxBot, do its requests go to NyxBot, which approves or denies them.`
-    : `${sandbox} ${direct} Its requests are never routed: only work NyxBot assigned, or work in a group NyxBot is in, reports the missing access to NyxBot instead.`;
+    ? translateUi("{{sandbox}} {{direct}} Only for work NyxBot assigned, or in a group with NyxBot, do its requests go to NyxBot, which approves or denies them.", { sandbox, direct })
+    : translateUi("{{sandbox}} {{direct}} Its requests are never routed: only work NyxBot assigned, or work in a group NyxBot is in, reports the missing access to NyxBot instead.", { sandbox, direct });
 }
 
 const GRANTS_SECTION_ID = "agent-details-grants";
@@ -158,39 +161,34 @@ function isNoAccess(error: unknown): boolean {
 
 /** Says why the forms are read-only instead of leaving a silently dead Save button. */
 function ReadOnlyNote({ agent }: { readonly agent: AssistantAgent }) {
+  const { t } = useUiTranslation();
   if (agent.status === "destroyed") {
     return (
       <section
         role="note"
-        aria-label="Agent destroyed"
+        aria-label={t("Agent destroyed")}
         className="space-y-1 rounded-xl border border-dashed border-border px-4 py-3 text-12 text-muted-foreground"
       >
         <p className="font-medium text-foreground">
-          {agentTitle(agent)} was destroyed
-          {agent.destroyed_at ? ` on ${formatDateTime(agent.destroyed_at)}` : ""}.
+          {agentTitle(agent)}{t(" was destroyed")}{agent.destroyed_at ? t(" on {{value}}", { value: formatDateTime(agent.destroyed_at) }) : ""}.
         </p>
-        <p>
-          Its grants, skills and settings are read-only and it no longer runs.
-          {agent.kind === "specialist" && agent.can_maintain !== false
-            ? " You can delete it permanently below."
+        <p>{t("Its grants, skills and settings are read-only and it no longer runs.")}{agent.kind === "specialist" && agent.can_maintain !== false
+            ? t(" You can delete it permanently below.")
             : ""}
         </p>
       </section>
     );
   }
   if (agent.can_maintain === false) {
-    const org = agent.owner_name ?? "the organization";
+    const org = agent.owner_name ?? translateUi("the organization");
     return (
       <section
         role="note"
-        aria-label="Read-only"
+        aria-label={t("Read-only")}
         className="space-y-1 rounded-xl border border-dashed border-border px-4 py-3 text-12 text-muted-foreground"
       >
-        <p className="font-medium text-foreground">Read-only.</p>
-        <p>
-          Only a maintainer of {org} (an Admin or Member) can change its grants,
-          skills and settings. You can view them.
-        </p>
+        <p className="font-medium text-foreground">{t("Read-only.")}</p>
+        <p>{t("Only a maintainer of ")}{org}{t(" (an Admin or Member) can change its grants, skills and settings. You can view them.")}</p>
       </section>
     );
   }
@@ -218,6 +216,7 @@ export function AgentDetailsSheet({
   readonly onOpenChange: (open: boolean) => void;
   readonly onDeleted: () => void;
 }) {
+  const { t } = useUiTranslation();
   const detail = useNyxBotAgent(agentId, open);
   const agent = detail.data?.agent;
   const loadedAgentId = agent?.id;
@@ -235,15 +234,15 @@ export function AgentDetailsSheet({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
         <SheetHeader className="space-y-1.5 pr-6">
-          <SheetTitle>Agent details</SheetTitle>
+          <SheetTitle>{t("Agent details")}</SheetTitle>
           <SheetDescription>
             {agent
               ? agent.kind === "nyxbot"
-                ? "Your personal agent. It has full access and remembers across all its threads and chat apps."
-                : "A specialist with its own memory. It uses only the services, machines and skills granted here and handles the work you give it directly itself."
+                ? t("Your personal agent. It has full access and remembers across all its threads and chat apps.")
+                : t("A specialist with its own memory. It uses only the services, machines and skills granted here and handles the work you give it directly itself.")
               : noAccess
-                ? "This agent is not available to you."
-                : "Loading agent..."}
+                ? t("This agent is not available to you.")
+                : t("Loading agent...")}
           </SheetDescription>
         </SheetHeader>
         <div className="mt-5 space-y-8">
@@ -251,18 +250,15 @@ export function AgentDetailsSheet({
             noAccess ? (
               <section
                 role="note"
-                aria-label="No access"
+                aria-label={t("No access")}
                 className="space-y-1 rounded-xl border border-dashed border-border px-4 py-3 text-12 text-muted-foreground"
               >
-                <p className="font-medium text-foreground">You cannot view this agent.</p>
-                <p>
-                  It belongs to an organization you are not a member of, or it no
-                  longer exists. Its grants and skills cannot be shown or changed here.
-                </p>
+                <p className="font-medium text-foreground">{t("You cannot view this agent.")}</p>
+                <p>{t("It belongs to an organization you are not a member of, or it no longer exists. Its grants and skills cannot be shown or changed here.")}</p>
               </section>
             ) : (
               <ErrorBanner
-                message={`Could not load this agent. ${detail.error.message}`}
+                message={t("Could not load this agent. {{message}}", { message: translateErrorMessage(detail.error.message) })}
                 onRetry={() => void detail.refetch()}
               />
             )
@@ -281,19 +277,19 @@ export function AgentDetailsSheet({
                 </Badge>
                 <span>
                   {agent.kind === "specialist"
-                    ? `Created by ${agent.created_by === "nyxbot" ? "NyxBot" : "you"} · `
+                    ? t("Created by {{value}} · ", { value: agent.created_by === "nyxbot" ? t("NyxBot") : t("you") })
                     : ""}
                   {agent.memory_count}{" "}
-                  {agent.memory_count === 1 ? "memory" : "memories"}
+                  {agent.memory_count === 1 ? t("memory") : t("memories")}
                 </span>
               </div>
               <ReadOnlyNote agent={agent} />
               <Section
-                title="Ownership"
+                title={t("Ownership")}
                 description={
                   agent.owner_kind === "org"
-                    ? `${agent.owner_name ?? agent.owner_id} · Maintained by Admins and Members. Your role: ${agent.org_role ?? "member"}.${agent.can_maintain === false ? " Read-only; viewers cannot maintain or chat." : " Chats are private to you; memory is shared with the organization."}`
-                    : "Personal agent"
+                    ? t("{{value}} · Maintained by Admins and Members. Your role: {{value1}}.{{value2}}", { value: agent.owner_name ?? agent.owner_id, value1: agent.org_role ?? t("member"), value2: agent.can_maintain === false ? t(" Read-only; viewers cannot maintain or chat.") : t(" Chats are private to you; memory is shared with the organization.") })
+                    : t("Personal agent")
                 }
               />
               <ProfileForm
@@ -304,14 +300,14 @@ export function AgentDetailsSheet({
               />
               {agent.kind === "specialist" ? (
                 <>
-                  <Section title="Access authority" description={accessAuthorityCopy(agent, requestMode)} />
+                  <Section title={t("Access authority")} description={accessAuthorityCopy(agent, requestMode)} />
                   <GrantsForm
                     key={`${agent.id}:${agent.services.join(",")}:${String(agent.account_read)}:${JSON.stringify(agent.guest_access)}`}
                     agent={agent}
                   />
                 </>
               ) : (
-                <Section id={GRANTS_SECTION_ID} title="Access" description="NyxBot runs with full access to your connected services and account, and is the only agent that can grant access to specialists. Machine capabilities are assigned separately. Its access mode decides when it asks you first.">
+                <Section id={GRANTS_SECTION_ID} title={t("Access")} description={t("NyxBot runs with full access to your connected services and account, and is the only agent that can grant access to specialists. Machine capabilities are assigned separately. Its access mode decides when it asks you first.")}>
                   <MachineCapabilities agentId={agent.id} disabled={agent.status === "destroyed"} />
                 </Section>
               )}
@@ -327,8 +323,8 @@ export function AgentDetailsSheet({
               {agent.status === "destroyed" ||
               agent.owner_kind === "org" ? null : (
                 <Section
-                  title="Channel bots"
-                  description={`Chat with ${agentTitle(agent)} from these bots.`}
+                  title={t("Channel bots")}
+                  description={t("Chat with {{value}} from these bots.", { value: agentTitle(agent) })}
                 >
                   <ChannelBotsManager agents={agents} agent={agent} />
                 </Section>
@@ -348,6 +344,7 @@ export function AgentDetailsSheet({
 const INHERIT = "inherit";
 
 function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
+  const { t } = useUiTranslation();
   const advancedControls = useFeature(FEATURE_FLAG.ASSISTANT_MODEL_CONTROLS);
   const update = useUpdateNyxBotAgent();
   const workspaceMode = useNyxBotSettings().data?.access_mode;
@@ -387,16 +384,16 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
   }
 
   return (
-    <Section title="Profile">
+    <Section title={t("Profile")}>
       <Form {...form}>
-        <form aria-label="Profile" noValidate onSubmit={form.handleSubmit(save)} className="space-y-3">
+        <form aria-label={t("Profile")} noValidate onSubmit={form.handleSubmit(save)} className="space-y-3">
           {nyxbot ? null : (
             <FormField
               control={form.control}
               name="name"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Name</FormLabel>
+                  <FormLabel>{t("Name")}</FormLabel>
                   <FormControl>
                     <Input
                       maxLength={32}
@@ -405,9 +402,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                       onChange={(event) => field.onChange(event.target.value.toLowerCase())}
                     />
                   </FormControl>
-                  <FormDescription className="text-11">
-                    The @handle used in groups and by NyxBot.
-                  </FormDescription>
+                  <FormDescription className="text-11">{t("The @handle used in groups and by NyxBot.")}</FormDescription>
                   <FormMessage />
                 </FormItem>
               )}
@@ -418,20 +413,17 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
             name="display_name"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Display name</FormLabel>
+                <FormLabel>{t("Display name")}</FormLabel>
                 <FormControl>
                   <Input
                     maxLength={ASSISTANT_AGENT_DISPLAY_NAME_MAX}
                     disabled={readOnly}
                     autoComplete="off"
-                    placeholder={nyxbot ? "NyxBot" : agent.name}
+                    placeholder={nyxbot ? t("NyxBot") : agent.name}
                     {...field}
                   />
                 </FormControl>
-                <FormDescription className="text-11">
-                  Shown instead of {nyxbot ? "NyxBot" : `@${agent.name}`}. Leave
-                  empty to use it.
-                </FormDescription>
+                <FormDescription className="text-11">{t("Shown instead of ")}{nyxbot ? t("NyxBot") : t("@{{name}}", { name: agent.name })}{t(". Leave empty to use it.")}</FormDescription>
                 <FormMessage />
               </FormItem>
             )}
@@ -441,16 +433,14 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
             name="model"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Model</FormLabel>
+                <FormLabel>{t("Model")}</FormLabel>
                 <ModelSelect
-                  label="Agent model"
+                  label={t("Agent model")}
                   value={field.value || undefined}
                   disabled={readOnly}
                   onChange={field.onChange}
                 />
-                <FormDescription className="text-11">
-                  Used by this agent's new threads. Each thread can switch from its composer.
-                </FormDescription>
+                <FormDescription className="text-11">{t("Used by this agent's new threads. Each thread can switch from its composer.")}</FormDescription>
                 <FormMessage />
               </FormItem>
             )}
@@ -460,7 +450,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
             name="access_mode_override"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Access mode</FormLabel>
+                <FormLabel>{t("Access mode")}</FormLabel>
                 <Select
                   value={field.value ?? INHERIT}
                   disabled={readOnly}
@@ -469,14 +459,12 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                   }
                 >
                   <FormControl>
-                    <SelectTrigger aria-label="Agent access mode">
+                    <SelectTrigger aria-label={t("Agent access mode")}>
                       <SelectValue />
                     </SelectTrigger>
                   </FormControl>
                   <SelectContent>
-                    <SelectItem value={INHERIT}>
-                      Workspace setting
-                      {workspaceMode ? ` (${ACCESS_MODE_LABEL[workspaceMode]})` : ""}
+                    <SelectItem value={INHERIT}>{t("Workspace setting")}{workspaceMode ? t(" ({{value}})", { value: ACCESS_MODE_LABEL[workspaceMode] }) : ""}
                     </SelectItem>
                     {nyxAgentAccessModeSchema.options.map((option) => (
                       <SelectItem key={option} value={option}>
@@ -497,13 +485,13 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
             name="description"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>{nyxbot ? "Notes" : "Role"}</FormLabel>
+                <FormLabel>{nyxbot ? t("Notes") : t("Role")}</FormLabel>
                 <FormControl>
                   <textarea
                     className={TEXTAREA_CLASS}
                     maxLength={2048}
                     disabled={readOnly}
-                    placeholder={nyxbot ? "How NyxBot should work with you (optional)." : undefined}
+                    placeholder={nyxbot ? t("How NyxBot should work with you (optional).") : undefined}
                     {...field}
                   />
                 </FormControl>
@@ -516,7 +504,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
             name="persona"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Persona</FormLabel>
+                <FormLabel>{t("Persona")}</FormLabel>
                 <FormControl>
                   <textarea
                     className={TEXTAREA_CLASS}
@@ -526,17 +514,14 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                     {...field}
                   />
                 </FormControl>
-                <FormDescription className="text-11">
-                  Personality and tone only; it never changes what the agent may
-                  do.
-                </FormDescription>
+                <FormDescription className="text-11">{t("Personality and tone only; it never changes what the agent may do.")}</FormDescription>
                 <FormMessage />
               </FormItem>
             )}
           />
           {error ? (
             <p role="alert" className="text-12 text-destructive">
-              {error}
+              {translateUi(error)}
             </p>
           ) : null}
           {readOnly ? null : (
@@ -547,9 +532,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                 variant="primary"
                 isLoading={update.isPending}
                 disabled={!form.formState.isDirty}
-              >
-                Save
-              </Button>
+              >{t("Save")}</Button>
             </div>
           )}
         </form>
@@ -559,6 +542,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
 }
 
 function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
+  const { t } = useUiTranslation();
   const grants = useSetNyxBotAgentGrants();
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
   const form = useAppForm<AssistantAgentGrants>({
@@ -601,11 +585,11 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
   return (
     <Section
       id={GRANTS_SECTION_ID}
-      title="Grants"
-      description="This specialist is sandboxed and cannot grant access itself. Saving replaces the current grants on every thread. When you talk to it directly, anything beyond them is reported to you as missing; only work NyxBot assigned, or work in a group NyxBot is in, asks NyxBot."
+      title={t("Grants")}
+      description={t("This specialist is sandboxed and cannot grant access itself. Saving replaces the current grants on every thread. When you talk to it directly, anything beyond them is reported to you as missing; only work NyxBot assigned, or work in a group NyxBot is in, asks NyxBot.")}
     >
       <Form {...form}>
-        <form aria-label="Grants" noValidate onSubmit={form.handleSubmit(save)} className="space-y-3">
+        <form aria-label={t("Grants")} noValidate onSubmit={form.handleSubmit(save)} className="space-y-3">
           <FormField
             control={form.control}
             name="services"
@@ -660,10 +644,8 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
               <FormItem>
                 <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
                   <div className="space-y-1">
-                    <FormLabel>Read my account</FormLabel>
-                    <FormDescription className="text-12">
-                        Look up keys, services and nodes; never change them.
-                      </FormDescription>
+                    <FormLabel>{t("Read my account")}</FormLabel>
+                    <FormDescription className="text-12">{t("Look up keys, services and nodes; never change them.")}</FormDescription>
                   </div>
                   <FormControl>
                     <Switch
@@ -679,7 +661,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
           ) : null}
           {error ? (
             <p role="alert" className="text-12 text-destructive">
-              {error}
+              {translateUi(error)}
             </p>
           ) : null}
           {readOnly ? null : (
@@ -690,9 +672,7 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
                 variant="primary"
                 isLoading={grants.isPending}
                 disabled={!form.formState.isDirty}
-              >
-                Save grants
-              </Button>
+              >{t("Save grants")}</Button>
             </div>
           )}
         </form>
@@ -708,9 +688,9 @@ function GrantsForm({ agent }: { readonly agent: AssistantAgent }) {
 }
 
 const GUEST_ACCESS_LABEL: Record<AssistantGuestAccess, string> = {
-  read: "Look things up only",
-  use: "Use, but not change or delete",
-  all: "Everything this agent can do",
+  get read() { return translateUi("Look things up only"); },
+  get use() { return translateUi("Use, but not change or delete"); },
+  get all() { return translateUi("Everything this agent can do"); },
 };
 
 /**
@@ -729,21 +709,14 @@ function GuestAccessList({
   readonly onChange: (value: Record<string, AssistantGuestAccess>) => void;
   readonly disabled?: boolean;
 }) {
+  const { t } = useUiTranslation();
   return (
     <div className="space-y-2 rounded-lg border border-border p-4">
       <div className="space-y-1">
-        <p className="text-12 font-medium text-foreground">
-          What others in its chats may do
-        </p>
-        <p className="text-12 text-muted-foreground">
-          For people other than you in the agent&apos;s group and shared chats.
-          &ldquo;Use&rdquo; lets them look things up, create and act (send a
-          message, turn a light on), but not change or delete what already
-          exists. Anything behind your approval stays yours. You can also ask
-          NyxBot to change this.
-        </p>
+        <p className="text-12 font-medium text-foreground">{t("What others in its chats may do")}</p>
+        <p className="text-12 text-muted-foreground">{t("For people other than you in the agent's group and shared chats. “Use” lets them look things up, create and act (send a message, turn a light on), but not change or delete what already exists. Anything behind your approval stays yours. You can also ask NyxBot to change this.")}</p>
       </div>
-      <ul aria-label="Guest access" className="space-y-1.5">
+      <ul aria-label={t("Guest access")} className="space-y-1.5">
         {services.map((slug) => {
           const id = `guest-access-${slug}`;
           return (
@@ -787,6 +760,7 @@ function MemoryList({
   readonly agent: AssistantAgent;
   readonly memory: readonly AssistantAgentMemoryNote[];
 }) {
+  const { t } = useUiTranslation();
   const forget = useForgetNyxBotMemory();
   const [error, setError] = useState<string>();
   const name = agentTitle(agent);
@@ -822,20 +796,20 @@ function MemoryList({
 
   return (
     <Section
-      title="Memory"
+      title={t("Memory")}
       description={
         agent.owner_kind === "org"
-          ? "Shared organization memory. Never save private member content here."
-          : `What ${name} remembers across its threads and chat apps.`}
+          ? t("Shared organization memory. Never save private member content here.")
+          : t("What {{name}} remembers across its threads and chat apps.", { name: name })}
     >
       {error ? (
         <p role="alert" className="text-12 text-destructive">
-          {error}
+          {translateUi(error)}
         </p>
       ) : null}
       {agent.owner_kind === "org" && agent.status !== "destroyed" ? (
         <form
-          aria-label="Shared memory"
+          aria-label={t("Shared memory")}
           onSubmit={memoryForm.handleSubmit(saveNote)}
           className="space-y-2"
         >
@@ -843,7 +817,7 @@ function MemoryList({
             htmlFor="shared-memory-note"
             className="text-12 font-medium"
           >
-            {editing ? "Edit shared note" : "Add shared note"}
+            {editing ? t("Edit shared note") : t("Add shared note")}
           </label>
           <textarea
             id="shared-memory-note"
@@ -861,9 +835,7 @@ function MemoryList({
                   setEditing(undefined);
                   memoryForm.reset({ text: "" });
                 }}
-              >
-                Cancel edit
-              </Button>
+              >{t("Cancel edit")}</Button>
             ) : null}
             <Button
               type="submit"
@@ -874,15 +846,14 @@ function MemoryList({
                 !memoryForm.formState.isDirty ||
                 !memoryForm.watch("text").trim()
               }
-            >
-              Save shared note
-            </Button>
+            >{t("Save shared note")}</Button>
           </div>
         </form>
       ) : null}
       {memory.length ? (
-        <ul aria-label={`${name} memory`} className="divide-y divide-border/30 rounded-lg border border-border">
-          {memory.map((note) => (
+        <ul aria-label={t("{{name}} memory", { name: name })} className="divide-y divide-border/30 rounded-lg border border-border">
+          {memory.map((note) => {
+return (
             <li key={note.id} className="flex items-start gap-2 px-3 py-2.5">
               <div className="min-w-0 flex-1 space-y-0.5">
                 <p className="whitespace-pre-wrap break-words text-12 text-foreground">
@@ -900,27 +871,24 @@ function MemoryList({
                     setEditing(note.id);
                     memoryForm.reset({ text: note.text });
                   }}
-                >
-                  Edit note
-                </Button>
+                >{t("Edit note")}</Button>
               ) : null}
               <Button
                 size="icon"
                 variant="ghost"
                 className="h-7 w-7 shrink-0"
-                aria-label={`Forget: ${note.text.slice(0, 60)}`}
+                aria-label={t("Forget: {{value}}", { value: note.text.slice(0, 60) })}
                 disabled={forget.isPending}
                 onClick={() => void remove(note)}
               >
                 <Trash2 />
               </Button>
             </li>
-          ))}
+          );
+})}
         </ul>
       ) : (
-        <p className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
-          Nothing remembered yet.
-        </p>
+        <p className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">{t("Nothing remembered yet.")}</p>
       )}
     </Section>
   );
@@ -933,6 +901,7 @@ function Lifecycle({
   readonly agent: AssistantAgent;
   readonly onDeleted: () => void;
 }) {
+  const { t } = useUiTranslation();
   const userId = useAuthStore((state) => state.user?.id);
   const queryClient = useQueryClient();
   const destroy = useDestroyNyxBotAgent();
@@ -962,17 +931,17 @@ function Lifecycle({
 
   return (
     <section
-      aria-label="Danger zone"
+      aria-label={t("Danger zone")}
       className="space-y-3 rounded-xl border border-destructive/40 p-4"
     >
       <div className="space-y-1">
         <h3 className="text-13 font-semibold text-destructive">
-          {destroyed ? "Delete permanently" : "Destroy agent"}
+          {destroyed ? t("Delete permanently") : t("Destroy agent")}
         </h3>
         <p className="text-12 text-destructive/70">
           {destroyed
-            ? `${agentTitle(agent)} was destroyed${agent.destroyed_at ? ` on ${formatDateTime(agent.destroyed_at)}` : ""}. Deleting removes it and all of its threads for good.`
-            : "Stops its work, revokes its access and disconnects its channel bots. Its threads stay readable."}
+            ? t("{{value}} was destroyed{{value1}}. Deleting removes it and all of its threads for good.", { value: agentTitle(agent), value1: agent.destroyed_at ? ` on ${formatDateTime(agent.destroyed_at)}` : "" })
+            : t("Stops its work, revokes its access and disconnects its channel bots. Its threads stay readable.")}
         </p>
       </div>
       <div className="flex justify-end">
@@ -984,7 +953,7 @@ function Lifecycle({
             setConfirm(destroyed ? "delete" : "destroy");
           }}
         >
-          {destroyed ? "Delete permanently" : "Destroy"}
+          {destroyed ? t("Delete permanently") : t("Destroy")}
         </Button>
       </div>
       <Dialog
@@ -997,26 +966,24 @@ function Lifecycle({
           <DialogHeader>
             <DialogTitle>
               {confirm === "delete"
-                ? `Delete ${agentTitle(agent)} permanently?`
-                : `Destroy ${agentTitle(agent)}?`}
+                ? t("Delete {{value}} permanently?", { value: agentTitle(agent) })
+                : t("Destroy {{value}}?", { value: agentTitle(agent) })}
             </DialogTitle>
             <DialogDescription>
               {confirm === "delete"
-                ? "The agent, its memory and every thread with it are deleted. This cannot be undone."
-                : "Any running turn stops, its access is revoked and its channel bots are disconnected. Its threads stay here, read-only. This cannot be undone."}
+                ? t("The agent, its memory and every thread with it are deleted. This cannot be undone.")
+                : t("Any running turn stops, its access is revoked and its channel bots are disconnected. Its threads stay here, read-only. This cannot be undone.")}
             </DialogDescription>
           </DialogHeader>
           {error ? (
             <p role="alert" className="text-12 text-destructive">
-              {error}
+              {translateUi(error)}
             </p>
           ) : null}
           <DialogFooter>
-            <Button variant="ghost" disabled={pending} onClick={() => setConfirm(undefined)}>
-              Cancel
-            </Button>
+            <Button variant="ghost" disabled={pending} onClick={() => setConfirm(undefined)}>{t("Cancel")}</Button>
             <Button variant="destructive" isLoading={pending} onClick={() => void run()}>
-              {confirm === "delete" ? "Delete permanently" : "Destroy"}
+              {confirm === "delete" ? t("Delete permanently") : t("Destroy")}
             </Button>
           </DialogFooter>
         </DialogContent>

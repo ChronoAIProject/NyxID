@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useRef } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useAuthStore } from "@/stores/auth-store";
@@ -14,6 +15,7 @@ interface TokenResponse {
 }
 
 export function CliAuthPage() {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const { port, state, client_ua } = useSearch({
     strict: false,
@@ -57,19 +59,12 @@ export function CliAuthPage() {
       <div className="flex min-h-screen items-center justify-center">
         <div className="flex max-w-sm flex-col items-center gap-4 text-center">
           <AlertCircle className="h-12 w-12 text-muted-foreground/50" />
-          <h2 className="text-lg font-semibold">
-            Invalid CLI Auth Request
-          </h2>
-          <p className="text-12 text-muted-foreground">
-            This page is used by the NyxID CLI. Run{" "}
+          <h2 className="text-lg font-semibold">{t("Invalid CLI Auth Request")}</h2>
+          <p className="text-12 text-muted-foreground">{t("This page is used by the NyxID CLI. Run")}{" "}
             <code className="rounded bg-muted px-1.5 py-0.5 text-xs">
               nyxid login
-            </code>{" "}
-            from your terminal.
-          </p>
-          <Button variant="outline" onClick={() => void navigate({ to: "/dashboard" })}>
-            Go to Dashboard
-          </Button>
+            </code>{" "}{t("from your terminal.")}</p>
+          <Button variant="outline" onClick={() => void navigate({ to: "/dashboard" })}>{t("Go to Dashboard")}</Button>
         </div>
       </div>
     );
@@ -79,16 +74,9 @@ export function CliAuthPage() {
     <div className="flex min-h-screen items-center justify-center">
       <div className="flex max-w-sm flex-col items-center gap-4 text-center">
         <NyxidIcon className="h-12 w-12" />
-        <h2 className="text-lg font-semibold">
-          CLI Authentication
-        </h2>
-        <p className="text-12 text-muted-foreground">
-          Sending credentials to the NyxID CLI...
-        </p>
-        <p className="text-xs text-muted-foreground">
-          You can close this tab after you see a success message in your
-          terminal.
-        </p>
+        <h2 className="text-lg font-semibold">{t("CLI Authentication")}</h2>
+        <p className="text-12 text-muted-foreground">{t("Sending credentials to the NyxID CLI...")}</p>
+        <p className="text-xs text-muted-foreground">{t("You can close this tab after you see a success message in your terminal.")}</p>
       </div>
     </div>
   );

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import {
@@ -26,6 +27,7 @@ export function ServiceAvatarStack({
   readonly items: readonly ServiceAvatarItem[];
   readonly label: string;
 }) {
+  const { t } = useUiTranslation();
   const [showAll, setShowAll] = useState(false);
   const visible = showAll ? items : items.slice(0, 4);
   return (
@@ -57,7 +59,7 @@ export function ServiceAvatarStack({
               <TooltipTrigger asChild>
                 <button
                   type="button"
-                  aria-label={item.actionLabel ?? `${item.name} · ${label}`}
+                  aria-label={item.actionLabel ?? t("{{name}} · {{label}}", { name: item.name, label: label })}
                   onClick={item.onSelect}
                   className={cn(
                     "relative z-0 flex size-6 shrink-0 items-center justify-center rounded-full bg-card ring-2 ring-card hover:z-10 focus-visible:z-10 focus-visible:outline-2 focus-visible:outline-ring",
@@ -86,12 +88,12 @@ export function ServiceAvatarStack({
           {items.length > 4 && (
             <button
               type="button"
-              aria-label={`${showAll ? "Collapse" : `Show all ${items.length} entries`} · ${label}`}
+              aria-label={t("{{value}} · {{label}}", { value: showAll ? t("Collapse") : `Show all ${items.length} entries`, label: label })}
               aria-expanded={showAll}
               onClick={() => setShowAll((value) => !value)}
               className="relative ml-1 flex size-6 shrink-0 items-center justify-center rounded-full bg-muted text-10 font-medium ring-2 ring-card focus-visible:outline-2 focus-visible:outline-ring"
             >
-              {showAll ? "−" : `+${items.length - 4}`}
+              {showAll ? "−" : t("+{{value}}", { value: items.length - 4 })}
             </button>
           )}
         </div>

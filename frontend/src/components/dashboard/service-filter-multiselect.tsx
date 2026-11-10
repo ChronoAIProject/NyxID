@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -31,6 +32,7 @@ export function ServiceFilterMultiselect({
   readonly onChange: (ids: string[]) => void;
   readonly className?: string;
 }) {
+  const { t } = useUiTranslation();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const hasIcons = options.some((option) => option.icon);
@@ -39,11 +41,11 @@ export function ServiceFilterMultiselect({
   );
   const summary =
     selected.length === 0
-      ? `All ${plural}`
+      ? t("All {{items}}", { items: t(plural) })
       : selected.length === 1
         ? (options.find((option) => option.id === selected[0])?.label ??
-          "Unavailable selection")
-        : `${selected.length} selected`;
+          t("Unavailable selection"))
+        : t("{{count}} selected", { count: selected.length });
   return (
     <Popover
       open={open}
@@ -74,19 +76,19 @@ export function ServiceFilterMultiselect({
       </PopoverTrigger>
       <PopoverContent
         align="start"
-        aria-label={`${label} filter`}
+        aria-label={t("{{label}} filter", { label: label })}
         className="w-72 max-w-[calc(100vw-2rem)] space-y-2 p-2"
       >
         <Input
-          aria-label={`Search ${plural}`}
-          placeholder={`Search ${plural}…`}
+          aria-label={t("Search {{plural}}", { plural: t(plural) })}
+          placeholder={t("Search {{plural}}…", { plural: t(plural) })}
           value={search}
           onChange={(event) => setSearch(event.target.value)}
         />
         <div
           className="max-h-64 overflow-y-auto overscroll-contain"
           role="group"
-          aria-label={`Select ${plural}`}
+          aria-label={t("Select {{plural}}", { plural: t(plural) })}
         >
           {visible.map((option) => {
             const checked = selected.includes(option.id);
@@ -124,8 +126,7 @@ export function ServiceFilterMultiselect({
             );
           })}
           {!visible.length && (
-            <p className="px-2 py-4 text-xs text-muted-foreground">
-              No matching {plural}.
+            <p className="px-2 py-4 text-xs text-muted-foreground">{t("No matching {{items}}.", { items: t(plural) })}
             </p>
           )}
         </div>
@@ -133,12 +134,10 @@ export function ServiceFilterMultiselect({
           <Button
             size="sm"
             variant="ghost"
-            aria-label={`Clear ${plural}`}
+            aria-label={t("Clear {{plural}}", { plural: t(plural) })}
             disabled={!selected.length}
             onClick={() => onChange([])}
-          >
-            Clear
-          </Button>
+          >{t("Clear")}</Button>
           <Button
             size="sm"
             variant="outline"
@@ -146,9 +145,7 @@ export function ServiceFilterMultiselect({
               setOpen(false);
               setSearch("");
             }}
-          >
-            Done
-          </Button>
+          >{t("Done")}</Button>
         </div>
       </PopoverContent>
     </Popover>

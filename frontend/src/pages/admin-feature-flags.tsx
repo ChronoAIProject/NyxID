@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import {
   changedFields,
   describeChanges,
@@ -79,6 +82,7 @@ const draftKey = (flag: string, type: ScopeType, id: string) =>
   `${flag}\u001f${type}\u001f${id}`;
 
 export function AdminFeatureFlagsPage() {
+  const { t } = useUiTranslation();
   const { data, isLoading, error } = useAdminFeatureFlags();
   const setOverride = useSetAdminFeatureFlag();
   const clearOverride = useClearAdminFeatureFlag();
@@ -198,9 +202,9 @@ export function AdminFeatureFlagsPage() {
         );
         if (failed.length)
           toast.error(
-            `Applied ${successful.length}; failed: ${failed.map((item) => `${item.flagKey} / ${item.type} ${item.id}`).join(", ")}. Review remaining changes before retrying.`,
+            translateUi("Applied {{length}}; failed: {{value}}. Review remaining changes before retrying.", { length: successful.length, value: failed.map((item) => `${item.flagKey} / ${item.type} ${item.id}`).join(", ") }),
           );
-        else toast.success(`${successful.length} changes applied`);
+        else toast.success(translateUi("{{length}} changes applied", { length: successful.length }));
       } finally {
         setApplying(false);
       }
@@ -260,13 +264,11 @@ export function AdminFeatureFlagsPage() {
     <div className="space-y-6">
       {rolloutReview.dialog}
       {error && data && (
-        <p role="alert">
-          Unable to refresh feature flags. Your drafts are retained.
-        </p>
+        <p role="alert">{t("Unable to refresh feature flags. Your drafts are retained.")}</p>
       )}
       <PageHeader
-        title="Feature Flags"
-        description="Platform-wide feature rollout. Configure each flag globally, per organization, and per user."
+        title={t("Feature Flags")}
+        description={t("Platform-wide feature rollout. Configure each flag globally, per organization, and per user.")}
       />
 
       {canWrite && <CreateFlagForm />}
@@ -274,7 +276,7 @@ export function AdminFeatureFlagsPage() {
       {canWrite && pendingCount > 0 && (
         <div className="sticky top-2 z-10 flex items-center justify-between gap-3 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 shadow-sm backdrop-blur">
           <span className="text-12 font-medium">
-            {pendingCount} unsaved change{pendingCount === 1 ? "" : "s"}
+            {pendingCount}{t(" unsaved change")}{pendingCount === 1 ? "" : "s"}
           </span>
           <div className="flex items-center gap-2">
             <Button
@@ -282,17 +284,13 @@ export function AdminFeatureFlagsPage() {
               size="sm"
               disabled={applying}
               onClick={() => setDrafts({})}
-            >
-              Discard
-            </Button>
+            >{t("Discard")}</Button>
             <Button
               variant="primary"
               size="sm"
               disabled={applying}
               onClick={applyChanges}
-            >
-              Apply changes
-            </Button>
+            >{t("Apply changes")}</Button>
           </div>
         </div>
       )}
@@ -302,31 +300,31 @@ export function AdminFeatureFlagsPage() {
         <Input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search feature flags…"
+          placeholder={t("Search feature flags…")}
           className="h-9 pl-8"
-          aria-label="Search feature flags"
+          aria-label={t("Search feature flags")}
         />
       </div>
 
       {isLoading && !data ? (
-        <div className="space-y-2" aria-label="Loading feature flags">
+        <div className="space-y-2" aria-label={t("Loading feature flags")}>
           {Array.from({ length: 3 }).map((_, index) => (
             <Skeleton key={index} className="h-24 w-full" />
           ))}
         </div>
       ) : error && !data ? (
         <FlagsEmptyState
-          title="Failed to load feature flags"
-          subtitle="Please try again later."
+          title={t("Failed to load feature flags")}
+          subtitle={t("Please try again later.")}
         />
       ) : flags.length === 0 ? (
         <FlagsEmptyState
-          title="No feature flags"
-          subtitle="No feature flags are available to your account. Create a flag to get started."
+          title={t("No feature flags")}
+          subtitle={t("No feature flags are available to your account. Create a flag to get started.")}
         />
       ) : (
         <div className="space-y-2">
-          {filtered.length === 0 && <p>No flags match “{search.trim()}”.</p>}
+          {filtered.length === 0 && <p>{t("No flags match “")}{search.trim()}”.</p>}
           {flags.map((flag) => (
             <div
               key={flag.key}
@@ -355,6 +353,7 @@ export function AdminFeatureFlagsPage() {
 }
 
 function CreateFlagForm() {
+  const { t } = useUiTranslation();
   const create = useCreateFeatureFlag();
   const [open, setOpen] = useState(false);
   const form = useAppForm({
@@ -364,7 +363,7 @@ function CreateFlagForm() {
   if (!open)
     return (
       <AddCtaButton
-        label="Create feature flag"
+        label={t("Create feature flag")}
         variant="subtle"
         onClick={() => setOpen(true)}
       />
@@ -376,34 +375,34 @@ function CreateFlagForm() {
         onSubmit={form.handleSubmit(async (body) => {
           try {
             await create.mutateAsync(body);
-            toast.success("Feature flag created");
+            toast.success(translateUi("Feature flag created"));
             form.reset();
             setOpen(false);
           } catch (error) {
             toast.error(
-              error instanceof Error
+              translateErrorMessage(error instanceof Error
                 ? error.message
-                : "Failed to create feature flag",
+                : "Failed to create feature flag"),
             );
           }
         })}
       >
         <div>
-          <Label htmlFor="new-flag-key">Flag key</Label>
+          <Label htmlFor="new-flag-key">{t("Flag key")}</Label>
           <Input
             id="new-flag-key"
             {...form.register("key")}
-            placeholder="my-team:new-feature"
+            placeholder={"my-team:new-feature"}
             disabled={create.isPending}
           />
           {form.formState.errors.key && (
             <p role="alert" className="text-12 text-destructive">
-              {form.formState.errors.key.message}
+              {translateUi(form.formState.errors.key.message ?? "")}
             </p>
           )}
         </div>
         <div>
-          <Label htmlFor="new-flag-description">Description</Label>
+          <Label htmlFor="new-flag-description">{t("Description")}</Label>
           <Input
             id="new-flag-description"
             {...form.register("description")}
@@ -412,7 +411,7 @@ function CreateFlagForm() {
           />
           {form.formState.errors.description && (
             <p role="alert" className="text-12 text-destructive">
-              {form.formState.errors.description.message}
+              {translateUi(form.formState.errors.description.message ?? "")}
             </p>
           )}
         </div>
@@ -425,9 +424,7 @@ function CreateFlagForm() {
             }
             disabled={create.isPending}
           />
-          <Label htmlFor="new-flag-default">
-            Enabled by default for everyone
-          </Label>
+          <Label htmlFor="new-flag-default">{t("Enabled by default for everyone")}</Label>
         </div>
         <div className="flex gap-2">
           <Button
@@ -440,17 +437,13 @@ function CreateFlagForm() {
               !form.watch("key").trim() ||
               !form.watch("description").trim()
             }
-          >
-            Create flag
-          </Button>
+          >{t("Create flag")}</Button>
           <Button
             type="button"
             variant="ghost"
             disabled={create.isPending}
             onClick={() => setOpen(false)}
-          >
-            Cancel
-          </Button>
+          >{t("Cancel")}</Button>
         </div>
       </form>
     </Card>
@@ -480,6 +473,7 @@ function FlagCard({
   readonly stagedUsers: readonly string[];
   readonly canWrite: boolean;
 }) {
+  const { t } = useUiTranslation();
   const [stagedOrgLabels, setStagedOrgLabels] = useState<
     Record<string, string>
   >({});
@@ -549,7 +543,7 @@ function FlagCard({
               <Badge
                 variant="secondary"
                 className="max-w-[200px] gap-1 text-11 font-normal"
-                title={`Owner: ${flag.owner}`}
+                title={t("Owner: {{owner}}", { owner: flag.owner })}
               >
                 <User className="h-3 w-3 shrink-0" aria-hidden />
                 <span className="min-w-0 truncate">{flag.owner}</span>
@@ -569,15 +563,13 @@ function FlagCard({
                   variant="secondary"
                   className="text-11 font-normal text-muted-foreground"
                 >
-                  +{extraPills} more
-                </Badge>
+                  +{extraPills}{t(" more")}</Badge>
               )}
             </div>
           )}
         </div>
         <div className="flex shrink-0 items-center gap-3">
-          <Badge variant="secondary" className="text-11">
-            Default: {flag.defaultEnabled ? "Enabled" : "Disabled"}
+          <Badge variant="secondary" className="text-11">{t("Default: ")}{flag.defaultEnabled ? t("Enabled") : t("Disabled")}
           </Badge>
           <ChevronDown
             className={cn(
@@ -593,13 +585,13 @@ function FlagCard({
           hidden={!open}
           className="space-y-4 border-t border-border/60 bg-muted/20 px-3 py-3"
         >
-          <Group label="Documentation">
+          <Group label={t("Documentation")}>
             <FlagMetadataEditor flag={flag} canWrite={canWrite} />
           </Group>
 
-          <Group label="Global">
+          <Group label={t("Global")}>
             <ScopeRow
-              label="All users (rollout / killswitch)"
+              label={t("All users (rollout / killswitch)")}
               state={stateFor("global", "")}
               pending={isPending("global", "")}
               disabled={!canWrite}
@@ -608,7 +600,7 @@ function FlagCard({
           </Group>
 
           {flag.key !== FEATURE_FLAG.INVITATION_CODE && (
-            <Group label="By organization">
+            <Group label={t("By organization")}>
               {canWrite && (
                 <AccountSearchPicker
                   flagKey={flag.key}
@@ -644,7 +636,7 @@ function FlagCard({
           )}
 
           {flag.key !== FEATURE_FLAG.INVITATION_CODE && (
-            <Group label="By user">
+            <Group label={t("By user")}>
               {canWrite && (
                 <AccountSearchPicker
                   flagKey={flag.key}
@@ -700,6 +692,7 @@ function FlagMetadataEditor({
   readonly flag: FlagRow;
   readonly canWrite: boolean;
 }) {
+  const { t } = useUiTranslation();
   const update = useUpdateAdminFeatureFlagMetadata();
   const [description, setDescription] = useState(flag.customDescription ?? "");
   const [owner, setOwner] = useState(flag.owner ?? "");
@@ -733,7 +726,7 @@ function FlagMetadataEditor({
       setDescription(values.description ?? "");
       setOwner(values.owner ?? "");
       setHydrationPending(false);
-      toast.success("Flag details saved");
+      toast.success(translateUi("Flag details saved"));
     },
     (pending) => hasFieldConflicts(pending.before, current, pending.body),
     flag.key,
@@ -771,13 +764,13 @@ function FlagMetadataEditor({
     return (
       <dl className="space-y-2 px-3 py-2.5 text-12">
         <div className="space-y-0.5">
-          <dt className="text-11 text-muted-foreground">Description</dt>
+          <dt className="text-11 text-muted-foreground">{t("Description")}</dt>
           <dd className="text-foreground">{flag.description}</dd>
         </div>
         <div className="space-y-0.5">
-          <dt className="text-11 text-muted-foreground">Owner</dt>
+          <dt className="text-11 text-muted-foreground">{t("Owner")}</dt>
           <dd className={cn(!flag.owner && "text-muted-foreground")}>
-            {flag.owner ?? "Unassigned"}
+            {flag.owner ?? t("Unassigned")}
           </dd>
         </div>
       </dl>
@@ -802,9 +795,7 @@ function FlagMetadataEditor({
         <Label
           htmlFor={`flag-description-${flag.key}`}
           className="text-11 font-normal"
-        >
-          Description — what this flag controls
-        </Label>
+        >{t("Description — what this flag controls")}</Label>
         <Input
           id={`flag-description-${flag.key}`}
           disabled={review.saving || update.isPending}
@@ -819,26 +810,24 @@ function FlagMetadataEditor({
         <Label
           htmlFor={`flag-owner-${flag.key}`}
           className="text-11 font-normal"
-        >
-          Owner — who to ask about it
-        </Label>
+        >{t("Owner — who to ask about it")}</Label>
         <Input
           id={`flag-owner-${flag.key}`}
           disabled={review.saving || update.isPending}
           value={owner}
           maxLength={MAX_FEATURE_FLAG_OWNER_LENGTH}
           onChange={(event) => setOwner(event.target.value)}
-          placeholder="Unassigned — e.g. Platform team"
+          placeholder={t("Unassigned — e.g. Platform team")}
           className="h-8 text-12"
         />
       </div>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-11 text-muted-foreground">
           {flag.customDescription == null
-            ? "Using the original description."
+            ? t("Using the original description.")
             : flag.metadataUpdatedAt
-              ? `Edited ${formatRelativeTime(flag.metadataUpdatedAt)}.`
-              : "Edited by an admin."}
+              ? t("Edited {{value}}.", { value: formatRelativeTime(flag.metadataUpdatedAt) })
+              : t("Edited by an admin.")}
         </p>
         <div className="flex items-center gap-2">
           {description !== "" && (
@@ -847,9 +836,7 @@ function FlagMetadataEditor({
               size="sm"
               onClick={() => setDescription("")}
               disabled={update.isPending}
-            >
-              Use default description
-            </Button>
+            >{t("Use default description")}</Button>
           )}
           <Button
             variant="primary"
@@ -857,7 +844,7 @@ function FlagMetadataEditor({
             onClick={save}
             disabled={stale || !dirty || update.isPending}
           >
-            {update.isPending ? "Saving…" : "Save details"}
+            {update.isPending ? t("Saving…") : t("Save details")}
           </Button>
         </div>
       </div>
@@ -872,6 +859,7 @@ interface SummaryPillValue {
 }
 
 function SummaryPill({ pill }: { readonly pill: SummaryPillValue }) {
+  const { t } = useUiTranslation();
   return (
     <Badge
       variant={pill.state === "enabled" ? "success" : "secondary"}
@@ -880,10 +868,10 @@ function SummaryPill({ pill }: { readonly pill: SummaryPillValue }) {
         pill.state === "inherit" && !pill.pending && "opacity-60",
         pill.pending && "ring-1 ring-primary/70",
       )}
-      title={`${pill.label} · ${word(pill.state)}`}
+      title={t("{{label}} · {{value}}", { label: pill.label, value: t(word(pill.state)) })}
     >
       <span className="min-w-0 truncate">{pill.label}</span>
-      <span className="shrink-0">· {word(pill.state)}</span>
+      <span className="shrink-0">· {t(word(pill.state))}</span>
     </Badge>
   );
 }
@@ -904,6 +892,7 @@ function AccountSearchPicker({
   readonly excludedIds: readonly string[];
   readonly onPick: (picked: { id: string; label: string }) => void;
 }) {
+  const { t } = useUiTranslation();
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [focused, setFocused] = useState(false);
@@ -974,10 +963,10 @@ function AccountSearchPicker({
           value={search}
           onChange={(event) => setSearch(event.target.value)}
           placeholder={
-            isOrg ? "Search organizations by name…" : "Search users by email…"
+            isOrg ? t("Search organizations by name…") : t("Search users by email…")
           }
           aria-label={
-            isOrg ? "Search organizations by name" : "Search users by email"
+            isOrg ? t("Search organizations by name") : t("Search users by email")
           }
           className="h-8 pl-8 text-12"
         />
@@ -985,14 +974,12 @@ function AccountSearchPicker({
       {normalizedSearch ? (
         <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
           {isLoading || waitingForSearch ? (
-            <p className="px-3 py-2 text-xs text-muted-foreground">
-              Searching…
-            </p>
+            <p className="px-3 py-2 text-xs text-muted-foreground">{t("Searching…")}</p>
           ) : results.length === 0 ? (
             <p className="px-3 py-2 text-xs text-muted-foreground">
               {isOrg
-                ? "No organizations match this search."
-                : "No users match this search."}
+                ? t("No organizations match this search.")
+                : t("No users match this search.")}
             </p>
           ) : (
             results.map((account) => (
@@ -1009,14 +996,12 @@ function AccountSearchPicker({
         showDefaults && (
           <div className="max-h-40 overflow-y-auto rounded-md border border-border/60">
             {defaultsLoading ? (
-              <p className="px-3 py-2 text-xs text-muted-foreground">
-                Loading…
-              </p>
+              <p className="px-3 py-2 text-xs text-muted-foreground">{t("Loading…")}</p>
             ) : defaults.length === 0 ? (
               <p className="px-3 py-2 text-xs text-muted-foreground">
                 {isOrg
-                  ? "No organizations to suggest."
-                  : "No users to suggest."}
+                  ? t("No organizations to suggest.")
+                  : t("No users to suggest.")}
               </p>
             ) : (
               <>
@@ -1029,9 +1014,7 @@ function AccountSearchPicker({
                   />
                 ))}
                 {hasMoreSuggestions && (
-                  <p className="border-t border-border/40 px-3 py-2 text-11 text-muted-foreground">
-                    More accounts — keep typing to narrow
-                  </p>
+                  <p className="border-t border-border/40 px-3 py-2 text-11 text-muted-foreground">{t("More accounts — keep typing to narrow")}</p>
                 )}
               </>
             )}
@@ -1125,6 +1108,7 @@ function ScopeRow({
   readonly disabled?: boolean;
   readonly onChange: (s: ScopeState) => void;
 }) {
+  const { t } = useUiTranslation();
   return (
     <div
       className={cn(
@@ -1153,9 +1137,9 @@ function ScopeRow({
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="inherit">Inherit</SelectItem>
-          <SelectItem value="enabled">Enabled</SelectItem>
-          <SelectItem value="disabled">Disabled</SelectItem>
+          <SelectItem value="inherit">{t("Inherit")}</SelectItem>
+          <SelectItem value="enabled">{t("Enabled")}</SelectItem>
+          <SelectItem value="disabled">{t("Disabled")}</SelectItem>
         </SelectContent>
       </Select>
     </div>

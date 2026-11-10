@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { credits } from "@/lib/billing-display";
 import { hasCredits } from "@/lib/credits";
 import { billingTargetLabel } from "@/lib/billing-targets";
@@ -42,6 +44,7 @@ export function CreditGrantsTable({
   onPageChange,
   onRevoke,
 }: CreditGrantsTableProps) {
+  const { t } = useUiTranslation();
   const pageCount = Math.max(1, Math.ceil(total / perPage));
   return (
     <div className="space-y-3">
@@ -49,14 +52,14 @@ export function CreditGrantsTable({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Recipient</TableHead>
-              <TableHead>Remaining</TableHead>
-              <TableHead>Scope</TableHead>
-              <TableHead>Expiry</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Reason</TableHead>
+              <TableHead>{t("Recipient")}</TableHead>
+              <TableHead>{t("Remaining")}</TableHead>
+              <TableHead>{t("Scope")}</TableHead>
+              <TableHead>{t("Expiry")}</TableHead>
+              <TableHead>{t("Status")}</TableHead>
+              <TableHead>{t("Reason")}</TableHead>
               {canWrite ? (
-                <TableHead className="text-right">Actions</TableHead>
+                <TableHead className="text-right">{t("Actions")}</TableHead>
               ) : null}
             </TableRow>
           </TableHeader>
@@ -84,8 +87,7 @@ export function CreditGrantsTable({
                 </TableCell>
                 <TableCell>
                   {formatCredits(grant.remaining ?? grant.remaining_micros)}{" "}
-                  <span className="text-11 text-muted-foreground">
-                    of {formatCredits(grant.amount ?? grant.amount_micros)}
+                  <span className="text-11 text-muted-foreground">{t("of ")}{formatCredits(grant.amount ?? grant.amount_micros)}
                   </span>
                 </TableCell>
                 <TableCell>
@@ -107,7 +109,7 @@ export function CreditGrantsTable({
                       type="button"
                       size="icon"
                       variant="ghost"
-                      title="Revoke grant"
+                      title={t("Revoke grant")}
                       disabled={
                         grant.status !== "active" ||
                         hasCredits(grant.reserved ?? grant.reserved_micros) ||
@@ -126,9 +128,7 @@ export function CreditGrantsTable({
                 <TableCell
                   colSpan={canWrite ? 7 : 6}
                   className="py-10 text-center text-muted-foreground"
-                >
-                  No credit grants.
-                </TableCell>
+                >{t("No credit grants.")}</TableCell>
               </TableRow>
             ) : null}
           </TableBody>
@@ -136,8 +136,7 @@ export function CreditGrantsTable({
       </div>
       {pageCount > 1 ? (
         <div className="flex items-center justify-between text-12 text-muted-foreground">
-          <span>
-            Page {page} of {pageCount}
+          <span>{t("Page ")}{page}{t(" of ")}{pageCount}
           </span>
           <div className="flex gap-2">
             <Button
@@ -146,18 +145,14 @@ export function CreditGrantsTable({
               variant="outline"
               disabled={page <= 1 || fetching}
               onClick={() => onPageChange(Math.max(1, page - 1))}
-            >
-              Previous
-            </Button>
+            >{t("Previous")}</Button>
             <Button
               type="button"
               size="sm"
               variant="outline"
               disabled={page >= pageCount || fetching}
               onClick={() => onPageChange(Math.min(pageCount, page + 1))}
-            >
-              Next
-            </Button>
+            >{t("Next")}</Button>
           </div>
         </div>
       ) : null}
@@ -166,36 +161,31 @@ export function CreditGrantsTable({
 }
 
 function RolloutWarning() {
+  const { t } = useUiTranslation();
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span className="mt-1 inline-flex cursor-help" tabIndex={0}>
           <Badge variant="warning" className="gap-1">
-            <AlertTriangle className="h-3 w-3" />
-            Billing rollout off
-          </Badge>
+            <AlertTriangle className="h-3 w-3" />{t("Billing rollout off")}</Badge>
         </span>
       </TooltipTrigger>
-      <TooltipContent>
-        Not in billing rollout - user cannot see billing yet.
-      </TooltipContent>
+      <TooltipContent>{t("Not in billing rollout - user cannot see billing yet.")}</TooltipContent>
     </Tooltip>
   );
 }
 
 function GrantStatus({ grant }: { readonly grant: AdminCreditGrant }) {
+  const { t } = useUiTranslation();
   if (grant.activation_state === "pending_activation") {
     return (
       <Tooltip>
         <TooltipTrigger asChild>
           <span className="inline-flex cursor-help" tabIndex={0}>
-            <Badge variant="warning">Pending activation</Badge>
+            <Badge variant="warning">{t("Pending activation")}</Badge>
           </span>
         </TooltipTrigger>
-        <TooltipContent>
-          Waiting for billing-ledger confirmation. The grant is not spendable or
-          visible to the recipient yet.
-        </TooltipContent>
+        <TooltipContent>{t("Waiting for billing-ledger confirmation. The grant is not spendable or visible to the recipient yet.")}</TooltipContent>
       </Tooltip>
     );
   }
@@ -215,16 +205,16 @@ function GrantStatus({ grant }: { readonly grant: AdminCreditGrant }) {
 
 function scopeLabel(allServices: boolean, slugs: readonly string[]) {
   return allServices
-    ? "All services"
+    ? translateUi("All services")
     : slugs.length <= 2
       ? slugs.join(", ")
       : `${slugs.slice(0, 2).join(", ")} +${String(slugs.length - 2)}`;
 }
 
 function formatCredits(value: string | number) {
-  return `${credits(value)} credits`;
+  return translateUi("{{value}} credits", { value: credits(value) });
 }
 
 function formatDateTime(value: string | null | undefined) {
-  return value ? new Date(value).toLocaleString() : "Never";
+  return value ? new Date(value).toLocaleString(getFormattingLocale()) : translateUi("Never");
 }

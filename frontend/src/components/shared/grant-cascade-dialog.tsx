@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { AlertTriangle } from "lucide-react";
 import {
   grantCascadeCaveat,
@@ -26,6 +27,7 @@ export function GrantCascadeDialog({
   readonly onRemoveOnly: () => void;
   readonly onCancel: () => void;
 }) {
+  const { t } = useUiTranslation();
   const affectedCount = details.siblings.length + 1;
 
   return (
@@ -37,22 +39,15 @@ export function GrantCascadeDialog({
               <AlertTriangle className="h-4 w-4" />
             </span>
             <div className="space-y-1.5">
-              <DialogTitle>
-                Disconnect {details.provider_name} everywhere?
-              </DialogTitle>
-              <DialogDescription>
-                This upstream authorization is shared by other NyxID services.
-                Choose how broadly to disconnect it.
-              </DialogDescription>
+              <DialogTitle>{t("Disconnect ")}{details.provider_name}{t(" everywhere?")}</DialogTitle>
+              <DialogDescription>{t("This upstream authorization is shared by other NyxID services. Choose how broadly to disconnect it.")}</DialogDescription>
             </div>
           </div>
         </DialogHeader>
 
         <div className="space-y-4 text-12">
           <div className="rounded-lg border border-destructive/20 bg-destructive/[0.04] px-4 py-3">
-            <p className="font-medium text-foreground">
-              Also using this {details.provider_name} authorization
-            </p>
+            <p className="font-medium text-foreground">{t("Also using this ")}{details.provider_name}{t(" authorization")}</p>
             <ul className="mt-2 space-y-1.5 text-muted-foreground">
               {details.siblings.map((sibling, index) => (
                 <li
@@ -71,17 +66,14 @@ export function GrantCascadeDialog({
               {details.unaffected_other_app.map((service, index) => (
                 <p
                   key={`${service.user_service_id}:${service.slug}:${service.name}:${index}`}
-                >
-                  not affected (different OAuth app): {service.name}
+                >{t("not affected (different OAuth app): ")}{service.name}
                 </p>
               ))}
             </div>
           )}
 
           {!details.token_scope_available && (
-            <p className="rounded-lg border border-warning/20 bg-warning/[0.04] px-4 py-3 text-warning">
-              Removing only this service cannot revoke its upstream access. The
-              authorization will remain active at {details.provider_name}.
+            <p className="rounded-lg border border-warning/20 bg-warning/[0.04] px-4 py-3 text-warning">{t("Removing only this service cannot revoke its upstream access. The authorization will remain active at ")}{details.provider_name}.
             </p>
           )}
 
@@ -91,9 +83,7 @@ export function GrantCascadeDialog({
         </div>
 
         <DialogFooter className="flex-col md:flex-col md:items-stretch md:space-x-0">
-          <Button variant="outline" disabled={isPending} onClick={onCancel}>
-            Cancel
-          </Button>
+          <Button variant="outline" disabled={isPending} onClick={onCancel}>{t("Cancel")}</Button>
           <Button
             variant="outline"
             className="whitespace-normal"
@@ -101,18 +91,15 @@ export function GrantCascadeDialog({
             onClick={onRemoveOnly}
           >
             {details.token_scope_available
-              ? "Remove only this service"
-              : "Remove from NyxID only"}
+              ? t("Remove only this service")
+              : t("Remove from NyxID only")}
           </Button>
           <Button
             variant="destructive"
             className="whitespace-normal"
             isLoading={isPending}
             onClick={onCascade}
-          >
-            Disconnect {details.provider_name} everywhere ({affectedCount}{" "}
-            services)
-          </Button>
+          >{t("Disconnect ")}{details.provider_name}{t(" everywhere (")}{affectedCount}{" "}{t("services)")}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

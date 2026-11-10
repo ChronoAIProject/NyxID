@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "@tanstack/react-router";
 import { DocsLayout, type TocItem } from "./docs-layout";
@@ -48,6 +49,7 @@ function readLastTab(): DocTabId {
 type Status = "loading" | "ok" | "missing";
 
 export function DocsPage() {
+  const { t } = useUiTranslation();
   const { _splat } = useParams({ from: "/docs/$" });
   const slug = (_splat ?? "").replace(/\/+$/, "");
   const known = findDocPage(slug);
@@ -287,10 +289,8 @@ export function DocsPage() {
       {status === "missing" && (
         <div className="max-w-3xl rounded-2xl border border-border bg-card p-10 text-center">
           <p className="font-mono text-xs tracking-widest text-text-tertiary uppercase">404</p>
-          <h1 className="mt-3 font-display text-2xl font-semibold tracking-tight text-foreground">Page not found</h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            This docs page doesn’t exist (yet). Try search, or pick a section from the sidebar.
-          </p>
+          <h1 className="mt-3 font-display text-2xl font-semibold tracking-tight text-foreground">{t("Page not found")}</h1>
+          <p className="mt-2 text-sm text-muted-foreground">{t("This docs page doesn’t exist (yet). Try search, or pick a section from the sidebar.")}</p>
         </div>
       )}
       {status === "ok" && doc && (

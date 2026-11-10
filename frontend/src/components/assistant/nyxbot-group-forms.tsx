@@ -1,3 +1,6 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translate as t } from "@/i18n";
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { useEffect, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
@@ -22,7 +25,13 @@ import {
   useAppForm,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useOrgs } from "@/hooks/use-orgs";
 import { useOrgMembers } from "@/hooks/use-org-members";
 import { useFeature } from "@/hooks/use-feature-flag";
@@ -84,7 +93,9 @@ function pickerRows(
       kind: agent.kind,
       description: [
         agentHandle(agent),
-        agent.kind === "nyxbot" ? "Your personal agent" : agent.description || "Specialist",
+        agent.kind === "nyxbot"
+          ? t("Your personal agent")
+          : agent.description || t("Specialist"),
       ]
         .filter(Boolean)
         .join(" · "),
@@ -94,13 +105,17 @@ function pickerRows(
   const known = agents.length > 0;
   const gone = (group?.members ?? [])
     .filter(
-      (member) => member.destroyed || (known && !live.some((row) => row.id === member.id)),
+      (member) =>
+        member.destroyed ||
+        (known && !live.some((row) => row.id === member.id)),
     )
     .map((member) => ({
       id: member.id,
       name: member.name,
       kind: member.kind,
-      description: `${member.destroyed ? "Destroyed" : "No longer available"} — removed when you save`,
+      description: t("{{status}} — removed when you save", {
+        status: member.destroyed ? t("Destroyed") : t("No longer available"),
+      }),
       destroyed: true,
     }));
   return [...live, ...gone];
@@ -115,10 +130,11 @@ function AgentPicker({
   readonly value: readonly string[];
   readonly onChange: (ids: string[]) => void;
 }) {
+  const { t } = useAppTranslation();
   const full = value.length >= ASSISTANT_GROUP_MAX_MEMBERS;
   return (
     <ul
-      aria-label="Agents"
+      aria-label={t("Agents")}
       className="assistant-scrollbar relative max-h-56 space-y-0.5 overflow-y-auto rounded-lg border border-border p-1"
     >
       {rows.map((row) => {
@@ -150,7 +166,9 @@ function AgentPicker({
               />
               <AgentAvatar agent={row} size="sm" />
               <span className="min-w-0 flex-1">
-                <span className="block truncate text-foreground">{row.name}</span>
+                <span className="block truncate text-foreground">
+                  {row.name}
+                </span>
                 <span className="block truncate text-11 text-text-tertiary">
                   {row.description}
                 </span>
@@ -163,47 +181,105 @@ function AgentPicker({
   );
 }
 
-function GroupOwnerPicker({ value, onChange }: {
+function GroupOwnerPicker({
+  value,
+  onChange,
+}: {
   readonly value?: string;
   readonly onChange: (id: string | undefined) => void;
 }) {
+  const { t } = useAppTranslation();
   const orgs = useOrgs();
   const enabled = useFeature(FEATURE_FLAG.ORG_AGENTS);
-  return <div className="space-y-2">
-    <label htmlFor="group-owner" className="text-12 font-medium">Ownership</label>
-    <Select value={value ?? "personal"} onValueChange={(id) => onChange(id === "personal" ? undefined : id)}>
-      <SelectTrigger id="group-owner"><SelectValue /></SelectTrigger>
-      <SelectContent>
-        <SelectItem value="personal">Personal</SelectItem>
-        {(orgs.data ?? []).filter((org) => ["admin", "member"].includes(org.your_role)).map((org) =>
-          <SelectItem key={org.id} value={org.id} disabled={!enabled}>{org.display_name ?? org.slug}</SelectItem>)}
-      </SelectContent>
-    </Select>
-    {!enabled && (orgs.data?.length ?? 0) > 0 ? <p className="text-11 text-muted-foreground">Organization groups are not enabled yet.</p> : null}
-  </div>;
+  return (
+    <div className="space-y-2">
+      <label htmlFor="group-owner" className="text-12 font-medium">
+        {t("Ownership")}
+      </label>
+      <Select
+        value={value ?? "personal"}
+        onValueChange={(id) => onChange(id === "personal" ? undefined : id)}
+      >
+        <SelectTrigger id="group-owner">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="personal">{t("Personal")}</SelectItem>
+          {(orgs.data ?? [])
+            .filter((org) => ["admin", "member"].includes(org.your_role))
+            .map((org) => (
+              <SelectItem key={org.id} value={org.id} disabled={!enabled}>
+                {org.display_name ?? org.slug}
+              </SelectItem>
+            ))}
+        </SelectContent>
+      </Select>
+      {!enabled && (orgs.data?.length ?? 0) > 0 ? (
+        <p className="text-11 text-muted-foreground">
+          {t("Organization groups are not enabled yet.")}
+        </p>
+      ) : null}
+    </div>
+  );
 }
 
-export function GroupParticipantPicker({ org, value, onChange }: {
+export function GroupParticipantPicker({
+  org,
+  value,
+  onChange,
+}: {
   readonly org: string;
   readonly value: readonly string[];
   readonly onChange: (ids: string[]) => void;
 }) {
+  const { t } = useAppTranslation();
   const members = useOrgMembers(org);
-  const eligible = (members.data ?? []).filter((member) => !member.revoked_at && ["admin", "member"].includes(member.role));
-  return <div className="space-y-2">
-    <p className="text-12 font-medium">Participants ({value.length} of 16)</p>
-    <ul aria-label="Participants" className="assistant-scrollbar relative max-h-44 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
-      {eligible.map((member) => <li key={member.user_id}>
-        <label className="flex items-center gap-2 text-12">
-          <Checkbox checked={value.includes(member.user_id)} disabled={value.length >= 16 && !value.includes(member.user_id)}
-            onCheckedChange={(checked) => onChange(checked ? [...value, member.user_id] : value.filter((id) => id !== member.user_id))} />
-          {member.display_name ?? "Member"}
-        </label>
-      </li>)}
-    </ul>
-    {members.isError ? <p role="alert" className="text-12 text-destructive">Could not load organization members.</p> : null}
-    <p className="text-11 text-muted-foreground">Only selected Admins and Members can read and participate. The creator is included when creating a group.</p>
-  </div>;
+  const eligible = (members.data ?? []).filter(
+    (member) => !member.revoked_at && ["admin", "member"].includes(member.role),
+  );
+  return (
+    <div className="space-y-2">
+      <p className="text-12 font-medium">
+        {t("Participants ({{count}} of {{max}})", {
+          count: value.length,
+          max: 16,
+        })}
+      </p>
+      <ul
+        aria-label={t("Participants")}
+        className="assistant-scrollbar relative max-h-44 space-y-1 overflow-y-auto rounded-lg border border-border p-2"
+      >
+        {eligible.map((member) => (
+          <li key={member.user_id}>
+            <label className="flex items-center gap-2 text-12">
+              <Checkbox
+                checked={value.includes(member.user_id)}
+                disabled={value.length >= 16 && !value.includes(member.user_id)}
+                onCheckedChange={(checked) =>
+                  onChange(
+                    checked
+                      ? [...value, member.user_id]
+                      : value.filter((id) => id !== member.user_id),
+                  )
+                }
+              />
+              {member.display_name ?? t("Member")}
+            </label>
+          </li>
+        ))}
+      </ul>
+      {members.isError ? (
+        <p role="alert" className="text-12 text-destructive">
+          {t("Could not load organization members.")}
+        </p>
+      ) : null}
+      <p className="text-11 text-muted-foreground">
+        {t(
+          "Only selected Admins and Members can read and participate. The creator is included when creating a group.",
+        )}
+      </p>
+    </div>
+  );
 }
 
 function GroupFields({
@@ -213,6 +289,7 @@ function GroupFields({
   readonly form: ReturnType<typeof useAppForm<AssistantGroupForm>>;
   readonly rows: readonly PickerRow[];
 }) {
+  const { t } = useAppTranslation();
   return (
     <>
       <FormField
@@ -220,10 +297,10 @@ function GroupFields({
         name="name"
         render={({ field }) => (
           <FormItem>
-            <FormLabel>Name</FormLabel>
+            <FormLabel>{t("Name")}</FormLabel>
             <FormControl>
               <Input
-                placeholder="Launch crew"
+                placeholder={t("Launch crew")}
                 autoComplete="off"
                 maxLength={ASSISTANT_GROUP_NAME_MAX}
                 {...field}
@@ -239,12 +316,19 @@ function GroupFields({
         render={({ field }) => (
           <FormItem>
             <FormLabel>
-              Agents{" "}
+              {t("Agents")}{" "}
               <span className="font-normal text-text-tertiary">
-                ({field.value.length} of {ASSISTANT_GROUP_MAX_MEMBERS})
+                {t("({{count}} of {{max}})", {
+                  count: field.value.length,
+                  max: ASSISTANT_GROUP_MAX_MEMBERS,
+                })}
               </span>
             </FormLabel>
-            <AgentPicker rows={rows} value={field.value} onChange={field.onChange} />
+            <AgentPicker
+              rows={rows}
+              value={field.value}
+              onChange={field.onChange}
+            />
             <FormMessage />
           </FormItem>
         )}
@@ -263,6 +347,7 @@ export function NewGroupDialog({
   readonly onClose: () => void;
   readonly onCreated: (group: AssistantGroup) => void;
 }) {
+  const { t } = useAppTranslation();
   const create = useCreateNyxBotGroup();
   const userId = useAuthStore((state) => state.user?.id);
   const nyxbotId = nyxBotOf(agents)?.id;
@@ -278,7 +363,10 @@ export function NewGroupDialog({
   // Agents may still be loading when the dialog opens; preselect NyxBot once known.
   useEffect(() => {
     if (org || !nyxbotId || form.getValues("member_agent_ids").length) return;
-    form.setValue("member_agent_ids", [nyxbotId], { shouldDirty: false, shouldTouch: false });
+    form.setValue("member_agent_ids", [nyxbotId], {
+      shouldDirty: false,
+      shouldTouch: false,
+    });
   }, [form, nyxbotId, org]);
 
   async function submit(values: AssistantGroupForm) {
@@ -286,7 +374,9 @@ export function NewGroupDialog({
     try {
       onCreated(await create.mutateAsync(values));
     } catch (cause) {
-      setError(errorMessage(cause, "Could not create the group. Try again."));
+      setError(
+        errorMessage(cause, t("Could not create the group. Try again.")),
+      );
     }
   }
 
@@ -299,33 +389,62 @@ export function NewGroupDialog({
     >
       <DialogContent scrollMode="body" className="md:max-w-md">
         <DialogHeader className="shrink-0 pr-6">
-          <DialogTitle>New group</DialogTitle>
+          <DialogTitle>{t("New group")}</DialogTitle>
           <DialogDescription>
-            Chat with up to {ASSISTANT_GROUP_MAX_MEMBERS} of your agents at once.{" "}
-            {GROUP_ROUTING_COPY}
+            {t("Chat with up to {{count}} of your agents at once.", {
+              count: ASSISTANT_GROUP_MAX_MEMBERS,
+            })}{" "}
+            {t(GROUP_ROUTING_COPY)}
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form noValidate onSubmit={form.handleSubmit(submit)}>
             <DialogBody className="space-y-4 pb-1">
-              <GroupOwnerPicker value={org} onChange={(id) => {
-                form.setValue("org", id);
-                form.setValue("member_agent_ids", id ? [] : nyxbotId ? [nyxbotId] : []);
-                form.setValue("participant_user_ids", id && userId ? [userId] : undefined);
-              }} />
-              <GroupFields form={form} rows={pickerRows(agents.filter((agent) => org
-                ? agent.owner_kind === "org" && agent.owner_id === org
-                : true))} />
-              {org ? <GroupParticipantPicker org={org} value={people} onChange={(ids) => form.setValue("participant_user_ids", ids)} /> : null}
+              <GroupOwnerPicker
+                value={org}
+                onChange={(id) => {
+                  form.setValue("org", id);
+                  form.setValue(
+                    "member_agent_ids",
+                    id ? [] : nyxbotId ? [nyxbotId] : [],
+                  );
+                  form.setValue(
+                    "participant_user_ids",
+                    id && userId ? [userId] : undefined,
+                  );
+                }}
+              />
+              <GroupFields
+                form={form}
+                rows={pickerRows(
+                  agents.filter((agent) =>
+                    org
+                      ? agent.owner_kind === "org" && agent.owner_id === org
+                      : true,
+                  ),
+                )}
+              />
+              {org ? (
+                <GroupParticipantPicker
+                  org={org}
+                  value={people}
+                  onChange={(ids) => form.setValue("participant_user_ids", ids)}
+                />
+              ) : null}
               {error ? (
                 <p role="alert" className="text-12 text-destructive">
-                  {error}
+                  {translateUi(error)}
                 </p>
               ) : null}
             </DialogBody>
             <DialogFooter className="pt-4">
-              <Button type="button" variant="ghost" onClick={onClose} disabled={create.isPending}>
-                Cancel
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={onClose}
+                disabled={create.isPending}
+              >
+                {t("Cancel")}
               </Button>
               <Button
                 type="submit"
@@ -333,7 +452,7 @@ export function NewGroupDialog({
                 isLoading={create.isPending}
                 disabled={!name.trim() || !members.length}
               >
-                Create group
+                {t("Create group")}
               </Button>
             </DialogFooter>
           </form>
@@ -357,14 +476,18 @@ export function GroupSettingsDialog({
   readonly onOpenChange: (open: boolean) => void;
   readonly onDeleted: () => void;
 }) {
+  const { t } = useAppTranslation();
   const update = useUpdateNyxBotGroup();
   const org = group.owner?.type === "org" ? group.owner.id : undefined;
-  const canManage = !org || group.your_role === "creator" || group.your_role === "admin";
+  const canManage =
+    !org || group.your_role === "creator" || group.your_role === "admin";
   const remove = useDeleteNyxBotGroup();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string>();
   const liveAgentIds = new Set(
-    agents.filter((agent) => agent.status !== "destroyed").map((agent) => agent.id),
+    agents
+      .filter((agent) => agent.status !== "destroyed")
+      .map((agent) => agent.id),
   );
   const alive = (member: AssistantGroup["members"][number]) =>
     !member.destroyed && (!agents.length || liveAgentIds.has(member.id));
@@ -390,8 +513,12 @@ export function GroupSettingsDialog({
       await update.mutateAsync({
         id: group.id,
         ...(dirty.name ? { name: values.name } : {}),
-        ...(org && dirty.participant_user_ids ? { participant_user_ids: values.participant_user_ids } : {}),
-        ...(org && dirty.lead_agent_id ? { lead_agent_id: values.lead_agent_id } : {}),
+        ...(org && dirty.participant_user_ids
+          ? { participant_user_ids: values.participant_user_ids }
+          : {}),
+        ...(org && dirty.lead_agent_id
+          ? { lead_agent_id: values.lead_agent_id }
+          : {}),
         ...(dirty.member_agent_ids || goneMembers
           ? { member_agent_ids: values.member_agent_ids }
           : {}),
@@ -399,7 +526,7 @@ export function GroupSettingsDialog({
       form.reset(values);
       onOpenChange(false);
     } catch (cause) {
-      setError(errorMessage(cause, "Could not save the group. Try again."));
+      setError(errorMessage(cause, t("Could not save the group. Try again.")));
     }
   }
 
@@ -407,7 +534,9 @@ export function GroupSettingsDialog({
     try {
       await update.mutateAsync({ id: group.id, leave: true });
       onDeleted();
-    } catch (cause) { setError(errorMessage(cause, "Could not leave the group.")); }
+    } catch (cause) {
+      setError(errorMessage(cause, t("Could not leave the group.")));
+    }
   }
 
   async function deleteGroup() {
@@ -417,7 +546,9 @@ export function GroupSettingsDialog({
       setConfirmDelete(false);
       onDeleted();
     } catch (cause) {
-      setError(errorMessage(cause, "Could not delete the group. Try again."));
+      setError(
+        errorMessage(cause, t("Could not delete the group. Try again.")),
+      );
     }
   }
 
@@ -431,29 +562,78 @@ export function GroupSettingsDialog({
       >
         <DialogContent scrollMode="body" className="md:max-w-md">
           <DialogHeader className="shrink-0 pr-6">
-            <DialogTitle>Group settings</DialogTitle>
-            <DialogDescription>{GROUP_ROUTING_COPY}</DialogDescription>
+            <DialogTitle>{t("Group settings")}</DialogTitle>
+            <DialogDescription>{t(GROUP_ROUTING_COPY)}</DialogDescription>
           </DialogHeader>
           <Form {...form}>
-            <form aria-label="Group settings" noValidate onSubmit={form.handleSubmit(save)}>
+            <form
+              aria-label={t("Group settings")}
+              noValidate
+              onSubmit={form.handleSubmit(save)}
+            >
               <DialogBody className="space-y-4 pb-1">
-                {org ? <p className="text-12 text-muted-foreground">{group.owner?.name} · {canManage ? "You can manage this group." : "Only the creator and participating Admins manage this group."}</p> : null}
+                {org ? (
+                  <p className="text-12 text-muted-foreground">
+                    {group.owner?.name} ·{" "}
+                    {canManage
+                      ? t("You can manage this group.")
+                      : t(
+                          "Only the creator and participating Admins manage this group.",
+                        )}
+                  </p>
+                ) : null}
                 <fieldset disabled={!canManage} className="space-y-4">
-                  <GroupFields form={form} rows={pickerRows(agents.filter((agent) => org ? agent.owner_id === org : true), group)} />
-                  {org ? <>
-                    <GroupParticipantPicker org={org} value={form.watch("participant_user_ids") ?? []} onChange={(ids) => form.setValue("participant_user_ids", ids)} />
-                    <div className="space-y-2">
-                      <label htmlFor="group-lead" className="text-12 font-medium">Lead agent</label>
-                      <Select value={form.watch("lead_agent_id")} onValueChange={(id) => form.setValue("lead_agent_id", id)}>
-                        <SelectTrigger id="group-lead"><SelectValue /></SelectTrigger>
-                        <SelectContent>{agents.filter((agent) => members.includes(agent.id)).map((agent) => <SelectItem key={agent.id} value={agent.id}>{agentTitle(agent)}</SelectItem>)}</SelectContent>
-                      </Select>
-                    </div>
-                  </> : null}
+                  <GroupFields
+                    form={form}
+                    rows={pickerRows(
+                      agents.filter((agent) =>
+                        org ? agent.owner_id === org : true,
+                      ),
+                      group,
+                    )}
+                  />
+                  {org ? (
+                    <>
+                      <GroupParticipantPicker
+                        org={org}
+                        value={form.watch("participant_user_ids") ?? []}
+                        onChange={(ids) =>
+                          form.setValue("participant_user_ids", ids)
+                        }
+                      />
+                      <div className="space-y-2">
+                        <label
+                          htmlFor="group-lead"
+                          className="text-12 font-medium"
+                        >
+                          {t("Lead agent")}
+                        </label>
+                        <Select
+                          value={form.watch("lead_agent_id")}
+                          onValueChange={(id) =>
+                            form.setValue("lead_agent_id", id)
+                          }
+                        >
+                          <SelectTrigger id="group-lead">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {agents
+                              .filter((agent) => members.includes(agent.id))
+                              .map((agent) => (
+                                <SelectItem key={agent.id} value={agent.id}>
+                                  {agentTitle(agent)}
+                                </SelectItem>
+                              ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </>
+                  ) : null}
                 </fieldset>
                 {error ? (
                   <p role="alert" className="text-12 text-destructive">
-                    {error}
+                    {translateUi(error)}
                   </p>
                 ) : null}
               </DialogBody>
@@ -464,51 +644,70 @@ export function GroupSettingsDialog({
                   disabled={busy}
                   onClick={() => onOpenChange(false)}
                 >
-                  Cancel
+                  {t("Cancel")}
                 </Button>
                 <Button
                   type="submit"
                   variant="primary"
                   isLoading={update.isPending}
                   disabled={
-                    !canManage || !(form.formState.isDirty || goneMembers) || !name.trim() || !members.length
+                    !canManage ||
+                    !(form.formState.isDirty || goneMembers) ||
+                    !name.trim() ||
+                    !members.length
                   }
                 >
-                  Save
+                  {t("Save")}
                 </Button>
               </DialogFooter>
             </form>
           </Form>
-          {org ? <div className="space-y-2">
-            <p className="text-12 text-muted-foreground">
-              The creator or a participating Admin must remain. Leaving as the last participant deletes the group.
-              Wait for your running turns to finish before leaving or being removed.
-            </p>
-            <Button type="button" variant="outline" disabled={busy} onClick={() => void leaveGroup()}>Leave group</Button>
-          </div> : null}
-          {canManage ? <section
-            aria-label="Danger zone"
-            className="mt-2 flex items-center justify-between gap-4 rounded-xl border border-destructive/40 p-4"
-          >
-            <div className="space-y-1">
-              <h3 className="text-13 font-semibold text-destructive">Delete group</h3>
-              <p className="text-12 text-destructive/70">
-                Removes the group and its messages. Your agents and their own threads stay.
+          {org ? (
+            <div className="space-y-2">
+              <p className="text-12 text-muted-foreground">
+                {t(
+                  "The creator or a participating Admin must remain. Leaving as the last participant deletes the group. Wait for your running turns to finish before leaving or being removed.",
+                )}
               </p>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy}
+                onClick={() => void leaveGroup()}
+              >
+                {t("Leave group")}
+              </Button>
             </div>
-            <Button
-              type="button"
-              size="sm"
-              variant="destructive"
-              disabled={busy}
-              onClick={() => {
-                setError(undefined);
-                setConfirmDelete(true);
-              }}
+          ) : null}
+          {canManage ? (
+            <section
+              aria-label={t("Danger zone")}
+              className="mt-2 flex items-center justify-between gap-4 rounded-xl border border-destructive/40 p-4"
             >
-              Delete
-            </Button>
-          </section> : null}
+              <div className="space-y-1">
+                <h3 className="text-13 font-semibold text-destructive">
+                  {t("Delete group")}
+                </h3>
+                <p className="text-12 text-destructive/70">
+                  {t(
+                    "Removes the group and its messages. Your agents and their own threads stay.",
+                  )}
+                </p>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                disabled={busy}
+                onClick={() => {
+                  setError(undefined);
+                  setConfirmDelete(true);
+                }}
+              >
+                {t("Delete")}{" "}
+              </Button>
+            </section>
+          ) : null}
         </DialogContent>
       </Dialog>
       <Dialog
@@ -519,14 +718,18 @@ export function GroupSettingsDialog({
       >
         <DialogContent className="md:max-w-md">
           <DialogHeader>
-            <DialogTitle>Delete {group.name}?</DialogTitle>
+            <DialogTitle>
+              {t("Delete")} {group.name}?
+            </DialogTitle>
             <DialogDescription>
-              The group and its messages are deleted. This cannot be undone.
+              {t(
+                "The group and its messages are deleted. This cannot be undone.",
+              )}
             </DialogDescription>
           </DialogHeader>
           {error ? (
             <p role="alert" className="text-12 text-destructive">
-              {error}
+              {translateUi(error)}
             </p>
           ) : null}
           <DialogFooter>
@@ -535,14 +738,14 @@ export function GroupSettingsDialog({
               disabled={remove.isPending}
               onClick={() => setConfirmDelete(false)}
             >
-              Cancel
+              {t("Cancel")}
             </Button>
             <Button
               variant="destructive"
               isLoading={remove.isPending}
               onClick={() => void deleteGroup()}
             >
-              Delete group
+              {t("Delete group")}
             </Button>
           </DialogFooter>
         </DialogContent>

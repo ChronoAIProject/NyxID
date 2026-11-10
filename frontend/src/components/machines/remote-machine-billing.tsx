@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -28,6 +31,7 @@ export function RemoteMachineBilling({
   readonly billingState?: string;
   readonly runId?: string;
 }) {
+  const { t } = useUiTranslation();
   const [offsets, setOffsets] = useState<number[]>([0]);
   const [selectedRunId, setSelectedRunId] = useState(runId);
   const [runCursors, setRunCursors] = useState<string[]>([]);
@@ -48,52 +52,31 @@ export function RemoteMachineBilling({
   return (
     <div className="space-y-6">
       <div className="space-y-2 text-12 text-muted-foreground">
-        <p>
-          Runtime billing uses the accepted continuous-run rate and cumulative
-          whole seconds. There is no per-instance cap. Paused storage is free.
-        </p>
-        <p>
-          Gateway services have their own charges. A free Machine never makes
-          downstream services free, and service costs are not added to these
-          runtime totals.
-        </p>
+        <p>{t("Runtime billing uses the accepted continuous-run rate and cumulative whole seconds. There is no per-instance cap. Paused storage is free.")}</p>
+        <p>{t("Gateway services have their own charges. A free Machine never makes downstream services free, and service costs are not added to these runtime totals.")}</p>
       </div>
       {billingState === "free" && (
-        <p className="rounded-lg border border-border/50 p-4 text-12 text-muted-foreground">
-          This resource currently reports free runtime billing. Paid historical
-          contracts, if any, are shown only when the server provides them.
-        </p>
+        <p className="rounded-lg border border-border/50 p-4 text-12 text-muted-foreground">{t("This resource currently reports free runtime billing. Paid historical contracts, if any, are shown only when the server provides them.")}</p>
       )}
-      <DetailSection title="Current and historical contracts">
+      <DetailSection title={t("Current and historical contracts")}>
         <div className="space-y-3 px-4 py-3">
           <Button
             variant={selectedRunId ? "outline" : "default"}
             onClick={() => selectRun(undefined)}
-          >
-            View current contract
-          </Button>
+          >{t("View current contract")}</Button>
           {selectedRunId && (
-            <p className="break-all text-12 text-muted-foreground">
-              Viewing historical run {selectedRunId}. Each run retains its
-              accepted rate version.
-            </p>
+            <p className="break-all text-12 text-muted-foreground">{t("Viewing historical run ")}{selectedRunId}{t(". Each run retains its accepted rate version.")}</p>
           )}
           {runs.isPending && (
-            <p role="status" className="text-12">
-              Loading historical contracts…
-            </p>
+            <p role="status" className="text-12">{t("Loading historical contracts…")}</p>
           )}
           {runs.error &&
             (runs.error instanceof ApiError &&
             [404, 405, 501].includes(runs.error.status) ? (
-              <p className="text-12 text-muted-foreground">
-                Historical contract lookup is unavailable on this server.
-                Current billing remains independently available when its
-                endpoint is enabled.
-              </p>
+              <p className="text-12 text-muted-foreground">{t("Historical contract lookup is unavailable on this server. Current billing remains independently available when its endpoint is enabled.")}</p>
             ) : (
               <ErrorBanner
-                message={`Historical contracts could not be loaded. ${runs.error.message}`}
+                message={t("Historical contracts could not be loaded. {{message}}", { message: translateErrorMessage(runs.error.message) })}
                 onRetry={() => void runs.refetch()}
               />
             ))}
@@ -105,151 +88,123 @@ export function RemoteMachineBilling({
               <div className="min-w-0 space-y-1 text-12">
                 <p className="break-all font-mono">{run.run_id}</p>
                 <p>
-                  {run.accepted_credits_per_second} Credits / second ·{" "}
+                  {run.accepted_credits_per_second}{t(" Credits / second ·")}{" "}
                   {run.state.replaceAll("_", " ")}
                 </p>
-                <p className="break-all text-muted-foreground">
-                  Rate {run.rate_version} · Created{" "}
-                  {new Date(run.created_at).toLocaleString()}
+                <p className="break-all text-muted-foreground">{t("Rate ")}{run.rate_version}{t(" · Created")}{" "}
+                  {new Date(run.created_at).toLocaleString(getFormattingLocale())}
                 </p>
               </div>
               <Button
-                aria-label={`View run ${run.run_id}`}
+                aria-label={t("View run {{run_id}}", { run_id: run.run_id })}
                 disabled={selectedRunId === run.run_id}
                 onClick={() => selectRun(run.run_id)}
-              >
-                View contract
-              </Button>
+              >{t("View contract")}</Button>
             </article>
           ))}
           {runs.data && !runs.data.runs.length && (
-            <p className="text-12 text-muted-foreground">
-              No runtime contracts in this page.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("No runtime contracts in this page.")}</p>
           )}
           <div className="flex justify-between gap-2">
             <Button
               disabled={!runCursors.length}
               onClick={() => setRunCursors((values) => values.slice(0, -1))}
-            >
-              Previous contracts
-            </Button>
+            >{t("Previous contracts")}</Button>
             <Button
               disabled={!runs.data?.next_cursor || runs.isFetching}
               onClick={() => {
                 const next = runs.data?.next_cursor;
                 if (next) setRunCursors((values) => [...values, next]);
               }}
-            >
-              Next contracts
-            </Button>
+            >{t("Next contracts")}</Button>
           </div>
         </div>
       </DetailSection>
       {query.isPending && (
-        <p role="status" className="text-12">
-          Loading runtime billing…
-        </p>
+        <p role="status" className="text-12">{t("Loading runtime billing…")}</p>
       )}
       {query.error && (
         <div role="status" className="space-y-3">
           {missing ? (
-            <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
-              Runtime billing details are unavailable on this server. Accepted
-              rates, exact settled/reserved amounts, pending liability, and
-              account-duration estimates cannot be shown yet.
-            </p>
+            <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">{t("Runtime billing details are unavailable on this server. Accepted rates, exact settled/reserved amounts, pending liability, and account-duration estimates cannot be shown yet.")}</p>
           ) : (
             <ErrorBanner
-              message={`Runtime billing could not be loaded. ${query.error.message}`}
+              message={t("Runtime billing could not be loaded. {{message}}", { message: translateErrorMessage(query.error.message) })}
               onRetry={() => void query.refetch()}
             />
           )}
-          <Button onClick={() => void query.refetch()}>
-            Check billing availability
-          </Button>
+          <Button onClick={() => void query.refetch()}>{t("Check billing availability")}</Button>
         </div>
       )}
       {data && (
         <>
-          <DetailSection title="Accepted runtime contract">
-            <DetailRow label="Run ID" value={data.run_id} mono copyable />
+          <DetailSection title={t("Accepted runtime contract")}>
+            <DetailRow label={t("Run ID")} value={data.run_id} mono copyable />
             <DetailRow
-              label="Contract state"
+              label={t("Contract state")}
               value={data.state.replaceAll("_", " ")}
               badge
             />
-            <DetailRow label="Rate version" value={data.rate_version} mono />
+            <DetailRow label={t("Rate version")} value={data.rate_version} mono />
             <DetailRow
-              label="Accepted rate"
+              label={t("Accepted rate")}
               value={`${data.accepted_credits_per_second} Credits / second`}
             />
             <DetailRow
-              label="Cumulative billed time"
+              label={t("Cumulative billed time")}
               value={`${data.cumulative_seconds} whole seconds`}
             />
             <DetailRow
-              label="Funded through"
-              value={new Date(data.covered_until).toLocaleString()}
+              label={t("Funded through")}
+              value={new Date(data.covered_until).toLocaleString(getFormattingLocale())}
             />
             <DetailRow
-              label="Settled"
+              label={t("Settled")}
               value={`${data.settled_credits} Credits`}
             />
             <DetailRow
-              label="Reserved"
+              label={t("Reserved")}
               value={`${data.reserved_credits} Credits`}
             />
             <DetailRow
-              label="Pending within reserved"
+              label={t("Pending within reserved")}
               value={`${data.pending_credits} Credits`}
             />
-            <p className="px-4 py-3 text-12 text-muted-foreground">
-              Pending liability is included in reserved Credits. It is not an
-              additional amount to sum. Unknown stop evidence can retain
-              responsibility until verified settlement; later funds do not
-              retroactively cover expired execution.
-            </p>
+            <p className="px-4 py-3 text-12 text-muted-foreground">{t("Pending liability is included in reserved Credits. It is not an additional amount to sum. Unknown stop evidence can retain responsibility until verified settlement; later funds do not retroactively cover expired execution.")}</p>
           </DetailSection>
-          <DetailSection title="Shared account funds and estimate">
+          <DetailSection title={t("Shared account funds and estimate")}>
             <DetailRow
-              label="Wallet available"
+              label={t("Wallet available")}
               value={`${data.funds.wallet_available} Credits`}
             />
             <DetailRow
-              label="Wallet reserved across account"
+              label={t("Wallet reserved across account")}
               value={`${data.funds.wallet_reserved} Credits`}
             />
             <DetailRow
-              label="Pending debits"
+              label={t("Pending debits")}
               value={`${data.funds.pending_debits} Credits`}
             />
             <DetailRow
-              label="Pending purchased-credit expiry"
+              label={t("Pending purchased-credit expiry")}
               value={`${data.funds.pending_expiry} Credits`}
             />
             <DetailRow
-              label="Matching allowance remaining"
+              label={t("Matching allowance remaining")}
               value={`${data.funds.matching_allowance_seconds} seconds`}
             />
             <DetailRow
-              label="Available matching grants"
+              label={t("Available matching grants")}
               value={`${data.funds.available_grants} Credits`}
             />
             <DetailRow
-              label="Current estimate"
+              label={t("Current estimate")}
               value={`${data.funds.estimated_seconds} seconds`}
             />
-            <p className="px-4 py-3 text-12 text-muted-foreground">
-              This is an account-wide estimate, not a reserved duration or
-              spending limit. Other Machines and services share these funds;
-              allowances and grants can expire. A finite reservation, live
-              eligibility, and provider checks still govern every execution
-              window.
-            </p>
+            <p className="px-4 py-3 text-12 text-muted-foreground">{t("This is an account-wide estimate, not a reserved duration or spending limit. Other Machines and services share these funds; allowances and grants can expire. A finite reservation, live eligibility, and provider checks still govern every execution window.")}</p>
           </DetailSection>
           <div className="space-y-3">
-            <h3 className="text-13 font-semibold">Runtime intervals</h3>
+            <h3 className="text-13 font-semibold">{t("Runtime intervals")}</h3>
             <div className="flex flex-col gap-3 md:hidden">
               {data.intervals.map((row) => (
                 <article
@@ -260,20 +215,16 @@ export function RemoteMachineBilling({
                     {row.interval_id}
                   </p>
                   <Badge variant={row.settled ? "success" : "warning"}>
-                    {row.settled ? "Settled" : "Reserved"}
+                    {row.settled ? t("Settled") : t("Reserved")}
                   </Badge>
-                  <p className="text-11 text-muted-foreground">
-                    Generation {row.runtime_generation} ·{" "}
+                  <p className="text-11 text-muted-foreground">{t("Generation ")}{row.runtime_generation} ·{" "}
                     {row.quantity === null
-                      ? "Awaiting evidence"
-                      : `${row.quantity} seconds`}
+                      ? t("Awaiting evidence")
+                      : t("{{quantity}} seconds", { quantity: row.quantity })}
                   </p>
                   <p className="text-11 text-muted-foreground">
-                    {row.settled ? row.settled_credits : row.reserved_credits}{" "}
-                    Credits
-                  </p>
-                  <p className="break-all text-11 text-text-tertiary">
-                    Rate {row.rate_version}
+                    {row.settled ? row.settled_credits : row.reserved_credits}{" "}{t("Credits")}</p>
+                  <p className="break-all text-11 text-text-tertiary">{t("Rate ")}{row.rate_version}
                   </p>
                 </article>
               ))}
@@ -282,10 +233,10 @@ export function RemoteMachineBilling({
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Interval</TableHead>
-                    <TableHead>Generation / seconds</TableHead>
-                    <TableHead>Funding</TableHead>
-                    <TableHead>Status</TableHead>
+                    <TableHead>{t("Interval")}</TableHead>
+                    <TableHead>{t("Generation / seconds")}</TableHead>
+                    <TableHead>{t("Funding")}</TableHead>
+                    <TableHead>{t("Status")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -296,30 +247,26 @@ export function RemoteMachineBilling({
                           {row.interval_id}
                         </span>
                         <span className="text-11 text-text-tertiary">
-                          {new Date(row.covered_from).toLocaleString()} –{" "}
-                          {new Date(row.covered_until).toLocaleString()}
+                          {new Date(row.covered_from).toLocaleString(getFormattingLocale())} –{" "}
+                          {new Date(row.covered_until).toLocaleString(getFormattingLocale())}
                         </span>
-                        <span className="block break-all text-11 text-text-tertiary">
-                          Rate {row.rate_version}
+                        <span className="block break-all text-11 text-text-tertiary">{t("Rate ")}{row.rate_version}
                         </span>
                       </TableCell>
                       <TableCell>
-                        {row.runtime_generation} / {row.quantity ?? "Pending"}
+                        {row.runtime_generation} / {row.quantity ?? t("Pending")}
                       </TableCell>
                       <TableCell>
                         {row.settled
                           ? row.settled_credits
-                          : row.reserved_credits}{" "}
-                        Credits
-                        <br />
-                        <span className="text-11 text-text-tertiary">
-                          Allowance {row.allowance_funded} · Grant{" "}
-                          {row.grant_funded} · Wallet {row.wallet_funded}
+                          : row.reserved_credits}{" "}{t("Credits")}<br />
+                        <span className="text-11 text-text-tertiary">{t("Allowance ")}{row.allowance_funded}{t(" · Grant")}{" "}
+                          {row.grant_funded}{t(" · Wallet ")}{row.wallet_funded}
                         </span>
                       </TableCell>
                       <TableCell>
                         <Badge variant={row.settled ? "success" : "warning"}>
-                          {row.settled ? "Settled" : "Reserved"}
+                          {row.settled ? t("Settled") : t("Reserved")}
                         </Badge>
                       </TableCell>
                     </TableRow>
@@ -328,17 +275,13 @@ export function RemoteMachineBilling({
               </Table>
             </div>
             {!data.intervals.length && (
-              <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
-                No runtime intervals in this page.
-              </p>
+              <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">{t("No runtime intervals in this page.")}</p>
             )}
             <div className="flex justify-between gap-2">
               <Button
                 disabled={offsets.length < 2}
                 onClick={() => setOffsets((values) => values.slice(0, -1))}
-              >
-                Previous intervals
-              </Button>
+              >{t("Previous intervals")}</Button>
               <Button
                 disabled={
                   data.next_interval_offset === null || query.isFetching
@@ -350,27 +293,17 @@ export function RemoteMachineBilling({
                       data.next_interval_offset!,
                     ]);
                 }}
-              >
-                Next intervals
-              </Button>
+              >{t("Next intervals")}</Button>
             </div>
           </div>
         </>
       )}
-      <DetailSection title="Recovery and separate service usage">
+      <DetailSection title={t("Recovery and separate service usage")}>
         <div className="space-y-3 px-4 py-3 text-12 text-muted-foreground">
-          <p>
-            Insufficient funds never triggers automatic top-up or resume. First
-            resolve any old pending responsibility, then manually review a new
-            quote and resume.
-          </p>
-          <p>
-            Load Machine-attributed gateway service rows separately below. Use
-            account Billing & Usage for service totals; those charges are not
-            copied into Machine runtime totals.
-          </p>
+          <p>{t("Insufficient funds never triggers automatic top-up or resume. First resolve any old pending responsibility, then manually review a new quote and resume.")}</p>
+          <p>{t("Load Machine-attributed gateway service rows separately below. Use account Billing & Usage for service totals; those charges are not copied into Machine runtime totals.")}</p>
           <Button asChild>
-            <Link to="/billing">Open Billing &amp; Usage</Link>
+            <Link to="/billing">{t("Open Billing & Usage")}</Link>
           </Button>
         </div>
       </DetailSection>

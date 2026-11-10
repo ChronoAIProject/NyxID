@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import type { ReactNode } from "react";
 // Direct file import (not the barrel) so the CLI-embedded wizard bundle,
 // which renders this via `wizard-entry.tsx`, pulls in only this one icon
@@ -18,8 +20,8 @@ import { RoadBarrierIcon } from "@/components/icons/empty-state/road-barrier";
  */
 export function NotFoundPage({
   code = "404",
-  title = "Page not found",
-  description = "The page you're looking for doesn't exist or may have moved.",
+  title: titleLocaleDefault,
+  description: descriptionLocaleDefault,
   action,
 }: {
   readonly code?: string;
@@ -27,6 +29,9 @@ export function NotFoundPage({
   readonly description?: ReactNode;
   readonly action?: ReactNode;
 }) {
+  useUiTranslation();
+  const title = titleLocaleDefault === undefined ? translateUi("Page not found") : titleLocaleDefault;
+  const description = descriptionLocaleDefault === undefined ? translateUi("The page you're looking for doesn't exist or may have moved.") : descriptionLocaleDefault;
   return (
     <div className="flex min-h-[60vh] w-full flex-col items-center justify-center gap-1 px-6 py-12 text-center">
       <RoadBarrierIcon className="h-48 w-48 text-muted-foreground/30" />

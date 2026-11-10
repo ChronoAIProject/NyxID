@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { Link } from "@tanstack/react-router";
 import { ArrowUpRight, Copy } from "lucide-react";
 import { toast } from "sonner";
@@ -6,12 +8,13 @@ import { copyToClipboard } from "@/lib/utils";
 import { PLUGIN_COMMANDS } from "@/lib/agent-plugins";
 
 export function AgentPluginsSection() {
+  const { t } = useUiTranslation();
   async function copyCommand(name: string, command: string) {
     try {
       await copyToClipboard(command);
-      toast.success(`${name} install command copied`);
+      toast.success(translateUi("{{name}} install command copied", { name: name }));
     } catch {
-      toast.error("Failed to copy install command");
+      toast.error(translateUi("Failed to copy install command"));
     }
   }
 
@@ -21,15 +24,12 @@ export function AgentPluginsSection() {
         <h2
           id="agent-plugins-heading"
           className="text-15 font-semibold text-foreground"
-        >
-          Agent plugins
-        </h2>
+        >{t("Agent plugins")}</h2>
         <Link
           to="/settings"
           search={{ tab: "mcp" }}
           className="text-11 text-text-tertiary hover:text-foreground"
-        >
-          MCP setup{" "}
+        >{t("MCP setup")}{" "}
           <ArrowUpRight className="inline h-3 w-3" aria-hidden="true" />
         </Link>
       </div>
@@ -43,11 +43,9 @@ export function AgentPluginsSection() {
                 size="sm"
                 type="button"
                 onClick={() => void copyCommand(name, command)}
-                aria-label={`Copy ${name} plugin install command`}
+                aria-label={t("Copy {{name}} plugin install command", { name: name })}
               >
-                <Copy className="h-3 w-3" aria-hidden="true" />
-                Copy command
-              </Button>
+                <Copy className="h-3 w-3" aria-hidden="true" />{t("Copy command")}</Button>
             </div>
             <pre className="whitespace-pre-wrap break-all font-mono text-11 leading-5 text-muted-foreground">
               {command}

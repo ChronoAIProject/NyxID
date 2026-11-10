@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState, type ComponentType, type ReactNode } from "react";
 import type { UseFormReturn } from "react-hook-form";
 import { useManagedOnboarding } from "@/hooks/use-channel-managed";
@@ -45,6 +46,7 @@ function ManagedBotConnect({
   preferManual = false,
   fullPage = false,
 }: ChannelBotConnectProps) {
+  const { t } = useUiTranslation();
   const { getPlatform } = useChannelPlatformViews();
   const descriptor = getPlatform(platform);
   const managed = useManagedOnboarding(
@@ -62,10 +64,10 @@ function ManagedBotConnect({
       {descriptor.managedOnly && !available && (
         <p role="status" className="text-xs text-muted-foreground">
           {managed.isLoading
-            ? "Loading account connection..."
+            ? t("Loading account connection...")
             : managed.isError
-              ? "Unable to load account connection settings. Retry shortly."
-              : `Not available until an admin configures ${descriptor.label}.`}
+              ? t("Unable to load account connection settings. Retry shortly.")
+              : t("Not available until an admin configures {{label}}.", { label: descriptor.label })}
         </p>
       )}
       {available && managed.data && Connect && (

@@ -1,3 +1,4 @@
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { useState, useCallback, useEffect } from "react";
 import { Link } from "@tanstack/react-router";
 import { useAuthStore } from "@/stores/auth-store";
@@ -40,6 +41,7 @@ const ONBOARDING_DISMISSED_KEY = "nyxid:onboarding-dismissed";
 const MOBILE_APP_LINK = "https://nyxid.onelink.me/REzJ/dql9w8fx";
 
 export function DashboardPage() {
+  const { t } = useAppTranslation();
   const user = useAuthStore((s) => s.user);
   const { data: apiKeys, isLoading: keysLoading } = useApiKeys();
   const { data: services, isLoading: servicesLoading } = useKeys();
@@ -73,8 +75,7 @@ export function DashboardPage() {
   // successful first proxy call. Once both are true, the checklist is
   // 3/3 complete and can be hidden / demoted.
   const checklistVisible =
-    !onboardingDismissed &&
-    (activeKeys === 0 || !firstProxyCallSucceeded);
+    !onboardingDismissed && (activeKeys === 0 || !firstProxyCallSucceeded);
   // While the checklist is visible AND any step is still incomplete, demote
   // the sibling cards' primary CTAs so the activation CTA stays visually
   // dominant (item 13a).
@@ -85,7 +86,9 @@ export function DashboardPage() {
   useEffect(() => {
     setRightPanel(
       <>
-        {!aiDismissed && <AiSetupCard onDismiss={dismissAi} demotePrimary={siblingDemote} />}
+        {!aiDismissed && (
+          <AiSetupCard onDismiss={dismissAi} demotePrimary={siblingDemote} />
+        )}
         <RightPanelContent demotePrimary={siblingDemote} />
       </>,
     );
@@ -129,7 +132,9 @@ export function DashboardPage() {
           className="text-22 sm:text-28 font-bold leading-[1.1]"
           style={{ letterSpacing: "-0.03em" }}
         >
-          Welcome back, {user?.display_name ?? "there"}
+          {t("Welcome back, {{name}}", {
+            name: user?.display_name ?? t("there"),
+          })}
         </h1>
         <p className="text-12 text-muted-foreground mt-1">
           {user?.email ?? ""}
@@ -149,8 +154,8 @@ export function DashboardPage() {
               )
             }
             iconColor={emailVerified ? "text-success" : "text-destructive"}
-            label="Email"
-            value={emailVerified ? "Verified" : "Unverified"}
+            label={t("Email")}
+            value={emailVerified ? t("Verified") : t("Unverified")}
             loading={false}
             href="/settings"
           />
@@ -163,24 +168,32 @@ export function DashboardPage() {
               )
             }
             iconColor={mfaEnabled ? "text-success" : "text-destructive"}
-            label="MFA"
-            value={mfaEnabled ? "Enabled" : "Disabled"}
+            label={t("MFA")}
+            value={mfaEnabled ? t("Enabled") : t("Disabled")}
             loading={false}
             href="/settings?tab=security"
           />
           <StatusCell
             icon={<Server className="h-4 w-4" />}
             iconColor="text-muted-foreground"
-            label="Services"
-            value={serviceCount > 0 ? `${String(serviceCount)} connected` : "No services"}
+            label={t("Services")}
+            value={
+              serviceCount > 0
+                ? t("{{count}} connected", { count: serviceCount })
+                : t("No services")
+            }
             loading={servicesLoading}
             href="/keys"
           />
           <StatusCell
             icon={<KeyRound className="h-4 w-4" />}
             iconColor="text-muted-foreground"
-            label="API Keys"
-            value={activeKeys > 0 ? `${String(activeKeys)} active` : "No keys"}
+            label={t("API Keys")}
+            value={
+              activeKeys > 0
+                ? t("{{count}} active", { count: activeKeys })
+                : t("No keys")
+            }
             loading={keysLoading}
             href="/keys?tab=nyxid"
           />
@@ -192,12 +205,17 @@ export function DashboardPage() {
                 <WifiOff className="h-4 w-4" />
               )
             }
-            iconColor={onlineNodes > 0 ? "text-success" : "text-muted-foreground"}
-            label="Nodes"
+            iconColor={
+              onlineNodes > 0 ? "text-success" : "text-muted-foreground"
+            }
+            label={t("Nodes")}
             value={
               totalNodes > 0
-                ? `${String(onlineNodes)}/${String(totalNodes)} online`
-                : "No nodes"
+                ? t("{{online}}/{{total}} online", {
+                    online: onlineNodes,
+                    total: totalNodes,
+                  })
+                : t("No nodes")
             }
             loading={nodesLoading}
             href="/nodes"
@@ -205,8 +223,8 @@ export function DashboardPage() {
           <StatusCell
             icon={<Shield className="h-4 w-4" />}
             iconColor="text-muted-foreground"
-            label="Approvals"
-            value="Configure"
+            label={t("Approvals")}
+            value={t("Configure")}
             loading={false}
             href="/approvals/settings"
           />
@@ -225,37 +243,37 @@ export function DashboardPage() {
       {/* Shortcuts */}
       <div>
         <h2 className="text-15 font-semibold text-foreground mb-3">
-          Shortcuts
+          {t("Shortcuts")}
         </h2>
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
           <QuickActionCard
             icon={<Server className="h-4 w-4" />}
-            title="Services"
-            desc="Connect an API"
+            title={t("Services")}
+            desc={t("Connect an API")}
             href="/keys?action=add-service"
           />
           <QuickActionCard
             icon={<KeyRound className="h-4 w-4" />}
-            title="API Keys"
-            desc="Create a scoped key"
+            title={t("API Keys")}
+            desc={t("Create a scoped key")}
             href="/keys?tab=nyxid&action=create-key"
           />
           <QuickActionCard
             icon={<Wifi className="h-4 w-4" />}
-            title="Nodes"
-            desc="Register a node"
+            title={t("Nodes")}
+            desc={t("Register a node")}
             href="/nodes"
           />
           <QuickActionCard
             icon={<Building2 className="h-4 w-4" />}
-            title="Organizations"
-            desc="Manage your orgs"
+            title={t("Organizations")}
+            desc={t("Manage your orgs")}
             href="/orgs"
           />
           <QuickActionCard
             icon={<Radio className="h-4 w-4" />}
-            title="Channel Bots"
-            desc="Set up a bot"
+            title={t("Channel Bots")}
+            desc={t("Set up a bot")}
             href="/channel-bots"
           />
         </div>
@@ -265,16 +283,18 @@ export function DashboardPage() {
 
       {/* Right panel content — inline on mobile/tablet, hidden on lg+ (shown in sidebar) */}
       <div className="flex flex-col gap-4 lg:hidden">
-        {!aiDismissed && <AiSetupCard onDismiss={dismissAi} demotePrimary={siblingDemote} />}
+        {!aiDismissed && (
+          <AiSetupCard onDismiss={dismissAi} demotePrimary={siblingDemote} />
+        )}
         <ApprovalsCard demotePrimary={siblingDemote} />
         <div className="rounded-xl border border-border/50 bg-card p-4 flex flex-col gap-2.5">
           <p className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-            Quick Links
+            {t("Quick Links")}
           </p>
           <div className="flex flex-col gap-1.5">
-            <QuickLink to="/docs" label="Documentation" />
-            <QuickLink to="/ai-setup" label="AI Setup Guide" />
-            <QuickLink to="/integration-guide" label="Integration Guide" />
+            <QuickLink to="/docs" label={t("Documentation")} />
+            <QuickLink to="/ai-setup" label={t("AI Setup Guide")} />
+            <QuickLink to="/integration-guide" label={t("Integration Guide")} />
           </div>
         </div>
       </div>
@@ -299,30 +319,31 @@ function OnboardingChecklist({
   readonly verifyKeyLoading: boolean;
   readonly onDismiss: () => void;
 }) {
+  const { t } = useAppTranslation();
   const steps = [
     {
       done: serviceConnected,
-      title: "Connect a Service",
-      description: "Add an API service to proxy through NyxID.",
+      title: t("Connect a Service"),
+      description: t("Add an API service to proxy through NyxID."),
       icon: <Cable className="h-4 w-4" />,
       href: "/keys?action=add-service",
-      cta: "Add service",
+      cta: t("Add service"),
     },
     {
       done: activeKeys > 0,
-      title: "Create an Agent Key",
-      description: "Generate a scoped key for your AI agent.",
+      title: t("Create an Agent Key"),
+      description: t("Generate a scoped key for your AI agent."),
       icon: <KeyRound className="h-4 w-4" />,
       href: "/keys?tab=nyxid&action=create-key",
-      cta: "Create Key",
+      cta: t("Create Key"),
     },
     {
       done: firstProxyCallSucceeded,
-      title: "Make first proxy call",
-      description: "Use your agent key to route a request through NyxID.",
+      title: t("Make first proxy call"),
+      description: t("Use your agent key to route a request through NyxID."),
       icon: <Wifi className="h-4 w-4" />,
       href: "/keys",
-      cta: "Make a call",
+      cta: t("Make a call"),
     },
   ];
 
@@ -336,17 +357,20 @@ function OnboardingChecklist({
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-15 font-semibold text-foreground">
-            Getting started
+            {t("Getting started")}
           </h2>
           <p className="text-11 text-muted-foreground mt-0.5">
-            {steps.filter((s) => s.done).length} of {steps.length} complete
+            {t("{{completed}} of {{total}} complete", {
+              completed: steps.filter((s) => s.done).length,
+              total: steps.length,
+            })}
           </p>
         </div>
         <button
           type="button"
           onClick={onDismiss}
           className="flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary/40 hover:text-foreground transition-colors"
-          aria-label="Dismiss"
+          aria-label={t("Dismiss")}
         >
           <X className="h-3.5 w-3.5" />
         </button>
@@ -368,7 +392,14 @@ function OnboardingChecklist({
                 {i > 0 && (
                   <div className="flex">
                     <div className="flex w-[36px] shrink-0 justify-center py-0">
-                      <div className={cn("w-[2px] h-10 -my-3.5", steps[i - 1]?.done ? "bg-nyx-secondary-400/60" : "bg-border/40")} />
+                      <div
+                        className={cn(
+                          "w-[2px] h-10 -my-3.5",
+                          steps[i - 1]?.done
+                            ? "bg-nyx-secondary-400/60"
+                            : "bg-border/40",
+                        )}
+                      />
                     </div>
                   </div>
                 )}
@@ -395,16 +426,28 @@ function OnboardingChecklist({
                           : "border-border/50 bg-card group-active:bg-overlay",
                       )}
                     >
-                      <p className={cn("text-13 font-semibold", step.done ? "text-foreground/50" : "text-foreground")}>
+                      <p
+                        className={cn(
+                          "text-13 font-semibold",
+                          step.done ? "text-foreground/50" : "text-foreground",
+                        )}
+                      >
                         {step.title}
                       </p>
-                      <p className={cn("text-11 mt-0.5 leading-relaxed", step.done ? "text-muted-foreground/50" : "text-muted-foreground")}>
+                      <p
+                        className={cn(
+                          "text-11 mt-0.5 leading-relaxed",
+                          step.done
+                            ? "text-muted-foreground/50"
+                            : "text-muted-foreground",
+                        )}
+                      >
                         {step.description}
                       </p>
                       {step.done ? (
                         <span className="mt-2 inline-flex items-center gap-1.5 text-12 font-medium text-success/70">
                           <Check className="h-3.5 w-3.5" />
-                          Completed
+                          {t("Completed")}
                         </span>
                       ) : (
                         <Button
@@ -443,13 +486,27 @@ function OnboardingChecklist({
           {/* ── Desktop: horizontal cards ── */}
           <div className="relative hidden md:block">
             <div className="absolute top-[19px] left-[calc(16.67%+27px)] right-[calc(16.67%+27px)] flex items-center gap-[54px] z-0">
-              <div className={cn("h-[2px] flex-1", steps[0]?.done ? "bg-nyx-secondary-400/60" : "bg-border/40")} />
-              <div className={cn("h-[2px] flex-1", steps[1]?.done ? "bg-nyx-secondary-400/60" : "bg-border/40")} />
+              <div
+                className={cn(
+                  "h-[2px] flex-1",
+                  steps[0]?.done ? "bg-nyx-secondary-400/60" : "bg-border/40",
+                )}
+              />
+              <div
+                className={cn(
+                  "h-[2px] flex-1",
+                  steps[1]?.done ? "bg-nyx-secondary-400/60" : "bg-border/40",
+                )}
+              />
             </div>
 
             <div className="relative z-10 grid grid-cols-3 gap-4">
               {steps.map((step, i) => (
-                <Link key={i} to={step.href} className="group flex flex-col items-center">
+                <Link
+                  key={i}
+                  to={step.href}
+                  className="group flex flex-col items-center"
+                >
                   <div
                     className={cn(
                       "flex h-[38px] w-[38px] items-center justify-center rounded-lg border transition-all duration-200",
@@ -468,14 +525,28 @@ function OnboardingChecklist({
                         : "border-border/50 bg-card group-hover:border-hairline-strong group-hover:bg-overlay",
                     )}
                   >
-                    <p className={cn("text-13 font-semibold", step.done ? "text-foreground/50" : "text-foreground")}>
+                    <p
+                      className={cn(
+                        "text-13 font-semibold",
+                        step.done ? "text-foreground/50" : "text-foreground",
+                      )}
+                    >
                       {step.title}
                     </p>
-                    <p className={cn("text-11 mt-1 leading-relaxed", step.done ? "text-muted-foreground/50" : "text-muted-foreground")}>{step.description}</p>
+                    <p
+                      className={cn(
+                        "text-11 mt-1 leading-relaxed",
+                        step.done
+                          ? "text-muted-foreground/50"
+                          : "text-muted-foreground",
+                      )}
+                    >
+                      {step.description}
+                    </p>
                     {step.done ? (
                       <span className="mt-3 inline-flex items-center gap-1.5 text-12 font-medium text-success/70">
                         <Check className="h-3.5 w-3.5" />
-                        Completed
+                        {t("Completed")}
                       </span>
                     ) : (
                       <Button
@@ -576,31 +647,32 @@ function AccountPostureCard({
   readonly activeKeys: number;
   readonly loading: boolean;
 }) {
+  const { t } = useAppTranslation();
   const items = [
     {
       done: emailVerified,
-      label: "Email verified",
+      label: t("Email verified"),
       icon: <Mail className="h-3.5 w-3.5" />,
       href: "/settings",
       cta: "Verify",
     },
     {
       done: mfaEnabled,
-      label: "MFA enabled",
+      label: t("MFA enabled"),
       icon: <Shield className="h-3.5 w-3.5" />,
       href: "/settings?tab=security",
       cta: "Enable",
     },
     {
       done: serviceCount > 0,
-      label: "Service connected",
+      label: t("Service connected"),
       icon: <Server className="h-3.5 w-3.5" />,
       href: serviceCount > 0 ? "/keys" : "/keys?action=add-service",
       cta: "Connect",
     },
     {
       done: activeKeys > 0,
-      label: "API key created",
+      label: t("API key created"),
       icon: <KeyRound className="h-3.5 w-3.5" />,
       href:
         activeKeys > 0
@@ -614,9 +686,9 @@ function AccountPostureCard({
 
   const statusLabel =
     score === 100
-      ? "Fully Secured"
+      ? t("Fully Secured")
       : score >= 50
-        ? "Needs Attention"
+        ? t("Needs Attention")
         : "At Risk";
   const statusColor =
     score === 100
@@ -636,7 +708,7 @@ function AccountPostureCard({
         </div>
         <div>
           <p className="text-13 font-semibold text-foreground">
-            Security Posture
+            {t("Security Posture")}
           </p>
           <p className={cn("text-11 font-medium", statusColor)}>
             {statusLabel}
@@ -693,11 +765,12 @@ function AccountPostureCard({
       <div className="border-t border-border/50 px-4 py-2.5">
         <div className="flex items-center justify-between mb-2">
           <span className="text-11 text-text-tertiary">
-            {doneCount} of {items.length}
+            {t("{{count}} of {{total}}", {
+              count: doneCount,
+              total: items.length,
+            })}
           </span>
-          <span className="text-11 font-medium text-foreground">
-            {score}%
-          </span>
+          <span className="text-11 font-medium text-foreground">{score}%</span>
         </div>
         <div className="h-1.5 w-full rounded-full bg-overlay-strong overflow-hidden">
           <div
@@ -711,7 +784,8 @@ function AccountPostureCard({
             className="mt-3 group flex items-center justify-between rounded-md -mx-1 px-1 py-1 text-11 transition-colors duration-200 hover:bg-overlay"
           >
             <span className="text-muted-foreground">
-              Next: <span className="text-foreground">{nextStep.label}</span>
+              {t("Next:")}{" "}
+              <span className="text-foreground">{nextStep.label}</span>
             </span>
             <ArrowRight className="h-3 w-3 text-nyx-secondary-400 transition-transform duration-200 group-hover:translate-x-0.5" />
           </Link>
@@ -757,17 +831,18 @@ function RightPanelContent({
 }: {
   readonly demotePrimary?: boolean;
 }) {
+  const { t } = useAppTranslation();
   return (
     <>
       <ApprovalsCard demotePrimary={demotePrimary} />
       <div className="rounded-xl border border-border/50 bg-card p-4 flex flex-col gap-2.5">
         <p className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-          Quick Links
+          {t("Quick Links")}
         </p>
         <div className="flex flex-col gap-1.5">
-          <QuickLink to="/docs" label="Documentation" />
-          <QuickLink to="/ai-setup" label="AI Setup Guide" />
-          <QuickLink to="/integration-guide" label="Integration Guide" />
+          <QuickLink to="/docs" label={t("Documentation")} />
+          <QuickLink to="/ai-setup" label={t("AI Setup Guide")} />
+          <QuickLink to="/integration-guide" label={t("Integration Guide")} />
         </div>
       </div>
     </>
@@ -781,20 +856,22 @@ function AiSetupCard({
   readonly onDismiss: () => void;
   readonly demotePrimary?: boolean;
 }) {
+  const { t } = useAppTranslation();
   return (
     <div className="group relative overflow-hidden rounded-xl border border-nyx-500/20 transition-[border-color] duration-300 hover:border-nyx-500/40 dark:border-nyx-500/30 dark:hover:border-nyx-500/50">
       <div className="absolute inset-0 bg-gradient-to-b from-nyx-500/[0.04] via-nyx-500/[0.02] to-transparent dark:from-nyx-500/15 dark:via-nyx-500/5 dark:to-transparent" />
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[200%] h-[120px] bg-[radial-gradient(ellipse_at_50%_0%,rgba(90,42,241,0.07)_0%,transparent_70%)] dark:bg-[radial-gradient(ellipse_at_50%_0%,rgba(90,42,241,0.25)_0%,transparent_70%)]" />
       <div className="relative flex flex-col gap-3 p-4">
         <span className="inline-flex w-fit items-center rounded-md bg-nyx-100 px-2 py-0.5 text-10 font-semibold text-nyx-700 dark:bg-nyx-500/20 dark:text-nyx-secondary-400">
-          NEW
+          {t("NEW")}
         </span>
         <h3 className="text-15 font-bold text-foreground leading-snug">
-          Give your AI agents superpowers
+          {t("Give your AI agents superpowers")}
         </h3>
         <p className="text-12 text-muted-foreground leading-relaxed">
-          Install NyxID skills in Claude Code, Cursor, or Codex to unlock
-          secure credential brokering.
+          {t(
+            "Install NyxID skills in Claude Code, Cursor, or Codex to unlock secure credential brokering.",
+          )}
         </p>
         <Button
           variant={demotePrimary ? "outline" : "primary"}
@@ -805,14 +882,14 @@ function AiSetupCard({
             <ButtonIcon variant={demotePrimary ? "default" : "primary"}>
               <ArrowRight className="h-3 w-3" />
             </ButtonIcon>
-            Set up
+            {t("Set up")}
           </Link>
         </Button>
         <button
           type="button"
           onClick={onDismiss}
           className="absolute right-3 top-3 flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary/60 hover:text-foreground transition-colors duration-300"
-          aria-label="Dismiss"
+          aria-label={t("Dismiss")}
         >
           <X className="h-3 w-3" />
         </button>
@@ -844,27 +921,24 @@ function ApprovalsCard({
 }: {
   readonly demotePrimary?: boolean;
 }) {
+  const { t } = useAppTranslation();
   return (
     <div className="rounded-xl border border-border/50 bg-card p-4 flex flex-col gap-3">
       <p className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-        Approvals
+        {t("Approvals")}
       </p>
       <p className="text-12 text-muted-foreground leading-relaxed">
-        Approve AI agent access via Telegram or the NyxID mobile app.
+        {t("Approve AI agent access via Telegram or the NyxID mobile app.")}
       </p>
       <div className="flex flex-col gap-2">
         <Button asChild>
           <Link to="/approvals/settings">
             <ButtonIcon>
-              <svg
-                className="h-3 w-3"
-                viewBox="0 0 24 24"
-                fill="currentColor"
-              >
+              <svg className="h-3 w-3" viewBox="0 0 24 24" fill="currentColor">
                 <path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" />
               </svg>
             </ButtonIcon>
-            Connect Telegram
+            {t("Connect Telegram")}
           </Link>
         </Button>
         <Button variant={demotePrimary ? "outline" : "primary"} asChild>
@@ -872,7 +946,7 @@ function ApprovalsCard({
             <ButtonIcon variant={demotePrimary ? "default" : "primary"}>
               <Smartphone className="h-3 w-3" />
             </ButtonIcon>
-            Get App
+            {t("Get App")}
           </a>
         </Button>
       </div>

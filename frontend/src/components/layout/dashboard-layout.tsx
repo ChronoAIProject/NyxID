@@ -1,6 +1,28 @@
-import { Suspense, useState, useEffect, useCallback, useMemo, createContext, useContext } from "react";
-import { Outlet, Link, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Sidebar, AssistantNavEntry, APPROVALS_NAV, DEVELOPER_NAV, getVisibleAdminNav, getVisibleMainNav, isNavActive } from "@/components/dashboard/sidebar";
+import { useAppTranslation } from "@/i18n/use-app-translation";
+import {
+  Suspense,
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  createContext,
+  useContext,
+} from "react";
+import {
+  Outlet,
+  Link,
+  useNavigate,
+  useRouterState,
+} from "@tanstack/react-router";
+import {
+  Sidebar,
+  AssistantNavEntry,
+  APPROVALS_NAV,
+  DEVELOPER_NAV,
+  getVisibleAdminNav,
+  getVisibleMainNav,
+  isNavActive,
+} from "@/components/dashboard/sidebar";
 import {
   CommandPalette,
   ALL_ITEMS as SEARCH_ITEMS,
@@ -26,7 +48,16 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ChevronLeft, LogOut, Menu, Search, Settings, User, Github, X } from "lucide-react";
+import {
+  ChevronLeft,
+  LogOut,
+  Menu,
+  Search,
+  Settings,
+  User,
+  Github,
+  X,
+} from "lucide-react";
 
 type RightPanelContextType = {
   setRightPanel: (node: React.ReactNode) => void;
@@ -47,28 +78,42 @@ export function DashboardLayout() {
   // reach flag-gated UI like the sidebar without a hard reload.
   const userQuery = useUser();
   const [commandOpen, setCommandOpen] = useState(false);
-  const [mobileNavState, setMobileNavState] = useState<"closed" | "open" | "closing">("closed");
+  const [mobileNavState, setMobileNavState] = useState<
+    "closed" | "open" | "closing"
+  >("closed");
   const [rightPanel, setRightPanel] = useState<React.ReactNode>(null);
-  const [breadcrumbLabels, setBreadcrumbLabels] = useState<Record<string, string>>({});
-  const [breadcrumbSections, setBreadcrumbSections] = useState<Record<string, string>>({});
-  const setBreadcrumbSection = useCallback((path: string, section: string | null) => {
-    setBreadcrumbSections((current) => {
-      if (current[path] === section || (!section && !(path in current))) return current;
-      const next = { ...current };
-      if (section) next[path] = section;
-      else delete next[path];
-      return next;
-    });
-  }, []);
-  const setBreadcrumbLabel = useCallback((path: string, label: string | null) => {
-    setBreadcrumbLabels((current) => {
-      if (current[path] === label || (!label && !(path in current))) return current;
-      const next = { ...current };
-      if (label) next[path] = label;
-      else delete next[path];
-      return next;
-    });
-  }, []);
+  const [breadcrumbLabels, setBreadcrumbLabels] = useState<
+    Record<string, string>
+  >({});
+  const [breadcrumbSections, setBreadcrumbSections] = useState<
+    Record<string, string>
+  >({});
+  const setBreadcrumbSection = useCallback(
+    (path: string, section: string | null) => {
+      setBreadcrumbSections((current) => {
+        if (current[path] === section || (!section && !(path in current)))
+          return current;
+        const next = { ...current };
+        if (section) next[path] = section;
+        else delete next[path];
+        return next;
+      });
+    },
+    [],
+  );
+  const setBreadcrumbLabel = useCallback(
+    (path: string, label: string | null) => {
+      setBreadcrumbLabels((current) => {
+        if (current[path] === label || (!label && !(path in current)))
+          return current;
+        const next = { ...current };
+        if (label) next[path] = label;
+        else delete next[path];
+        return next;
+      });
+    },
+    [],
+  );
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
   // Applies the resolved theme class to <html> on mount, reverts to dark on
@@ -96,64 +141,81 @@ export function DashboardLayout() {
   // flash the wrong thing.
   const onboarding = useShouldShowOnboarding();
   // Shared channel onboarding must stay reachable through setup and bot routing.
-  const isChannelBotRoute = pathname === "/channel-bots" || pathname.startsWith("/channel-bots/") || pathname === "/onboarding/setups" || pathname.startsWith("/onboarding/setups/");
+  const isChannelBotRoute =
+    pathname === "/channel-bots" ||
+    pathname.startsWith("/channel-bots/") ||
+    pathname === "/onboarding/setups" ||
+    pathname.startsWith("/onboarding/setups/");
   if (onboarding.status === "loading") return null;
-  if (onboarding.status === "show" && !isChannelBotRoute && !(import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1")) return <OnboardingTakeover />;
+  if (
+    onboarding.status === "show" &&
+    !isChannelBotRoute &&
+    !(import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1")
+  )
+    return <OnboardingTakeover />;
 
   return (
     <RightPanelContext.Provider value={{ setRightPanel }}>
-    <BreadcrumbLabelContext.Provider value={{ pathname, labels: breadcrumbLabels, setLabel: setBreadcrumbLabel, sections: breadcrumbSections, setSection: setBreadcrumbSection }}>
-      <div
-        className="flex flex-col h-dvh overflow-hidden bg-background"
-        style={{
-          paddingTop: "var(--sat)",
-          paddingLeft: "var(--sal)",
-          paddingRight: "var(--sar)",
+      <BreadcrumbLabelContext.Provider
+        value={{
+          pathname,
+          labels: breadcrumbLabels,
+          setLabel: setBreadcrumbLabel,
+          sections: breadcrumbSections,
+          setSection: setBreadcrumbSection,
         }}
       >
-        <AmbientStatusLine />
+        <div
+          className="flex flex-col h-dvh overflow-hidden bg-background"
+          style={{
+            paddingTop: "var(--sat)",
+            paddingLeft: "var(--sal)",
+            paddingRight: "var(--sar)",
+          }}
+        >
+          <AmbientStatusLine />
 
-        <TopBar
-          onSearch={() => setCommandOpen(true)}
-          onMobileMenu={() => setMobileNavState("open")}
-        />
+          <TopBar
+            onSearch={() => setCommandOpen(true)}
+            onMobileMenu={() => setMobileNavState("open")}
+          />
 
-        <div className="flex flex-1 min-h-0 overflow-hidden">
-          <div className="hidden md:flex shrink-0">
-            <Sidebar />
+          <div className="flex flex-1 min-h-0 overflow-hidden">
+            <div className="hidden md:flex shrink-0">
+              <Sidebar />
+            </div>
+
+            <main
+              className="relative flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain px-4 pt-4 sm:px-6 sm:pt-6 md:px-8 lg:px-10"
+              style={{ paddingBottom: "max(2rem, var(--sab))" }}
+            >
+              <div className="w-full">
+                <Suspense>
+                  <Outlet />
+                </Suspense>
+              </div>
+            </main>
+
+            {rightPanel && (
+              <aside className="hidden lg:flex shrink-0 w-[280px] flex-col overflow-y-auto px-3 pt-6 pb-6">
+                <div className="flex flex-col gap-3">{rightPanel}</div>
+              </aside>
+            )}
           </div>
 
-          <main
-            className="relative flex-1 min-w-0 overflow-x-hidden overflow-y-auto overscroll-contain px-4 pt-4 sm:px-6 sm:pt-6 md:px-8 lg:px-10"
-            style={{ paddingBottom: "max(2rem, var(--sab))" }}
-          >
-            <div className="w-full">
-              <Suspense>
-                <Outlet />
-              </Suspense>
-            </div>
-          </main>
-
-          {rightPanel && (
-            <aside className="hidden lg:flex shrink-0 w-[280px] flex-col overflow-y-auto px-3 pt-6 pb-6">
-              <div className="flex flex-col gap-3">
-                {rightPanel}
-              </div>
-            </aside>
+          {mobileNavState !== "closed" && (
+            <MobileNav
+              isClosing={mobileNavState === "closing"}
+              onClose={closeMobileNav}
+              onAnimationEnd={() => {
+                if (mobileNavState === "closing") setMobileNavState("closed");
+              }}
+            />
           )}
+
+          <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
         </div>
-
-        {mobileNavState !== "closed" && (
-          <MobileNav
-            isClosing={mobileNavState === "closing"}
-            onClose={closeMobileNav}
-            onAnimationEnd={() => { if (mobileNavState === "closing") setMobileNavState("closed"); }}
-          />
-        )}
-
-        <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
-      </div>
-    </BreadcrumbLabelContext.Provider>
+      </BreadcrumbLabelContext.Provider>
     </RightPanelContext.Provider>
   );
 }
@@ -182,9 +244,16 @@ function sectionTitleFor(pathname: string): string {
 }
 
 function TopBarBreadcrumbs() {
+  const { t } = useAppTranslation();
   const { pathname, labels, sections } = useContext(BreadcrumbLabelContext);
   const search = useRouterState({ select: (s) => s.location.search });
-  const crumbs = buildStudioBreadcrumbs(pathname, labels, search, sections?.[pathname]);
+  const crumbs = buildStudioBreadcrumbs(
+    pathname,
+    labels,
+    search,
+    sections?.[pathname],
+    t,
+  );
   return <StudioBreadcrumbTrail crumbs={crumbs} />;
 }
 
@@ -195,6 +264,7 @@ function TopBar({
   readonly onSearch: () => void;
   readonly onMobileMenu?: () => void;
 }) {
+  const { t } = useAppTranslation();
   const user = useAuthStore((s) => s.user);
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
@@ -211,8 +281,14 @@ function TopBar({
     "/orgs",
     "/nodes",
     "/channel-bots",
-    "/settings", "/guide", "/approvals/settings", "/approvals/history",
-    "/approvals/grants", "/developer/apps", "/ai-setup", "/integration-guide",
+    "/settings",
+    "/guide",
+    "/approvals/settings",
+    "/approvals/history",
+    "/approvals/grants",
+    "/developer/apps",
+    "/ai-setup",
+    "/integration-guide",
   ]);
   const showBack = !ROOT_PATHS.has(pathname);
 
@@ -225,7 +301,7 @@ function TopBar({
             type="button"
             onClick={() => window.history.back()}
             className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground"
-            aria-label="Go back"
+            aria-label={t("Go back")}
           >
             <ChevronLeft className="h-5 w-5" />
           </button>
@@ -252,116 +328,126 @@ function TopBar({
 
         {/* Right actions */}
         <div className="flex items-center gap-2">
-        {/* Theme toggle — light/dark, all breakpoints */}
-        <ThemeToggle />
+          {/* Theme toggle — light/dark, all breakpoints */}
+          <ThemeToggle />
 
-        {/* Search — desktop only */}
-        <button
-          type="button"
-          onClick={onSearch}
-          className="hidden md:flex h-8 items-center gap-2 rounded-lg border border-hairline px-3 text-12 text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
-        >
-          <Search className="h-[14px] w-[14px]" />
-          <span>Search...</span>
-          <kbd className="ml-1 flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong text-10 text-text-tertiary">/</kbd>
-        </button>
+          {/* Search — desktop only */}
+          <button
+            type="button"
+            onClick={onSearch}
+            className="hidden md:flex h-8 items-center gap-2 rounded-lg border border-hairline px-3 text-12 text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
+          >
+            <Search className="h-[14px] w-[14px]" />
+            <span>{t("Search...")}</span>
+            <kbd className="ml-1 flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong text-10 text-text-tertiary">
+              /
+            </kbd>
+          </button>
 
-        {/* Profile — desktop only (mobile has it in the menu) */}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
+          {/* Profile — desktop only (mobile has it in the menu) */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                className="hidden md:flex h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground focus-visible:outline-none"
+                aria-label={t("User menu")}
+              >
+                <User className="h-[14px] w-[14px]" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48 p-2">
+              <div className="px-2 py-1.5">
+                <p className="text-12 font-medium text-foreground">
+                  {user?.display_name ?? t("User")}
+                </p>
+                <p className="text-11 text-text-tertiary">
+                  {user?.email ?? ""}
+                </p>
+              </div>
+                      <DropdownMenuItem
+                onClick={() => void navigate({ to: "/settings" })}
+                className="rounded-md text-12"
+              >
+                {t("Settings")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => void handleLogout()}
+                className="rounded-md text-12 text-destructive focus:text-destructive"
+              >
+                {t("Log out")}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {/* GitHub — desktop only */}
+          <a
+            href="https://github.com/ChronoAIProject"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hidden md:flex h-8 items-center gap-1.5 rounded-lg border border-hairline px-3 text-12 text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
+          >
+            <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong">
+              <Github className="h-3 w-3" />
+            </span>
+            <span>{t("GitHub")}</span>
+          </a>
+
+          {/* Mobile: profile */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary"
+                aria-label={t("User menu")}
+              >
+                <User className="h-[14px] w-[14px]" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48 p-2">
+              <div className="px-2 py-1.5">
+                <p className="text-12 font-medium text-foreground">
+                  {user?.display_name ?? t("User")}
+                </p>
+                <p className="text-11 text-text-tertiary">
+                  {user?.email ?? ""}
+                </p>
+              </div>
+                      <DropdownMenuItem
+                onClick={() => void navigate({ to: "/settings" })}
+                className="rounded-md text-12"
+              >
+                {t("Settings")}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                onClick={() => void handleLogout()}
+                className="rounded-md text-12 text-destructive focus:text-destructive"
+              >
+                {t("Log out")}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          {/* Mobile: GitHub */}
+          <a
+            href="https://github.com/ChronoAIProject"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
+            aria-label={t("GitHub")}
+          >
+            <Github className="h-[14px] w-[14px]" />
+          </a>
+
+          {onMobileMenu && (
             <button
               type="button"
-              className="hidden md:flex h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground focus-visible:outline-none"
-              aria-label="User menu"
+              onClick={onMobileMenu}
+              className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg text-muted-foreground"
+              aria-label={t("Open menu")}
             >
-              <User className="h-[14px] w-[14px]" />
+              <Menu className="h-4 w-4" />
             </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-48 p-2">
-            <div className="px-2 py-1.5">
-              <p className="text-12 font-medium text-foreground">{user?.display_name ?? "User"}</p>
-              <p className="text-11 text-text-tertiary">{user?.email ?? ""}</p>
-            </div>
-            <DropdownMenuItem
-              onClick={() => void navigate({ to: "/settings" })}
-              className="rounded-md text-12"
-            >
-              Settings
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onClick={() => void handleLogout()}
-              className="rounded-md text-12 text-destructive focus:text-destructive"
-            >
-              Log out
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-
-        {/* GitHub — desktop only */}
-        <a
-          href="https://github.com/ChronoAIProject"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="hidden md:flex h-8 items-center gap-1.5 rounded-lg border border-hairline px-3 text-12 text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
-        >
-          <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[4px] border border-hairline bg-overlay-strong">
-            <Github className="h-3 w-3" />
-          </span>
-          <span>GitHub</span>
-        </a>
-
-        {/* Mobile: profile */}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary"
-              aria-label="User menu"
-            >
-              <User className="h-[14px] w-[14px]" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-48 p-2">
-            <div className="px-2 py-1.5">
-              <p className="text-12 font-medium text-foreground">{user?.display_name ?? "User"}</p>
-              <p className="text-11 text-text-tertiary">{user?.email ?? ""}</p>
-            </div>
-            <DropdownMenuItem
-              onClick={() => void navigate({ to: "/settings" })}
-              className="rounded-md text-12"
-            >
-              Settings
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              onClick={() => void handleLogout()}
-              className="rounded-md text-12 text-destructive focus:text-destructive"
-            >
-              Log out
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-
-        {/* Mobile: GitHub */}
-        <a
-          href="https://github.com/ChronoAIProject"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg border border-hairline text-text-tertiary transition-colors duration-300 hover:border-hairline-strong hover:text-muted-foreground"
-          aria-label="GitHub"
-        >
-          <Github className="h-[14px] w-[14px]" />
-        </a>
-
-        {onMobileMenu && (
-        <button
-          type="button"
-          onClick={onMobileMenu}
-          className="flex md:hidden h-8 w-8 items-center justify-center rounded-lg text-muted-foreground"
-          aria-label="Open menu"
-        >
-          <Menu className="h-4 w-4" />
-        </button>
-        )}
+          )}
         </div>
       </div>
     </header>
@@ -373,10 +459,15 @@ function MobileNavItem({
   active,
   onClick,
 }: {
-  readonly item: { to: string; icon: React.ComponentType<{ className?: string }>; label: string };
+  readonly item: {
+    to: string;
+    icon: React.ComponentType<{ className?: string }>;
+    label: string;
+  };
   readonly active: boolean;
   readonly onClick: () => void;
 }) {
+  const { t } = useAppTranslation();
   return (
     <Link
       to={item.to}
@@ -392,7 +483,7 @@ function MobileNavItem({
           active ? "text-nyx-secondary-400" : "text-text-tertiary"
         }`}
       />
-      {item.label}
+      {t(item.label)}
     </Link>
   );
 }
@@ -406,6 +497,7 @@ function MobileNav({
   readonly onClose: () => void;
   readonly onAnimationEnd: () => void;
 }) {
+  const { t } = useAppTranslation();
   const user = useAuthStore((s) => s.user);
   const navigate = useNavigate();
   const logoutMutation = useLogout();
@@ -413,7 +505,12 @@ function MobileNav({
   // Usage-only role holders (no admin read access) get just the Usage entry.
   const adminNav = getVisibleAdminNav(user);
   const mainNav = getVisibleMainNav(user);
-  const allItems = [...mainNav, ...APPROVALS_NAV, ...DEVELOPER_NAV, ...adminNav];
+  const allItems = [
+    ...mainNav,
+    ...APPROVALS_NAV,
+    ...DEVELOPER_NAV,
+    ...adminNav,
+  ];
   const [searchQuery, setSearchQuery] = useState("");
 
   const searchResults = useMemo(() => {
@@ -421,10 +518,11 @@ function MobileNav({
     const q = searchQuery.toLowerCase();
     return SEARCH_ITEMS.filter(
       (item) =>
+        t(item.label).toLowerCase().includes(q) ||
         item.label.toLowerCase().includes(q) ||
         (item.to?.toLowerCase().includes(q) ?? false),
     );
-  }, [searchQuery]);
+  }, [searchQuery, t]);
 
   async function handleLogout() {
     onClose();
@@ -460,13 +558,16 @@ function MobileNav({
       onAnimationEnd={onAnimationEnd}
     >
       {/* Header */}
-      <div className="flex items-center justify-between shrink-0 h-[56px] px-5" style={{ paddingTop: "var(--sat)" }}>
+      <div
+        className="flex items-center justify-between shrink-0 h-[56px] px-5"
+        style={{ paddingTop: "var(--sat)" }}
+      >
         <NyxidLogo className="h-6 w-auto" />
         <button
           type="button"
           onClick={onClose}
           className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground"
-          aria-label="Close menu"
+          aria-label={t("Close menu")}
         >
           <X className="h-4 w-4" />
         </button>
@@ -480,11 +581,15 @@ function MobileNav({
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search..."
+            placeholder={t("Search...")}
             className="flex-1 bg-transparent text-13 text-foreground placeholder:text-text-tertiary outline-none"
           />
           {searchQuery && (
-            <button type="button" onClick={() => setSearchQuery("")} className="text-text-tertiary">
+            <button
+              type="button"
+              onClick={() => setSearchQuery("")}
+              className="text-text-tertiary"
+            >
               <X className="h-3.5 w-3.5" />
             </button>
           )}
@@ -504,16 +609,18 @@ function MobileNav({
                   className="flex items-center gap-3 rounded-xl px-4 py-3 text-14 text-muted-foreground active:bg-overlay-strong"
                 >
                   <item.icon className="h-[18px] w-[18px] shrink-0 text-text-tertiary" />
-                  <span className="flex-1 text-left">{item.label}</span>
+                  <span className="flex-1 text-left">{t(item.label)}</span>
                   {item.group === "action" && (
-                    <span className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">Action</span>
+                    <span className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+                      {t("Action")}
+                    </span>
                   )}
                 </button>
               ))}
             </div>
           ) : (
             <div className="py-8 text-center text-13 text-text-tertiary">
-              No results for &ldquo;{searchQuery}&rdquo;
+              {t("No results for “{{query}}”", { query: searchQuery })}
             </div>
           )
         ) : (
@@ -532,7 +639,7 @@ function MobileNav({
 
             <div className="px-4 my-3">
               <span className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
-                Approvals
+                {t("Approvals")}
               </span>
             </div>
             <div className="flex flex-col gap-0.5">
@@ -548,7 +655,7 @@ function MobileNav({
 
             <div className="px-4 my-3">
               <span className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
-                Developer
+                {t("Developer")}
               </span>
             </div>
             <div className="flex flex-col gap-0.5">
@@ -562,11 +669,11 @@ function MobileNav({
               ))}
             </div>
 
-            {(adminNav.length > 0) && (
+            {adminNav.length > 0 && (
               <>
                 <div className="px-4 my-3">
                   <span className="text-10 font-medium uppercase tracking-[1.5px] text-text-tertiary">
-                    Admin
+                    {t("Admin")}
                   </span>
                 </div>
                 <div className="flex flex-col gap-0.5">
@@ -586,24 +693,34 @@ function MobileNav({
       </nav>
 
       {/* Footer — user info + logout */}
-      <div className="shrink-0 border-t border-border/60 px-5 py-4 space-y-2" style={{ paddingBottom: "max(1rem, var(--sab))" }}>
+      <div
+        className="shrink-0 border-t border-border/60 px-5 py-4 space-y-2"
+        style={{ paddingBottom: "max(1rem, var(--sab))" }}
+      >
         <div className="flex items-center gap-3">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
             <User className="h-[14px] w-[14px] text-text-tertiary" />
           </div>
           <div className="min-w-0 flex-1">
-            <p className="text-13 font-medium text-foreground truncate">{user?.display_name ?? "User"}</p>
-            <p className="text-11 text-text-tertiary truncate">{user?.email ?? ""}</p>
+            <p className="text-13 font-medium text-foreground truncate">
+              {user?.display_name ?? t("User")}
+            </p>
+            <p className="text-11 text-text-tertiary truncate">
+              {user?.email ?? ""}
+            </p>
           </div>
         </div>
         <div className="flex gap-2">
           <button
             type="button"
-            onClick={() => { onClose(); void navigate({ to: "/settings" }); }}
+            onClick={() => {
+              onClose();
+              void navigate({ to: "/settings" });
+            }}
             className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-hairline bg-overlay py-2.5 text-12 text-muted-foreground active:bg-overlay-strong"
           >
             <Settings className="h-3.5 w-3.5" />
-            Settings
+            {t("Settings")}
           </button>
           <button
             type="button"
@@ -611,7 +728,7 @@ function MobileNav({
             className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-hairline bg-overlay py-2.5 text-12 text-destructive active:bg-overlay-strong"
           >
             <LogOut className="h-3.5 w-3.5" />
-            Log out
+            {t("Log out")}
           </button>
         </div>
       </div>

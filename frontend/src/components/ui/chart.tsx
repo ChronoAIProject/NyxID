@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import * as React from "react"
 import * as RechartsPrimitive from "recharts"
 import type {
@@ -143,6 +145,7 @@ const ChartTooltipContent = React.forwardRef<
     },
     ref
   ) => {
+  useUiTranslation();
     const { config } = useChart()
 
     const tooltipLabel = React.useMemo(() => {
@@ -251,7 +254,7 @@ const ChartTooltipContent = React.forwardRef<
                       {item.value !== undefined && (
                         <span className="font-mono font-medium tabular-nums text-foreground">
                           {typeof item.value === "number"
-                            ? item.value.toLocaleString()
+                            ? item.value.toLocaleString(getFormattingLocale())
                             : item.value}
                         </span>
                       )}
@@ -282,6 +285,7 @@ const ChartLegendContent = React.forwardRef<
     { className, hideIcon = false, payload, verticalAlign = "bottom", nameKey },
     ref
   ) => {
+  useUiTranslation();
     const { config } = useChart()
 
     if (!payload?.length) {

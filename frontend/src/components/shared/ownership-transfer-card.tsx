@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { ArrowRightLeft } from "lucide-react";
 import { useAuthStore } from "@/stores/auth-store";
@@ -38,20 +39,19 @@ function TransferCard({
   resource,
   onTransferred,
 }: OwnershipTransferCardProps) {
+  const { t } = useUiTranslation();
   const [open, setOpen] = useState(false);
 
   return (
-    <DetailSection title="Ownership transfer">
+    <DetailSection title={t("Ownership transfer")}>
       <div className="flex flex-col gap-4 p-5 sm:flex-row sm:items-start sm:justify-between">
         <div className="max-w-2xl space-y-2 text-xs text-muted-foreground">
-          <p>
-            Transfer {kind === "service" ? "the catalog definition for " : ""}
-            {resource.name} to another person or organization.
-          </p>
+          <p>{t("Transfer ")}{kind === "service" ? t("the catalog definition for ") : ""}
+            {resource.name}{t(" to another person or organization.")}</p>
           <p>
             {kind === "channel_bot"
-              ? "Credentials and webhook settings stay with the bot. Existing routes will be retired, and the new owner must assign their own agents. Conversation history stays with the previous owner."
-              : "Existing connections, credentials and pricing stay in place. Shared service configuration remains managed by NyxID admins."}
+              ? t("Credentials and webhook settings stay with the bot. Existing routes will be retired, and the new owner must assign their own agents. Conversation history stays with the previous owner.")
+              : t("Existing connections, credentials and pricing stay in place. Shared service configuration remains managed by NyxID admins.")}
           </p>
         </div>
         <Button
@@ -59,9 +59,7 @@ function TransferCard({
           className="shrink-0"
           onClick={() => setOpen(true)}
         >
-          <ArrowRightLeft className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
-          Transfer ownership
-        </Button>
+          <ArrowRightLeft className="mr-2 h-3.5 w-3.5" aria-hidden="true" />{t("Transfer ownership")}</Button>
       </div>
       {open && (
         <OwnershipTransferDialog

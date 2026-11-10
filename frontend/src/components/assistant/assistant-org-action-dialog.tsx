@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { Building2, ShieldAlert } from "lucide-react";
 import { z } from "zod";
@@ -135,6 +137,7 @@ export function AssistantOrgActionDialog({
   params,
   onComplete,
 }: AssistantOrgActionDialogProps) {
+  const { t } = useUiTranslation();
   const [displayName, setDisplayName] = useState(
     textParam(params, "displayName"),
   );
@@ -374,14 +377,14 @@ export function AssistantOrgActionDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Building2 className="size-4" />
-            {resultId ? "Organization change confirmed" : actionTitle(action)}
+            {resultId ? t("Organization change confirmed") : actionTitle(action)}
           </DialogTitle>
           <DialogDescription>
             {resultId
-              ? "The canonical organization projection confirms the requested state."
+              ? t("The canonical organization projection confirms the requested state.")
               : destructive
-                ? "This access change is destructive and must be confirmed every time."
-                : "NyxID applies this change in your signed-in browser session."}
+                ? t("This access change is destructive and must be confirmed every time.")
+                : t("NyxID applies this change in your signed-in browser session.")}
           </DialogDescription>
         </DialogHeader>
         {!resultId ? (
@@ -389,7 +392,7 @@ export function AssistantOrgActionDialog({
             {(action === "create" || action === "update") && (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="org-name">Organization name</Label>
+                  <Label htmlFor="org-name">{t("Organization name")}</Label>
                   <Input
                     id="org-name"
                     value={displayName}
@@ -398,7 +401,7 @@ export function AssistantOrgActionDialog({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="org-slug">Slug</Label>
+                  <Label htmlFor="org-slug">{t("Slug")}</Label>
                   <Input
                     id="org-slug"
                     value={slug}
@@ -407,7 +410,7 @@ export function AssistantOrgActionDialog({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="org-contact">Contact email</Label>
+                  <Label htmlFor="org-contact">{t("Contact email")}</Label>
                   <Input
                     id="org-contact"
                     value={contactEmail}
@@ -416,7 +419,7 @@ export function AssistantOrgActionDialog({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="org-avatar">Avatar URL</Label>
+                  <Label htmlFor="org-avatar">{t("Avatar URL")}</Label>
                   <Input
                     id="org-avatar"
                     value={avatarUrl}
@@ -429,7 +432,7 @@ export function AssistantOrgActionDialog({
             {action === "member_add" && (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="org-user-id">User ID</Label>
+                  <Label htmlFor="org-user-id">{t("User ID")}</Label>
                   <Input
                     id="org-user-id"
                     value={userId}
@@ -437,7 +440,7 @@ export function AssistantOrgActionDialog({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="org-member-role">Role</Label>
+                  <Label htmlFor="org-member-role">{t("Role")}</Label>
                   <Select
                     value={role}
                     onValueChange={(value) => setRole(value as OrgRole)}
@@ -459,7 +462,7 @@ export function AssistantOrgActionDialog({
             {(action === "member_remove" ||
               action === "member_update_role") && (
               <div className="space-y-2">
-                <Label htmlFor="org-member-id">Member ID</Label>
+                <Label htmlFor="org-member-id">{t("Member ID")}</Label>
                 <Input
                   id="org-member-id"
                   value={memberId}
@@ -469,7 +472,7 @@ export function AssistantOrgActionDialog({
             )}
             {action === "member_update_role" && (
               <div className="space-y-2">
-                <Label htmlFor="org-role">Role</Label>
+                <Label htmlFor="org-role">{t("Role")}</Label>
                 <Select
                   value={role}
                   onValueChange={(value) => setRole(value as OrgRole)}
@@ -490,7 +493,7 @@ export function AssistantOrgActionDialog({
             {action === "invite" && (
               <>
                 <div className="space-y-2">
-                  <Label htmlFor="invite-role">Invite role</Label>
+                  <Label htmlFor="invite-role">{t("Invite role")}</Label>
                   <Select
                     value={role}
                     onValueChange={(value) => setRole(value as OrgRole)}
@@ -508,7 +511,7 @@ export function AssistantOrgActionDialog({
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="invite-ttl">Invite lifetime (hours)</Label>
+                  <Label htmlFor="invite-ttl">{t("Invite lifetime (hours)")}</Label>
                   <Input
                     id="invite-ttl"
                     type="number"
@@ -523,11 +526,11 @@ export function AssistantOrgActionDialog({
             {(action === "member_add" || action === "invite") &&
             allowedServiceIds !== undefined ? (
               <div className="space-y-1.5">
-                <p className="text-xs font-medium">Allowed services</p>
+                <p className="text-xs font-medium">{t("Allowed services")}</p>
                 <p className="break-all font-mono text-xs text-muted-foreground">
                   {allowedServiceIds.length > 0
                     ? allowedServiceIds.join(", ")
-                    : "No services"}
+                    : t("No services")}
                 </p>
               </div>
             ) : null}
@@ -546,16 +549,14 @@ export function AssistantOrgActionDialog({
                   onCheckedChange={(value) => setConfirmed(value === true)}
                 />
                 <span className="flex items-center gap-1">
-                  <ShieldAlert className="size-3" />I understand this access
-                  change is destructive.
-                </span>
+                  <ShieldAlert className="size-3" />{t("I understand this access change is destructive.")}</span>
               </label>
             )}
           </div>
         ) : null}
         {error ? (
           <p role="alert" className="text-xs text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
         <DialogFooter>
@@ -566,14 +567,10 @@ export function AssistantOrgActionDialog({
                 onComplete(resultId);
                 close();
               }}
-            >
-              Done
-            </Button>
+            >{t("Done")}</Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
               <Button
                 type="button"
                 variant={destructive ? "destructive" : "primary"}
@@ -581,7 +578,7 @@ export function AssistantOrgActionDialog({
                 disabled={pending || (destructive && !confirmed)}
                 onClick={() => void submit()}
               >
-                {destructive ? "Confirm change" : "Continue"}
+                {destructive ? t("Confirm change") : t("Continue")}
               </Button>
             </>
           )}

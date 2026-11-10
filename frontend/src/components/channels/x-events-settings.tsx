@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useChannelPlatforms } from "@/hooks/use-channel-platforms";
 import { useEffect } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -15,6 +17,7 @@ import {
 import type { ChannelBotDetail, XChannelEvent } from "@/types/channels";
 
 export function XEventsSettings({ bot }: { readonly bot: ChannelBotDetail }) {
+  const { t } = useUiTranslation();
   const update = useUpdateChannelBot({ creditsOwnerId: bot.user_id });
   const catalog = useChannelPlatforms();
   const choices =
@@ -38,7 +41,7 @@ export function XEventsSettings({ bot }: { readonly bot: ChannelBotDetail }) {
       {
         onSuccess: () => {
           reset(data);
-          toast.success("X event subscriptions updated");
+          toast.success(translateUi("X event subscriptions updated"));
         },
       },
     );
@@ -49,7 +52,7 @@ export function XEventsSettings({ bot }: { readonly bot: ChannelBotDetail }) {
       onSubmit={form.handleSubmit(save)}
       className="space-y-4 border-t border-border px-4 py-4"
     >
-      <h3 className="text-sm font-medium">Events to receive</h3>
+      <h3 className="text-sm font-medium">{t("Events to receive")}</h3>
       {choices.map(
         ({ subscription, subscription_label, label, description }) => {
           const value = subscription as XChannelEvent;
@@ -79,17 +82,12 @@ export function XEventsSettings({ bot }: { readonly bot: ChannelBotDetail }) {
         },
       )}
       {catalog.error && (
-        <ErrorBanner message="Event choices could not be loaded." />
+        <ErrorBanner message={t("Event choices could not be loaded.")} />
       )}
-      <p className="text-xs text-muted-foreground">
-        Public replies support text. Reply events cover direct replies to your
-        posts; protected posts are not delivered. Received events and sent
-        replies use this service&apos;s request price. If write permission is
-        missing, reconnect the account below and save again.
-      </p>
+      <p className="text-xs text-muted-foreground">{t("Public replies support text. Reply events cover direct replies to your posts; protected posts are not delivered. Received events and sent replies use this service's request price. If write permission is missing, reconnect the account below and save again.")}</p>
       {form.formState.errors.events?.message && (
         <p role="alert" className="text-xs text-destructive">
-          {form.formState.errors.events.message}
+          {translateUi(form.formState.errors.events.message ?? "")}
         </p>
       )}
       {update.error && <ErrorBanner message={update.error.message} />}
@@ -103,9 +101,7 @@ export function XEventsSettings({ bot }: { readonly bot: ChannelBotDetail }) {
           !form.formState.isValid ||
           update.isPending
         }
-      >
-        Save event subscriptions
-      </Button>
+      >{t("Save event subscriptions")}</Button>
     </form>
   );
 }

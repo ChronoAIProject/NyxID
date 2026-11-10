@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useChannelPlatformViews } from "@/hooks/use-channel-platforms";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearch } from "@tanstack/react-router";
@@ -93,6 +96,7 @@ function BotRow({
   readonly ownerLabel?: string;
   readonly onDelete: (id: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const catalog = useChannelPlatformViews();
   const { getPlatform } = catalog;
@@ -112,17 +116,15 @@ function BotRow({
       {ownerLabel && <TableCell className="text-xs text-muted-foreground">{ownerLabel}</TableCell>}
       <TableCell>
         <Badge variant={statusBadgeVariant(bot.status)}>
-          {bot.status.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")}
+          {t(bot.status.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "))}
         </Badge>
       </TableCell>
       <TableCell>
-        {getPlatform(bot.platform).webhookIngestion === false ? <span className="text-xs text-muted-foreground">Polling</span> : bot.webhook_registered ? (
+        {getPlatform(bot.platform).webhookIngestion === false ? <span className="text-xs text-muted-foreground">{t("Polling")}</span> : bot.webhook_registered ? (
           <div className="flex items-center gap-1 text-xs text-muted-foreground">
-            <Check className="h-3 w-3 text-success" />
-            Registered
-          </div>
+            <Check className="h-3 w-3 text-success" />{t("Registered")}</div>
         ) : (
-          <span className="text-xs text-muted-foreground">Not registered</span>
+          <span className="text-xs text-muted-foreground">{t("Not registered")}</span>
         )}
       </TableCell>
       <TableCell className="text-xs text-muted-foreground">
@@ -133,7 +135,7 @@ function BotRow({
           variant="ghost"
           size="icon"
           className="h-8 w-8"
-          aria-label={`Delete ${bot.label}`}
+          aria-label={t("Delete {{label}}", { label: bot.label })}
           onClick={(e) => {
             e.stopPropagation();
             onDelete(bot.id);
@@ -155,6 +157,7 @@ function BotCard({
   readonly ownerLabel?: string;
   readonly onDelete: (id: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const catalog = useChannelPlatformViews();
   const { getPlatform } = catalog;
@@ -172,23 +175,23 @@ function BotCard({
           variant="ghost"
           size="icon"
           className="h-7 w-7"
-          aria-label={`Delete ${bot.label}`}
+          aria-label={t("Delete {{label}}", { label: bot.label })}
           onClick={() => onDelete(bot.id)}
         >
           <Trash2 className="h-3.5 w-3.5 text-destructive" />
         </Button>
       </div>
       <p className="pr-10 text-13 font-semibold text-foreground truncate">{bot.label}</p>
-      <p className="text-11 text-muted-foreground">{bot.platform_bot_username || "No username"}</p>
+      <p className="text-11 text-muted-foreground">{bot.platform_bot_username || t("No username")}</p>
       <div className="mt-2 flex flex-wrap gap-1.5">
         {ownerLabel && <Badge variant="secondary">{ownerLabel}</Badge>}
         <Badge variant="secondary">{getPlatform(bot.platform).label}</Badge>
         <Badge variant={statusBadgeVariant(bot.status)}>
-          {bot.status.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")}
+          {t(bot.status.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" "))}
         </Badge>
       </div>
       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
-        <span>{getPlatform(bot.platform).webhookIngestion === false ? "Polling" : bot.webhook_registered ? "Webhook registered" : "No webhook"}</span>
+        <span>{getPlatform(bot.platform).webhookIngestion === false ? t("Polling") : bot.webhook_registered ? t("Webhook registered") : t("No webhook")}</span>
         <span>{formatDate(bot.created_at)}</span>
       </div>
     </div>
@@ -206,12 +209,13 @@ function BotsTable({
   readonly onDelete: (id: string) => void;
   readonly viewMode: ViewMode;
 }) {
+  const { t } = useUiTranslation();
   const { data: orgs } = useOrgs();
   const userId = useAuthStore((state) => state.user?.id);
   const ownerLabels = new Map(orgs?.map((org) => [org.id, org.display_name || org.id]));
   function ownerLabel(bot: ChannelBotItem) {
     if (!showOwner) return undefined;
-    return bot.user_id === userId ? "User" : ownerLabels.get(bot.user_id) ?? bot.user_id;
+    return bot.user_id === userId ? t("User") : ownerLabels.get(bot.user_id) ?? bot.user_id;
   }
 
   return (
@@ -238,14 +242,14 @@ function BotsTable({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Platform</TableHead>
-                <TableHead>Bot Username</TableHead>
-                <TableHead>Label</TableHead>
-                {showOwner && <TableHead>Scope</TableHead>}
-                <TableHead>Status</TableHead>
-                <TableHead>Webhook</TableHead>
-                <TableHead>Created</TableHead>
-                <TableHead className="w-[60px]">Actions</TableHead>
+                <TableHead>{t("Platform")}</TableHead>
+                <TableHead>{t("Bot Username")}</TableHead>
+                <TableHead>{t("Label")}</TableHead>
+                {showOwner && <TableHead>{t("Scope")}</TableHead>}
+                <TableHead>{t("Status")}</TableHead>
+                <TableHead>{t("Webhook")}</TableHead>
+                <TableHead>{t("Created")}</TableHead>
+                <TableHead className="w-[60px]">{t("Actions")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -261,14 +265,13 @@ function BotsTable({
 }
 
 function EmptyState() {
+  const { t } = useUiTranslation();
   return (
     <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
       <RobotIcon className="h-64 w-64 text-muted-foreground" />
       <div className="space-y-1">
-        <p className="text-12 font-medium text-muted-foreground">No channel bots yet</p>
-        <p className="text-xs text-muted-foreground">
-          Add a messaging platform bot to relay conversations to your AI agents.
-        </p>
+        <p className="text-12 font-medium text-muted-foreground">{t("No channel bots yet")}</p>
+        <p className="text-xs text-muted-foreground">{t("Add a messaging platform bot to relay conversations to your AI agents.")}</p>
       </div>
     </div>
   );
@@ -283,6 +286,7 @@ function DeleteBotDialog({
   readonly deletionNote?: string;
   readonly onClose: () => void;
 }) {
+  const { t } = useUiTranslation();
   const deleteMutation = useDeleteChannelBot();
 
   async function handleDelete() {
@@ -290,13 +294,13 @@ function DeleteBotDialog({
     try {
       const result = await deleteMutation.mutateAsync(botId);
       if (result?.webhook_cleanup === "failed") {
-        toast.warning("Bot deleted. Remove its remaining email subscription in the Aurinko dashboard.");
+        toast.warning(translateUi("Bot deleted. Remove its remaining email subscription in the Aurinko dashboard."));
       } else {
-        toast.success("Bot deleted");
+        toast.success(translateUi("Bot deleted"));
       }
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to delete bot",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to delete bot"),
       );
     } finally {
       onClose();
@@ -307,24 +311,18 @@ function DeleteBotDialog({
     <Dialog open={botId !== null} onOpenChange={() => onClose()}>
       <DialogContent className="md:max-w-md">
         <DialogHeader>
-          <DialogTitle>Delete Channel Bot</DialogTitle>
-          <DialogDescription>
-            This deletes the NyxID connection and its conversation routes.
-            The bot remains on the messaging platform. Reconnecting requires
-            assigning its agents again.
-            {deletionNote && ` ${deletionNote}`}
+          <DialogTitle>{t("Delete Channel Bot")}</DialogTitle>
+          <DialogDescription>{t("This deletes the NyxID connection and its conversation routes. The bot remains on the messaging platform. Reconnecting requires assigning its agents again.")}{deletionNote && t(" {{deletionNote}}", { deletionNote: deletionNote })}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
-            Cancel
-          </Button>
+          <Button variant="outline" onClick={onClose}>{t("Cancel")}</Button>
           <Button
             variant="destructive"
             onClick={() => void handleDelete()}
             disabled={deleteMutation.isPending}
           >
-            {deleteMutation.isPending ? "Deleting..." : "Delete"}
+            {deleteMutation.isPending ? t("Deleting...") : t("Delete")}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -355,6 +353,7 @@ function CreateDeviceChannelDialog({
   readonly onOpenChange: (open: boolean) => void;
   readonly defaultOrgId: string | null;
 }) {
+  const { t } = useUiTranslation();
   const createDevice = useCreateDeviceConversation();
   const { data: apiKeys } = useApiKeys({ orgId: defaultOrgId });
 
@@ -415,16 +414,16 @@ function CreateDeviceChannelDialog({
           // POST /api/v1/channel-events/{conversation_id}, NOT the
           // logical `platform_conversation_id` the user typed in.
           toast.success(
-            `Device channel created (ID: ${created.id}). Copy this ID — it's the path parameter for /channel-events.`,
+            translateUi("Device channel created (ID: {{id}}). Copy this ID — it's the path parameter for /channel-events.", { id: created.id }),
           );
           reset();
           onOpenChange(false);
         },
         onError: (err) => {
           toast.error(
-            err instanceof ApiError
+            translateErrorMessage(err instanceof ApiError
               ? err.message
-              : "Failed to create device channel",
+              : "Failed to create device channel"),
           );
         },
       },
@@ -435,50 +434,40 @@ function CreateDeviceChannelDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="md:max-w-md">
         <DialogHeader>
-          <DialogTitle>Add Device Channel</DialogTitle>
-          <DialogDescription>
-            Device channels receive events through{" "}
+          <DialogTitle>{t("Add Device Channel")}</DialogTitle>
+          <DialogDescription>{t("Device channels receive events through")}{" "}
             <code className="text-xs">
               POST /api/v1/channel-events/&#123;conversation_id&#125;
-            </code>
-            . No bot token is required — authenticate with the agent API key
-            configured below.
-          </DialogDescription>
+            </code>{t(". No bot token is required — authenticate with the agent API key configured below.")}</DialogDescription>
         </DialogHeader>
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="platform_conversation_id">Device Channel ID</Label>
+            <Label htmlFor="platform_conversation_id">{t("Device Channel ID")}</Label>
             <Input
               id="platform_conversation_id"
-              placeholder="household-camera"
+              placeholder={"household-camera"}
               {...register("platform_conversation_id")}
             />
-            <p className="text-xs text-muted-foreground">
-              The logical name the device will POST to. Must be unique per
-              owner.
-            </p>
+            <p className="text-xs text-muted-foreground">{t("The logical name the device will POST to. Must be unique per owner.")}</p>
             {errors.platform_conversation_id && (
               <p className="text-xs text-destructive">
-                {errors.platform_conversation_id.message}
+                {translateUi(errors.platform_conversation_id.message ?? "")}
               </p>
             )}
           </div>
 
           <div className="space-y-2">
-            <Label>Agent API Key</Label>
+            <Label>{t("Agent API Key")}</Label>
             {activeApiKeys.length === 0 ? (
-              <p className="text-xs text-muted-foreground">
-                No active agent API keys in this scope. Create one with a
-                callback URL first.
-              </p>
+              <p className="text-xs text-muted-foreground">{t("No active agent API keys in this scope. Create one with a callback URL first.")}</p>
             ) : (
               <Select
                 value={watch("agent_api_key_id") ?? ""}
                 onValueChange={(value) => setValue("agent_api_key_id", value)}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select an API key" />
+                  <SelectValue placeholder={t("Select an API key")} />
                 </SelectTrigger>
                 <SelectContent>
                   {activeApiKeys.map((key) => (
@@ -488,7 +477,7 @@ function CreateDeviceChannelDialog({
                       disabled={!key.callback_url}
                     >
                       {key.name}
-                      {!key.callback_url ? " -- no callback URL" : ""}
+                      {!key.callback_url ? t(" -- no callback URL") : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -496,30 +485,25 @@ function CreateDeviceChannelDialog({
             )}
             {errors.agent_api_key_id && (
               <p className="text-xs text-destructive">
-                {errors.agent_api_key_id.message}
+                {translateUi(errors.agent_api_key_id.message ?? "")}
               </p>
             )}
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="platform_conversation_type">
-              Channel Type (optional)
-            </Label>
+            <Label htmlFor="platform_conversation_type">{t("Channel Type (optional)")}</Label>
             <Input
               id="platform_conversation_type"
-              placeholder="device"
+              placeholder={t("device")}
               {...register("platform_conversation_type")}
             />
-            <p className="text-xs text-muted-foreground">
-              Freeform label surfaced to the agent as
-              <code className="mx-1 text-xs">conversation.conversation_type</code>
+            <p className="text-xs text-muted-foreground">{t("Freeform label surfaced to the agent as")}<code className="mx-1 text-xs">conversation.conversation_type</code>
               (e.g. <code className="text-xs">camera</code>,{" "}
-              <code className="text-xs">sensor</code>). Defaults to
-              <code className="mx-1 text-xs">device</code>.
+              <code className="text-xs">sensor</code>{t("). Defaults to")}<code className="mx-1 text-xs">device</code>.
             </p>
             {errors.platform_conversation_type && (
               <p className="text-xs text-destructive">
-                {errors.platform_conversation_type.message}
+                {translateUi(errors.platform_conversation_type.message ?? "")}
               </p>
             )}
           </div>
@@ -529,11 +513,9 @@ function CreateDeviceChannelDialog({
               type="button"
               variant="outline"
               onClick={() => onOpenChange(false)}
-            >
-              Cancel
-            </Button>
+            >{t("Cancel")}</Button>
             <Button variant="primary" type="submit" disabled={createDevice.isPending}>
-              {createDevice.isPending ? "Creating..." : "Create Device Channel"}
+              {createDevice.isPending ? t("Creating...") : t("Create Device Channel")}
             </Button>
           </DialogFooter>
         </form>
@@ -549,12 +531,13 @@ function DeviceChannelCard({
   readonly conversation: ChannelConversationItem;
   readonly onDelete: (id: string) => void;
 }) {
+  const { t } = useUiTranslation();
   async function copyRowId() {
     try {
       await navigator.clipboard.writeText(conversation.id);
-      toast.success("Channel ID copied");
+      toast.success(translateUi("Channel ID copied"));
     } catch {
-      toast.error("Could not copy — your browser blocked clipboard access");
+      toast.error(translateUi("Could not copy — your browser blocked clipboard access"));
     }
   }
 
@@ -582,7 +565,7 @@ function DeviceChannelCard({
           size="icon"
           className="h-5 w-5"
           onClick={() => void copyRowId()}
-          title="Copy full channel ID"
+          title={t("Copy full channel ID")}
         >
           <Copy className="h-2.5 w-2.5 text-muted-foreground" />
         </Button>
@@ -590,11 +573,11 @@ function DeviceChannelCard({
       <div className="mt-2 flex flex-wrap gap-1.5">
         <Badge variant="secondary">{conversation.platform_conversation_type}</Badge>
         <Badge variant={conversation.is_active ? "success" : "secondary"}>
-          {conversation.is_active ? "Active" : "Inactive"}
+          {conversation.is_active ? t("Active") : t("Inactive")}
         </Badge>
       </div>
       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
-        <span>Agent: {conversation.agent_api_key_id.slice(0, 8)}…</span>
+        <span>{t("Agent: ")}{conversation.agent_api_key_id.slice(0, 8)}…</span>
         <span>{formatDate(conversation.created_at)}</span>
       </div>
     </div>
@@ -608,12 +591,13 @@ function DeviceChannelRow({
   readonly conversation: ChannelConversationItem;
   readonly onDelete: (id: string) => void;
 }) {
+  const { t } = useUiTranslation();
   async function copyRowId() {
     try {
       await navigator.clipboard.writeText(conversation.id);
-      toast.success("Channel ID copied");
+      toast.success(translateUi("Channel ID copied"));
     } catch {
-      toast.error("Could not copy — your browser blocked clipboard access");
+      toast.error(translateUi("Could not copy — your browser blocked clipboard access"));
     }
   }
 
@@ -632,7 +616,7 @@ function DeviceChannelRow({
             size="icon"
             className="h-6 w-6"
             onClick={() => void copyRowId()}
-            title="Copy full channel ID (path parameter for /channel-events/{id})"
+            title={t("Copy full channel ID (path parameter for /channel-events/{id})")}
           >
             <Copy className="h-3 w-3 text-muted-foreground" />
           </Button>
@@ -649,7 +633,7 @@ function DeviceChannelRow({
       </TableCell>
       <TableCell>
         <Badge variant={conversation.is_active ? "success" : "secondary"}>
-          {conversation.is_active ? "Active" : "Inactive"}
+          {conversation.is_active ? t("Active") : t("Inactive")}
         </Badge>
       </TableCell>
       <TableCell className="text-xs text-muted-foreground">
@@ -680,6 +664,7 @@ function DeviceChannelsSection({
   readonly onAdd: () => void;
   readonly viewMode: ViewMode;
 }) {
+  const { t } = useUiTranslation();
   const { data: conversations, isLoading } = useChannelConversations({ orgId });
   const deleteConversation = useDeleteChannelConversation();
 
@@ -693,10 +678,10 @@ function DeviceChannelsSection({
 
   function handleDelete(id: string) {
     deleteConversation.mutate(id, {
-      onSuccess: () => toast.success("Device channel deleted"),
+      onSuccess: () => toast.success(translateUi("Device channel deleted")),
       onError: (err) =>
         toast.error(
-          err instanceof ApiError ? err.message : "Failed to delete",
+          translateErrorMessage(err instanceof ApiError ? err.message : "Failed to delete"),
         ),
     });
   }
@@ -705,17 +690,14 @@ function DeviceChannelsSection({
     <div className="space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
-          <h2 className="text-lg font-semibold">Device Channels</h2>
-          <p className="text-12 text-muted-foreground">
-            HTTP Event Gateway channels for analyzers, sensors, and other
-            non-bot event sources.
-          </p>
+          <h2 className="text-lg font-semibold">{t("Device Channels")}</h2>
+          <p className="text-12 text-muted-foreground">{t("HTTP Event Gateway channels for analyzers, sensors, and other non-bot event sources.")}</p>
         </div>
         <div className="flex shrink-0 flex-wrap items-center gap-3">
           <div className="w-36 sm:w-48">
-            <OrgScopeSelect value={orgId} onChange={onScopeChange} label="Device channel scope" />
+            <OrgScopeSelect value={orgId} onChange={onScopeChange} label={t("Device channel scope")} />
           </div>
-          <AddCtaButton label="Add Device Channel" onClick={onAdd} />
+          <AddCtaButton label={t("Add Device Channel")} onClick={onAdd} />
         </div>
       </div>
 
@@ -725,11 +707,8 @@ function DeviceChannelsSection({
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SmartSpeakerIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">No device channels yet</p>
-            <p className="text-xs text-muted-foreground">
-              Create one to let devices push events into the channel relay
-              pipeline.
-            </p>
+            <p className="text-12 font-medium text-muted-foreground">{t("No device channels yet")}</p>
+            <p className="text-xs text-muted-foreground">{t("Create one to let devices push events into the channel relay pipeline.")}</p>
           </div>
         </div>
       ) : (
@@ -764,15 +743,13 @@ function DeviceChannelsSection({
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead title="NyxID identifier for this channel — used in the event-gateway URL (POST /api/v1/channel-events/{id})">
-                      Channel ID
-                    </TableHead>
-                    <TableHead>Channel Name</TableHead>
-                    <TableHead>Type</TableHead>
-                    <TableHead>Agent Key</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Created</TableHead>
-                    <TableHead className="w-[60px]">Actions</TableHead>
+                    <TableHead title={t("NyxID identifier for this channel — used in the event-gateway URL (POST /api/v1/channel-events/{id})")}>{t("Channel ID")}</TableHead>
+                    <TableHead>{t("Channel Name")}</TableHead>
+                    <TableHead>{t("Type")}</TableHead>
+                    <TableHead>{t("Agent Key")}</TableHead>
+                    <TableHead>{t("Status")}</TableHead>
+                    <TableHead>{t("Created")}</TableHead>
+                    <TableHead className="w-[60px]">{t("Actions")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -794,6 +771,7 @@ function DeviceChannelsSection({
 }
 
 function ChannelBotsList() {
+  const { t } = useUiTranslation();
   const catalog = useChannelPlatformViews();
   const { getPlatform } = catalog;
   const navigate = useNavigate();
@@ -826,19 +804,19 @@ function ChannelBotsList() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Channel Bots"
-        description="Manage messaging platform bots for agent relay."
+        title={t("Channel Bots")}
+        description={t("Manage messaging platform bots for agent relay.")}
         actions={
           <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-            <span className="text-xs text-muted-foreground">Scope</span>
+            <span className="text-xs text-muted-foreground">{t("Scope")}</span>
             <div className="w-36 sm:w-48">
-              <OrgScopeSelect value={scope} onChange={setScope} allowAll personalLabel="User" />
+              <OrgScopeSelect value={scope} onChange={setScope} allowAll personalLabel={t("User")} />
             </div>
             <ViewToggle viewMode={viewMode} onViewModeChange={setViewMode} />
             <Button variant="outline" asChild>
-              <Link to="/channel-bots/connect">Setup links</Link>
+              <Link to="/channel-bots/connect">{t("Setup links")}</Link>
             </Button>
-            <AddCtaButton label="Add Bot" onClick={() => setCreateOpen(true)} />
+            <AddCtaButton label={t("Add Bot")} onClick={() => setCreateOpen(true)} />
           </div>
         }
       />
@@ -846,21 +824,17 @@ function ChannelBotsList() {
       {telegram.data?.request && (
         <div className="flex flex-col gap-3 rounded-xl border border-primary/30 bg-primary/5 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0 space-y-1">
-            <p className="text-sm font-medium">Telegram setup in progress</p>
-            <p className="break-words text-xs text-muted-foreground">
-              Continue setting up {telegram.data.request.label} from your saved step.
-            </p>
+            <p className="text-sm font-medium">{t("Telegram setup in progress")}</p>
+            <p className="break-words text-xs text-muted-foreground">{t("Continue setting up ")}{telegram.data.request.label}{t(" from your saved step.")}</p>
           </div>
-          <Button variant="outline" onClick={() => void navigate({ to: "/channel-bots", search: { connect: "telegram-new", request_id: telegram.data?.request?.id }, replace: true })}>
-            Resume Telegram setup
-          </Button>
+          <Button variant="outline" onClick={() => void navigate({ to: "/channel-bots", search: { connect: "telegram-new", request_id: telegram.data?.request?.id }, replace: true })}>{t("Resume Telegram setup")}</Button>
         </div>
       )}
 
       {isLoading ? (
         <LoadingSkeleton />
       ) : error ? (
-        <ErrorBanner message="Failed to load channel bots. Please try again." onRetry={refetch} />
+        <ErrorBanner message={t("Failed to load channel bots. Please try again.")} onRetry={refetch} />
       ) : !bots || bots.length === 0 ? (
         <EmptyState />
       ) : (

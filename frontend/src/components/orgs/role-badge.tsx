@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Badge } from "@/components/ui/badge";
 import type { OrgRole } from "@/schemas/orgs";
 
@@ -7,10 +8,10 @@ interface RoleBadgeProps {
 }
 
 const ROLE_LABEL: Record<string, string> = {
-  admin: "Admin",
-  member: "Member",
-  viewer: "Viewer",
-  owner: "Owner",
+  get admin() { return translateUi("Admin"); },
+  get member() { return translateUi("Member"); },
+  get viewer() { return translateUi("Viewer"); },
+  get owner() { return translateUi("Owner"); },
 };
 
 /**

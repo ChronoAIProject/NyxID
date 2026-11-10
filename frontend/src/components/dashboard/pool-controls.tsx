@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import type { ReactNode } from "react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -92,6 +93,7 @@ export function PolicyEditor({
   policy: FailoverPolicy;
   onChange: (policy: FailoverPolicy) => void;
 }) {
+  const { t } = useUiTranslation();
   const set = <K extends keyof FailoverPolicy>(
     key: K,
     value: FailoverPolicy[K],
@@ -100,47 +102,47 @@ export function PolicyEditor({
     <div className="space-y-4 rounded-xl border border-border/50 p-4">
       <div className="grid gap-3 sm:grid-cols-2">
         <NumberInput
-          label="Maximum attempts"
+          label={t("Maximum attempts")}
           min={1}
           max={5}
           value={policy.max_attempts}
           onChange={(v) => set("max_attempts", v)}
         />
         <NumberInput
-          label="Replay body limit (bytes)"
+          label={t("Replay body limit (bytes)")}
           min={1}
           value={policy.max_replay_body_bytes}
           onChange={(v) => set("max_replay_body_bytes", v)}
         />
         <NumberInput
-          label="Attempt timeout (ms)"
+          label={t("Attempt timeout (ms)")}
           min={1000}
           max={300000}
           value={policy.per_attempt_timeout_ms}
           onChange={(v) => set("per_attempt_timeout_ms", v)}
         />
         <NumberInput
-          label="Overall deadline (ms)"
+          label={t("Overall deadline (ms)")}
           min={1000}
           max={600000}
           value={policy.overall_deadline_ms}
           onChange={(v) => set("overall_deadline_ms", v)}
         />
         <NumberInput
-          label="Base cooldown (ms)"
+          label={t("Base cooldown (ms)")}
           min={1}
           value={policy.cooldown.base_ms}
           onChange={(v) => set("cooldown", { ...policy.cooldown, base_ms: v })}
         />
         <NumberInput
-          label="Maximum cooldown (ms)"
+          label={t("Maximum cooldown (ms)")}
           min={1}
           max={3600000}
           value={policy.cooldown.max_ms}
           onChange={(v) => set("cooldown", { ...policy.cooldown, max_ms: v })}
         />
         <NumberInput
-          label="Failures before cooldown"
+          label={t("Failures before cooldown")}
           min={1}
           value={policy.cooldown.failures_to_open}
           onChange={(v) =>
@@ -149,14 +151,14 @@ export function PolicyEditor({
         />
       </div>
       <Toggle
-        label="Honor provider Retry-After"
+        label={t("Honor provider Retry-After")}
         checked={policy.cooldown.honor_retry_after}
         onChange={(v) =>
           set("cooldown", { ...policy.cooldown, honor_retry_after: v })
         }
       />
       <fieldset className="space-y-2">
-        <legend className="text-12 font-medium">Retry causes</legend>
+        <legend className="text-12 font-medium">{t("Retry causes")}</legend>
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {retryTriggers.map((trigger) => (
             <label key={trigger} className="flex items-center gap-2 text-12">
@@ -177,15 +179,11 @@ export function PolicyEditor({
         </div>
       </fieldset>
       <Toggle
-        label="Allow replay after an ambiguous dispatch"
+        label={t("Allow replay after an ambiguous dispatch")}
         checked={policy.retry_ambiguous_dispatch}
         onChange={(v) => set("retry_ambiguous_dispatch", v)}
       />
-      <p className="text-12 text-muted-foreground">
-        A timeout or 5xx may follow completed work. Enabling replay for POST can
-        duplicate provider work and charges. A provider 429 rejection can fall
-        back without this option. Set maximum attempts to 1 to disable fallback.
-      </p>
+      <p className="text-12 text-muted-foreground">{t("A timeout or 5xx may follow completed work. Enabling replay for POST can duplicate provider work and charges. A provider 429 rejection can fall back without this option. Set maximum attempts to 1 to disable fallback.")}</p>
     </div>
   );
 }

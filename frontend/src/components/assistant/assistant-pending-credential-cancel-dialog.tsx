@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { ShieldAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -40,6 +42,7 @@ export function AssistantPendingCredentialCancelDialog({
   readonly params: AssistantPendingCredentialCancelParams;
   readonly onComplete: (pendingCredentialId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const submittingRef = useRef(false);
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -111,20 +114,20 @@ export function AssistantPendingCredentialCancelDialog({
         <DialogHeader>
           <DialogTitle>
             {resultId
-              ? "Pending credential cancelled"
-              : "Cancel pending credential"}
+              ? t("Pending credential cancelled")
+              : t("Cancel pending credential")}
           </DialogTitle>
           <DialogDescription>
             {resultId
-              ? "The canonical projection confirms this request is inactive and declined."
-              : "The node will no longer be able to consume this pending credential request."}
+              ? t("The canonical projection confirms this request is inactive and declined.")
+              : t("The node will no longer be able to consume this pending credential request.")}
           </DialogDescription>
         </DialogHeader>
 
         {!resultId ? (
           <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">Pending credential</span>
+              <span className="text-muted-foreground">{t("Pending credential")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[65%] truncate font-mono"
@@ -133,7 +136,7 @@ export function AssistantPendingCredentialCancelDialog({
               </Badge>
             </div>
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">Node</span>
+              <span className="text-muted-foreground">{t("Node")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[65%] truncate font-mono"
@@ -147,16 +150,14 @@ export function AssistantPendingCredentialCancelDialog({
                 onCheckedChange={(value) => setConfirmed(value === true)}
               />
               <span className="flex items-start gap-1.5 text-destructive">
-                <ShieldAlert className="mt-0.5 size-3 shrink-0" />I understand
-                this request cannot be consumed after cancellation.
-              </span>
+                <ShieldAlert className="mt-0.5 size-3 shrink-0" />{t("I understand this request cannot be consumed after cancellation.")}</span>
             </label>
           </div>
         ) : null}
 
         {error ? (
           <p role="alert" className="text-11 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
         <DialogFooter>
@@ -168,23 +169,17 @@ export function AssistantPendingCredentialCancelDialog({
                 onComplete(resultId);
                 close();
               }}
-            >
-              Done
-            </Button>
+            >{t("Done")}</Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>
-                Keep request
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{t("Keep request")}</Button>
               <Button
                 type="button"
                 variant="destructive"
                 isLoading={submitting}
                 disabled={submitting || !confirmed}
                 onClick={() => void submit()}
-              >
-                Cancel request
-              </Button>
+              >{t("Cancel request")}</Button>
             </>
           )}
         </DialogFooter>

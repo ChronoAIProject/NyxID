@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { MachineGrantCard } from "@/components/shared/machine-grant-card";
 import { useSearch } from "@tanstack/react-router";
 import { ServiceScopeCard } from "@/components/dashboard/api-key-detail/service-scope-card";
@@ -26,6 +27,7 @@ import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { LoginCredentialsSection } from "@/components/dashboard/api-key-detail/login-credentials-section";
 
 export function ApiKeyDetailPage() {
+  const { t } = useUiTranslation();
   const { grant_service } = useSearch({ strict: false }) as {
     grant_service?: string;
   };
@@ -55,13 +57,13 @@ export function ApiKeyDetailPage() {
     return (
       <div className="space-y-8">
         <PageHeader
-          title="Key Not Found"
+          title={t("Key Not Found")}
         />
         <ErrorBanner
           message={
             error instanceof ApiError
               ? error.message
-              : "Failed to load key details."
+              : t("Failed to load key details.")
           }
           onRetry={refetch}
         />
@@ -74,7 +76,7 @@ export function ApiKeyDetailPage() {
       <PageHeader
         title={apiKey.name}
         description={
-          apiKey.description ?? `API key ${maskApiKey(apiKey.key_prefix)}`
+          apiKey.description ?? t("API key {{value}}", { value: maskApiKey(apiKey.key_prefix) })
         }
         actions={
           canWrite &&
@@ -85,30 +87,23 @@ export function ApiKeyDetailPage() {
               onClick={() => setRotateOpen(true)}
               disabled={!apiKey.is_active}
             >
-              <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
-              Rotate Key
-            </Button>
+              <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>{t("Rotate Key")}</Button>
             <Button
               variant="destructive"
               onClick={() => setDeleteOpen(true)}
             >
-              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
-              Revoke
-            </Button>
+              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>{t("Revoke")}</Button>
           </div>
         }
       />
 
       {apiKey.assistant_conversation_id ? (
-        <p className="text-12 text-muted-foreground">
-          Used by assistant chat · {" "}
+        <p className="text-12 text-muted-foreground">{t("Used by assistant chat · ")}{" "}
           <Link
             to="/assistant"
             search={{ c: apiKey.assistant_conversation_id }}
             className="text-primary-text hover:underline"
-          >
-            Open chat
-          </Link>
+          >{t("Open chat")}</Link>
         </p>
       ) : null}
       <div className="grid gap-4 md:grid-cols-2">

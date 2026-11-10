@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { AlertCircle, Loader2 } from "lucide-react";
 
 interface ErrorBannerProps {
@@ -7,6 +8,7 @@ interface ErrorBannerProps {
 }
 
 export function ErrorBanner({ message, onRetry }: ErrorBannerProps) {
+  const { t } = useUiTranslation();
   const [retrying, setRetrying] = useState(false);
 
   const handleRetry = useCallback(() => {
@@ -24,7 +26,7 @@ export function ErrorBanner({ message, onRetry }: ErrorBannerProps) {
       <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-destructive/10">
         <AlertCircle className="h-4.5 w-4.5 text-destructive" />
       </div>
-      <p className="flex-1 text-12 text-destructive">{message}</p>
+      <p className="flex-1 text-12 text-destructive">{t(message)}</p>
       {onRetry && (
         <button
           type="button"
@@ -35,7 +37,7 @@ export function ErrorBanner({ message, onRetry }: ErrorBannerProps) {
           {retrying ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
           ) : (
-            "Retry"
+            t("Retry")
           )}
         </button>
       )}

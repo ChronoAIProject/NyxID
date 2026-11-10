@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { MachineGrantConsent } from "@/components/shared/machine-grant-consent";
 import { useEffect, useState } from "react";
 import { AlertTriangle, ArrowRight, Check, ChevronDown } from "lucide-react";
@@ -20,6 +21,7 @@ function ServiceIdentity({
 }: {
   readonly service: UserServiceResponse;
 }) {
+  const { t } = useUiTranslation();
   const source = service.credential_source;
   return (
     <span className="block min-w-0">
@@ -36,8 +38,8 @@ function ServiceIdentity({
       </span>
       <span className="mt-1 block text-11 font-normal text-muted-foreground">
         {source.type === "org"
-          ? `Organization · ${source.org_name}`
-          : "Personal"}
+          ? t("Organization · {{org_name}}", { org_name: source.org_name })
+          : t("Personal")}
       </span>
     </span>
   );
@@ -50,6 +52,7 @@ export function OAuthIncrementalConsentPage({
   readonly request?: IncrementalConsentRequest;
   readonly error?: string;
 }) {
+  const { t } = useUiTranslation();
   useApplyTheme();
   const email = useAuthStore((state) => state.user?.email);
   const { data: services, isLoading, isError } = useUserServices();
@@ -120,8 +123,8 @@ export function OAuthIncrementalConsentPage({
       return (
         <div key={id} className="py-3.5 text-12 text-muted-foreground">
           {isLoading || isError
-            ? "Previously authorized service details unavailable: "
-            : "Previously authorized service unavailable: "}
+            ? t("Previously authorized service details unavailable: ")
+            : t("Previously authorized service unavailable: ")}
           <span className="break-all font-mono">{id}</span>
         </div>
       );
@@ -139,7 +142,7 @@ export function OAuthIncrementalConsentPage({
           variant={retained ? "secondary" : "accent"}
           className="shrink-0 text-10"
         >
-          {retained ? "Authorized" : "Required"}
+          {retained ? t("Authorized") : t("Required")}
         </Badge>
       </div>
     );
@@ -159,20 +162,15 @@ export function OAuthIncrementalConsentPage({
             <div className="connection-identity-icon flex size-16 items-center justify-center rounded-full border border-border bg-card">
               <NyxidIcon className="size-8" />
             </div>
-            <span className="text-xs font-medium text-foreground">NyxID</span>
+            <span className="text-xs font-medium text-foreground">{t("NyxID")}</span>
           </div>
-          <h1 className="break-words text-22 font-bold leading-tight text-foreground sm:text-28">
-            Update service access
-          </h1>
+          <h1 className="break-words text-22 font-bold leading-tight text-foreground sm:text-28">{t("Update service access")}</h1>
           <p className="max-w-md break-words text-12 leading-relaxed text-muted-foreground">
             <span className="font-medium text-foreground">
-              {snapshot?.client_name ?? "This application"}
-            </span>{" "}
-            is requesting additional access to your NyxID account.
-          </p>
+              {snapshot?.client_name ?? t("This application")}
+            </span>{" "}{t("is requesting additional access to your NyxID account.")}</p>
           {request && (
-            <p className="break-all text-11 text-muted-foreground">
-              Return to{" "}
+            <p className="break-all text-11 text-muted-foreground">{t("Return to")}{" "}
               {new URL(request.redirect_uri).host ||
                 new URL(request.redirect_uri).protocol.slice(0, -1)}
             </p>
@@ -187,9 +185,7 @@ export function OAuthIncrementalConsentPage({
                   <p
                     role="status"
                     className="py-5 text-12 text-muted-foreground"
-                  >
-                    Loading services...
-                  </p>
+                  >{t("Loading services...")}</p>
                 ) : (
                   <>
                     <section
@@ -201,18 +197,18 @@ export function OAuthIncrementalConsentPage({
                         className="text-15 font-semibold text-foreground"
                       >
                         {additions.length
-                          ? `Allow ${additions.length} additional ${additions.length === 1 ? "service" : "services"}`
-                          : "No additional services needed"}
+                          ? t("Allow {{length}} additional {{value}}", { length: additions.length, value: additions.length === 1 ? t("service") : t("services") })
+                          : t("No additional services needed")}
                       </h2>
                       <p className="mt-1.5 text-12 leading-relaxed text-muted-foreground">
                         {requiredAdditions.length
-                          ? "These services are required to continue. Cancel if you do not want to grant access."
-                          : "The requested services are already included in this application's access."}
+                          ? t("These services are required to continue. Cancel if you do not want to grant access.")
+                          : t("The requested services are already included in this application's access.")}
                       </p>
                       {requiredAdditions.length > 0 && (
                         <div
                           role="region"
-                          aria-label="Additional services"
+                          aria-label={t("Additional services")}
                           tabIndex={0}
                           className="relative mt-4 max-h-[min(18rem,45dvh)] divide-y divide-border/60 overflow-y-auto overscroll-contain border-y border-border/60 focus-visible:outline-2 focus-visible:outline-ring"
                         >
@@ -232,16 +228,13 @@ export function OAuthIncrementalConsentPage({
                             <Badge
                               variant="accent"
                               className="shrink-0 text-10"
-                            >
-                              Optional
-                            </Badge>
+                            >{t("Optional")}</Badge>
                           </div>
                         ) : null;
                       })}
                       {optional.length > 0 && (
                         <details className="group mt-4">
-                          <summary className="flex cursor-pointer list-none items-center justify-between text-12 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
-                            Add optional services{" "}
+                          <summary className="flex cursor-pointer list-none items-center justify-between text-12 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">{t("Add optional services")}{" "}
                             <ChevronDown
                               className="h-4 w-4 transition-transform group-open:rotate-180"
                               aria-hidden="true"
@@ -284,11 +277,10 @@ export function OAuthIncrementalConsentPage({
                         <h2
                           id="incremental-permissions"
                           className="text-15 font-semibold text-foreground"
-                        >
-                          Allow {addedScopes.length} additional{" "}
+                        >{t("Allow ")}{addedScopes.length}{t(" additional")}{" "}
                           {addedScopes.length === 1
-                            ? "permission"
-                            : "permissions"}
+                            ? t("permission")
+                            : t("permissions")}
                         </h2>
                         <div className="mt-4 divide-y divide-border/60 border-y border-border/60">
                           {addedScopes.map((scope) => (
@@ -313,19 +305,17 @@ export function OAuthIncrementalConsentPage({
                       <h2
                         id="incremental-existing"
                         className="text-15 font-semibold text-foreground"
-                      >
-                        Already authorized
-                      </h2>
+                      >{t("Already authorized")}</h2>
                       <p className="mt-1.5 text-12 leading-relaxed text-muted-foreground">
                         {snapshot.allow_all_services
-                          ? "This application already has access to all available services. This access will be retained."
-                          : "Your existing access will be retained. You can manage it separately in Authorized Applications."}
+                          ? t("This application already has access to all available services. This access will be retained.")
+                          : t("Your existing access will be retained. You can manage it separately in Authorized Applications.")}
                       </p>
                       {!snapshot.allow_all_services &&
                         currentIds.length > 0 && (
                           <div
                             role="region"
-                            aria-label="Already authorized services"
+                            aria-label={t("Already authorized services")}
                             tabIndex={0}
                             className="mt-4 max-h-[min(18rem,45dvh)] divide-y divide-border/60 overflow-y-auto overscroll-contain border-y border-border/60 focus-visible:outline-2 focus-visible:outline-ring"
                           >
@@ -334,9 +324,7 @@ export function OAuthIncrementalConsentPage({
                         )}
                       {!snapshot.allow_all_services &&
                         currentIds.length === 0 && (
-                          <p className="mt-3 text-12 text-muted-foreground">
-                            No services previously authorized.
-                          </p>
+                          <p className="mt-3 text-12 text-muted-foreground">{t("No services previously authorized.")}</p>
                         )}
                     </section>
                   </>
@@ -348,20 +336,14 @@ export function OAuthIncrementalConsentPage({
                       aria-hidden="true"
                     />
                     <div>
-                      <h2 className="text-14 font-semibold text-foreground">
-                        Make sure you trust {snapshot.client_name}
+                      <h2 className="text-14 font-semibold text-foreground">{t("Make sure you trust ")}{snapshot.client_name}
                       </h2>
-                      <p className="mt-2 text-12 leading-relaxed text-muted-foreground">
-                        This app may receive the account information above and
-                        use the services you approve. You can revoke access
-                        later from Authorized Applications.
-                      </p>
+                      <p className="mt-2 text-12 leading-relaxed text-muted-foreground">{t("This app may receive the account information above and use the services you approve. You can revoke access later from Authorized Applications.")}</p>
                     </div>
                   </div>
                 </section>
                 <details className="group border-t border-border py-4">
-                  <summary className="flex cursor-pointer list-none items-center justify-between text-12 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">
-                    App details{" "}
+                  <summary className="flex cursor-pointer list-none items-center justify-between text-12 font-medium text-muted-foreground [&::-webkit-details-marker]:hidden">{t("App details")}{" "}
                     <ChevronDown
                       className="h-4 w-4 transition-transform group-open:rotate-180"
                       aria-hidden="true"
@@ -369,27 +351,27 @@ export function OAuthIncrementalConsentPage({
                   </summary>
                   <div className="mt-3 divide-y divide-border/60 border-y border-border/60">
                     <DetailRow
-                      label="Application"
+                      label={t("Application")}
                       value={snapshot.client_name}
                     />
                     <DetailRow
-                      label="Redirect host"
+                      label={t("Redirect host")}
                       value={new URL(request.redirect_uri).host}
                     />
                     <DetailRow
-                      label="Client ID"
+                      label={t("Client ID")}
                       value={request.client_id}
                       mono
                       copyable
                     />
                     <DetailRow
-                      label="Redirect URI"
+                      label={t("Redirect URI")}
                       value={request.redirect_uri}
                       mono
                       copyable
                     />
                     <DetailRow
-                      label="Existing scopes"
+                      label={t("Existing scopes")}
                       value={currentScopes.join(" ")}
                       mono
                     />
@@ -498,17 +480,17 @@ export function OAuthIncrementalConsentPage({
                     className="w-full"
                   >
                     {additions.length || addedScopes.length
-                      ? `Allow ${[
+                      ? t("Allow {{value}}", { value: [
                           additions.length
-                            ? `${additions.length} ${additions.length === 1 ? "service" : "services"}`
+                            ? `${additions.length} ${additions.length === 1 ? t("service") : t("services")}`
                             : "",
                           addedScopes.length
-                            ? `${addedScopes.length} ${addedScopes.length === 1 ? "permission" : "permissions"}`
+                            ? `${addedScopes.length} ${addedScopes.length === 1 ? t("permission") : t("permissions")}`
                             : "",
                         ]
                           .filter(Boolean)
-                          .join(" and ")}`
-                      : "Continue"}
+                          .join(" and ") })
+                      : t("Continue")}
                     <ArrowRight className="ml-2 size-4" aria-hidden="true" />
                   </Button>
                   <Button
@@ -518,22 +500,19 @@ export function OAuthIncrementalConsentPage({
                     variant="ghost"
                     className="w-full"
                   >
-                    {expired ? "Return to application" : "Cancel"}
+                    {expired ? t("Return to application") : t("Cancel")}
                   </Button>
                 </form>
               </>
             )}
           </div>
-          <div className="border-t border-border px-5 py-3 text-center text-xs text-muted-foreground sm:px-8">
-            Signed in as{" "}
+          <div className="border-t border-border px-5 py-3 text-center text-xs text-muted-foreground sm:px-8">{t("Signed in as")}{" "}
             <span className="break-all text-foreground">
-              {email || "your NyxID account"}
+              {email || t("your NyxID account")}
             </span>
           </div>
         </div>
-        <p className="mt-5 text-center text-xs text-muted-foreground">
-          Application access via NyxID
-        </p>
+        <p className="mt-5 text-center text-xs text-muted-foreground">{t("Application access via NyxID")}</p>
       </div>
     </main>
   );

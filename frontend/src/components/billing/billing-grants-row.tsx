@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import {
   decimalCredits,
   exactCredits,
@@ -71,7 +72,8 @@ function AppliesTo({
   grant: CreditGrant;
   catalog: BillingCatalog;
 }) {
-  if (grant.scope.all_services) return <>All services</>;
+  const { t } = useUiTranslation();
+  if (grant.scope.all_services) return <>{t("All services")}</>;
   const names = grant.scope.service_slugs.map((slug) =>
     serviceName(catalog, slug),
   );
@@ -80,8 +82,7 @@ function AppliesTo({
     <Tooltip delayDuration={150}>
       <TooltipTrigger asChild>
         <span className="grant-scope" tabIndex={0}>
-          {names.slice(0, 2).join(", ")} +{names.length - 2} more
-        </span>
+          {names.slice(0, 2).join(", ")} +{names.length - 2}{t(" more")}</span>
       </TooltipTrigger>
       <TooltipContent>{names.join(", ")}</TooltipContent>
     </Tooltip>
@@ -89,8 +90,9 @@ function AppliesTo({
 }
 
 function StateBadge({ grant }: { grant: CreditGrant }) {
+  const { t } = useUiTranslation();
   if (grant.activation_state === "pending_activation") {
-    return <Badge variant="secondary">Pending</Badge>;
+    return <Badge variant="secondary">{t("Pending")}</Badge>;
   }
   if (grant.status !== "active") {
     return (
@@ -114,10 +116,11 @@ export function CreditGrantsRow({
   grants: readonly CreditGrant[];
   catalog: BillingCatalog;
 }) {
+  const { t } = useUiTranslation();
   // Relative expiry hints are relative to when the page was opened.
   const [now] = useState(() => Date.now());
   if (!activeGrants.length) {
-    return <p className="empty-inline">No active credit grants.</p>;
+    return <p className="empty-inline">{t("No active credit grants.")}</p>;
   }
   const grants = [...activeGrants].sort(byConsumption);
   // A pending grant is unspendable until its ledger entry is confirmed, so it
@@ -153,8 +156,8 @@ export function CreditGrantsRow({
         grantPico(grant, "amount") - grantPico(grant, "remaining"),
       ),
       limit: geometry(grantPico(grant, "amount")),
-      legend: `${exact(grantPico(grant, "remaining"))} left`,
-      detail: `${exact(grantPico(grant, "remaining"))} of ${exact(grantPico(grant, "amount"))} credits left`,
+      legend: t("{{amount}} left", { amount: exact(grantPico(grant, "remaining")) }),
+      detail: t("{{remaining}} of {{limit}} credits left", { remaining: exact(grantPico(grant, "remaining")), limit: exact(grantPico(grant, "amount")) }),
     })),
   );
   const rows = grants.map((grant) => {
@@ -173,21 +176,13 @@ export function CreditGrantsRow({
     >
       <summary className="benefit-summary">
         <div className="compact-benefit-label">
-          <strong className="benefit-label-with-help">
-            Credit grants
-            <BenefitHelp label="Credit grants">
-              <p>
-                Credits applied after free usage and before your wallet. Grants
-                expiring soonest are used first.
-              </p>
-              <p>
-                Reserved credits are excluded from the available balance.
-                Pending grants become available once they are activated.
-              </p>
+          <strong className="benefit-label-with-help">{t("Credit grants")}<BenefitHelp label={t("Credit grants")}>
+              <p>{t("Credits applied after free usage and before your wallet. Grants expiring soonest are used first.")}</p>
+              <p>{t("Reserved credits are excluded from the available balance. Pending grants become available once they are activated.")}</p>
             </BenefitHelp>
           </strong>
           <span>
-            {grants.length} {grants.length === 1 ? "grant" : "grants"}
+            {grants.length} {grants.length === 1 ? t("grant") : t("grants")}
           </span>
         </div>
         <DetailsAction />
@@ -195,16 +190,14 @@ export function CreditGrantsRow({
           <div className="compact-coverage compact-grant-balance">
             <Tooltip delayDuration={150}>
               <TooltipTrigger asChild>
-                <strong tabIndex={0}>{amount(available)} credits</strong>
+                <strong tabIndex={0}>{amount(available)}{t(" credits")}</strong>
               </TooltipTrigger>
-              <TooltipContent>
-                Available: {exact(available)} credits
-              </TooltipContent>
+              <TooltipContent>{t("Available: ")}{exact(available)}{t(" credits")}</TooltipContent>
             </Tooltip>
-            <small>available</small>
-            {pending > 0n && <small>· {amount(pending)} pending</small>}
+            <small>{t("available")}</small>
+            {pending > 0n && <small>· {amount(pending)}{t(" pending")}</small>}
           </div>
-          <StackedMeter stack={stack} label="Credit grants" />
+          <StackedMeter stack={stack} label={t("Credit grants")} />
         </div>
       </summary>
       <div className="benefit-expanded">
@@ -212,11 +205,11 @@ export function CreditGrantsRow({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Grant</TableHead>
-                <TableHead>Applies to</TableHead>
-                <TableHead className="text-right">Remaining</TableHead>
-                <TableHead className="text-right">Used</TableHead>
-                <TableHead>Expires</TableHead>
+                <TableHead>{t("Grant")}</TableHead>
+                <TableHead>{t("Applies to")}</TableHead>
+                <TableHead className="text-right">{t("Remaining")}</TableHead>
+                <TableHead className="text-right">{t("Used")}</TableHead>
+                <TableHead>{t("Expires")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -233,12 +226,11 @@ export function CreditGrantsRow({
                     <AppliesTo grant={grant} catalog={catalog} />
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
-                    {amount(grantPico(grant, "remaining"))} of{" "}
+                    {amount(grantPico(grant, "remaining"))}{t(" of")}{" "}
                     {amount(grantPico(grant, "amount"))}
                     {grantPico(grant, "reserved") > 0n && (
                       <span className="block text-11 text-muted-foreground">
-                        {amount(grantPico(grant, "reserved"))} reserved
-                      </span>
+                        {amount(grantPico(grant, "reserved"))}{t(" reserved")}</span>
                     )}
                   </TableCell>
                   <TableCell
@@ -254,7 +246,7 @@ export function CreditGrantsRow({
             </TableBody>
           </Table>
         </div>
-        <ul className="grants-mobile" aria-label="Credit grants">
+        <ul className="grants-mobile" aria-label={t("Credit grants")}>
           {rows.map(({ grant, step, percent, status }) => (
             <li key={grant.id}>
               <span className="stack-labelled">
@@ -263,13 +255,11 @@ export function CreditGrantsRow({
                 <StateBadge grant={grant} />
               </span>
               <span className={cn("tabular-nums", toneClass[status])}>
-                {formatPercent(percent)}% used
-              </span>
+                {formatPercent(percent)}{t("% used")}</span>
               <small>
-                {amount(grantPico(grant, "remaining"))} of{" "}
-                {amount(grantPico(grant, "amount"))} left
-                {grantPico(grant, "reserved") > 0n &&
-                  ` · ${amount(grantPico(grant, "reserved"))} reserved`}{" "}
+                {amount(grantPico(grant, "remaining"))}{t(" of")}{" "}
+                {amount(grantPico(grant, "amount"))}{t(" left")}{grantPico(grant, "reserved") > 0n &&
+                  t(" · {{value}} reserved", { value: amount(grantPico(grant, "reserved")) })}{" "}
                 · <AppliesTo grant={grant} catalog={catalog} /> ·{" "}
                 {expiryLabel(grant.expires_at, now)}
               </small>

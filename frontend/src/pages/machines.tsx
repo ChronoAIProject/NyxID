@@ -1,3 +1,5 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useRemoteMachineAdmission } from "@/hooks/use-remote-machine-admission";
 import {
   MachineIsolationBadge,
@@ -51,6 +53,7 @@ function MachineCard({
   readonly onActivity: () => void;
   readonly update?: MachineUpdateStatus;
 }) {
+  const { t } = useUiTranslation();
   const machine = node.machine!;
   return (
     <article className="space-y-3 rounded-xl border border-border/50 bg-card p-4">
@@ -60,12 +63,11 @@ function MachineCard({
           {node.name}
         </h3>
         {update?.update_available ? (
-          <Badge variant="warning">
-            Update available ({update.target_version})
+          <Badge variant="warning">{t("Update available (")}{update.target_version})
           </Badge>
         ) : null}
         <span className="text-11 text-muted-foreground">
-          v{node.metadata?.agent_version ?? "unknown"}
+          v{node.metadata?.agent_version ?? t("unknown")}
         </span>
         <NodeStatusBadge status={node.status} isConnected={node.is_connected} />
         <MachineIsolationBadge machine={machine} />
@@ -84,9 +86,9 @@ function MachineCard({
       </p>
       <p className="text-12 text-muted-foreground">
         {node.owner.display_name} ·{" "}
-        {node.is_connected ? "Connected" : "Disconnected"}
+        {node.is_connected ? t("Connected") : t("Disconnected")}
         {machine.computer && !machine.computer_ready
-          ? " · Computer permissions or display unavailable"
+          ? t(" · Computer permissions or display unavailable")
           : ""}
       </p>
       <div className="flex flex-wrap gap-2">
@@ -96,25 +98,20 @@ function MachineCard({
               to="/assistant/machines/$nodeId/desktop"
               params={{ nodeId: node.id }}
               disabled={!node.is_connected}
-            >
-              Watch / Take over desktop
-            </Link>
+            >{t("Watch / Take over desktop")}</Link>
           </Button>
         ) : null}
         <Button onClick={onActivity}>
-          <History />
-          Activity
-        </Button>
-        <Button onClick={onSettings} aria-label={`Settings for ${node.name}`}>
-          <Settings />
-          Settings
-        </Button>
+          <History />{t("Activity")}</Button>
+        <Button onClick={onSettings} aria-label={t("Settings for {{name}}", { name: node.name })}>
+          <Settings />{t("Settings")}</Button>
       </div>
     </article>
   );
 }
 
 export function MachinesPage() {
+  const { t } = useUiTranslation();
   const remoteAdmission = useRemoteMachineAdmission();
   const navigate = useNavigate();
   const search = parseMachinesSearch(
@@ -180,18 +177,18 @@ export function MachinesPage() {
         }
       >
         <TabsList>
-          <TabsTrigger value="machines">Machines</TabsTrigger>
-          <TabsTrigger value="logins">Saved logins</TabsTrigger>
+          <TabsTrigger value="machines">{t("Machines")}</TabsTrigger>
+          <TabsTrigger value="logins">{t("Saved logins")}</TabsTrigger>
         </TabsList>
         <TabsContent value="machines" className="mt-6 space-y-6">
           <PageHeader
-            title="Machines"
-            description="Remote and self-hosted computers for authorized agents and clients."
+            title={t("Machines")}
+            description={t("Remote and self-hosted computers for authorized agents and clients.")}
             actions={
               <div className="flex flex-wrap gap-2">
                 {remoteAdmission && (
                   <AddCtaButton
-                    label="Create remote machine"
+                    label={t("Create remote machine")}
                     onClick={() =>
                       void navigate({
                         to: "/assistant/machines/new",
@@ -201,7 +198,7 @@ export function MachinesPage() {
                   />
                 )}
                 <AddCtaButton
-                  label="Add a machine"
+                  label={t("Add a machine")}
                   onClick={() =>
                     void navigate({ to: "/assistant/machines/new" })
                   }
@@ -209,28 +206,19 @@ export function MachinesPage() {
               </div>
             }
           />
-          <section aria-label="Remote machines" className="space-y-3">
-            <h3 className="text-15 font-semibold">Remote machines</h3>
-            <p className="text-12 text-muted-foreground">
-              Personal hosted machines with a fixed workspace and selected
-              capabilities. Resource state, runtime billing and execution
-              authorization are independent.
-            </p>
+          <section aria-label={t("Remote machines")} className="space-y-3">
+            <h3 className="text-15 font-semibold">{t("Remote machines")}</h3>
+            <p className="text-12 text-muted-foreground">{t("Personal hosted machines with a fixed workspace and selected capabilities. Resource state, runtime billing and execution authorization are independent.")}</p>
             {!remote.isPending &&
               !remote.error &&
               !remote.discoveryComplete && (
-                <p role="status" className="text-12 text-muted-foreground">
-                  Complete remote Machine discovery is not confirmed by this
-                  server.
-                </p>
+                <p role="status" className="text-12 text-muted-foreground">{t("Complete remote Machine discovery is not confirmed by this server.")}</p>
               )}
             {remote.isPending ? (
-              <p role="status" className="text-12">
-                Loading remote machines…
-              </p>
+              <p role="status" className="text-12">{t("Loading remote machines…")}</p>
             ) : remote.error ? (
               <ErrorBanner
-                message="Remote machine management could not be loaded. This deployment may not expose it yet."
+                message={t("Remote machine management could not be loaded. This deployment may not expose it yet.")}
                 onRetry={() => void remote.refetch()}
               />
             ) : hostedMachines.length ? (
@@ -239,20 +227,16 @@ export function MachinesPage() {
                 onOpen={openRemote}
               />
             ) : (
-              <p className="rounded-lg border border-dashed border-border p-6 text-12 text-muted-foreground">
-                No remote machines. Check your free slot and the configured
-                profile before creating one.
-              </p>
+              <p className="rounded-lg border border-dashed border-border p-6 text-12 text-muted-foreground">{t("No remote machines. Check your free slot and the configured profile before creating one.")}</p>
             )}
           </section>
-          <h3 className="text-15 font-semibold">Self-hosted machines</h3>
+          <h3 className="text-15 font-semibold">{t("Self-hosted machines")}</h3>
           {nodes.isPending || orgs.isPending ? (
-            <p role="status">Loading machines…</p>
+            <p role="status">{t("Loading machines…")}</p>
           ) : null}
           {nodes.error || orgs.error ? (
-            <p role="alert" className="text-12 text-destructive">
-              Could not load machines.{" "}
-              {nodes.error?.message ?? orgs.error?.message}
+            <p role="alert" className="text-12 text-destructive">{t("Could not load machines.")}{" "}
+              {translateUi(nodes.error?.message ?? orgs.error?.message ?? "")}
             </p>
           ) : null}
           {!nodes.isPending &&
@@ -260,10 +244,7 @@ export function MachinesPage() {
           !nodes.error &&
           !orgs.error &&
           !machines.length ? (
-            <p className="rounded-xl border border-border/50 p-6 text-12 text-muted-foreground">
-              Add a machine to let NyxBot run commands, work with files and use
-              a desktop.
-            </p>
+            <p className="rounded-xl border border-border/50 p-6 text-12 text-muted-foreground">{t("Add a machine to let NyxBot run commands, work with files and use a desktop.")}</p>
           ) : null}
           <div className="grid gap-4 xl:grid-cols-2">
             {machines.map((node) => (
@@ -292,10 +273,8 @@ export function MachinesPage() {
       >
         <SheetContent className="w-full overflow-y-auto sm:max-w-3xl">
           <SheetHeader className="pr-8">
-            <SheetTitle>Remote machine details</SheetTitle>
-            <SheetDescription>
-              Lifecycle, access, work history and billing for this machine.
-            </SheetDescription>
+            <SheetTitle>{t("Remote machine details")}</SheetTitle>
+            <SheetDescription>{t("Lifecycle, access, work history and billing for this machine.")}</SheetDescription>
           </SheetHeader>
           {remoteDetailId ? (
             <RemoteMachineDetail
@@ -324,7 +303,7 @@ export function MachinesPage() {
       >
         <SheetContent className="flex w-full min-w-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
           <SheetHeader className="shrink-0 p-5 pr-10">
-            <SheetTitle>Machine activity</SheetTitle>
+            <SheetTitle>{t("Machine activity")}</SheetTitle>
             <SheetDescription>
               {machines.find((node) => node.id === activityId)?.name}
             </SheetDescription>
@@ -342,10 +321,8 @@ export function MachinesPage() {
       >
         <SheetContent className="flex w-full min-w-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">
           <SheetHeader className="shrink-0 p-5 pr-10">
-            <SheetTitle>{selected?.name} settings</SheetTitle>
-            <SheetDescription>
-              Control confirmations, saved-login typing and specialist access.
-            </SheetDescription>
+            <SheetTitle>{selected?.name}{t(" settings")}</SheetTitle>
+            <SheetDescription>{t("Control confirmations, saved-login typing and specialist access.")}</SheetDescription>
           </SheetHeader>
           {selected ? (
             <MachineSettings
@@ -368,6 +345,7 @@ function RemoteMachineList({
   readonly machines: RemoteMachine[];
   readonly onOpen: (id: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const label = (value: string) =>
     value.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
   const state = (machine: RemoteMachine) => (
@@ -383,8 +361,7 @@ function RemoteMachineList({
       >
         {label(machine.resource_state)}
       </Badge>
-      <span className="text-11 text-muted-foreground">
-        Billing: {label(machine.billing_state)} · Authorization:{" "}
+      <span className="text-11 text-muted-foreground">{t("Billing: ")}{label(machine.billing_state)}{t(" · Authorization:")}{" "}
         {label(machine.authorization_state)}
       </span>
     </div>
@@ -401,13 +378,9 @@ function RemoteMachineList({
               {machine.name ?? machine.sandbox_name}
             </h4>
             {state(machine)}
-            <p className="text-11 text-muted-foreground">
-              Generation {machine.runtime_generation} ·{" "}
-              {machine.profile.workspace_gib} GiB workspace
-            </p>
-            <Button onClick={() => onOpen(machine.node_id)}>
-              View details
-            </Button>
+            <p className="text-11 text-muted-foreground">{t("Generation ")}{machine.runtime_generation} ·{" "}
+              {machine.profile.workspace_gib}{t(" GiB workspace")}</p>
+            <Button onClick={() => onOpen(machine.node_id)}>{t("View details")}</Button>
           </article>
         ))}
       </div>
@@ -415,11 +388,11 @@ function RemoteMachineList({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Machine</TableHead>
-              <TableHead>State</TableHead>
-              <TableHead>Runtime</TableHead>
+              <TableHead>{t("Machine")}</TableHead>
+              <TableHead>{t("State")}</TableHead>
+              <TableHead>{t("Runtime")}</TableHead>
               <TableHead>
-                <span className="sr-only">Details</span>
+                <span className="sr-only">{t("Details")}</span>
               </TableHead>
             </TableRow>
           </TableHeader>
@@ -435,20 +408,16 @@ function RemoteMachineList({
                   </div>
                 </TableCell>
                 <TableCell>{state(machine)}</TableCell>
-                <TableCell>
-                  Generation {machine.runtime_generation}
+                <TableCell>{t("Generation ")}{machine.runtime_generation}
                   <br />
                   <span className="text-11 text-muted-foreground">
-                    {machine.profile.workspace_gib} GiB workspace
-                  </span>
+                    {machine.profile.workspace_gib}{t(" GiB workspace")}</span>
                 </TableCell>
                 <TableCell>
                   <Button
                     onClick={() => onOpen(machine.node_id)}
-                    aria-label={`View ${machine.name ?? machine.sandbox_name}`}
-                  >
-                    Details
-                  </Button>
+                    aria-label={t("View {{value}}", { value: machine.name ?? machine.sandbox_name })}
+                  >{t("Details")}</Button>
                 </TableCell>
               </TableRow>
             ))}

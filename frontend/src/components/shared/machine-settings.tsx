@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import {
   MachineIsolationBadge,
   MachineSharingBadge,
@@ -55,6 +57,7 @@ export function MachineSettings({
   readonly canManage: boolean;
   readonly update?: MachineUpdateStatus;
 }) {
+  const { t } = useUiTranslation();
   const settings = useMachineSettings(node.id);
   const updatePolicy = useMachineUpdatePolicy(node.id);
   const [automaticDraft, setAutomaticDraft] = useState<boolean>();
@@ -133,13 +136,13 @@ export function MachineSettings({
   return (
     <>
       <form
-        aria-label="Machine settings"
+        aria-label={t("Machine settings")}
         onSubmit={form.handleSubmit(save)}
         className="flex min-h-0 min-w-0 flex-1 flex-col text-12"
       >
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 pb-5 [overflow-wrap:anywhere]">
           {update ? (
-            <SettingsSection title="Version and updates">
+            <SettingsSection title={t("Version and updates")}>
               <MachineUpdate name={node.name} status={update} />
               <label className="flex items-start gap-2">
                 <Checkbox
@@ -147,21 +150,15 @@ export function MachineSettings({
                   disabled={!canManage}
                   onCheckedChange={(value) => setAutomaticDraft(value === true)}
                 />
-                <span>
-                  Update automatically when idle
-                  <span className="mt-1 block text-muted-foreground">
-                    Recommended. Updates wait until no job, turn, live desktop
-                    or owner control is active. You receive an update
-                    notification.
-                  </span>
+                <span>{t("Update automatically when idle")}<span className="mt-1 block text-muted-foreground">{t("Recommended. Updates wait until no job, turn, live desktop or owner control is active. You receive an update notification.")}</span>
                 </span>
               </label>
             </SettingsSection>
           ) : null}
-          <SettingsSection title="Status and capabilities">
+          <SettingsSection title={t("Status and capabilities")}>
             <div className="flex flex-wrap gap-2">
               <Badge variant={node.is_connected ? "success" : "secondary"}>
-                {node.is_connected ? "Connected" : "Disconnected"}
+                {node.is_connected ? t("Connected") : t("Disconnected")}
               </Badge>
               <MachineIsolationBadge machine={machine} />
               <MachineSharingBadge />
@@ -177,60 +174,45 @@ export function MachineSettings({
                 .join(" · ")}{" "}
               · {machine.os} / {machine.arch}
             </p>
-            <p className="text-muted-foreground">
-              Workspace roots: {machine.roots.join(", ")}
+            <p className="text-muted-foreground">{t("Workspace roots: ")}{machine.roots.join(", ")}
             </p>
             <MachineIsolationDetails machine={machine} />
-            <p className="text-muted-foreground">
-              Agents configured for Shared legacy can run granted commands and
-              file tools in shared mode, even when separation is unavailable.
-              A separated assignment refuses execution if its separate workspace
-              is unavailable; it never falls back to shared mode.
-            </p>
+            <p className="text-muted-foreground">{t("Agents configured for Shared legacy can run granted commands and file tools in shared mode, even when separation is unavailable. A separated assignment refuses execution if its separate workspace is unavailable; it never falls back to shared mode.")}</p>
             {!machine.separated?.available ? <div className="space-y-1 text-muted-foreground">
               <p>{SEPARATED_SETUP_NOTE}</p>
-              {machine.separated?.reason ? <details><summary className="cursor-pointer">Separate workspace diagnostics</summary><p>{machine.separated.reason}</p></details> : null}
+              {machine.separated?.reason ? <details><summary className="cursor-pointer">{t("Separate workspace diagnostics")}</summary><p>{machine.separated.reason}</p></details> : null}
             </div> : null}
           </SettingsSection>
           {machine.computer || machine.browser ? (
-            <SettingsSection title="Live desktop">
+            <SettingsSection title={t("Live desktop")}>
               <p className="text-muted-foreground">
                 {machine.computer_ready
-                  ? "Ready"
-                  : "Permissions or display unavailable"}{" "}
-                · {machine.computer_mode} mode · cua{" "}
-                {machine.cua_version ?? "unavailable"}
+                  ? t("Ready")
+                  : t("Permissions or display unavailable")}{" "}
+                · {machine.computer_mode}{t(" mode · cua")}{" "}
+                {machine.cua_version ?? t("unavailable")}
               </p>
               {machine.computer_permissions ? (
-                <p className="text-muted-foreground">
-                  Screen Recording:{" "}
+                <p className="text-muted-foreground">{t("Screen Recording:")}{" "}
                   {machine.computer_permissions.screen_recording
-                    ? "allowed"
-                    : "not granted"}
-                  . Accessibility:{" "}
+                    ? t("allowed")
+                    : t("not granted")}{t(". Accessibility:")}{" "}
                   {machine.computer_permissions.accessibility
-                    ? "allowed"
-                    : "not granted"}
-                  . Enable permissions for the app running the node in macOS
-                  System Settings.
-                </p>
+                    ? t("allowed")
+                    : t("not granted")}{t(". Enable permissions for the app running the node in macOS System Settings.")}</p>
               ) : null}
               <Button asChild className="max-w-full">
                 <Link
                   to="/assistant/machines/$nodeId/desktop"
                   params={{ nodeId: node.id }}
                   search={{ conversation_id: undefined }}
-                >
-                  Open live desktop
-                </Link>
+                >{t("Open live desktop")}</Link>
               </Button>
             </SettingsSection>
           ) : null}
           {canManage ? (
-            <SettingsSection title="Owner confirmation">
-              <p className="text-muted-foreground">
-                Choose when an agent must ask before acting on this machine.
-              </p>
+            <SettingsSection title={t("Owner confirmation")}>
+              <p className="text-muted-foreground">{t("Choose when an agent must ask before acting on this machine.")}</p>
               <Select
                 value={confirm}
                 onValueChange={(value) =>
@@ -239,21 +221,21 @@ export function MachineSettings({
                 disabled={saving}
               >
                 <SelectTrigger
-                  aria-label="Owner confirmation"
+                  aria-label={t("Owner confirmation")}
                   className="w-full"
                 >
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="none">No confirmation</SelectItem>
-                  <SelectItem value="changes">Confirm changes</SelectItem>
-                  <SelectItem value="all">Confirm every operation</SelectItem>
+                  <SelectItem value="none">{t("No confirmation")}</SelectItem>
+                  <SelectItem value="changes">{t("Confirm changes")}</SelectItem>
+                  <SelectItem value="all">{t("Confirm every operation")}</SelectItem>
                 </SelectContent>
               </Select>
             </SettingsSection>
           ) : null}
           {canManage && (machine.browser ?? machine.computer) && !machine.browser_isolated ? (
-            <SettingsSection title="Saved logins on a shared OS user">
+            <SettingsSection title={t("Saved logins on a shared OS user")}>
               <p className="text-muted-foreground">{SINGLE_USER_WARNING}</p>
               <label className="flex items-start gap-3">
                 <Checkbox
@@ -265,7 +247,7 @@ export function MachineSettings({
                     setAcknowledged(false);
                   }}
                 />
-                <span>Allow saved-login typing on this machine</span>
+                <span>{t("Allow saved-login typing on this machine")}</span>
               </label>
               {allow && !node.allow_single_user_saved_logins ? (
                 <label className="flex items-start gap-3 rounded-lg border border-warning/30 p-3">
@@ -274,30 +256,23 @@ export function MachineSettings({
                     checked={acknowledged}
                     onCheckedChange={(value) => setAcknowledged(value === true)}
                   />
-                  <span>
-                    I understand the shared-user risk and allow typing.
-                  </span>
+                  <span>{t("I understand the shared-user risk and allow typing.")}</span>
                 </label>
               ) : null}
             </SettingsSection>
           ) : null}
           {canManage ? (
-            <SettingsSection title="Specialist access">
-              <p className="text-muted-foreground">
-                NyxBot can use every machine you own or administer. Choose which
-                specialists can use this one.
-              </p>
+            <SettingsSection title={t("Specialist access")}>
+              <p className="text-muted-foreground">{t("NyxBot can use every machine you own or administer. Choose which specialists can use this one.")}</p>
               {agents.isPending ? (
-                <p role="status">Loading specialists…</p>
+                <p role="status">{t("Loading specialists…")}</p>
               ) : agents.error ? (
                 <p role="alert" className="text-destructive">
-                  {agents.error.message}
+                  {translateUi(agents.error.message ?? "")}
                 </p>
               ) : specialists.length ? (
                 <fieldset disabled={saving} className="space-y-3">
-                  <legend className="sr-only">
-                    Specialists allowed on this machine
-                  </legend>
+                  <legend className="sr-only">{t("Specialists allowed on this machine")}</legend>
                   {specialists.map((agent) => (
                     <label
                       key={agent.id}
@@ -325,31 +300,20 @@ export function MachineSettings({
                 </fieldset>
               ) : (
                 <div className="space-y-3">
-                  <p className="text-muted-foreground">
-                    No specialists yet. Create one for a focused role, then
-                    grant it this machine.
-                  </p>
-                  <Button type="button" onClick={() => setCreating(true)}>
-                    Create a specialist
-                  </Button>
+                  <p className="text-muted-foreground">{t("No specialists yet. Create one for a focused role, then grant it this machine.")}</p>
+                  <Button type="button" onClick={() => setCreating(true)}>{t("Create a specialist")}</Button>
                 </div>
               )}
             </SettingsSection>
           ) : null}
-          <SettingsSection title="Saved logins">
-            <p className="text-muted-foreground">
-              Manage website logins separately. Agents can fill approved fields
-              in the secure browser; the developer browser never receives saved
-              logins.
-            </p>
+          <SettingsSection title={t("Saved logins")}>
+            <p className="text-muted-foreground">{t("Manage website logins separately. Agents can fill approved fields in the secure browser; the developer browser never receives saved logins.")}</p>
             <Button
               asChild
               variant="outline"
               className="max-w-full whitespace-normal"
             >
-              <Link to="/assistant/machines" search={{ tab: "logins" }}>
-                Manage saved logins
-              </Link>
+              <Link to="/assistant/machines" search={{ tab: "logins" }}>{t("Manage saved logins")}</Link>
             </Button>
           </SettingsSection>
         </div>
@@ -357,7 +321,7 @@ export function MachineSettings({
           <footer className="shrink-0 space-y-2 border-t border-border bg-surface px-5 py-4">
             {error ? (
               <p role="alert" className="break-words text-destructive">
-                {error}
+                {translateUi(error)}
               </p>
             ) : null}
             <div className="flex items-center justify-end gap-3">
@@ -371,9 +335,7 @@ export function MachineSettings({
                     !acknowledged)
                 }
                 isLoading={saving}
-              >
-                Save machine settings
-              </Button>
+              >{t("Save machine settings")}</Button>
             </div>
           </footer>
         ) : null}

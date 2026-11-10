@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import {
   changedFields,
   describeChanges,
@@ -55,6 +58,7 @@ export function AdminRoleDetailPage() {
 }
 
 function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
@@ -110,7 +114,7 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
     async ({ before: _before, ...variables }) => {
       void _before;
       await updateMutation.mutateAsync(variables);
-      toast.success("Role updated successfully");
+      toast.success(translateUi("Role updated successfully"));
       setEditOpen(false);
     },
     (pending) =>
@@ -133,11 +137,11 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
   async function handleDelete() {
     try {
       await deleteMutation.mutateAsync(roleId);
-      toast.success("Role deleted");
+      toast.success(translateUi("Role deleted"));
       void navigate({ to: "/admin/roles" });
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to delete role",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to delete role"),
       );
     } finally {
       setDeleteOpen(false);
@@ -154,7 +158,7 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
       setBulkAssignOpen(false);
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to bulk assign role",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to bulk assign role"),
       );
     }
   }
@@ -172,18 +176,12 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
-          Role not found
-        </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
-          The role you are looking for does not exist or has been deleted.
-        </p>
+        <h3 className="mb-2 font-display text-lg font-semibold">{t("Role not found")}</h3>
+        <p className="mb-4 text-sm text-muted-foreground">{t("The role you are looking for does not exist or has been deleted.")}</p>
         <Button
           variant="outline"
           onClick={() => void navigate({ to: "/admin/roles" })}
-        >
-          Back to Roles
-        </Button>
+        >{t("Back to Roles")}</Button>
       </div>
     );
   }
@@ -199,15 +197,11 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
               <Button variant="outline" onClick={() => setBulkAssignOpen(true)}>
                 <ButtonIcon>
                   <Users className="h-3 w-3" />
-                </ButtonIcon>
-                Assign All
-              </Button>
+                </ButtonIcon>{t("Assign All")}</Button>
               <Button variant="outline" onClick={openEditDialog}>
                 <ButtonIcon>
                   <Pencil className="h-3 w-3" />
-                </ButtonIcon>
-                Edit
-              </Button>
+                </ButtonIcon>{t("Edit")}</Button>
               {!role.is_system && (
                 <Button
                   variant="destructive"
@@ -215,45 +209,41 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
                 >
                   <ButtonIcon variant="destructive">
                     <Trash2 className="h-3 w-3 text-destructive" />
-                  </ButtonIcon>
-                  Delete
-                </Button>
+                  </ButtonIcon>{t("Delete")}</Button>
               )}
             </>
           ) : null
         }
       />
 
-      <DetailSection title="Role Information">
-        <DetailRow label="ID" value={role.id} copyable />
-        <DetailRow label="Name" value={role.name} />
-        <DetailRow label="Slug" value={role.slug} copyable />
+      <DetailSection title={t("Role Information")}>
+        <DetailRow label={t("ID")} value={role.id} copyable />
+        <DetailRow label={t("Name")} value={role.name} />
+        <DetailRow label={t("Slug")} value={role.slug} copyable />
         <DetailRow
-          label="Type"
+          label={t("Type")}
           value={role.is_system ? "System" : "Custom"}
           badge
           badgeVariant={role.is_system ? "secondary" : "default"}
         />
         <DetailRow
-          label="Default"
+          label={t("Default")}
           value={role.is_default ? "Yes" : "No"}
           badge
           badgeVariant={role.is_default ? "success" : "secondary"}
         />
         {role.client_id && (
-          <DetailRow label="Client ID" value={role.client_id} copyable />
+          <DetailRow label={t("Client ID")} value={role.client_id} copyable />
         )}
-        <DetailRow label="Created" value={formatDate(role.created_at)} />
-        <DetailRow label="Updated" value={formatDate(role.updated_at)} />
+        <DetailRow label={t("Created")} value={formatDate(role.created_at)} />
+        <DetailRow label={t("Updated")} value={formatDate(role.updated_at)} />
       </DetailSection>
 
-      <DetailSection title="Permissions">
+      <DetailSection title={t("Permissions")}>
         {role.permissions.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <SmartRemoteIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">
-              No permissions assigned.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("No permissions assigned.")}</p>
           </div>
         ) : (
           <div className="flex flex-wrap gap-2 px-4 py-3">
@@ -275,9 +265,8 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Edit Role</DialogTitle>
-            <DialogDescription>
-              Update role details for {role.name}.
+            <DialogTitle>{t("Edit Role")}</DialogTitle>
+            <DialogDescription>{t("Update role details for ")}{role.name}.
             </DialogDescription>
           </DialogHeader>
           <Form {...form}>
@@ -290,10 +279,10 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Name</FormLabel>
+                    <FormLabel>{t("Name")}</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder="Role name"
+                        placeholder={t("Role name")}
                         disabled={role.is_system}
                         {...field}
                       />
@@ -307,10 +296,10 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
                 name="slug"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Slug</FormLabel>
+                    <FormLabel>{t("Slug")}</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder="role-slug"
+                        placeholder={"role-slug"}
                         disabled={role.is_system}
                         {...field}
                       />
@@ -324,9 +313,9 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
                 name="description"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Description</FormLabel>
+                    <FormLabel>{t("Description")}</FormLabel>
                     <FormControl>
-                      <Input placeholder="Optional description" {...field} />
+                      <Input placeholder={t("Optional description")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -337,10 +326,10 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
                 name="permissions"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Permissions</FormLabel>
+                    <FormLabel>{t("Permissions")}</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder="e.g. users:read, users:write"
+                        placeholder={t("e.g. users:read, users:write")}
                         {...field}
                       />
                     </FormControl>
@@ -359,9 +348,7 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
                         onCheckedChange={field.onChange}
                       />
                     </FormControl>
-                    <FormLabel className="!mt-0">
-                      Auto-assign to new users
-                    </FormLabel>
+                    <FormLabel className="!mt-0">{t("Auto-assign to new users")}</FormLabel>
                     <FormMessage />
                   </FormItem>
                 )}
@@ -371,16 +358,12 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
                   type="button"
                   variant="outline"
                   onClick={() => setEditOpen(false)}
-                >
-                  Cancel
-                </Button>
+                >{t("Cancel")}</Button>
                 <Button
                   type="submit"
                   variant="primary"
                   isLoading={updateMutation.isPending}
-                >
-                  Save Changes
-                </Button>
+                >{t("Save Changes")}</Button>
               </DialogFooter>
             </form>
           </Form>
@@ -391,24 +374,16 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete Role</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to delete &quot;{role.name}&quot;? It will
-              be removed from all users and groups. This action cannot be
-              undone.
-            </DialogDescription>
+            <DialogTitle>{t("Delete Role")}</DialogTitle>
+            <DialogDescription>{t("Are you sure you want to delete \"")}{role.name}{t("\"? It will be removed from all users and groups. This action cannot be undone.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteOpen(false)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
-            >
-              Delete Role
-            </Button>
+            >{t("Delete Role")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -417,23 +392,15 @@ function AdminRoleDetailPageEditor({ roleId }: { readonly roleId: string }) {
       <Dialog open={bulkAssignOpen} onOpenChange={setBulkAssignOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Assign Role to All Users</DialogTitle>
-            <DialogDescription>
-              This will assign the &quot;{role.name}&quot; role to every
-              existing user who does not already have it. Users who already have
-              this role will not be affected.
-            </DialogDescription>
+            <DialogTitle>{t("Assign Role to All Users")}</DialogTitle>
+            <DialogDescription>{t("This will assign the \"")}{role.name}{t("\" role to every existing user who does not already have it. Users who already have this role will not be affected.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setBulkAssignOpen(false)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setBulkAssignOpen(false)}>{t("Cancel")}</Button>
             <Button
               onClick={() => void handleBulkAssignAll()}
               isLoading={bulkAssignMutation.isPending}
-            >
-              Assign to All Users
-            </Button>
+            >{t("Assign to All Users")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

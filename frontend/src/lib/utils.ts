@@ -1,3 +1,4 @@
+import { getFormattingLocale, translateTime as t } from "./formatting-locale";
 import { type ClassValue, clsx } from "clsx";
 import { extendTailwindMerge } from "tailwind-merge";
 
@@ -7,7 +8,21 @@ import { extendTailwindMerge } from "tailwind-merge";
 const twMerge = extendTailwindMerge({
   extend: {
     theme: {
-      text: ["9", "10", "11", "12", "13", "14", "15", "17", "20", "22", "24", "28", "36"],
+      text: [
+        "9",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14",
+        "15",
+        "17",
+        "20",
+        "22",
+        "24",
+        "28",
+        "36",
+      ],
     },
   },
 });
@@ -20,25 +35,31 @@ export function formatDate(dateStr: string | null | undefined): string {
   if (!dateStr) return "N/A";
   const date = new Date(dateStr);
   if (Number.isNaN(date.getTime())) return "N/A";
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(date);
+  return new Intl.DateTimeFormat(
+    getFormattingLocale(),
+    {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    },
+  ).format(date);
 }
 
 export function formatDateTime(dateStr: string | null | undefined): string {
   if (!dateStr) return "N/A";
   const date = new Date(dateStr);
   if (Number.isNaN(date.getTime())) return "N/A";
-  return new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(date);
+  return new Intl.DateTimeFormat(
+    getFormattingLocale(),
+    {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    },
+  ).format(date);
 }
 
 /**
@@ -51,11 +72,14 @@ export function formatClockTime(dateStr: string | null | undefined): string {
   if (!dateStr) return "";
   const date = new Date(dateStr);
   if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(date);
+  return new Intl.DateTimeFormat(
+    getFormattingLocale(),
+    {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    },
+  ).format(date);
 }
 
 export function formatRelativeTime(dateStr: string | null | undefined): string {
@@ -69,10 +93,10 @@ export function formatRelativeTime(dateStr: string | null | undefined): string {
   const diffHours = Math.floor(diffMinutes / 60);
   const diffDays = Math.floor(diffHours / 24);
 
-  if (diffSeconds < 60) return "just now";
-  if (diffMinutes < 60) return `${String(diffMinutes)}m ago`;
-  if (diffHours < 24) return `${String(diffHours)}h ago`;
-  if (diffDays < 7) return `${String(diffDays)}d ago`;
+  if (diffSeconds < 60) return t("just now");
+  if (diffMinutes < 60) return t("{{count}}m ago", { count: diffMinutes });
+  if (diffHours < 24) return t("{{count}}h ago", { count: diffHours });
+  if (diffDays < 7) return t("{{count}}d ago", { count: diffDays });
   return formatDate(dateStr);
 }
 
@@ -84,9 +108,7 @@ export function formatRelativeTime(dateStr: string | null | undefined): string {
  * farther than a week out. Use this for "expires at" timestamps and similar
  * fields where the value can legitimately sit in the future.
  */
-export function formatTimeDistance(
-  dateStr: string | null | undefined,
-): string {
+export function formatTimeDistance(dateStr: string | null | undefined): string {
   if (!dateStr) return "N/A";
   const date = new Date(dateStr);
   if (Number.isNaN(date.getTime())) return "N/A";
@@ -98,13 +120,18 @@ export function formatTimeDistance(
   const absDays = Math.floor(absHours / 24);
 
   const isFuture = diffMs > 0;
-  const suffix = isFuture ? "" : " ago";
-  const prefix = isFuture ? "in " : "";
 
-  if (absSeconds < 60) return isFuture ? "in a moment" : "just now";
-  if (absMinutes < 60) return `${prefix}${String(absMinutes)}m${suffix}`;
-  if (absHours < 24) return `${prefix}${String(absHours)}h${suffix}`;
-  if (absDays < 7) return `${prefix}${String(absDays)}d${suffix}`;
+  if (absSeconds < 60) return t(isFuture ? "in a moment" : "just now");
+  if (absMinutes < 60)
+    return t(isFuture ? "in {{count}}m" : "{{count}}m ago", {
+      count: absMinutes,
+    });
+  if (absHours < 24)
+    return t(isFuture ? "in {{count}}h" : "{{count}}h ago", {
+      count: absHours,
+    });
+  if (absDays < 7)
+    return t(isFuture ? "in {{count}}d" : "{{count}}d ago", { count: absDays });
   return formatDate(dateStr);
 }
 

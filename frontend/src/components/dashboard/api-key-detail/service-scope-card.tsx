@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
 import { useMemo, useState } from "react";
 import { useUpdateApiKey } from "@/hooks/use-api-keys";
@@ -57,9 +60,10 @@ type ServiceScopeProps = {
   readonly canWrite?: boolean;
 };
 export function ServiceScopeCard(props: ServiceScopeProps) {
+  const { t } = useUiTranslation();
   const { data: allKeys, isLoading } = useKeys({ includeTools: true });
   if (isLoading && props.initialCatalogServiceId)
-    return <p className="text-12">Loading tool grants…</p>;
+    return <p className="text-12">{t("Loading tool grants…")}</p>;
   return (
     <ServiceScopeEditor
       key={`${props.keyId}:${props.initialCatalogServiceId ?? ""}`}
@@ -95,6 +99,7 @@ function ServiceScopeEditor({
   readonly apiKeySource?: CredentialSource;
   readonly canWrite?: boolean;
 }) {
+  const { t } = useUiTranslation();
   const [allowPlatform, setAllowPlatform] = useState(
     initialCatalogServiceId ? false : allowAutoConnectedServices,
   );
@@ -136,13 +141,13 @@ function ServiceScopeEditor({
       },
       {
         onSuccess: () => {
-          toast.success("Service scope updated");
+          toast.success(translateUi("Service scope updated"));
           setEditing(false);
         },
         onError: (err) => {
           const message =
             err instanceof ApiError ? err.message : "Failed to update scope";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -168,11 +173,9 @@ function ServiceScopeEditor({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Shield className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">Service Scope</CardTitle>
+          <CardTitle className="text-15">{t("Service Scope")}</CardTitle>
         </div>
-        <CardDescription>
-          Which external services this key can access via proxy
-        </CardDescription>
+        <CardDescription>{t("Which external services this key can access via proxy")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {editing ? (
@@ -183,16 +186,12 @@ function ServiceScopeEditor({
                 checked={allowAll}
                 onCheckedChange={(checked) => setAllowAll(checked === true)}
               />
-              <Label htmlFor="allow-all-services" className="text-12">
-                Allow all services
-              </Label>
+              <Label htmlFor="allow-all-services" className="text-12">{t("Allow all services")}</Label>
             </div>
 
             {!allowAll && (
               <div className="space-y-2 rounded-lg border border-border p-3">
-                <p className="text-xs text-muted-foreground">
-                  Select allowed services:
-                </p>
+                <p className="text-xs text-muted-foreground">{t("Select allowed services:")}</p>
                 {personalKeys.length > 0 ? (
                   personalKeys
                     .filter((k) => !k.auto_connected)
@@ -214,9 +213,7 @@ function ServiceScopeEditor({
                       </div>
                     ))
                 ) : (
-                  <p className="text-xs text-muted-foreground">
-                    No external services configured yet.
-                  </p>
+                  <p className="text-xs text-muted-foreground">{t("No external services configured yet.")}</p>
                 )}
               </div>
             )}
@@ -248,25 +245,18 @@ function ServiceScopeEditor({
                     selectedIds.length === allowedServiceIds.length &&
                     selectedIds.every((id) => allowedServiceIds.includes(id)))
                 }
-              >
-                Save
-              </Button>
-              <Button variant="outline" onClick={handleCancel}>
-                Cancel
-              </Button>
+              >{t("Save")}</Button>
+              <Button variant="outline" onClick={handleCancel}>{t("Cancel")}</Button>
             </div>
           </div>
         ) : (
           <div className="flex items-center justify-between">
             <div>
               {!allowAllServices && allowAutoConnectedServices && (
-                <Badge variant="secondary">
-                  All auto-connected platform services (including future
-                  additions)
-                </Badge>
+                <Badge variant="secondary">{t("All auto-connected platform services (including future additions)")}</Badge>
               )}
               {allowAllServices ? (
-                <Badge variant="secondary">All services</Badge>
+                <Badge variant="secondary">{t("All services")}</Badge>
               ) : allowedServices.length > 0 ? (
                 <div className="flex flex-wrap gap-1">
                   {allowedServices.map((s) => (
@@ -277,7 +267,7 @@ function ServiceScopeEditor({
                 </div>
               ) : (
                 !allowAutoConnectedServices && (
-                  <Badge variant="destructive">No services (auth-only)</Badge>
+                  <Badge variant="destructive">{t("No services (auth-only)")}</Badge>
                 )
               )}
             </div>

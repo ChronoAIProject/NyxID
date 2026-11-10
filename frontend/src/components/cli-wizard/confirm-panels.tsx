@@ -1,3 +1,4 @@
+import { useWizardTranslation } from "@/i18n/wizard";
 // Per-kind wizard panels. Each panel owns the "confirm action" step
 // (review prefill, maybe tweak a field, click "Do it"), then hands a
 // DisplayOnce-ready secret back to the parent page via `onSecret`.
@@ -131,6 +132,7 @@ export function ApiKeyCreateConfirm({
   pairingId,
   onSuccess,
 }: ApiKeyCreateConfirmProps) {
+  const { t } = useWizardTranslation();
   const [name, setName] = useState(prefill.name ?? "");
   const [platform, setPlatform] = useState(prefill.platform ?? "");
   const [nameValid, setNameValid] = useState(false);
@@ -202,34 +204,30 @@ export function ApiKeyCreateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Create an API key
-        </h2>
-        <p className="text-12 text-muted-foreground">
-          Review the details your CLI sent and confirm to mint the key.
-        </p>
+        <h2 className="font-serif text-28 font-normal">{t("Create an API key")}</h2>
+        <p className="text-12 text-muted-foreground">{t("Review the details your CLI sent and confirm to mint the key.")}</p>
       </div>
       <div className="flex flex-col gap-4">
         <NameInput
           id="pair-api-key-name"
-          label="Name"
+          label={t("Name")}
           schema={apiKeyNameSchema}
           value={name}
           onChange={setName}
           onValidityChange={setNameValid}
-          placeholder="e.g. coding-agent"
-          hint="A short label so you can find this key in `nyxid api-key list`."
+          placeholder={t("e.g. coding-agent")}
+          hint={t("A short label so you can find this key in `nyxid api-key list`.")}
           autoFocus
         />
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center gap-1.5">
-            <Label htmlFor="pair-api-key-platform">Platform</Label>
+            <Label htmlFor="pair-api-key-platform">{t("Platform")}</Label>
             <TooltipProvider delayDuration={150}>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    aria-label="About platform tags"
+                    aria-label={t("About platform tags")}
                     className="text-muted-foreground transition-colors duration-300 hover:text-foreground"
                   >
                     <Info className="h-3.5 w-3.5" />
@@ -243,28 +241,13 @@ export function ApiKeyCreateConfirm({
                 >
                   <div className="flex flex-col gap-4">
                     <p>
-                      <span className="font-medium text-foreground">
-                        Platform
-                      </span>{" "}
-                      tags the key with the AI agent that will use it.
-                    </p>
-                    <p className="text-muted-foreground">
-                      It controls three things: audit attribution (logs
-                      show which agent made each proxy request), per-
-                      agent rate-limit buckets, and dashboard filtering
-                      on the API Keys page.
-                    </p>
-                    <p className="text-muted-foreground">
-                      Values are a fixed allowlist —{" "}
+                      <span className="font-medium text-foreground">{t("Platform")}</span>{" "}{t("tags the key with the AI agent that will use it.")}</p>
+                    <p className="text-muted-foreground">{t("It controls three things: audit attribution (logs show which agent made each proxy request), per- agent rate-limit buckets, and dashboard filtering on the API Keys page.")}</p>
+                    <p className="text-muted-foreground">{t("Values are a fixed allowlist —")}{" "}
                       <code>claude-code</code>, <code>cursor</code>,{" "}
                       <code>codex</code>, <code>openclaw</code>,{" "}
-                      <code>generic</code>. Custom strings are rejected
-                      by the backend.
-                    </p>
-                    <p className="text-muted-foreground">
-                      Leave as <code>— none —</code> if you don't want
-                      the tag.
-                    </p>
+                      <code>generic</code>{t(". Custom strings are rejected by the backend.")}</p>
+                    <p className="text-muted-foreground">{t("Leave as ")}<code>{t("— none —")}</code>{t(" if you don't want the tag.")}</p>
                   </div>
                 </TooltipContent>
               </Tooltip>
@@ -277,10 +260,10 @@ export function ApiKeyCreateConfirm({
             }}
           >
             <SelectTrigger id="pair-api-key-platform">
-              <SelectValue placeholder="— none —" />
+              <SelectValue placeholder={t("— none —")} />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="__none__">— none —</SelectItem>
+              <SelectItem value="__none__">{t("— none —")}</SelectItem>
               {PLATFORMS.map((p) => (
                 <SelectItem key={p} value={p}>
                   <span className="inline-flex items-center gap-2">
@@ -291,12 +274,10 @@ export function ApiKeyCreateConfirm({
               ))}
             </SelectContent>
           </Select>
-          <p className="text-xs text-muted-foreground">
-            Tags the key for audit attribution + per-agent rate limits.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("Tags the key for audit attribution + per-agent rate limits.")}</p>
         </div>
         {(orgs.data?.length ?? 0) > 0 ? (
-          <Field label="Owner" htmlFor="pair-api-key-owner">
+          <Field label={t("Owner")} htmlFor="pair-api-key-owner">
             <select
               id="pair-api-key-owner"
               value={ownerId}
@@ -311,19 +292,15 @@ export function ApiKeyCreateConfirm({
               }}
               className="flex h-10 w-full rounded-xl border border-input bg-transparent px-[14px] py-2 text-13 text-foreground transition-colors duration-300 focus-visible:outline-none focus-visible:border-input-focus"
             >
-              <option value="">Personal (your account)</option>
+              <option value="">{t("Personal (your account)")}</option>
               {orgs.data
                 ?.filter((org) => org.your_role === "admin")
                 .map((org) => (
-                  <option key={org.id} value={org.id}>
-                    Org · {org.display_name ?? org.id}
+                  <option key={org.id} value={org.id}>{t("Org · ")}{org.display_name ?? org.id}
                   </option>
                 ))}
             </select>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Org-owned keys authenticate as the org; every admin of
-              the selected org can rotate or delete them.
-            </p>
+            <p className="mt-1 text-xs text-muted-foreground">{t("Org-owned keys authenticate as the org; every admin of the selected org can rotate or delete them.")}</p>
           </Field>
         ) : null}
         <ScopePicker value={scopes} onChange={setScopes} />
@@ -335,7 +312,7 @@ export function ApiKeyCreateConfirm({
       </div>
       {error ? <ErrorLine message={error} /> : null}
       <Button variant="primary" onClick={() => void submit()} disabled={submitDisabled}>
-        {loading ? "Creating..." : "Create Key"}
+        {loading ? t("Creating...") : t("Create Key")}
       </Button>
     </div>
   );
@@ -367,6 +344,7 @@ export function ApiKeyRotateConfirm({
   pairingId,
   onSuccess,
 }: ApiKeyRotateConfirmProps) {
+  const { t } = useWizardTranslation();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -396,17 +374,12 @@ export function ApiKeyRotateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Rotate API key
-        </h2>
-        <p className="text-12 text-muted-foreground">
-          Rotating <strong>{prefill.display_name}</strong> will issue a
-          new key and immediately revoke the previous one.
-        </p>
+        <h2 className="font-serif text-28 font-normal">{t("Rotate API key")}</h2>
+        <p className="text-12 text-muted-foreground">{t("Rotating ")}<strong>{prefill.display_name}</strong>{t(" will issue a new key and immediately revoke the previous one.")}</p>
       </div>
       {error ? <ErrorLine message={error} /> : null}
       <Button variant="primary" onClick={() => void submit()} disabled={loading}>
-        {loading ? "Rotating..." : "Rotate key"}
+        {loading ? t("Rotating...") : t("Rotate key")}
       </Button>
     </div>
   );
@@ -447,6 +420,7 @@ export function NodeRegisterConfirm({
   pairingId,
   onSuccess,
 }: NodeRegisterConfirmProps) {
+  const { t } = useWizardTranslation();
   const [name, setName] = useState(prefill.name ?? "");
   const [nameValid, setNameValid] = useState(true); // empty is valid (we fall back to default)
   const [loading, setLoading] = useState(false);
@@ -480,29 +454,24 @@ export function NodeRegisterConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Generate node registration token
-        </h2>
-        <p className="text-12 text-muted-foreground">
-          Use this token with <code>nyxid node register</code> to
-          connect a new node.
-        </p>
+        <h2 className="font-serif text-28 font-normal">{t("Generate node registration token")}</h2>
+        <p className="text-12 text-muted-foreground">{t("Use this token with ")}<code>nyxid node register</code>{t(" to connect a new node.")}</p>
       </div>
       <NameInput
         id="pair-node-name"
-        label="Node name (optional)"
+        label={t("Node name (optional)")}
         schema={nodeNameSchema}
         value={name}
         onChange={setName}
         onValidityChange={setNameValid}
         placeholder={DEFAULT_NODE_NAME}
-        hint={`Lowercase letters, digits, hyphens only (max 64). Leave blank for \`${DEFAULT_NODE_NAME}\`.`}
+        hint={t("Lowercase letters, digits, hyphens only (max 64). Leave blank for `{{name}}`.", { name: DEFAULT_NODE_NAME })}
         optional
         autoFocus
       />
       {error ? <ErrorLine message={error} /> : null}
       <Button variant="primary" onClick={() => void submit()} disabled={loading || !nameValid}>
-        {loading ? "Generating..." : "Generate token"}
+        {loading ? t("Generating...") : t("Generate token")}
       </Button>
     </div>
   );
@@ -533,6 +502,7 @@ export function NodeRotateConfirm({
   pairingId,
   onSuccess,
 }: NodeRotateConfirmProps) {
+  const { t } = useWizardTranslation();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -562,17 +532,12 @@ export function NodeRotateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Rotate node token
-        </h2>
-        <p className="text-12 text-muted-foreground">
-          Rotating <strong>{prefill.display_name}</strong> issues a new
-          auth token + signing secret and revokes the previous pair.
-        </p>
+        <h2 className="font-serif text-28 font-normal">{t("Rotate node token")}</h2>
+        <p className="text-12 text-muted-foreground">{t("Rotating ")}<strong>{prefill.display_name}</strong>{t(" issues a new auth token + signing secret and revokes the previous pair.")}</p>
       </div>
       {error ? <ErrorLine message={error} /> : null}
       <Button variant="primary" onClick={() => void submit()} disabled={loading}>
-        {loading ? "Rotating..." : "Rotate token"}
+        {loading ? t("Rotating...") : t("Rotate token")}
       </Button>
     </div>
   );
@@ -604,6 +569,7 @@ export function ServiceAccountCreateConfirm({
   pairingId,
   onSuccess,
 }: ServiceAccountCreateConfirmProps) {
+  const { t } = useWizardTranslation();
   const form = useAppForm({
     resolver: zodResolver(createServiceAccountSchema),
     defaultValues: {
@@ -677,53 +643,48 @@ export function ServiceAccountCreateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Create a service account
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Service accounts authenticate via the OAuth client_credentials flow.
-          The client_secret is shown once, on the next screen.
-        </p>
+        <h2 className="font-serif text-28 font-normal">{t("Create a service account")}</h2>
+        <p className="text-sm text-muted-foreground">{t("Service accounts authenticate via the OAuth client_credentials flow. The client_secret is shown once, on the next screen.")}</p>
       </div>
       <div className="flex flex-col gap-4">
-        <Field label="Name" htmlFor="pair-sa-name">
+        <Field label={t("Name")} htmlFor="pair-sa-name">
           <Input
             id="pair-sa-name"
             value={name}
             onChange={(e) => {
               form.setValue("name", e.target.value);
             }}
-            placeholder="e.g. ci-deploys"
+            placeholder={t("e.g. ci-deploys")}
             autoFocus
           />
         </Field>
-        <Field label="Allowed scopes" htmlFor="pair-sa-scopes">
+        <Field label={t("Allowed scopes")} htmlFor="pair-sa-scopes">
           <ServiceAccountScopePicker id="pair-sa-scopes" value={scopes}
             onChange={(value) => form.setValue("allowed_scopes", value)}
             ownerId={ownerId || currentUser?.id || ""} />
         </Field>
-        <Field label="Description (optional)" htmlFor="pair-sa-desc">
+        <Field label={t("Description (optional)")} htmlFor="pair-sa-desc">
           <Input
             id="pair-sa-desc"
             value={description}
             onChange={(e) => {
               form.setValue("description", e.target.value);
             }}
-            placeholder="What this account is for"
+            placeholder={t("What this account is for")}
           />
         </Field>
-        <Field label="Role IDs (optional, comma-separated)" htmlFor="pair-sa-roles">
+        <Field label={t("Role IDs (optional, comma-separated)")} htmlFor="pair-sa-roles">
           <Input
             id="pair-sa-roles"
             value={roleIds}
             onChange={(e) => {
               form.setValue("role_ids", e.target.value);
             }}
-            placeholder="role-id-1,role-id-2"
+            placeholder={"role-id-1,role-id-2"}
           />
         </Field>
         {(orgs.data?.length ?? 0) > 0 ? (
-          <Field label="Owner" htmlFor="pair-sa-owner">
+          <Field label={t("Owner")} htmlFor="pair-sa-owner">
             <select
               id="pair-sa-owner"
               value={ownerId}
@@ -732,22 +693,21 @@ export function ServiceAccountCreateConfirm({
               }}
               className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-13 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
-              <option value="">Personal (your admin account)</option>
+              <option value="">{t("Personal (your admin account)")}</option>
               {orgs.data?.map((org) => (
-                <option key={org.id} value={org.id}>
-                  Org · {org.display_name ?? org.id}
+                <option key={org.id} value={org.id}>{t("Org · ")}{org.display_name ?? org.id}
                 </option>
               ))}
             </select>
           </Field>
         ) : null}
       </div>
-      {!currentUser && identity.isPending && <p role="status">Loading your account…</p>}
-      {!currentUser && identity.isError && <div role="alert"><ErrorLine message={identity.error.message} /><Button variant="outline" onClick={() => void identity.refetch()}>Retry account</Button></div>}
-      {Object.entries(form.formState.errors).map(([field, value]) => <ErrorLine key={field} message={value.message ?? "Invalid value"} />)}
+      {!currentUser && identity.isPending && <p role="status">{t("Loading your account…")}</p>}
+      {!currentUser && identity.isError && <div role="alert"><ErrorLine message={identity.error.message} /><Button variant="outline" onClick={() => void identity.refetch()}>{t("Retry account")}</Button></div>}
+      {Object.entries(form.formState.errors).map(([field, value]) => <ErrorLine key={field} message={value.message ?? t("Invalid value")} />)}
       {error ? <ErrorLine message={error} /> : null}
       <Button onClick={() => void submit()} disabled={submitDisabled}>
-        {loading ? "Creating..." : "Create Service Account"}
+        {loading ? t("Creating...") : t("Create Service Account")}
       </Button>
     </div>
   );
@@ -778,6 +738,7 @@ export function ServiceAccountRotateSecretConfirm({
   pairingId,
   onSuccess,
 }: ServiceAccountRotateSecretConfirmProps) {
+  const { t } = useWizardTranslation();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -807,18 +768,12 @@ export function ServiceAccountRotateSecretConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Rotate service account secret
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Rotating <strong>{prefill.display_name}</strong> immediately revokes
-          all existing access tokens issued under this service account and mints
-          a new client_secret.
-        </p>
+        <h2 className="font-serif text-28 font-normal">{t("Rotate service account secret")}</h2>
+        <p className="text-sm text-muted-foreground">{t("Rotating ")}<strong>{prefill.display_name}</strong>{t(" immediately revokes all existing access tokens issued under this service account and mints a new client_secret.")}</p>
       </div>
       {error ? <ErrorLine message={error} /> : null}
       <Button onClick={() => void submit()} disabled={loading}>
-        {loading ? "Rotating..." : "Rotate secret"}
+        {loading ? t("Rotating...") : t("Rotate secret")}
       </Button>
     </div>
   );
@@ -848,6 +803,7 @@ export function DeveloperAppCreateConfirm({
   pairingId,
   onSuccess,
 }: DeveloperAppCreateConfirmProps) {
+  const { t } = useWizardTranslation();
   const [name, setName] = useState(prefill.name ?? "");
   // Mutable list — each row gets a unique key so React doesn't
   // trample values when a row is removed mid-edit.
@@ -958,29 +914,23 @@ export function DeveloperAppCreateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Create a developer OAuth app
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Confidential client — the client_secret is shown once on the next
-          screen. Use it to sign Sign-in-with-NyxID requests from your
-          downstream product.
-        </p>
+        <h2 className="font-serif text-28 font-normal">{t("Create a developer OAuth app")}</h2>
+        <p className="text-sm text-muted-foreground">{t("Confidential client — the client_secret is shown once on the next screen. Use it to sign Sign-in-with-NyxID requests from your downstream product.")}</p>
       </div>
       <div className="flex flex-col gap-4">
-        <Field label="App name" htmlFor="pair-app-name">
+        <Field label={t("App name")} htmlFor="pair-app-name">
           <Input
             id="pair-app-name"
             value={name}
             onChange={(e) => {
               setName(e.target.value);
             }}
-            placeholder="e.g. Acme Web"
+            placeholder={t("e.g. Acme Web")}
             autoFocus
           />
         </Field>
         <div className="flex flex-col gap-1.5">
-          <Label>Redirect URIs</Label>
+          <Label>{t("Redirect URIs")}</Label>
           <div className="flex flex-col gap-2">
             {redirectUris.map((uri, idx) => (
               <div key={idx} className="flex items-center gap-2">
@@ -999,7 +949,7 @@ export function DeveloperAppCreateConfirm({
                   onClick={() => {
                     removeUri(idx);
                   }}
-                  aria-label="Remove redirect URI"
+                  aria-label={t("Remove redirect URI")}
                   disabled={redirectUris.length === 1 && uri.trim().length === 0}
                 >
                   <Trash2 className="h-4 w-4" />
@@ -1013,37 +963,34 @@ export function DeveloperAppCreateConfirm({
               onClick={addUri}
               className="self-start"
             >
-              <Plus className="mr-1 h-3 w-3" /> Add redirect URI
-            </Button>
+              <Plus className="mr-1 h-3 w-3" />{t(" Add redirect URI")}</Button>
           </div>
         </div>
-        <Field label="Allowed scopes" htmlFor="pair-app-scopes">
+        <Field label={t("Allowed scopes")} htmlFor="pair-app-scopes">
           <Input
             id="pair-app-scopes"
             value={allowedScopes}
             onChange={(e) => {
               setAllowedScopes(e.target.value);
             }}
-            placeholder="openid profile email"
+            placeholder={"openid profile email"}
           />
-          <p className="text-xs text-muted-foreground">Space-separated.</p>
+          <p className="text-xs text-muted-foreground">{t("Space-separated.")}</p>
         </Field>
-        <Field label="Delegation scopes (optional)" htmlFor="pair-app-delegation">
+        <Field label={t("Delegation scopes (optional)")} htmlFor="pair-app-delegation">
           <Input
             id="pair-app-delegation"
             value={delegationScopes}
             onChange={(e) => {
               setDelegationScopes(e.target.value);
             }}
-            placeholder="(blank disables token exchange)"
+            placeholder={t("(blank disables token exchange)")}
           />
         </Field>
         <div className="flex items-center justify-between rounded-md border border-border bg-muted/20 px-3 py-2">
           <div className="flex flex-col gap-0.5">
-            <Label htmlFor="pair-app-broker">Broker capability</Label>
-            <p className="text-xs text-muted-foreground">
-              Allow this app to broker downstream credentials.
-            </p>
+            <Label htmlFor="pair-app-broker">{t("Broker capability")}</Label>
+            <p className="text-xs text-muted-foreground">{t("Allow this app to broker downstream credentials.")}</p>
           </div>
           <Switch
             id="pair-app-broker"
@@ -1054,7 +1001,7 @@ export function DeveloperAppCreateConfirm({
           />
         </div>
         {(orgs.data?.length ?? 0) > 0 ? (
-          <Field label="Owner" htmlFor="pair-app-owner">
+          <Field label={t("Owner")} htmlFor="pair-app-owner">
             <select
               id="pair-app-owner"
               value={ownerId}
@@ -1063,10 +1010,9 @@ export function DeveloperAppCreateConfirm({
               }}
               className="flex h-10 w-full rounded-[10px] border border-input bg-transparent px-[14px] py-2 text-13 text-foreground ring-offset-background transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
-              <option value="">Personal</option>
+              <option value="">{t("Personal")}</option>
               {orgs.data?.map((org) => (
-                <option key={org.id} value={org.id}>
-                  Org · {org.display_name ?? org.id}
+                <option key={org.id} value={org.id}>{t("Org · ")}{org.display_name ?? org.id}
                 </option>
               ))}
             </select>
@@ -1075,7 +1021,7 @@ export function DeveloperAppCreateConfirm({
       </div>
       {error ? <ErrorLine message={error} /> : null}
       <Button onClick={() => void submit()} disabled={submitDisabled}>
-        {loading ? "Creating..." : "Create app"}
+        {loading ? t("Creating...") : t("Create app")}
       </Button>
     </div>
   );
@@ -1105,6 +1051,7 @@ export function DeveloperAppRotateSecretConfirm({
   pairingId,
   onSuccess,
 }: DeveloperAppRotateSecretConfirmProps) {
+  const { t } = useWizardTranslation();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1133,18 +1080,12 @@ export function DeveloperAppRotateSecretConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Rotate developer app secret
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Rotating <strong>{prefill.display_name}</strong> mints a new
-          client_secret. Update any deployments using the previous value
-          immediately.
-        </p>
+        <h2 className="font-serif text-28 font-normal">{t("Rotate developer app secret")}</h2>
+        <p className="text-sm text-muted-foreground">{t("Rotating ")}<strong>{prefill.display_name}</strong>{t(" mints a new client_secret. Update any deployments using the previous value immediately.")}</p>
       </div>
       {error ? <ErrorLine message={error} /> : null}
       <Button onClick={() => void submit()} disabled={loading}>
-        {loading ? "Rotating..." : "Rotate secret"}
+        {loading ? t("Rotating...") : t("Rotate secret")}
       </Button>
     </div>
   );
@@ -1190,6 +1131,7 @@ export function MfaSetupConfirm({
   pairingId,
   onSuccess,
 }: MfaSetupConfirmProps) {
+  const { t } = useWizardTranslation();
   // Phase: "init" before reserve+setup, "ready" after secret is in
   // hand and we're waiting on the user's TOTP code, "confirming"
   // while /mfa/confirm is in flight.
@@ -1269,12 +1211,8 @@ export function MfaSetupConfirm({
     return (
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1">
-          <h2 className="font-serif text-28 font-normal">
-            Setting up MFA
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            Generating a TOTP secret on the server…
-          </p>
+          <h2 className="font-serif text-28 font-normal">{t("Setting up MFA")}</h2>
+          <p className="text-sm text-muted-foreground">{t("Generating a TOTP secret on the server…")}</p>
         </div>
         {error ? <ErrorLine message={error} /> : null}
       </div>
@@ -1284,32 +1222,24 @@ export function MfaSetupConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">
-          Add MFA to your account
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Scan this QR with your authenticator app (1Password, Authy, Google
-          Authenticator). Then enter the 6-digit code it shows to verify and
-          finish enrollment.
-        </p>
+        <h2 className="font-serif text-28 font-normal">{t("Add MFA to your account")}</h2>
+        <p className="text-sm text-muted-foreground">{t("Scan this QR with your authenticator app (1Password, Authy, Google Authenticator). Then enter the 6-digit code it shows to verify and finish enrollment.")}</p>
       </div>
 
       {qrDataUrl ? (
         <div className="flex justify-center rounded-md border border-border bg-white p-4 dark:bg-muted/30">
           <img
             src={qrDataUrl}
-            alt="MFA enrollment QR code"
+            alt={t("MFA enrollment QR code")}
             className="h-60 w-60"
           />
         </div>
       ) : (
-        <p className="text-xs text-muted-foreground">
-          Couldn't render the QR code. Use the otpauth URL below instead.
-        </p>
+        <p className="text-xs text-muted-foreground">{t("Couldn't render the QR code. Use the otpauth URL below instead.")}</p>
       )}
 
       <div className="flex flex-col gap-1.5">
-        <Label>Or enter the secret manually</Label>
+        <Label>{t("Or enter the secret manually")}</Label>
         <div className="flex items-center gap-2">
           <code className="flex-1 overflow-x-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-sm">
             {secretRevealed ? secret : "•".repeat(Math.max(secret?.length ?? 12, 12))}
@@ -1322,17 +1252,16 @@ export function MfaSetupConfirm({
               setSecretRevealed((r) => !r);
             }}
           >
-            {secretRevealed ? "Hide" : "Reveal"}
+            {secretRevealed ? t("Hide") : t("Reveal")}
           </Button>
         </div>
         {qrUrl ? (
-          <p className="break-all text-11 text-muted-foreground">
-            otpauth URL: <code className="font-mono">{qrUrl}</code>
+          <p className="break-all text-11 text-muted-foreground">{t("otpauth URL: ")}<code className="font-mono">{qrUrl}</code>
           </p>
         ) : null}
       </div>
 
-      <Field label="6-digit code from your authenticator" htmlFor="pair-mfa-code">
+      <Field label={t("6-digit code from your authenticator")} htmlFor="pair-mfa-code">
         <Input
           id="pair-mfa-code"
           value={code}
@@ -1352,7 +1281,7 @@ export function MfaSetupConfirm({
         onClick={() => void submitConfirm()}
         disabled={phase === "confirming" || code.trim().length === 0}
       >
-        {phase === "confirming" ? "Verifying..." : "Verify and enable MFA"}
+        {phase === "confirming" ? t("Verifying...") : t("Verify and enable MFA")}
       </Button>
     </div>
   );
@@ -1378,9 +1307,10 @@ function Field({
 }
 
 function ErrorLine({ message }: { readonly message: string }) {
+  const { t } = useWizardTranslation();
   return (
     <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
-      {message}
+      {t(message)}
     </p>
   );
 }

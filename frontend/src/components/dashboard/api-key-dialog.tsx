@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import type { ProviderConfig } from "@/types/api";
 import {
@@ -30,6 +31,7 @@ export function ApiKeyDialog({
   onCancel,
   isPending,
 }: ApiKeyDialogProps) {
+  const { t } = useUiTranslation();
   const [apiKey, setApiKey] = useState("");
   const [label, setLabel] = useState("");
   const [gatewayUrl, setGatewayUrl] = useState("");
@@ -59,11 +61,11 @@ export function ApiKeyDialog({
     <Dialog open onOpenChange={onCancel}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Connect to {provider.name}</DialogTitle>
+          <DialogTitle>{t("Connect to ")}{provider.name}</DialogTitle>
           <DialogDescription>
             {requiresGatewayUrl
-              ? `Enter your ${provider.name} instance URL and bearer token. Your credentials will be encrypted at rest.`
-              : "Enter your API key to connect this provider. Your key will be encrypted at rest."}
+              ? t("Enter your {{name}} instance URL and bearer token. Your credentials will be encrypted at rest.", { name: provider.name })
+              : t("Enter your API key to connect this provider. Your key will be encrypted at rest.")}
           </DialogDescription>
         </DialogHeader>
 
@@ -80,15 +82,13 @@ export function ApiKeyDialog({
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 text-12 text-primary-text hover:underline"
-            >
-              Get your API key
-              <ExternalLink className="h-3 w-3" />
+            >{t("Get your API key")}<ExternalLink className="h-3 w-3" />
             </a>
           )}
 
           {requiresGatewayUrl && (
             <div className="space-y-2">
-              <Label htmlFor="provider-gateway-url">Gateway URL</Label>
+              <Label htmlFor="provider-gateway-url">{t("Gateway URL")}</Label>
               <Input
                 id="provider-gateway-url"
                 type="url"
@@ -98,33 +98,31 @@ export function ApiKeyDialog({
                 maxLength={2048}
                 autoComplete="url"
               />
-              <p className="text-xs text-muted-foreground">
-                Your self-hosted {provider.name} instance URL
-              </p>
+              <p className="text-xs text-muted-foreground">{t("Your self-hosted ")}{provider.name}{t(" instance URL")}</p>
             </div>
           )}
 
           <div className="space-y-2">
             <Label htmlFor="provider-api-key">
-              {requiresGatewayUrl ? "Bearer Token" : "API Key"}
+              {requiresGatewayUrl ? t("Bearer Token") : t("API Key")}
             </Label>
             <Input
               id="provider-api-key"
               type="password"
-              placeholder={requiresGatewayUrl ? "Bearer token..." : "sk-..."}
+              placeholder={requiresGatewayUrl ? t("Bearer token...") : "sk-..."}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               maxLength={4096}
               autoComplete="off"
             />
-            <p className="text-xs text-muted-foreground">Max 4096 characters</p>
+            <p className="text-xs text-muted-foreground">{t("Max 4096 characters")}</p>
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="provider-label">Label (optional)</Label>
+            <Label htmlFor="provider-label">{t("Label (optional)")}</Label>
             <Input
               id="provider-label"
-              placeholder="e.g., Production Key"
+              placeholder={t("e.g., Production Key")}
               value={label}
               onChange={(e) => setLabel(e.target.value)}
               maxLength={200}
@@ -132,8 +130,7 @@ export function ApiKeyDialog({
           </div>
 
           {isPending && (
-            <p className="text-xs text-muted-foreground">
-              Validating your credentials with {provider.name}...
+            <p className="text-xs text-muted-foreground">{t("Validating your credentials with ")}{provider.name}...
             </p>
           )}
 
@@ -143,11 +140,9 @@ export function ApiKeyDialog({
               variant="outline"
               onClick={onCancel}
               disabled={isPending}
-            >
-              Cancel
-            </Button>
+            >{t("Cancel")}</Button>
             <Button variant="primary" type="submit" disabled={!canSubmit} isLoading={isPending}>
-              {isPending ? "Validating..." : "Connect"}
+              {isPending ? t("Validating...") : t("Connect")}
             </Button>
           </DialogFooter>
         </form>

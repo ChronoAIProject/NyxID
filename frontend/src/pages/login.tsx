@@ -1,9 +1,11 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { AuthFlow } from "@/components/auth/auth-flow";
 import { MfaVerifyForm } from "@/components/auth/mfa-verify-form";
 import { useAuthStore } from "@/stores/auth-store";
 import { Button } from "@/components/ui/button";
 
 export function LoginPage() {
+  const { t } = useUiTranslation();
   const mfaRequired = useAuthStore((s) => s.mfaRequired);
 
   const params = new URLSearchParams(window.location.search);
@@ -12,7 +14,7 @@ export function LoginPage() {
   const inviteCode = params.get("code") ?? undefined;
 
   if (import.meta.env.DEV && import.meta.env.VITE_ROUTING_PREVIEW === "1") {
-    return <div className="space-y-4"><h1 className="text-2xl font-semibold">View your real connections</h1><p className="text-sm text-muted-foreground">Sign in on NyxID, then return here to explore the local routing proposal with your production account data.</p><Button asChild><a href="/__routing-preview/login">Continue to NyxID</a></Button></div>;
+    return <div className="space-y-4"><h1 className="text-2xl font-semibold">{t("View your real connections")}</h1><p className="text-sm text-muted-foreground">{t("Sign in on NyxID, then return here to explore the local routing proposal with your production account data.")}</p><Button asChild><a href="/__routing-preview/login">{t("Continue to NyxID")}</a></Button></div>;
   }
 
   if (mfaRequired) {

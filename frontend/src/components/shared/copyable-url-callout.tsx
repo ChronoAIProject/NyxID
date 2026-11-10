@@ -1,3 +1,4 @@
+import { useWizardTranslation } from "@/i18n/wizard";
 import { useState } from "react";
 import { Check, Copy, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -28,16 +29,17 @@ export function CopyableUrlCallout({
   docsHref,
   className,
 }: CopyableUrlCalloutProps) {
+  const { t } = useWizardTranslation();
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
     try {
       await copyToClipboard(url);
       setCopied(true);
-      toast.success(`${label} copied`);
+      toast.success(t("{{label}} copied", { label }));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error("Failed to copy");
+      toast.error(t("Failed to copy"));
     }
   }
 
@@ -59,14 +61,14 @@ export function CopyableUrlCallout({
           size="icon"
           className="absolute right-1.5 top-1.5 h-8 w-8 shrink-0"
           onClick={() => void handleCopy()}
-          aria-label={`Copy ${label}`}
+          aria-label={t("Copy {{label}}", { label })}
         >
           {copied ? (
             <Check className="h-3.5 w-3.5 text-success" />
           ) : (
             <Copy className="h-3.5 w-3.5" />
           )}
-          <span className="sr-only">Copy {label}</span>
+          <span className="sr-only">{t("Copy {{label}}", { label })}</span>
         </Button>
       </div>
       {description ? (
@@ -78,9 +80,7 @@ export function CopyableUrlCallout({
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-1 text-xs text-primary-text hover:underline"
-        >
-          Learn more →
-          <ExternalLink className="h-3 w-3" aria-hidden="true" />
+        >{t("Learn more →")}<ExternalLink className="h-3 w-3" aria-hidden="true" />
         </a>
       ) : null}
     </div>

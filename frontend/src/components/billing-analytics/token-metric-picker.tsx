@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { ChevronDown, Info } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -24,22 +25,20 @@ export function TokenOverlapHint({
 }: {
   selected: readonly TokenMetric[];
 }) {
+  const { t } = useUiTranslation();
   if (!hasRedundantTokenSelection(selected)) return null;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <button
           type="button"
-          aria-label="How selected token counts are calculated"
+          aria-label={t("How selected token counts are calculated")}
           className="inline-flex size-4 shrink-0 items-center justify-center align-middle text-muted-foreground hover:text-foreground"
         >
           <Info className="size-3.5" />
         </button>
       </TooltipTrigger>
-      <TooltipContent className="max-w-64">
-        Total tokens is input + output. Selected input, output, and cache counts
-        are shown but not added again; cache counts can overlap input.
-      </TooltipContent>
+      <TooltipContent className="max-w-64">{t("Total tokens is input + output. Selected input, output, and cache counts are shown but not added again; cache counts can overlap input.")}</TooltipContent>
     </Tooltip>
   );
 }

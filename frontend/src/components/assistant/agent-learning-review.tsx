@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { Badge } from "@/components/ui/badge";
@@ -27,6 +29,7 @@ export function AgentLearningReview({
   readonly proposalId?: string;
   readonly readOnly?: boolean;
 }) {
+  const { t } = useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.AGENT_LEARNING);
   const review = useAgentLearningReview(agentId, enabled);
   const [open, setOpen] = useState<string | undefined>(proposalId);
@@ -50,28 +53,16 @@ export function AgentLearningReview({
   const proposals = review.data?.proposals ?? [];
 
   return (
-    <section aria-label="Learning" className="space-y-3">
+    <section aria-label={t("Learning")} className="space-y-3">
       <div className="space-y-1">
-        <h3 className="text-13 font-semibold text-foreground">
-          Learning proposals
-        </h3>
-        <p className="text-12 text-muted-foreground">
-          Completed work can produce private, untrusted Ornn skill drafts.
-          Full access publishes and attaches automatically; other modes require your confirmation.
-        </p>
+        <h3 className="text-13 font-semibold text-foreground">{t("Learning proposals")}</h3>
+        <p className="text-12 text-muted-foreground">{t("Completed work can produce private, untrusted Ornn skill drafts. Full access publishes and attaches automatically; other modes require your confirmation.")}</p>
       </div>
       {review.error ? (
-        <p role="alert" className="text-12 text-destructive">
-          Automatic learning is unavailable.
-        </p>
+        <p role="alert" className="text-12 text-destructive">{t("Automatic learning is unavailable.")}</p>
       ) : null}
       {review.status.data?.publication_blocked ? (
-        <p role="alert" className="text-12 text-warning">
-          Publishing is unavailable for this organization because it has no
-          owner binding. Organization members may consent to learning, but only
-          the bound owner can publish private Ornn skills. Contact an
-          organization owner to publish.
-        </p>
+        <p role="alert" className="text-12 text-warning">{t("Publishing is unavailable for this organization because it has no owner binding. Organization members may consent to learning, but only the bound owner can publish private Ornn skills. Contact an organization owner to publish.")}</p>
       ) : null}
       {review.status.data?.org_owned && !readOnly ? (
         <label className="flex items-center gap-2 text-12">
@@ -79,9 +70,7 @@ export function AgentLearningReview({
             checked={review.status.data.opted_in ?? false}
             disabled={review.consent?.isPending}
             onCheckedChange={(checked) => review.consent?.mutate(checked)}
-          />
-          I consent to learning proposals for this organization
-        </label>
+          />{t("I consent to learning proposals for this organization")}</label>
       ) : null}
       {/* Draft edit failures render inside the editor, beside their fields. */}
       {[
@@ -109,13 +98,11 @@ export function AgentLearningReview({
                   threshold: Math.min(50, Math.max(1, threshold)),
                 })
               }
-            />
-            Enable automatic learning
-          </label>
+            />{t("Enable automatic learning")}</label>
           <label className="flex items-center gap-2 text-12">
-            <span>Threshold</span>
+            <span>{t("Threshold")}</span>
             <Input
-              aria-label="Learning threshold"
+              aria-label={t("Learning threshold")}
               className="w-16"
               type="number"
               min={1}
@@ -138,7 +125,7 @@ export function AgentLearningReview({
       ) : null}
 
       {proposals.length === 0 ? (
-        <p className="text-12 text-text-tertiary">No pending proposals.</p>
+        <p className="text-12 text-text-tertiary">{t("No pending proposals.")}</p>
       ) : null}
 
       {proposals.map((proposal) => {
@@ -175,7 +162,7 @@ export function AgentLearningReview({
           >
             <div className="flex items-center justify-between gap-2">
               <p className="text-12 font-medium">
-                {draft?.name ?? "Learning proposal"}
+                {draft?.name ?? t("Learning proposal")}
               </p>
               <Badge variant="secondary">{proposal.status}</Badge>
             </div>
@@ -183,12 +170,10 @@ export function AgentLearningReview({
               {draft?.description}
             </p>
             <p className="text-11 text-text-tertiary">
-              {proposal.evidence_count} evidence items ·{" "}
-              {proposal.body_bytes.toLocaleString()} bytes
-            </p>
+              {proposal.evidence_count}{t(" evidence items ·")}{" "}
+              {proposal.body_bytes.toLocaleString(getFormattingLocale())}{t(" bytes")}</p>
             {proposal.published_version ? (
-              <p className="text-11 text-success">
-                Published version: {proposal.published_version}
+              <p className="text-11 text-success">{t("Published version: ")}{proposal.published_version}
               </p>
             ) : null}
             {proposal.failure_code ? (
@@ -202,11 +187,7 @@ export function AgentLearningReview({
               </p>
             ) : null}
             {checkOnly ? (
-              <p role="status" className="text-11 text-warning">
-                Learning evidence or consent is no longer available. NyxID can
-                only check whether this publication reached Ornn; it will not
-                attach it to the agent.
-              </p>
+              <p role="status" className="text-11 text-warning">{t("Learning evidence or consent is no longer available. NyxID can only check whether this publication reached Ornn; it will not attach it to the agent.")}</p>
             ) : null}
 
             {isOpen && proposal.source === "authored" && proposal.auto_allowed ? (
@@ -228,7 +209,7 @@ export function AgentLearningReview({
                 size="sm"
                 onClick={() => setOpen(isOpen ? undefined : proposal.id)}
               >
-                {isOpen ? "Hide draft" : "Review draft"}
+                {isOpen ? t("Hide draft") : t("Review draft")}
               </Button>
               {proposal.source === "authored" && proposal.status !== "pinned" ? (
                 proposal.card_conversation_id ? (
@@ -236,13 +217,9 @@ export function AgentLearningReview({
                     to="/assistant"
                     search={{ c: proposal.card_conversation_id, card: proposal.acknowledgement_id ?? undefined }}
                     className="text-11 text-primary hover:underline"
-                  >
-                    Open the confirmation card
-                  </Link>
+                  >{t("Open the confirmation card")}</Link>
                 ) : (
-                  <p className="text-11 text-muted-foreground">
-                    Confirm this authored skill from its conversation card.
-                  </p>
+                  <p className="text-11 text-muted-foreground">{t("Confirm this authored skill from its conversation card.")}</p>
                 )
               ) : legacyPackage ? (
                 <Button
@@ -261,9 +238,7 @@ export function AgentLearningReview({
                       }));
                     }
                   }}
-                >
-                  Review updated package
-                </Button>
+                >{t("Review updated package")}</Button>
               ) : !approvable ? null : (
                 <Button
                   size="sm"
@@ -296,17 +271,17 @@ export function AgentLearningReview({
                 >
                   {checkOnly
                     ? card
-                      ? "Confirm check"
-                      : "Check publication"
+                      ? t("Confirm check")
+                      : t("Check publication")
                     : recovering
                       ? card
-                        ? "Confirm finish publishing"
-                        : "Finish publishing"
+                        ? t("Confirm finish publishing")
+                        : t("Finish publishing")
                       : proposal.status === "publication_failed"
-                        ? "Retry publication"
+                        ? t("Retry publication")
                         : card
-                          ? "Confirm publish & attach"
-                          : "Publish & request confirmation"}
+                          ? t("Confirm publish & attach")
+                          : t("Publish & request confirmation")}
                 </Button>
               )}
               {/* The server rejects only pending or failed drafts. A failed
@@ -332,7 +307,7 @@ export function AgentLearningReview({
                     }
                   }}
                 >
-                  {proposal.auto_allowed && proposal.status === "pinned" ? "Discard and detach" : "Reject"}
+                  {proposal.auto_allowed && proposal.status === "pinned" ? t("Discard and detach") : t("Reject")}
                 </Button>
               ) : null}
             </div>
@@ -343,8 +318,8 @@ export function AgentLearningReview({
             !readOnly ? (
               <p className="text-11 text-warning">
                 {card
-                  ? "Step 2 of 2: Confirming this exact card publishes the private skill and attaches its pinned version. The card expires if the draft or agent changes."
-                  : "Publishing takes two steps: this button first asks for an owner confirmation card, then you confirm that exact card here. Nothing is published until you confirm."}
+                  ? t("Step 2 of 2: Confirming this exact card publishes the private skill and attaches its pinned version. The card expires if the draft or agent changes.")
+                  : t("Publishing takes two steps: this button first asks for an owner confirmation card, then you confirm that exact card here. Nothing is published until you confirm.")}
               </p>
             ) : null}
           </article>
@@ -357,9 +332,7 @@ export function AgentLearningReview({
           variant="secondary"
           disabled={review.run.isPending}
           onClick={() => review.run.mutate()}
-        >
-          Run learning now
-        </Button>
+        >{t("Run learning now")}</Button>
       ) : null}
     </section>
   );

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { ChevronDown, Search } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -23,6 +24,7 @@ export function BillingUsageExplorer({
   rows: BillingUsageRow[];
   totals?: BillingUsageTotals;
 }) {
+  const { t } = useUiTranslation();
   const [dimension, setDimension] = useState<Dimension>("service");
   const [query, setQuery] = useState("");
   const groups = groupRows(catalog, rows, dimension);
@@ -36,21 +38,18 @@ export function BillingUsageExplorer({
     <Card className="usage-results usage-explorer">
       <CardHeader className="usage-explorer-heading">
         <div>
-          <CardTitle>Usage overview</CardTitle>
-          <p className="text-12 text-muted-foreground">
-            Compare metered quantities and see how your usage is funded.
-          </p>
+          <CardTitle>{t("Usage overview")}</CardTitle>
+          <p className="text-12 text-muted-foreground">{t("Compare metered quantities and see how your usage is funded.")}</p>
         </div>
         {rows.length > 0 && (
           <span className="usage-group-count">
-            {groups.length} {dimensions[dimension].toLowerCase()}
-            {groups.length === 1 ? "" : "s"}
+            {t("{{count}} groups", { count: groups.length })}
           </span>
         )}
       </CardHeader>
       <CardContent>
         {rows.length === 0 && (
-          <p className="empty-inline">No usage in this period.</p>
+          <p className="empty-inline">{t("No usage in this period.")}</p>
         )}
         {rows.length > 0 && (
           <div className="usage-overview-visuals">
@@ -68,13 +67,11 @@ export function BillingUsageExplorer({
                 size={14}
                 className="disclosure-arrow"
                 aria-hidden="true"
-              />
-              Explore by service, model or agent
-            </summary>
+              />{t("Explore by service, model or agent")}</summary>
             {rows.length > 0 && (
               <div className="usage-explorer-controls">
                 <AnalyticsSelect
-                  label="Group by"
+                  label={t("Group by")}
                   inline
                   value={dimension}
                   onChange={(value) => {
@@ -89,8 +86,8 @@ export function BillingUsageExplorer({
                 <div className="usage-search">
                   <Search size={14} aria-hidden="true" />
                   <Input
-                    aria-label="Search usage groups"
-                    placeholder={`Search ${dimensions[dimension].toLowerCase()}s`}
+                    aria-label={t("Search usage groups")}
+                    placeholder={t("Search {{dimension}}", { dimension: dimensions[dimension].toLowerCase() })}
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
                   />

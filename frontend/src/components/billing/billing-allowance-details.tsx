@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { billingMetricLabel } from "@/lib/billing-units";
@@ -20,6 +21,7 @@ function UsedGauge({
   limit: number;
   label: string;
 }) {
+  const { t } = useUiTranslation();
   const percent =
     limit > 0 ? Math.min(100, Math.max(0, (used / limit) * 100)) : 0;
   const formatted = formatPercent(percent);
@@ -41,7 +43,7 @@ function UsedGauge({
       <span
         className="benefit-track allowance-track"
         role="meter"
-        aria-label={`${label} used`}
+        aria-label={t("{{label}} used", { label: label })}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={percent}
@@ -58,7 +60,7 @@ function UsedGauge({
           style={{ width: `${reservedPercent}%` }}
         />
       </span>
-      <span className="benefit-meter-caption">{formatted}% used</span>
+      <span className="benefit-meter-caption">{formatted}{t("% used")}</span>
     </span>
   );
 }
@@ -66,6 +68,7 @@ function UsedGauge({
 const PAGE_SIZE = 5;
 
 function AllowanceGroupDetails({ rows }: { rows: UserAllowanceBalance[] }) {
+  const { t } = useUiTranslation();
   const [page, setPage] = useState(0);
   const balance = rows[0]!;
   const lastPage = Math.max(0, Math.ceil(rows.length / PAGE_SIZE) - 1);
@@ -81,67 +84,61 @@ function AllowanceGroupDetails({ rows }: { rows: UserAllowanceBalance[] }) {
           {balance.allowance.recurrence.replaceAll("_", " ")}
         </span>
         <span>
-          {rows.length} {rows.length === 1 ? "allowance" : "allowances"}
+          {rows.length} {rows.length === 1 ? t("allowance") : t("allowances")}
         </span>
         <dl>
           <div>
-            <dt>Period starts</dt>
+            <dt>{t("Period starts")}</dt>
             <dd>{timestamp(balance.period_start)}</dd>
           </div>
           <div>
-            <dt>Resets / expires</dt>
+            <dt>{t("Resets / expires")}</dt>
             <dd>
               {balance.period_end
                 ? timestamp(balance.period_end)
-                : "No reset or expiry"}
+                : t("No reset or expiry")}
             </dd>
           </div>
         </dl>
         <div
           className="allowance-gauge-legend"
-          aria-label="Allowance gauge legend"
+          aria-label={t("Allowance gauge legend")}
         >
           <span>
-            <i className="allowance-consumed" />
-            Consumed
-          </span>
+            <i className="allowance-consumed" />{t("Consumed")}</span>
           <span>
-            <i className="allowance-reserved" />
-            Reserved
-          </span>
+            <i className="allowance-reserved" />{t("Reserved")}</span>
           <span>
-            <i className="allowance-available" />
-            Available
-          </span>
+            <i className="allowance-available" />{t("Available")}</span>
         </div>
       </div>
       <div className="allowance-balances">
         {rows.slice(first, first + PAGE_SIZE).map((row, index) => (
           <article className="allowance-balance" key={row.allowance.id}>
             <header>
-              <strong>Allowance {first + index + 1}</strong>
+              <strong>{t("Allowance ")}{first + index + 1}</strong>
               <UsedGauge
                 used={row.consumed_quantity}
                 reserved={row.reserved_quantity}
                 limit={row.allowance.quantity}
-                label={`${billingMetricLabel(row.allowance.metric)} allowance ${first + index + 1}`}
+                label={t("{{value}} allowance {{value1}}", { value: billingMetricLabel(row.allowance.metric), value1: first + index + 1 })}
               />
             </header>
             <dl>
               <div>
-                <dt>Limit</dt>
+                <dt>{t("Limit")}</dt>
                 <dd>{number(row.allowance.quantity)}</dd>
               </div>
               <div className="allowance-remaining">
-                <dt>Remaining</dt>
+                <dt>{t("Remaining")}</dt>
                 <dd>{number(row.remaining_quantity)}</dd>
               </div>
               <div>
-                <dt>Consumed</dt>
+                <dt>{t("Consumed")}</dt>
                 <dd>{number(row.consumed_quantity)}</dd>
               </div>
               <div>
-                <dt>Reserved</dt>
+                <dt>{t("Reserved")}</dt>
                 <dd>{number(row.reserved_quantity)}</dd>
               </div>
             </dl>
@@ -151,25 +148,20 @@ function AllowanceGroupDetails({ rows }: { rows: UserAllowanceBalance[] }) {
       {lastPage > 0 && (
         <div className="billing-detail-pagination">
           <span>
-            {first + 1}–{Math.min(first + PAGE_SIZE, rows.length)} of{" "}
-            {rows.length} allowances
-          </span>
+            {first + 1}–{Math.min(first + PAGE_SIZE, rows.length)}{t(" of")}{" "}
+            {rows.length}{t(" allowances")}</span>
           <Button
             variant="outline"
             size="sm"
             disabled={currentPage === 0}
             onClick={() => setPage(currentPage - 1)}
-          >
-            Previous allowances
-          </Button>
+          >{t("Previous allowances")}</Button>
           <Button
             variant="outline"
             size="sm"
             disabled={currentPage === lastPage}
             onClick={() => setPage(currentPage + 1)}
-          >
-            Next allowances
-          </Button>
+          >{t("Next allowances")}</Button>
         </div>
       )}
     </>
@@ -181,6 +173,7 @@ export function BillingAllowanceDetails({
 }: {
   families: { name: string; units: AllowanceGroup[] }[];
 }) {
+  const { t } = useUiTranslation();
   const groups = families.flatMap((family) => family.units);
   const [selectedKeys, setSelectedKeys] = useState<string[]>(() =>
     groups[0] ? [groups[0][0]] : [],
@@ -213,11 +206,9 @@ export function BillingAllowanceDetails({
           };
         })}
       />
-      <div role="region" aria-label="Selected allowance balances">
+      <div role="region" aria-label={t("Selected allowance balances")}>
         {selected.length === 0 ? (
-          <p className="empty-inline">
-            Select metrics to inspect allowance balances.
-          </p>
+          <p className="empty-inline">{t("Select metrics to inspect allowance balances.")}</p>
         ) : (
           selected.map(([key, rows]) => (
             <div className="allowance-inspector" key={key}>
@@ -226,10 +217,7 @@ export function BillingAllowanceDetails({
           ))
         )}
       </div>
-      <p className="fine-print mt-3">
-        Each allowance has its own limit. Percentages show consumed usage;
-        reserved units are listed separately.
-      </p>
+      <p className="fine-print mt-3">{t("Each allowance has its own limit. Percentages show consumed usage; reserved units are listed separately.")}</p>
     </div>
   );
 }

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState, type ReactNode } from "react";
 import { useKeys, useCatalog } from "@/hooks/use-keys";
 import { useUserServices } from "@/hooks/use-user-services";
@@ -15,6 +16,7 @@ export default function ServiceRoutingPreview({
   /** Page-level primary action (Connect Service) shown in the sticky toolbar. */
   readonly actions?: ReactNode | ((compact: boolean) => ReactNode);
 }) {
+  const { t } = useUiTranslation();
   const keys = useKeys();
   const catalog = useCatalog({ includeAll: true });
   const services = useUserServices();
@@ -30,11 +32,8 @@ export default function ServiceRoutingPreview({
   if (keys.isLoading) return <Skeleton className="h-64 w-full" />;
   if (keys.error)
     return (
-      <div className="rounded-xl border p-6 text-sm">
-        Connections could not be loaded.{" "}
-        <Button variant="outline" onClick={() => void keys.refetch()}>
-          Retry
-        </Button>
+      <div className="rounded-xl border p-6 text-sm">{t("Connections could not be loaded.")}{" "}
+        <Button variant="outline" onClick={() => void keys.refetch()}>{t("Retry")}</Button>
       </div>
     );
 

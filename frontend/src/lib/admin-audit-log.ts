@@ -1,3 +1,5 @@
+import { getCalendarDateFormatter } from "@/lib/formatting-locale";
+import { translateUi } from "@/i18n/use-ui-translation";
 import type {
   AdminAuditLogActorFilter,
   AdminAuditLogFilterField,
@@ -78,11 +80,11 @@ const TEXT_FILTER_KEYS = [
 ] as const satisfies readonly AdminAuditLogFilterKey[];
 
 const TEXT_FILTER_LABELS: Record<(typeof TEXT_FILTER_KEYS)[number], string> = {
-  api_key_name: "Agent",
-  user_id: "User ID",
-  api_key_id: "API Key ID",
-  ip_address: "IP address",
-  user_agent: "User agent",
+  get api_key_name() { return translateUi("Agent"); },
+  get user_id() { return translateUi("User ID"); },
+  get api_key_id() { return translateUi("API Key ID"); },
+  get ip_address() { return translateUi("IP address"); },
+  get user_agent() { return translateUi("User agent"); },
 };
 
 function isTextFilterKey(value: unknown): value is AdminAuditLogFilterKey {
@@ -100,17 +102,17 @@ export const ADMIN_AUDIT_LOG_SEARCH_FIELDS = [
 const SEARCH_FIELD_KEYS = ADMIN_AUDIT_LOG_SEARCH_FIELDS.map(({ key }) => key);
 
 const STATUS_LABELS: Record<AdminAuditLogStatusFilter, string> = {
-  "2xx": "2xx Success",
-  "3xx": "3xx Redirect",
-  "4xx": "4xx Client error",
-  "5xx": "5xx Server error",
-  none: "No status",
+  get "2xx"() { return translateUi("2xx Success"); },
+  get "3xx"() { return translateUi("3xx Redirect"); },
+  get "4xx"() { return translateUi("4xx Client error"); },
+  get "5xx"() { return translateUi("5xx Server error"); },
+  get none() { return translateUi("No status"); },
 };
 
 const ACTOR_LABELS: Record<AdminAuditLogActorFilter, string> = {
-  user: "User session",
-  agent: "Agent API key",
-  anonymous: "Anonymous",
+  get user() { return translateUi("User session"); },
+  get agent() { return translateUi("Agent API key"); },
+  get anonymous() { return translateUi("Anonymous"); },
 };
 
 function option(value: string, label: string) {
@@ -544,16 +546,10 @@ export function getAdminAuditLogFilterValues(
 export type AppliedAdminAuditLogFilter =
   AppliedDataTableFilter<AdminAuditLogFilterKey>;
 
-const DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-  year: "numeric",
-  timeZone: "UTC",
-});
 
 function formatCalendarDate(value: string): string {
   const date = calendarDateObject(value);
-  return date ? DATE_FORMATTER.format(date) : value;
+  return date ? getCalendarDateFormatter().format(date) : value;
 }
 
 function appliedDateFilter(

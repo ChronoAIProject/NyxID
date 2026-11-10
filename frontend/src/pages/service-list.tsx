@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useAuthStore } from "@/stores/auth-store";
 import { canManageCatalog, canAdminWrite } from "@/types/api";
 import { useState } from "react";
@@ -12,6 +14,7 @@ import { BrickWallIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 export function ServiceListPage() {
+  const { t } = useUiTranslation();
   const user = useAuthStore((state) => state.user);
   const { data: services, isLoading } = useServices();
   const { data: providers } = useProviders();
@@ -26,9 +29,9 @@ export function ServiceListPage() {
     setDeletingId(id);
     try {
       await deleteMutation.mutateAsync(id);
-      toast.success("Service deleted successfully");
+      toast.success(translateUi("Service deleted successfully"));
     } catch {
-      toast.error("Failed to delete service");
+      toast.error(translateUi("Failed to delete service"));
     } finally {
       setDeletingId(null);
     }
@@ -37,12 +40,12 @@ export function ServiceListPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Services"
-        description="Manage downstream services and their authentication."
+        title={t("Services")}
+        description={t("Manage downstream services and their authentication.")}
         actions={
           canManageCatalog(user) && (
             <AddCtaButton
-              label="Create Service"
+              label={t("Create Service")}
               onClick={() => setCreateOpen(true)}
             />
           )
@@ -61,12 +64,8 @@ export function ServiceListPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <BrickWallIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">
-              No services yet
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Add a service to get started.
-            </p>
+            <p className="text-12 font-medium text-muted-foreground">{t("No services yet")}</p>
+            <p className="text-xs text-muted-foreground">{t("Add a service to get started.")}</p>
           </div>
         </div>
       ) : (

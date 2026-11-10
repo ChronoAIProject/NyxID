@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import * as React from "react";
 import type * as LabelPrimitive from "@radix-ui/react-label";
 import { Slot } from "@radix-ui/react-slot";
@@ -43,7 +44,19 @@ function useAppForm<
 >(
   props?: UseFormProps<TFieldValues, TContext, TTransformedValues>,
 ): UseFormReturn<TFieldValues, TContext, TTransformedValues> {
+  const { i18n } = useUiTranslation();
+  const language = i18n.resolvedLanguage;
   const form = useForm<TFieldValues, TContext, TTransformedValues>(props);
+  const previousLanguage = React.useRef(language);
+  React.useEffect(() => {
+    if (previousLanguage.current === language) return;
+    previousLanguage.current = language;
+    const fields = Object.keys(form.formState.errors).filter((name) => {
+      const type = form.getFieldState(name as FieldPath<TFieldValues>).error?.type;
+      return name !== "root" && type !== "manual" && type !== "server";
+    }) as FieldPath<TFieldValues>[];
+    if (fields.length) void form.trigger(fields);
+  }, [form, language]);
   // useForm returns a stable object (only its formState property is swapped
   // each render), so this memo runs once. The Proxy shadows setValue while
   // every other read — including formState — stays live on the underlying
@@ -72,6 +85,7 @@ function useAppForm<
  * Must be rendered inside `<Form {...form}>`.
  */
 function FormSubmitErrors({ className }: { readonly className?: string }) {
+  const { t } = useUiTranslation();
   // useFormState subscribes independently of the parent page's formState
   // reads, so this re-renders even if the host never touches errors.
   const { submitCount, errors } = useFormState();
@@ -81,8 +95,8 @@ function FormSubmitErrors({ className }: { readonly className?: string }) {
   const count = fieldErrors.length;
   return (
     <p role="alert" className={cn("text-xs text-destructive", className)}>
-      Cannot save — {count} {count === 1 ? "field needs" : "fields need"}{" "}
-      attention{first ? `: ${first}` : "."}
+      {t("Cannot save — {{count}} fields need attention.", { count })}
+      {first && <> {t(first)}</>}
     </p>
   );
 }
@@ -217,10 +231,11 @@ const FormMessage = React.forwardRef<
   HTMLParagraphElement,
   React.HTMLAttributes<HTMLParagraphElement>
 >(({ className, children, ...props }, ref) => {
+  const { t } = useUiTranslation();
   const { error, formMessageId } = useFormField();
   // Array-container errors carry only nested per-index errors and no
   // `message`; String(undefined) would render a literal "undefined".
-  const body = error?.message ? String(error.message) : children;
+  const body = error?.message ? t(String(error.message)) : children;
 
   if (!body) {
     return null;

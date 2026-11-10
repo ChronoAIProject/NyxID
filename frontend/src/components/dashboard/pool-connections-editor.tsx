@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useEffect, useState } from "react";
 import { useWatch, type UseFormReturn } from "react-hook-form";
 import { ArrowDown, ArrowUp } from "lucide-react";
@@ -44,6 +46,7 @@ export function PoolConnectionsEditor({
   operation: PoolOperation | null;
   setOperation: (operation: PoolOperation | null) => void;
 }) {
+  const { t } = useUiTranslation();
   const values = useWatch({ control: form.control });
   const members = values.members ?? [];
   const priority = values.strategy === "priority";
@@ -203,21 +206,21 @@ export function PoolConnectionsEditor({
         : a.index - b.index,
     );
   return (
-    <section className="space-y-3" aria-label="Pool connections">
+    <section className="space-y-3" aria-label={t("Pool connections")}>
       <div>
         <h3 className="text-13 font-semibold">
-          {priority ? "Connection order" : "Connections"}
+          {priority ? t("Connection order") : t("Connections")}
         </h3>
         <p className="mt-1 text-12 text-muted-foreground">
           {priority
-            ? "Lower priority numbers run first. Connections with the same number share traffic."
-            : "Add the connections that should share traffic."}
+            ? t("Lower priority numbers run first. Connections with the same number share traffic.")
+            : t("Add the connections that should share traffic.")}
         </p>
       </div>
       {priority && (
         <div className="space-y-2 rounded-xl border border-border/50 p-3">
           <Choice
-            label="Connections with the same priority"
+            label={t("Connections with the same priority")}
             value={values.tier_balance ?? "round_robin"}
             options={[
               [
@@ -226,9 +229,7 @@ export function PoolConnectionsEditor({
                   <PoolStrategyIcon
                     strategy="round_robin"
                     className="size-3.5 shrink-0"
-                  />
-                  Take turns
-                </span>,
+                  />{t("Take turns")}</span>,
               ],
               [
                 "weighted",
@@ -236,9 +237,7 @@ export function PoolConnectionsEditor({
                   <PoolStrategyIcon
                     strategy="weighted"
                     className="size-3.5 shrink-0"
-                  />
-                  Share by weight
-                </span>,
+                  />{t("Share by weight")}</span>,
               ],
             ]}
             onChange={(value) => {
@@ -249,14 +248,11 @@ export function PoolConnectionsEditor({
               void form.trigger();
             }}
           />
-          <p className="text-11 text-muted-foreground">
-            Lower priority numbers are tried first. Ties use this balancing
-            mode; unavailable members can still be skipped at request time.
-          </p>
+          <p className="text-11 text-muted-foreground">{t("Lower priority numbers are tried first. Ties use this balancing mode; unavailable members can still be skipped at request time.")}</p>
         </div>
       )}
       <div className="space-y-2 rounded-xl border border-border/50 p-3">
-        <h4 className="text-12 font-medium">Select connections</h4>
+        <h4 className="text-12 font-medium">{t("Select connections")}</h4>
         <PoolConnectionPicker
           rows={rows}
           selectedIds={members.map((member) => member.user_service_id!)}
@@ -279,12 +275,10 @@ export function PoolConnectionsEditor({
       </div>
       {members.length === 0 && (
         <div className="rounded-xl border border-dashed border-border p-4 text-12 text-muted-foreground">
-          {!pool && <p>Add at least one connection to create a pool.</p>}
+          {!pool && <p>{t("Add at least one connection to create a pool.")}</p>}
           {priority
-            ? "Choose a primary connection, then a backup."
-            : "Add the connections that should share traffic."}{" "}
-          You can mix platform access and your own keys.
-        </div>
+            ? t("Choose a primary connection, then a backup.")
+            : t("Add the connections that should share traffic.")}{" "}{t("You can mix platform access and your own keys.")}</div>
       )}
       {members.length > 0 && (
         <PoolCycleSummary
@@ -296,7 +290,7 @@ export function PoolConnectionsEditor({
       )}
       {selected.isError && (
         <ErrorBanner
-          message="Could not refresh selected connections. Retry to check their compatibility."
+          message={t("Could not refresh selected connections. Retry to check their compatibility.")}
           onRetry={() => {
             void selected.refetch();
           }}
@@ -341,47 +335,45 @@ export function PoolConnectionsEditor({
                 <p className="break-words text-12 font-medium">
                   {labelRow?.name ||
                     labelRow?.slug ||
-                    `Connection ${position + 1}`}
+                    t("Connection {{value}}", { value: position + 1 })}
                 </p>
                 <p className="break-words text-11 text-muted-foreground">
                   {labelRow
-                    ? `${labelRow.slug} · ${bindingLabel(labelRow.credential_binding)}`
-                    : "Loading connection details…"}
+                    ? t("{{slug}} · {{value}}", { slug: labelRow.slug, value: bindingLabel(labelRow.credential_binding) })
+                    : t("Loading connection details…")}
                 </p>
                 {!invalidPriority && (
                   <p className="mt-1 text-11 text-muted-foreground">
                     {member.enabled === false ? (
-                      "Disabled · excluded from cycle"
+                      t("Disabled · excluded from cycle")
                     ) : (
                       <>
-                        {priority ? "Tier cycle position" : "Cycle position"}{" "}
-                        {cyclePosition + 1} of {enabledTier.length}
-                        {cyclePosition === 0 ? " · first in cycle" : ""}
+                        {priority ? t("Tier cycle position") : t("Cycle position")}{" "}
+                        {cyclePosition + 1}{t(" of ")}{enabledTier.length}
+                        {cyclePosition === 0 ? t(" · first in cycle") : ""}
                         {cyclePosition === enabledTier.length - 1
-                          ? " · last in cycle"
+                          ? t(" · last in cycle")
                           : ""}
                       </>
                     )}
                     {!priority && weighted
                       ? member.enabled === false
-                        ? " · excluded from configured share"
+                        ? t(" · excluded from configured share")
                         : share
-                          ? ` · configured share ${share}`
-                          : " · configured share unavailable until enabled weights are valid"
+                          ? t(" · configured share {{share}}", { share: share })
+                          : t(" · configured share unavailable until enabled weights are valid")
                       : ""}
                   </p>
                 )}
                 {priority && values.tier_balance === "weighted" && (
                   <p className="mt-1 text-11 text-muted-foreground">
                     {invalidPriority
-                      ? "Priority tier needs a valid number · configured share unavailable"
-                      : `Priority tier ${member.priority ?? 0} · ${
-                          share
+                      ? t("Priority tier needs a valid number · configured share unavailable")
+                      : t("Priority tier {{value}} · {{value1}}", { value: member.priority ?? 0, value1: share
                             ? `configured tier share ${share}`
                             : member.enabled === false
-                              ? "disabled · excluded from tier share"
-                              : "configured share unavailable until enabled weights in this tier are valid"
-                        }`}
+                              ? t("disabled · excluded from tier share")
+                              : t("configured share unavailable until enabled weights in this tier are valid") })}
                   </p>
                 )}
                 {candidate?.reason && (
@@ -394,7 +386,7 @@ export function PoolConnectionsEditor({
                 type="button"
                 variant="ghost"
                 size="sm"
-                aria-label={`Remove ${labelRow?.name || labelRow?.slug || `connection ${position + 1}`}`}
+                aria-label={t("Remove {{value}}", { value: labelRow?.name || labelRow?.slug || `connection ${position + 1}` })}
                 onClick={() =>
                   form.setValue(
                     "members",
@@ -403,9 +395,7 @@ export function PoolConnectionsEditor({
                       .filter((m) => m.user_service_id !== id),
                   )
                 }
-              >
-                Remove
-              </Button>
+              >{t("Remove")}</Button>
               {(!priority || !invalidPriority) && (
                 <div className="flex shrink-0 items-center gap-1">
                   <Button
@@ -413,7 +403,7 @@ export function PoolConnectionsEditor({
                     variant="outline"
                     size="icon"
                     className="size-7"
-                    aria-label={`Move connection ${position + 1} earlier ${priority ? `within priority ${member.priority ?? 0}` : "in the cycle"}`}
+                    aria-label={t("Move connection {{value}} earlier {{value1}}", { value: position + 1, value1: priority ? `within priority ${member.priority ?? 0}` : t("in the cycle") })}
                     disabled={tierPosition === 0}
                     onClick={() => moveMember(id, -1)}
                   >
@@ -424,7 +414,7 @@ export function PoolConnectionsEditor({
                     variant="outline"
                     size="icon"
                     className="size-7"
-                    aria-label={`Move connection ${position + 1} later ${priority ? `within priority ${member.priority ?? 0}` : "in the cycle"}`}
+                    aria-label={t("Move connection {{value}} later {{value1}}", { value: position + 1, value1: priority ? `within priority ${member.priority ?? 0}` : t("in the cycle") })}
                     disabled={tierPosition === tierMembers.length - 1}
                     onClick={() => moveMember(id, 1)}
                   >
@@ -438,7 +428,7 @@ export function PoolConnectionsEditor({
             >
               {priority && (
                 <NumberInput
-                  label={`Priority for member ${position + 1}`}
+                  label={t("Priority for member {{value}}", { value: position + 1 })}
                   value={member.priority ?? 0}
                   max={4294967295}
                   onChange={(v) => setMember(id, { priority: v })}
@@ -446,10 +436,10 @@ export function PoolConnectionsEditor({
               )}
               {aiChat && (
                 <label className="space-y-1 text-12">
-                  <span>Model (required)</span>
+                  <span>{t("Model (required)")}</span>
                   <Input
-                    aria-label={`Model for member ${position + 1}`}
-                    placeholder="Provider model name"
+                    aria-label={t("Model for member {{value}}", { value: position + 1 })}
+                    placeholder={t("Provider model name")}
                     value={member.model ?? ""}
                     onChange={(e) =>
                       setMember(id, { model: e.target.value || null })
@@ -459,7 +449,7 @@ export function PoolConnectionsEditor({
               )}
               {weighted && (
                 <NumberInput
-                  label={`Weight for member ${position + 1}`}
+                  label={t("Weight for member {{value}}", { value: position + 1 })}
                   min={1}
                   max={1000}
                   value={member.weight ?? 1}
@@ -469,11 +459,11 @@ export function PoolConnectionsEditor({
             </div>
             {weighted && weightError && (
               <p role="alert" className="text-12 text-destructive">
-                {memberLabel(id, position)}: {weightError}
+                {memberLabel(id, position)}: {translateUi(weightError)}
               </p>
             )}
             <Toggle
-              label={`Member ${position + 1} enabled`}
+              label={t("Member {{value}} enabled", { value: position + 1 })}
               checked={member.enabled ?? true}
               onChange={(v) => setMember(id, { enabled: v })}
             />
@@ -481,24 +471,19 @@ export function PoolConnectionsEditor({
               <label className="flex items-start gap-2 text-12 leading-relaxed">
                 <Checkbox
                   className="mt-0.5"
-                  aria-label={`Confirm API compatibility for member ${position + 1}`}
+                  aria-label={t("Confirm API compatibility for member {{value}}", { value: position + 1 })}
                   checked={member.same_api_compatible ?? false}
                   onCheckedChange={(v) =>
                     setMember(id, { same_api_compatible: v === true })
                   }
-                />
-                I confirm this connection accepts the same paths and request
-                format as the other connections.
-              </label>
+                />{t("I confirm this connection accepts the same paths and request format as the other connections.")}</label>
             )}
           </div>
         );
       })}
       {!aiChat && (
         <details className="rounded-xl border border-border/50 p-3">
-          <summary className="cursor-pointer text-12 font-medium">
-            Check an operation (optional)
-          </summary>
+          <summary className="cursor-pointer text-12 font-medium">{t("Check an operation (optional)")}</summary>
           <div className="pt-3">
             <PoolOperationCheck operation={operation} onChange={setOperation} />
           </div>

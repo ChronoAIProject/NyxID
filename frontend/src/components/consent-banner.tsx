@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 /**
  * Telemetry consent banner.
  *
@@ -16,6 +17,7 @@ import { useConsentStore } from '../stores/consent-store';
 import { usePublicConfig } from '../hooks/use-public-config';
 
 export function ConsentBanner() {
+  const { t } = useUiTranslation();
   const asked = useConsentStore((s) => s.asked);
   const setConsent = useConsentStore((s) => s.setConsent);
   // Only fetch config if the banner could possibly render. Once the
@@ -39,31 +41,21 @@ export function ConsentBanner() {
     <div
       role="dialog"
       aria-live="polite"
-      aria-label="Telemetry consent"
+      aria-label={t("Telemetry consent")}
       className="fixed inset-x-0 bottom-0 z-50 border-t bg-background/95 backdrop-blur"
     >
       <div className="mx-auto flex max-w-5xl flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="text-12 text-muted-foreground">
-          We collect anonymous usage telemetry to help us improve NyxID.
-          We never capture credentials, form content, or the contents of
-          your requests. This choice applies to this browser only — other
-          devices and the CLI manage their own telemetry settings. You
-          can change this later in Settings.
-        </div>
+        <div className="text-12 text-muted-foreground">{t("We collect anonymous usage telemetry to help us improve NyxID. We never capture credentials, form content, or the contents of your requests. This choice applies to this browser only — other devices and the CLI manage their own telemetry settings. You can change this later in Settings.")}</div>
         <div className="flex shrink-0 items-center gap-2">
           <Button
             variant="ghost"
             onClick={() => setConsent(false)}
-            aria-label="Decline telemetry"
-          >
-            No Thanks
-          </Button>
+            aria-label={t("Decline telemetry")}
+          >{t("No Thanks")}</Button>
           <Button
             onClick={() => setConsent(true)}
-            aria-label="Accept telemetry"
-          >
-            Allow
-          </Button>
+            aria-label={t("Accept telemetry")}
+          >{t("Allow")}</Button>
         </div>
       </div>
     </div>

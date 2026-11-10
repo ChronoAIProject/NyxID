@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Area, AreaChart, XAxis, YAxis } from "recharts";
 import { useApiKeyUsage } from "@/hooks/use-api-keys";
@@ -41,11 +43,10 @@ function ActivityChart({
     readonly error_count: number;
   }[];
 }) {
+  const { t } = useUiTranslation();
   if (buckets.length === 0) {
     return (
-      <p className="text-xs text-muted-foreground">
-        No usage in the selected window.
-      </p>
+      <p className="text-xs text-muted-foreground">{t("No usage in the selected window.")}</p>
     );
   }
 
@@ -73,7 +74,7 @@ function ActivityChart({
           tickLine={false}
           axisLine={false}
           tickFormatter={(value: string) =>
-            new Date(value + "T00:00:00").toLocaleDateString("en-US", {
+            new Date(value + "T00:00:00").toLocaleDateString(getFormattingLocale(), {
               month: "short",
               day: "numeric",
             })
@@ -86,7 +87,7 @@ function ActivityChart({
           content={
             <ChartTooltipContent
               labelFormatter={(value) =>
-                new Date(value + "T00:00:00").toLocaleDateString("en-US", {
+                new Date(value + "T00:00:00").toLocaleDateString(getFormattingLocale(), {
                   month: "short",
                   day: "numeric",
                 })
@@ -120,6 +121,7 @@ export function UsageStatsCard({
 }: {
   readonly keyId: string;
 }) {
+  const { t } = useUiTranslation();
   const [days, setDays] = useState(7);
   const { data, isLoading, error, refetch } = useApiKeyUsage(keyId, days);
 
@@ -129,22 +131,20 @@ export function UsageStatsCard({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Activity className="h-4 w-4 text-primary-text" />
-            <CardTitle className="text-15">Usage</CardTitle>
+            <CardTitle className="text-15">{t("Usage")}</CardTitle>
           </div>
           <Select value={String(days)} onValueChange={(v) => setDays(Number(v))}>
             <SelectTrigger className="h-8 w-[160px] text-xs">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="7">Last 7 Days</SelectItem>
-              <SelectItem value="30">Last 30 Days</SelectItem>
-              <SelectItem value="90">Last 3 Months</SelectItem>
+              <SelectItem value="7">{t("Last 7 Days")}</SelectItem>
+              <SelectItem value="30">{t("Last 30 Days")}</SelectItem>
+              <SelectItem value="90">{t("Last 3 Months")}</SelectItem>
             </SelectContent>
           </Select>
         </div>
-        <CardDescription>
-          Agent-attributed requests, provider-reported tokens, and reported cost.
-        </CardDescription>
+        <CardDescription>{t("Agent-attributed requests, provider-reported tokens, and reported cost.")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         {isLoading ? (
@@ -153,32 +153,24 @@ export function UsageStatsCard({
             <Skeleton className="h-24 w-full" />
           </div>
         ) : error || !data ? (
-          <ErrorBanner message="Failed to load usage stats." onRetry={refetch} />
+          <ErrorBanner message={t("Failed to load usage stats.")} onRetry={refetch} />
         ) : (
           <>
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <div className="rounded-lg border border-border p-3">
-                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-                  Requests
-                </p>
+                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">{t("Requests")}</p>
                 <p className="mt-1 text-lg font-semibold">{data.request_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-                  Successes
-                </p>
+                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">{t("Successes")}</p>
                 <p className="mt-1 text-lg font-semibold">{data.success_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-                  Errors
-                </p>
+                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">{t("Errors")}</p>
                 <p className="mt-1 text-lg font-semibold">{data.error_count}</p>
               </div>
               <div className="rounded-lg border border-border p-3">
-                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-                  Error Rate
-                </p>
+                <p className="text-11 font-semibold uppercase tracking-[1.5px] text-text-tertiary">{t("Error Rate")}</p>
                 <p className="mt-1 text-lg font-semibold">
                   {(data.error_rate * 100).toFixed(1)}%
                 </p>
@@ -187,17 +179,16 @@ export function UsageStatsCard({
 
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <p className="text-xs font-medium text-foreground">Daily Activity</p>
-                <span className="text-xs text-muted-foreground">
-                  Last used{" "}
-                  {data.last_used_at ? formatRelativeTime(data.last_used_at) : "never"}
+                <p className="text-xs font-medium text-foreground">{t("Daily Activity")}</p>
+                <span className="text-xs text-muted-foreground">{t("Last used")}{" "}
+                  {data.last_used_at ? formatRelativeTime(data.last_used_at) : t("never")}
                 </span>
               </div>
               <ActivityChart buckets={data.daily_buckets} />
             </div>
 
             <div className="space-y-2">
-              <p className="text-xs font-medium text-foreground">Top Services</p>
+              <p className="text-xs font-medium text-foreground">{t("Top Services")}</p>
               {data.top_services.length > 0 ? (
                 <div className="flex flex-wrap gap-2">
                   {data.top_services.map((service) => (
@@ -207,9 +198,7 @@ export function UsageStatsCard({
                   ))}
                 </div>
               ) : (
-                <p className="text-xs text-muted-foreground">
-                  No attributed service traffic yet.
-                </p>
+                <p className="text-xs text-muted-foreground">{t("No attributed service traffic yet.")}</p>
               )}
             </div>
           </>

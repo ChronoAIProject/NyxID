@@ -1,3 +1,4 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import {
   useChannelActivities,
@@ -42,9 +43,10 @@ export function LatestActivity({
   readonly unavailable?: boolean;
   readonly loading?: boolean;
 }) {
-  if (unavailable) return <span>Activity unavailable</span>;
-  if (loading) return <span>Loading activity…</span>;
-  if (!activity) return <span>No activity received</span>;
+  const { t } = useUiTranslation();
+  if (unavailable) return <span>{t("Activity unavailable")}</span>;
+  if (loading) return <span>{t("Loading activity…")}</span>;
+  if (!activity) return <span>{t("No activity received")}</span>;
   return (
     <span>
       {activityLabel(activity.kind, descriptors)} ·{" "}
@@ -56,17 +58,17 @@ export function LatestActivity({
 function callbackLabel(status: string | null) {
   switch (status) {
     case "delivered":
-      return "Callback accepted";
+      return translateUi("Callback accepted");
     case "failed":
-      return "Callback failed";
+      return translateUi("Callback failed");
     case "timeout":
-      return "Callback timed out";
+      return translateUi("Callback timed out");
     case "not_enabled":
-      return "Agent notification not enabled";
+      return translateUi("Agent notification not enabled");
     case "pending":
-      return "Callback pending";
+      return translateUi("Callback pending");
     default:
-      return "Callback status unavailable";
+      return translateUi("Callback status unavailable");
   }
 }
 
@@ -79,6 +81,7 @@ export function ChannelActivities({
   readonly id: string;
   readonly descriptors: readonly ChannelActivityDescriptor[];
 }) {
+  const { t } = useUiTranslation();
   const [kind, setKind] = useState("all");
   const [page, setPage] = useState(1);
   const query = useChannelActivities(
@@ -89,15 +92,15 @@ export function ChannelActivities({
     page,
   );
   return (
-    <DetailSection title="Received activities">
+    <DetailSection title={t("Received activities")}>
       <div className="space-y-4 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-xs text-muted-foreground">
             {query.error
-              ? "Activity count unavailable"
+              ? t("Activity count unavailable")
               : query.isPending
-                ? "Loading activity count…"
-                : `${query.data.total} ${kind === "all" ? "received" : "matching"} ${query.data.total === 1 ? "activity" : "activities"} in the last ${query.data.retention_days} days`}
+                ? t("Loading activity count…")
+                : t("{{total}} {{value}} {{value2}} in the last {{retention_days}} days", { total: query.data.total, value: kind === "all" ? t("received") : t("matching"), value2: query.data.total === 1 ? t("activity") : t("activities"), retention_days: query.data.retention_days })}
           </p>
           <Select
             value={kind}
@@ -106,36 +109,30 @@ export function ChannelActivities({
               setPage(1);
             }}
           >
-            <SelectTrigger aria-label="Activity type" className="w-48">
+            <SelectTrigger aria-label={t("Activity type")} className="w-48">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">All activity types</SelectItem>
+              <SelectItem value="all">{t("All activity types")}</SelectItem>
               {descriptors.map((entry) => (
                 <SelectItem key={entry.kind} value={entry.kind}>
                   {entry.label}
                 </SelectItem>
               ))}
-              <SelectItem value="message">Earlier messages</SelectItem>
+              <SelectItem value="message">{t("Earlier messages")}</SelectItem>
             </SelectContent>
           </Select>
         </div>
-        <p className="text-xs text-muted-foreground">
-          Received means NyxID recorded the activity. Callback acceptance means
-          the agent acknowledged it; it does not confirm processing. Message
-          content is not stored here.
-        </p>
+        <p className="text-xs text-muted-foreground">{t("Received means NyxID recorded the activity. Callback acceptance means the agent acknowledged it; it does not confirm processing. Message content is not stored here.")}</p>
         {query.error ? (
           <ErrorBanner
-            message="Activities could not be loaded."
+            message={t("Activities could not be loaded.")}
             onRetry={() => void query.refetch()}
           />
         ) : query.isPending ? (
-          <p className="text-xs text-muted-foreground">Loading activities…</p>
+          <p className="text-xs text-muted-foreground">{t("Loading activities…")}</p>
         ) : !query.data.activities.length ? (
-          <p className="text-xs text-muted-foreground">
-            No matching activity received in this period.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("No matching activity received in this period.")}</p>
         ) : (
           <ul className="divide-y divide-border">
             {query.data.activities.map((activity) => (
@@ -151,20 +148,14 @@ export function ChannelActivities({
                     {callbackLabel(activity.callback_status)}
                   </span>
                 </div>
-                <p className="break-all text-xs text-muted-foreground">
-                  From {activity.sender_platform_id ?? "unknown sender"} ·{" "}
-                  {activity.platform_conversation_id ?? "unknown conversation"}
+                <p className="break-all text-xs text-muted-foreground">{t("From ")}{activity.sender_platform_id ?? t("unknown sender")} ·{" "}
+                  {activity.platform_conversation_id ?? t("unknown conversation")}
                 </p>
                 {activity.content_availability === "encrypted" && (
-                  <p className="text-xs text-muted-foreground">
-                    Encrypted message received. Text and replies are
-                    unavailable.
-                  </p>
+                  <p className="text-xs text-muted-foreground">{t("Encrypted message received. Text and replies are unavailable.")}</p>
                 )}
                 {activity.content_availability === "metadata_only" && (
-                  <p className="text-xs text-muted-foreground">
-                    Metadata notification. Replies are unavailable.
-                  </p>
+                  <p className="text-xs text-muted-foreground">{t("Metadata notification. Replies are unavailable.")}</p>
                 )}
               </li>
             ))}
@@ -177,9 +168,7 @@ export function ChannelActivities({
               variant="outline"
               disabled={page === 1 || query.isFetching}
               onClick={() => setPage(page - 1)}
-            >
-              Previous
-            </Button>
+            >{t("Previous")}</Button>
             <Button
               variant="outline"
               disabled={
@@ -189,9 +178,7 @@ export function ChannelActivities({
                 !!query.error
               }
               onClick={() => setPage(page + 1)}
-            >
-              Next
-            </Button>
+            >{t("Next")}</Button>
           </div>
         )}
       </div>
@@ -206,29 +193,23 @@ export function ActivityCallbackSettings({
   readonly id: string;
   readonly descriptors: readonly ChannelActivityDescriptor[];
 }) {
+  const { t } = useUiTranslation();
   const query = useActivityCallback(id);
   const update = useSetActivityCallback(id);
   return (
-    <DetailSection title="Typed activity callbacks">
+    <DetailSection title={t("Typed activity callbacks")}>
       <div className="space-y-3 p-4">
-        <p className="text-xs text-muted-foreground">
-          Enable activity types only after your agent declares support for this
-          route. Encrypted chat and own-post notifications contain metadata and
-          cannot be replied to. Enabling applies to new activity; earlier
-          notifications are not replayed.
-        </p>
+        <p className="text-xs text-muted-foreground">{t("Enable activity types only after your agent declares support for this route. Encrypted chat and own-post notifications contain metadata and cannot be replied to. Enabling applies to new activity; earlier notifications are not replayed.")}</p>
         {query.error ? (
-          <ErrorBanner message="Agent activity support could not be loaded." />
+          <ErrorBanner message={t("Agent activity support could not be loaded.")} />
         ) : query.isPending ? (
-          <p className="text-xs text-muted-foreground">
-            Loading agent support…
-          </p>
+          <p className="text-xs text-muted-foreground">{t("Loading agent support…")}</p>
         ) : (
           <>
             <p className="text-xs">
               {query.data.declared
-                ? `Agent supports: ${query.data.kinds.map((kind) => activityLabel(kind, descriptors)).join(", ")}`
-                : "The assigned agent has not declared support for its current callback. Existing callbacks continue normally."}
+                ? t("Agent supports: {{value}}", { value: query.data.kinds.map((kind) => activityLabel(kind, descriptors)).join(", ") })
+                : t("The assigned agent has not declared support for its current callback. Existing callbacks continue normally.")}
             </p>
             <Button
               disabled={
@@ -239,8 +220,8 @@ export function ActivityCallbackSettings({
               onClick={() => update.mutate(!query.data.enabled)}
             >
               {query.data.enabled
-                ? "Disable typed callbacks"
-                : "Enable typed callbacks"}
+                ? t("Disable typed callbacks")
+                : t("Enable typed callbacks")}
             </Button>
           </>
         )}

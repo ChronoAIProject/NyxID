@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useAuthStore } from "@/stores/auth-store";
 import { useState } from "react";
 import {
@@ -21,29 +22,23 @@ export function PlatformPersonalBindings() {
   return <OwnedBindings key={actor ?? "signed-out"} />;
 }
 function OwnedBindings() {
+  const { t } = useUiTranslation();
   const query = usePersonalBindings();
   const revoke = useRevokePersonalBinding();
   const [review, setReview] = useState<PersonalBinding>();
   const rows = query.data?.pages.flatMap((page) => page.bindings) ?? [];
   return (
-    <section aria-label="Personal Telegram links" className="space-y-3 text-12">
-      <p>
-        These platform-operated Telegram bots use your existing NyxBot
-        permissions and personal billing. Each verified identity has its own
-        thread.
-      </p>
-      {query.isPending && <p role="status">Loading personal links...</p>}
+    <section aria-label={t("Personal Telegram links")} className="space-y-3 text-12">
+      <p>{t("These platform-operated Telegram bots use your existing NyxBot permissions and personal billing. Each verified identity has its own thread.")}</p>
+      {query.isPending && <p role="status">{t("Loading personal links...")}</p>}
       {query.error && (
         <ErrorBanner
-          message="Personal Telegram links are unavailable."
+          message={t("Personal Telegram links are unavailable.")}
           onRetry={() => void query.refetch()}
         />
       )}
       {query.isSuccess && rows.length === 0 && (
-        <p className="rounded-lg border border-dashed border-border p-4 text-muted-foreground">
-          No personal Telegram links. Send /link in a platform bot's private
-          chat to begin.
-        </p>
+        <p className="rounded-lg border border-dashed border-border p-4 text-muted-foreground">{t("No personal Telegram links. Send /link in a platform bot's private chat to begin.")}</p>
       )}
       {rows.map((row) => (
         <div
@@ -51,27 +46,20 @@ function OwnedBindings() {
           className="space-y-2 rounded-lg border border-border p-4"
         >
           <p className="font-medium">{row.manager.display_name}</p>
-          <p className="text-muted-foreground">
-            Telegram account {row.sender.display_name ?? row.sender.id} ·{" "}
-            {row.state === "active" ? "Linked" : "Disconnected"}
+          <p className="text-muted-foreground">{t("Telegram account ")}{row.sender.display_name ?? row.sender.id} ·{" "}
+            {row.state === "active" ? t("Linked") : t("Disconnected")}
           </p>
           {row.conversation_id ? (
             <a
               className="underline"
               href={`/assistant?c=${encodeURIComponent(row.conversation_id)}`}
-            >
-              Open saved Telegram thread
-            </a>
+            >{t("Open saved Telegram thread")}</a>
           ) : row.state === "active" ? (
-            <p>
-              Send your first private message to create the Telegram thread.
-            </p>
+            <p>{t("Send your first private message to create the Telegram thread.")}</p>
           ) : null}
           {row.state === "active" && (
             <div>
-              <Button variant="outline" onClick={() => setReview(row)}>
-                Disconnect personal access
-              </Button>
+              <Button variant="outline" onClick={() => setReview(row)}>{t("Disconnect personal access")}</Button>
             </div>
           )}
         </div>
@@ -81,9 +69,7 @@ function OwnedBindings() {
           variant="outline"
           onClick={() => void query.fetchNextPage()}
           isLoading={query.isFetchingNextPage}
-        >
-          More personal links
-        </Button>
+        >{t("More personal links")}</Button>
       )}
       {revoke.error && <ErrorBanner message={revoke.error.message} />}
       <Dialog
@@ -94,17 +80,11 @@ function OwnedBindings() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Disconnect personal Telegram access?</DialogTitle>
-            <DialogDescription>
-              Work already started may keep running in NyxID; stop it from the
-              app. Your saved thread and pending approvals remain available.
-              This disconnects only personal access for this identity.
-            </DialogDescription>
+            <DialogTitle>{t("Disconnect personal Telegram access?")}</DialogTitle>
+            <DialogDescription>{t("Work already started may keep running in NyxID; stop it from the app. Your saved thread and pending approvals remain available. This disconnects only personal access for this identity.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setReview(undefined)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setReview(undefined)}>{t("Cancel")}</Button>
             <Button
               variant="destructive"
               isLoading={revoke.isPending}
@@ -114,9 +94,7 @@ function OwnedBindings() {
                     onSuccess: () => setReview(undefined),
                   });
               }}
-            >
-              Disconnect
-            </Button>
+            >{t("Disconnect")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

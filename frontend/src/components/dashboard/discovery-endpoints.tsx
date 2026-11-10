@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { copyToClipboard } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Copy } from "lucide-react";
@@ -14,9 +16,9 @@ interface DiscoveryEndpointsProps {
 async function handleCopy(text: string, label: string) {
   try {
     await copyToClipboard(text);
-    toast.success(`${label} copied to clipboard`);
+    toast.success(translateUi("{{label}} copied to clipboard", { label: label }));
   } catch {
-    toast.error("Failed to copy to clipboard");
+    toast.error(translateUi("Failed to copy to clipboard"));
   }
 }
 
@@ -27,6 +29,7 @@ export function DiscoveryEndpoints({
   userinfoEndpoint,
   jwksUri,
 }: DiscoveryEndpointsProps) {
+  const { t } = useUiTranslation();
   const endpoints = [
     { label: "Issuer", value: issuer },
     { label: "Authorization", value: authorizationEndpoint },
@@ -37,9 +40,7 @@ export function DiscoveryEndpoints({
 
   return (
     <div>
-      <p className="mb-2 text-xs font-medium text-muted-foreground">
-        Discovery Endpoints
-      </p>
+      <p className="mb-2 text-xs font-medium text-muted-foreground">{t("Discovery Endpoints")}</p>
       <div className="space-y-1">
         {endpoints.map((ep) => (
           <div

@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -42,6 +44,7 @@ export function AssistantNodeRotateTokenDialog({
   readonly params: AssistantNodeRotateTokenParams;
   readonly onComplete: (nodeId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const submittingRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -116,14 +119,14 @@ export function AssistantNodeRotateTokenDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <RefreshCw className="size-4" />
-            {result ? "Node credentials rotated" : "Rotate node credentials"}
+            {result ? t("Node credentials rotated") : t("Rotate node credentials")}
           </DialogTitle>
           <DialogDescription>
             {result?.unavailable
-              ? "The credentials were rotated, but the one-time replacements were not captured. Rotate them again before reconnecting the node."
+              ? t("The credentials were rotated, but the one-time replacements were not captured. Rotate them again before reconnecting the node.")
               : result
-                ? "These values are shown only once. Copy and store both securely now."
-                : "Rotation immediately invalidates the node's current token and signing secret."}
+                ? t("These values are shown only once. Copy and store both securely now.")
+                : t("Rotation immediately invalidates the node's current token and signing secret.")}
           </DialogDescription>
         </DialogHeader>
 
@@ -131,9 +134,7 @@ export function AssistantNodeRotateTokenDialog({
           <div className="space-y-3 border-y border-border py-4">
             {result.authToken ? (
               <div className="space-y-1.5">
-                <Label htmlFor="assistant-node-auth-token">
-                  One-time auth token
-                </Label>
+                <Label htmlFor="assistant-node-auth-token">{t("One-time auth token")}</Label>
                 <Input
                   id="assistant-node-auth-token"
                   readOnly
@@ -144,9 +145,7 @@ export function AssistantNodeRotateTokenDialog({
             ) : null}
             {result.signingSecret ? (
               <div className="space-y-1.5">
-                <Label htmlFor="assistant-node-signing-secret">
-                  One-time signing secret
-                </Label>
+                <Label htmlFor="assistant-node-signing-secret">{t("One-time signing secret")}</Label>
                 <Input
                   id="assistant-node-signing-secret"
                   readOnly
@@ -158,7 +157,7 @@ export function AssistantNodeRotateTokenDialog({
           </div>
         ) : (
           <div className="flex items-center justify-between gap-4 border-y border-border py-4 text-12">
-            <span className="text-muted-foreground">Node</span>
+            <span className="text-muted-foreground">{t("Node")}</span>
             <Badge
               variant="secondary"
               className="max-w-[70%] truncate font-mono"
@@ -170,7 +169,7 @@ export function AssistantNodeRotateTokenDialog({
 
         {error ? (
           <p role="alert" className="text-11 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
         <DialogFooter>
@@ -183,22 +182,18 @@ export function AssistantNodeRotateTokenDialog({
                 close();
               }}
             >
-              {result.unavailable ? "Acknowledge" : "I have saved it"}
+              {result.unavailable ? t("Acknowledge") : t("I have saved it")}
             </Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
               <Button
                 type="button"
                 variant="primary"
                 isLoading={submitting}
                 disabled={submitting}
                 onClick={() => void submit()}
-              >
-                Rotate credentials
-              </Button>
+              >{t("Rotate credentials")}</Button>
             </>
           )}
         </DialogFooter>

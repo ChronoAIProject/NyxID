@@ -1,7 +1,11 @@
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
 import { useState, type ReactNode } from "react";
 import { MessageSquare, Plus } from "lucide-react";
-import { AgentAvatar, AgentAvatarStack } from "@/components/assistant/nyxbot-agent-avatar";
+import {
+  AgentAvatar,
+  AgentAvatarStack,
+} from "@/components/assistant/nyxbot-agent-avatar";
 import { AgentStatusDot } from "@/components/assistant/nyxbot-agent-panels";
 import { Button } from "@/components/ui/button";
 import { nyxBotOf, useNyxBotAgent } from "@/hooks/use-nyxbot-agents";
@@ -13,10 +17,12 @@ import {
   greetingFor,
 } from "@/lib/assistant/nyxbot-labels";
 import { formatRelativeTime } from "@/lib/utils";
-import type { AssistantAgent, AssistantGroup } from "@/schemas/assistant-nyxagent";
+import type {
+  AssistantAgent,
+  AssistantGroup,
+} from "@/schemas/assistant-nyxagent";
 
 const MEMORY_PREVIEW = 3;
-
 
 function Section({
   id,
@@ -44,7 +50,9 @@ function Section({
 
 function Quiet({ children }: { readonly children: ReactNode }) {
   return (
-    <p className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">{children}</p>
+    <p className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
+      {children}
+    </p>
   );
 }
 
@@ -57,10 +65,15 @@ function AwayList({
   readonly onOpenAgent: (agent: AssistantAgent) => void;
   readonly onOpenConversation: (conversationId: string) => void;
 }) {
+  const { t } = useAppTranslation();
   const items = awayItems(agents);
   if (!items.length) {
     return (
-      <Quiet>All caught up. Replies and requests from your specialists show up here.</Quiet>
+      <Quiet>
+        {t(
+          "All caught up. Replies and requests from your specialists show up here.",
+        )}
+      </Quiet>
     );
   }
   return (
@@ -70,15 +83,17 @@ function AwayList({
           <AgentAvatar agent={item.agent} size="lg" />
           <div className="min-w-0 flex-1 space-y-0.5">
             <div className="flex items-center gap-2 text-12">
-              <span className="font-medium text-foreground">{agentTitle(item.agent)}</span>
+              <span className="font-medium text-foreground">
+                {agentTitle(item.agent)}
+              </span>
               {item.kind === "request" ? (
                 <span className="rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning light:border-transparent light:bg-warning light:text-white">
-                  Needs a decision
+                  {t("Needs a decision")}
                 </span>
               ) : (
                 <span className="flex items-center gap-1.5 text-11 text-text-tertiary">
                   <AgentStatusDot status={item.agent.status} />
-                  {AGENT_STATUS_LABEL[item.agent.status]}
+                  {t(AGENT_STATUS_LABEL[item.agent.status])}
                   <span aria-hidden="true">·</span>
                   {formatRelativeTime(item.at)}
                 </span>
@@ -92,19 +107,19 @@ function AwayList({
             <Button
               size="sm"
               variant="outline"
-              aria-label={`Review ${agentTitle(item.agent)}'s request: ${item.request.summary}`}
+              aria-label={t("Review {{value}}'s request: {{summary}}", { value: agentTitle(item.agent), summary: item.request.summary })}
               onClick={() => onOpenConversation(item.request.conversation_id)}
             >
-              Review
+              {t("Review")}
             </Button>
           ) : (
             <Button
               size="sm"
               variant="ghost"
-              aria-label={`Open ${agentTitle(item.agent)}`}
+              aria-label={t("Open {{value}}", { value: agentTitle(item.agent) })}
               onClick={() => onOpenAgent(item.agent)}
             >
-              Open
+              {t("Open")}
             </Button>
           )}
         </li>
@@ -120,40 +135,47 @@ function MemoryPreview({
   readonly nyxbot: AssistantAgent | undefined;
   readonly onManage: () => void;
 }) {
+  const { t } = useAppTranslation();
   const detail = useNyxBotAgent(nyxbot?.id);
   const notes = detail.data?.memory ?? [];
   return (
     <Section
       id="nyxbot-home-memory"
-      title="What NyxBot remembers"
+      title={t("What NyxBot remembers")}
       action={
         <Button size="sm" variant="ghost" onClick={onManage} disabled={!nyxbot}>
-          Manage
+          {t("Manage")}
         </Button>
       }
     >
       {detail.isPending && nyxbot ? (
-        <Quiet>Loading memory...</Quiet>
+        <Quiet>{t("Loading memory...")}</Quiet>
       ) : notes.length ? (
         <ul
-          aria-label="NyxBot memory preview"
+          aria-label={t("NyxBot memory preview")}
           className="divide-y divide-border/30 overflow-hidden rounded-xl border border-border/50 bg-card"
         >
           {notes.slice(0, MEMORY_PREVIEW).map((note) => (
-            <li key={note.id} className="line-clamp-2 px-4 py-2.5 text-12 text-foreground">
+            <li
+              key={note.id}
+              className="line-clamp-2 px-4 py-2.5 text-12 text-foreground"
+            >
               {note.text}
             </li>
           ))}
           {notes.length > MEMORY_PREVIEW ? (
             <li className="px-4 py-2 text-11 text-text-tertiary">
-              and {notes.length - MEMORY_PREVIEW} more
+              {t("and {{count}} more", {
+                count: notes.length - MEMORY_PREVIEW,
+              })}
             </li>
           ) : null}
         </ul>
       ) : (
         <Quiet>
-          Nothing yet. Tell NyxBot &ldquo;Remember …&rdquo; and it keeps that
-          across every chat.
+          {t(
+            "Nothing yet. Tell NyxBot “Remember …” and it keeps that across every chat.",
+          )}
         </Quiet>
       )}
     </Section>
@@ -167,6 +189,7 @@ function RosterCard({
   readonly agent: AssistantAgent;
   readonly onChat: (agent: AssistantAgent) => void;
 }) {
+  const { t } = useAppTranslation();
   const nyxbot = agent.kind === "nyxbot";
   const handle = agentHandle(agent);
   return (
@@ -186,15 +209,17 @@ function RosterCard({
           </p>
           <p className="flex items-center gap-1.5 text-11 text-text-tertiary">
             {nyxbot ? (
-              "Your personal agent"
+              t("Your personal agent")
             ) : (
               <>
                 <AgentStatusDot status={agent.status} />
-                {AGENT_STATUS_LABEL[agent.status]}
+                {t(AGENT_STATUS_LABEL[agent.status])}
                 {agent.pending_requests.length ? (
                   <span className="text-warning">
-                    · {agent.pending_requests.length}{" "}
-                    {agent.pending_requests.length === 1 ? "request" : "requests"}
+                    ·{" "}
+                    {t("{{count}} requests", {
+                      count: agent.pending_requests.length,
+                    })}
                   </span>
                 ) : null}
               </>
@@ -205,19 +230,21 @@ function RosterCard({
       <p className="line-clamp-2 min-h-8 text-12 text-muted-foreground">
         {agent.description ||
           (nyxbot
-            ? "Full access to your services and account. Delegates to your specialists."
-            : "No role described yet.")}
+            ? t(
+                "Full access to your services and account. Delegates to your specialists.",
+              )
+            : t("No role described yet."))}
       </p>
       <div className="flex justify-end">
         <Button
           size="sm"
           variant="outline"
-          aria-label={`Chat with ${agentTitle(agent)}`}
+          aria-label={t("Chat with {{value}}", { value: agentTitle(agent) })}
           disabled={agent.can_use === false}
           onClick={() => onChat(agent)}
         >
           <MessageSquare aria-hidden="true" />
-          Chat
+          {t("Chat")}
         </Button>
       </div>
     </li>
@@ -231,21 +258,25 @@ function GroupCard({
   readonly group: AssistantGroup;
   readonly onOpen: () => void;
 }) {
+  const { t } = useAppTranslation();
   const working = group.working_agent_ids.length;
   return (
     <li>
       <button
         type="button"
         onClick={onOpen}
-        aria-label={`Open group ${group.name}`}
+        aria-label={t("Open group {{name}}", { name: group.name })}
         className="flex w-full flex-col gap-2.5 rounded-xl border border-border/50 bg-card p-4 text-left transition-colors hover:bg-overlay"
       >
         <div className="flex w-full items-center gap-2">
           <AgentAvatarStack agents={group.members} size="sm" max={4} />
           {working ? (
             <span className="ml-auto flex items-center gap-1.5 text-11 text-muted-foreground">
-              <span aria-hidden="true" className="h-1.5 w-1.5 animate-pulse rounded-full bg-success" />
-              {working} working
+              <span
+                aria-hidden="true"
+                className="h-1.5 w-1.5 animate-pulse rounded-full bg-success"
+              />
+              {working} {t("working")}
             </span>
           ) : null}
         </div>
@@ -253,9 +284,11 @@ function GroupCard({
           {group.name}
         </span>
         <span className="truncate text-11 text-text-tertiary">
-          {group.owner?.type === "org" ? `${group.owner.name} · ` : ""}
+          {group.owner?.type === "org" ? t("{{name}} · ", { name: group.owner.name }) : ""}
           {group.members.map((member) => agentTitle(member)).join(", ")}
-          {group.last_message_at ? ` · ${formatRelativeTime(group.last_message_at)}` : ""}
+          {group.last_message_at
+            ? t(" · {{value}}", { value: formatRelativeTime(group.last_message_at) })
+            : ""}
         </span>
       </button>
     </li>
@@ -292,6 +325,7 @@ export function NyxBotHome({
   readonly onNewAgent: () => void;
   readonly onManageMemory: () => void;
 }) {
+  const { t } = useAppTranslation();
   const [now] = useState(() => new Date());
   const firstName = userName?.trim().split(/\s+/)[0];
   const nyxbot = nyxBotOf(agents);
@@ -306,25 +340,30 @@ export function NyxBotHome({
         style={{ paddingBottom: Math.max(bottomInset + 24, 96) }}
       >
         <header className="flex items-center gap-4">
-          <AgentAvatar agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }} size="lg" />
+          <AgentAvatar
+            agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }}
+            size="lg"
+          />
           <div className="min-w-0 space-y-1">
             <h1
               className="text-22 font-bold leading-[1.1] text-foreground sm:text-28"
               style={{ letterSpacing: "-0.03em" }}
             >
-              {greetingFor(now)}
-              {firstName ? `, ${firstName}` : ""}
+              {firstName
+                ? t("{{greeting}}, {{name}}", { greeting: t(greetingFor(now)), name: firstName })
+                : t(greetingFor(now))}
             </h1>
             <p className="text-12 text-muted-foreground">
-              NyxBot is your personal agent. Ask it anything below, or check in
-              on your team.
+              {t(
+                "NyxBot is your personal agent. Ask it anything below, or check in on your team.",
+              )}
             </p>
           </div>
         </header>
 
-        <Section id="nyxbot-home-away" title="While you were away">
+        <Section id="nyxbot-home-away" title={t("While you were away")}>
           {agentsLoading ? (
-            <Quiet>Loading your agents...</Quiet>
+            <Quiet>{t("Loading your agents...")}</Quiet>
           ) : (
             <AwayList
               agents={agents}
@@ -338,60 +377,73 @@ export function NyxBotHome({
 
         <Section
           id="nyxbot-home-agents"
-          title="Your agents"
+          title={t("Your agents")}
           action={
             <Button size="sm" variant="ghost" onClick={onNewAgent}>
               <Plus aria-hidden="true" />
-              New agent
+              {t("New agent")}
             </Button>
           }
         >
           {roster.length ? (
-            <div aria-label="Agents" className="space-y-4">
+            <div aria-label={t("Agents")} className="space-y-4">
               {agentOwnerSections(roster).map((section) => (
                 <section
                   key={section.id}
-                  aria-label={section.label}
+                  aria-label={
+                    section.id === "personal" ? t("Personal") : section.label
+                  }
                   className="space-y-2"
                 >
                   <h3 className="text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-                    {section.label}
+                    {section.id === "personal" ? t("Personal") : section.label}
                   </h3>
                   <ul className="grid gap-3 sm:grid-cols-2">
-              {section.agents.map((agent) => (
-                <RosterCard key={agent.id} agent={agent} onChat={onChat} />
-              ))}
-            </ul>
+                    {section.agents.map((agent) => (
+                      <RosterCard
+                        key={agent.id}
+                        agent={agent}
+                        onChat={onChat}
+                      />
+                    ))}
+                  </ul>
                 </section>
               ))}
             </div>
           ) : (
             <Quiet>
-              {agentsLoading ? "Loading your agents..." : "No agents yet."}
+              {agentsLoading
+                ? t("Loading your agents...")
+                : t("No agents yet.")}
             </Quiet>
           )}
         </Section>
 
         <Section
           id="nyxbot-home-groups"
-          title="Groups"
+          title={t("Groups")}
           action={
             <Button size="sm" variant="ghost" onClick={onNewGroup}>
               <Plus aria-hidden="true" />
-              New group
+              {t("New group")}
             </Button>
           }
         >
           {groups.length ? (
-            <ul aria-label="Groups" className="grid gap-3 sm:grid-cols-2">
+            <ul aria-label={t("Groups")} className="grid gap-3 sm:grid-cols-2">
               {groups.map((group) => (
-                <GroupCard key={group.id} group={group} onOpen={() => onOpenGroup(group.id)} />
+                <GroupCard
+                  key={group.id}
+                  group={group}
+                  onOpen={() => onOpenGroup(group.id)}
+                />
               ))}
             </ul>
           ) : (
             <Quiet>
-              Put several agents in one chat. Mention one with @ to ask it
-              directly; NyxBot answers the rest.
+              {t(
+                "Put several agents in one chat. Mention one with @ to ask it directly; NyxBot answers the rest.",
+              )}
             </Quiet>
           )}
         </Section>

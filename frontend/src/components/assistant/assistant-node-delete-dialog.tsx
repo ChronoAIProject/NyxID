@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { ShieldAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -40,6 +42,7 @@ export function AssistantNodeDeleteDialog({
   readonly params: AssistantNodeDeleteParams;
   readonly onComplete: (nodeId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const submittingRef = useRef(false);
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -98,19 +101,19 @@ export function AssistantNodeDeleteDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {resultId ? "Credential node deleted" : "Delete credential node"}
+            {resultId ? t("Credential node deleted") : t("Delete credential node")}
           </DialogTitle>
           <DialogDescription>
             {resultId
-              ? "The node authorization projection is absent, confirming deletion."
-              : "This deactivates the node, its bindings, and pending credential work. It cannot be undone from chat."}
+              ? t("The node authorization projection is absent, confirming deletion.")
+              : t("This deactivates the node, its bindings, and pending credential work. It cannot be undone from chat.")}
           </DialogDescription>
         </DialogHeader>
 
         {!resultId ? (
           <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">Node</span>
+              <span className="text-muted-foreground">{t("Node")}</span>
               <Badge
                 variant="secondary"
                 className="max-w-[70%] truncate font-mono"
@@ -124,16 +127,14 @@ export function AssistantNodeDeleteDialog({
                 onCheckedChange={(value) => setConfirmed(value === true)}
               />
               <span className="flex items-start gap-1.5 text-destructive">
-                <ShieldAlert className="mt-0.5 size-3 shrink-0" />I understand
-                this removes node routing and pending credential work.
-              </span>
+                <ShieldAlert className="mt-0.5 size-3 shrink-0" />{t("I understand this removes node routing and pending credential work.")}</span>
             </label>
           </div>
         ) : null}
 
         {error ? (
           <p role="alert" className="text-11 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
         <DialogFooter>
@@ -145,23 +146,17 @@ export function AssistantNodeDeleteDialog({
                 onComplete(resultId);
                 close();
               }}
-            >
-              Done
-            </Button>
+            >{t("Done")}</Button>
           ) : (
             <>
-              <Button type="button" variant="outline" onClick={close}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
               <Button
                 type="button"
                 variant="destructive"
                 isLoading={submitting}
                 disabled={submitting || !confirmed}
                 onClick={() => void submit()}
-              >
-                Delete node
-              </Button>
+              >{t("Delete node")}</Button>
             </>
           )}
         </DialogFooter>

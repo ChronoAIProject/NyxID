@@ -1,7 +1,15 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translate as t } from "@/i18n";
+import { useAppTranslation } from "@/i18n/use-app-translation";
+import { DecisionContinuation } from "./decision-continuation";
 import { useRouter, useRouterState } from "@tanstack/react-router";
 import { useAccountPanel } from "@/hooks/use-account-panel";
 import { isAssistantShellRoute } from "@/lib/assistant/account-panel-search";
-import { CAPACITY_ACKNOWLEDGEMENT, formatCapacityWait } from "@/lib/assistant/capacity-wait";
+import {
+  CAPACITY_ACKNOWLEDGEMENT,
+  formatCapacityWait,
+} from "@/lib/assistant/capacity-wait";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   memo,
@@ -46,16 +54,29 @@ const EMPTY_MESSAGES: readonly ChatMessage[] = [];
 
 function recoveryReason(reason: string): string {
   switch (reason) {
-    case "turn_active": return "Another turn is active. Check its result before retrying.";
-    case "already_retried": return "This reply was already retried. Review the newer result.";
-    case "agent_destroyed": return "This agent's threads are read-only.";
-    case "attachment_expired": return "An original attachment is no longer available.";
-    case "activity_outcome_uncertain": return "A tool may have taken effect. Check its result before another attempt.";
+    case "turn_active":
+      return t("Another turn is active. Check its result before retrying.");
+    case "already_retried":
+      return t("This reply was already retried. Review the newer result.");
+    case "agent_destroyed":
+      return t("This agent's threads are read-only.");
+    case "attachment_expired":
+      return t("An original attachment is no longer available.");
+    case "activity_outcome_uncertain":
+      return t(
+        "A tool may have taken effect. Check its result before another attempt.",
+      );
     case "activity_evidence_incomplete":
-    case "lineage_incomplete": return "Completed actions cannot be verified for this retry.";
-    case "input_unavailable": return "The original request is no longer available.";
-    case "status_unavailable": return "Retry availability could not be checked. Check again before retrying.";
-    default: return "This reply cannot be retried automatically.";
+    case "lineage_incomplete":
+      return t("Completed actions cannot be verified for this retry.");
+    case "input_unavailable":
+      return t("The original request is no longer available.");
+    case "status_unavailable":
+      return t(
+        "Retry availability could not be checked. Check again before retrying.",
+      );
+    default:
+      return t("This reply cannot be retried automatically.");
   }
 }
 
@@ -78,10 +99,11 @@ function ThinkingBlock({
   readonly text: string;
   readonly streaming: boolean;
 }) {
+  const { t } = useAppTranslation();
   const [open, setOpen] = useState(false);
   if (!text) return null;
   return (
-    <div className="mb-2" role="status" aria-label="Assistant reasoning">
+    <div className="mb-2" role="status" aria-label={t("Assistant reasoning")}>
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
@@ -92,7 +114,7 @@ function ThinkingBlock({
           className={cn("h-3 w-3 transition-transform", open && "rotate-90")}
         />
         <Brain className="h-3 w-3" />
-        Thinking
+        {t("Thinking")}
         {streaming ? <PulseDot /> : null}
       </button>
       {open ? (
@@ -110,16 +132,18 @@ function toolFailureCopy(
   switch (failure?.kind) {
     case "service_status":
       return failure.status == null
-        ? "The service returned an error. No HTTP status is available."
+        ? t("The service returned an error. No HTTP status is available.")
         : `The service responded with HTTP ${failure.status}.`;
     case "refused":
-      return "NyxID refused this call.";
+      return t("NyxID refused this call.");
     case "internal":
-      return "NyxID could not complete this call.";
+      return t("NyxID could not complete this call.");
     case "tool_error":
-      return "The tool reported an error.";
+      return t("The tool reported an error.");
     default:
-      return "This step did not complete. No additional error details are available.";
+      return t(
+        "This step did not complete. No additional error details are available.",
+      );
   }
 }
 
@@ -139,29 +163,45 @@ function ToolElapsed({ startedAt }: { readonly startedAt: string }) {
   return <span aria-hidden> · {formatElapsed(seconds)}</span>;
 }
 
-function StatusLabel({ label, interrupted }: {
+function StatusLabel({
+  label,
+  interrupted,
+}: {
   readonly label: string;
   readonly interrupted?: boolean;
 }) {
+  const { t } = useAppTranslation();
   return (
     <span role="status" aria-live="polite">
       {label}
       {interrupted ? (
-        <span> Connection interrupted; checking every few seconds</span>
+        <span> {t("Connection interrupted; checking every few seconds")}</span>
       ) : null}
     </span>
   );
 }
 
-function ActivitySummaryIcon({ status }: { readonly status: ChatMessage["status"] }) {
+function ActivitySummaryIcon({
+  status,
+}: {
+  readonly status: ChatMessage["status"];
+}) {
+  const { t } = useAppTranslation();
   if (status === "streaming") return <PulseDot />;
   if (status === "error") {
-    return <X className="h-3 w-3 text-destructive" aria-label="Turn failed" />;
+    return (
+      <X className="h-3 w-3 text-destructive" aria-label={t("Turn failed")} />
+    );
   }
   if (status === "stopped") {
-    return <CircleAlert className="h-3 w-3 text-muted-foreground" aria-label="Stopped" />;
+    return (
+      <CircleAlert
+        className="h-3 w-3 text-muted-foreground"
+        aria-label={t("Stopped")}
+      />
+    );
   }
-  return <Check className="h-3 w-3 text-success" aria-label="Completed" />;
+  return <Check className="h-3 w-3 text-success" aria-label={t("Completed")} />;
 }
 
 function activitySummary(message: ChatMessage): string {
@@ -169,11 +209,11 @@ function activitySummary(message: ChatMessage): string {
     case "streaming":
       return message.turnStatus?.label ?? "Working…";
     case "error":
-      return "Turn failed";
+      return t("Turn failed");
     case "stopped":
-      return "Stopped";
+      return t("Stopped");
     default:
-      return "Completed";
+      return t("Completed");
   }
 }
 
@@ -182,26 +222,35 @@ function ToolStatusIcon({
 }: {
   readonly status: RuntimeToolCallInfo["status"];
 }) {
+  const { t } = useAppTranslation();
   if (status === "running") return <PulseDot className="mx-[3px]" />;
   if (status === "error") {
     return (
-      <X aria-label="Failed" className="h-3 w-3 shrink-0 text-destructive" />
+      <X
+        aria-label={t("Failed")}
+        className="h-3 w-3 shrink-0 text-destructive"
+      />
     );
   }
   return (
-    <Check aria-label="Succeeded" className="h-3 w-3 shrink-0 text-success" />
+    <Check
+      aria-label={t("Succeeded")}
+      className="h-3 w-3 shrink-0 text-success"
+    />
   );
 }
 
 function ActivityBlock({ message }: { readonly message: ChatMessage }) {
+  const { t } = useAppTranslation();
   const steps = message.steps ?? [];
   const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine);
   const count = steps.length + tools.length;
   const total = Math.max(count, message.activityTotal ?? 0);
   const [open, setOpen] = useState(false);
   if (!count) return null;
-  const failed = steps.filter((step) => step.status === "error").length
-    + tools.filter((tool) => tool.status === "error").length;
+  const failed =
+    steps.filter((step) => step.status === "error").length +
+    tools.filter((tool) => tool.status === "error").length;
   const summary = activitySummary(message);
   return (
     <div className="mb-2 overflow-hidden rounded-lg border border-hairline bg-overlay/35">
@@ -216,11 +265,21 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
         />
         <ActivitySummaryIcon status={message.status} />
         <span>
-          {summary} · {total} {total === 1 ? "action" : "actions"}
+          {summary} · {t("{{count}} actions", { count: total })}
           {message.activityTotal && message.activityTotal > count ? (
-            <span className="ml-1">· latest {count} of {message.activityTotal} shown</span>
+            <span className="ml-1">
+              ·{" "}
+              {t("latest {{count}} of {{total}} shown", {
+                count,
+                total: message.activityTotal,
+              })}
+            </span>
           ) : null}
-          {failed ? <span className="ml-1 text-warning">· {failed} failed</span> : null}
+          {failed ? (
+            <span className="ml-1 text-warning">
+              · {t("{{count}} failed", { count: failed })}
+            </span>
+          ) : null}
         </span>
       </button>
       {open ? (
@@ -235,11 +294,13 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
                 <Check className="mt-0.5 h-3 w-3 text-success" />
               )}
               <span className="min-w-0 flex-1 break-words text-muted-foreground">
-                {step.name || "Processing"}
+                {step.name || t("Processing")}
               </span>
               {step.status === "error" ? (
                 <span className="text-text-tertiary">
-                  Step failed. The assistant can continue after a failed step.
+                  {t(
+                    "Step failed. The assistant can continue after a failed step.",
+                  )}
                 </span>
               ) : null}
               {step.stepType ? (
@@ -269,8 +330,8 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
                 </span>
                 {tool.status === "error" ? (
                   <span className="text-text-tertiary">
-                    {toolFailureCopy(tool.failure)} The assistant can continue
-                    after a failed step.
+                    {toolFailureCopy(tool.failure)}{" "}
+                    {t("The assistant can continue after a failed step.")}
                   </span>
                 ) : null}
               </summary>
@@ -295,24 +356,62 @@ function BillingRemedy() {
 }
 
 function BillingRemedyWithRouter() {
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const { t } = useAppTranslation();
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   const panel = useAccountPanel();
   if (!isAssistantShellRoute(pathname)) return null;
-  return <button type="button" className="mt-2 block text-11 underline"
-    onClick={() => void panel.open("billing", { panelTab: "overview" })}>Open Billing &amp; Usage</button>;
+  return (
+    <button
+      type="button"
+      className="mt-2 block text-11 underline"
+      onClick={() => void panel.open("billing", { panelTab: "overview" })}
+    >
+      {t("Open Billing & Usage")}
+    </button>
+  );
 }
 
-function CapacityDetails({ attempts, capacityWaitMs }: { readonly attempts?: number | null; readonly capacityWaitMs?: number | null }) {
-  return <>{attempts != null ? <><dt>attempts</dt><dd>{attempts}</dd></> : null}
-    {capacityWaitMs != null && capacityWaitMs > 0 ? <><dt>capacity</dt><dd>waited {formatCapacityWait(capacityWaitMs)} for capacity</dd></> : null}</>;
+function CapacityDetails({
+  attempts,
+  capacityWaitMs,
+}: {
+  readonly attempts?: number | null;
+  readonly capacityWaitMs?: number | null;
+}) {
+  const { t } = useAppTranslation();
+  return (
+    <>
+      {attempts != null ? (
+        <>
+          <dt>{t("attempts")}</dt>
+          <dd>{attempts}</dd>
+        </>
+      ) : null}
+      {capacityWaitMs != null && capacityWaitMs > 0 ? (
+        <>
+          <dt>{t("capacity")}</dt>
+          <dd>
+            {t("waited {{duration}} for capacity", {
+              duration: formatCapacityWait(capacityWaitMs),
+            })}
+          </dd>
+        </>
+      ) : null}
+    </>
+  );
 }
 
 /** Metadata-only diagnostics of a failed turn, with a copyable ID. */
 function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
+  const { t } = useAppTranslation();
   const diagnosticId = [
     `turn ${detail.turnId}`,
     detail.attempts != null ? `attempts ${detail.attempts}` : null,
-    detail.capacityWaitMs != null ? `capacity_wait_ms ${detail.capacityWaitMs}` : null,
+    detail.capacityWaitMs != null
+      ? `capacity_wait_ms ${detail.capacityWaitMs}`
+      : null,
     detail.upstreamCode ? `upstream ${detail.upstreamCode}` : null,
     detail.responseId ? `response ${detail.responseId}` : null,
     detail.upstreamRequestId ? `request ${detail.upstreamRequestId}` : null,
@@ -321,39 +420,49 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
     .join(" / ");
   return (
     <details className="mt-2 text-11 text-text-tertiary">
-      <summary className="cursor-pointer">Details</summary>
+      <summary className="cursor-pointer">{t("Details")}</summary>
       <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
-        <CapacityDetails attempts={detail.attempts} capacityWaitMs={detail.capacityWaitMs} />
-        <dt>stage</dt>
+        <CapacityDetails
+          attempts={detail.attempts}
+          capacityWaitMs={detail.capacityWaitMs}
+        />
+        <dt>{t("stage")}</dt>
         <dd>{detail.stage}</dd>
         {detail.httpStatus != null ? (
           <>
-            <dt>http</dt>
+            <dt>{t("http")}</dt>
             <dd>{detail.httpStatus}</dd>
           </>
         ) : null}
-        {detail.upstreamCode ? <><dt>upstream</dt><dd>{detail.upstreamCode}</dd></> : null}
-        <dt>turn</dt>
+        {detail.upstreamCode ? (
+          <>
+            <dt>{t("upstream")}</dt>
+            <dd>{detail.upstreamCode}</dd>
+          </>
+        ) : null}
+        <dt>{t("turn")}</dt>
         <dd>{detail.turnId}</dd>
         {detail.responseId ? (
           <>
-            <dt>response</dt>
+            <dt>{t("response")}</dt>
             <dd>{detail.responseId}</dd>
           </>
         ) : null}
         {detail.upstreamRequestId ? (
           <>
-            <dt>request</dt>
+            <dt>{t("request")}</dt>
             <dd>{detail.upstreamRequestId}</dd>
           </>
         ) : null}
-        <dt>continuations</dt>
+        <dt>{t("continuations")}</dt>
         <dd>{detail.continuations}</dd>
         {detail.occurredAt ? (
           <>
-            <dt>at</dt>
+            <dt>{t("at")}</dt>
             <dd>
-              <time dateTime={detail.occurredAt}>{new Date(detail.occurredAt).toLocaleString()}</time>
+              <time dateTime={detail.occurredAt}>
+                {new Date(detail.occurredAt).toLocaleString(getFormattingLocale())}
+              </time>
             </dd>
           </>
         ) : null}
@@ -363,7 +472,7 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
         className="mt-1 underline"
         onClick={() => void navigator.clipboard?.writeText(diagnosticId)}
       >
-        Copy diagnostic ID
+        {t("Copy diagnostic ID")}
       </button>
     </details>
   );
@@ -374,13 +483,20 @@ function ErrorDetails({ detail }: { readonly detail: ErrorDetail }) {
  * model can think for many seconds before its first word, which must not read
  * as a frozen page. Ticks only itself, never the transcript.
  */
-function WaitingStatus({ label, interrupted, capacity, capacityStartedAt, capacityDeadline }: {
+function WaitingStatus({
+  label,
+  interrupted,
+  capacity,
+  capacityStartedAt,
+  capacityDeadline,
+}: {
   readonly label?: string;
   readonly interrupted?: boolean;
   readonly capacity?: boolean;
   readonly capacityStartedAt?: string | null;
   readonly capacityDeadline?: string | null;
 }) {
+  const { t } = useAppTranslation();
   const [started] = useState(Date.now);
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
@@ -391,22 +507,40 @@ function WaitingStatus({ label, interrupted, capacity, capacityStartedAt, capaci
   if (capacity) {
     const from = Date.parse(capacityStartedAt ?? "");
     const to = Date.parse(capacityDeadline ?? "");
-    const clock = (value: number) => `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
+    const clock = (value: number) =>
+      `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
     const bound = Math.max(0, Math.ceil((to - from) / 1000));
-    const waited = Math.min(bound, Math.max(0, Math.floor((now - from) / 1000)));
+    const waited = Math.min(
+      bound,
+      Math.max(0, Math.floor((now - from) / 1000)),
+    );
     return (
       <span data-waiting-status>
-        <StatusLabel label="Waiting for the assistant" interrupted={interrupted} />
-        {Number.isFinite(from) && Number.isFinite(to)
-          ? <span aria-hidden> · {clock(waited)} of up to {clock(bound)}</span>
-          : seconds >= 3 ? <span aria-hidden> · {formatElapsed(seconds)}</span> : null}
+        <StatusLabel
+          label={t("Waiting for the assistant")}
+          interrupted={interrupted}
+        />
+        {Number.isFinite(from) && Number.isFinite(to) ? (
+          <span aria-hidden>
+            {" "}
+            ·{" "}
+            {t("{{elapsed}} of up to {{limit}}", {
+              elapsed: clock(waited),
+              limit: clock(bound),
+            })}
+          </span>
+        ) : seconds >= 3 ? (
+          <span aria-hidden> · {formatElapsed(seconds)}</span>
+        ) : null}
       </span>
     );
   }
   return (
     <span data-waiting-status={!label && seconds >= 3 ? true : undefined}>
-      <StatusLabel label={label ?? "Thinking"} interrupted={interrupted} />
-      {seconds >= 3 ? <span aria-hidden> · {formatElapsed(seconds)}</span> : null}
+      <StatusLabel label={label ?? t("Thinking")} interrupted={interrupted} />
+      {seconds >= 3 ? (
+        <span aria-hidden> · {formatElapsed(seconds)}</span>
+      ) : null}
     </span>
   );
 }
@@ -426,6 +560,7 @@ export function ChatMessageBubble({
   readonly conversationId?: string;
   readonly feedbackEnabled?: boolean;
 }) {
+  const { t } = useAppTranslation();
   const streaming = message.status === "streaming";
   const capacityNote = streaming && message.systemNote === "capacity_wait";
   const [retrying, setRetrying] = useState(false);
@@ -441,7 +576,11 @@ export function ChatMessageBubble({
     try {
       await onRetry();
     } catch (error) {
-      setRetryError(error instanceof Error && error.message ? error.message : "Retry failed. Try again.");
+      setRetryError(
+        error instanceof Error && error.message
+          ? error.message
+          : t("Retry failed. Try again."),
+      );
     } finally {
       setRetrying(false);
     }
@@ -481,7 +620,7 @@ export function ChatMessageBubble({
       });
   };
   if (message.continuation_of) {
-    return <p role="status" className="px-[7px] text-11 text-muted-foreground">Continuing after your decision</p>;
+    return <DecisionContinuation />;
   }
   if (message.role === "user") {
     return (
@@ -489,8 +628,8 @@ export function ChatMessageBubble({
         <div className="rounded-lg bg-overlay-strong px-3 py-2 text-12 leading-relaxed text-foreground whitespace-pre-wrap">
           {message.steering && (
             <p className="mb-1 text-11 text-muted-foreground" role="note">
-              Steering ·{" "}
-              {steeringNotice(message.steering.code, message.steering.outcome)}
+              {t("Steering ·")}{" "}
+              {t(steeringNotice(message.steering.code, message.steering.outcome))}
             </p>
           )}
           {message.images?.length ? (
@@ -503,7 +642,7 @@ export function ChatMessageBubble({
           {content}
           {feedbackError ? (
             <p role="alert" className="mt-1 text-11 text-destructive">
-              Unable to save feedback. Try again.
+              {t("Unable to save feedback. Try again.")}
             </p>
           ) : null}
         </div>
@@ -522,7 +661,10 @@ export function ChatMessageBubble({
   const thinking = streaming && !printable;
   // Machine screenshots render inside their tool card.
   const replyImages = (message.images ?? []).filter(
-    (image) => !message.toolCalls?.some((tool) => tool.machine?.screenshot_id === image.id),
+    (image) =>
+      !message.toolCalls?.some(
+        (tool) => tool.machine?.screenshot_id === image.id,
+      ),
   );
   const runningTool = streaming
     ? message.toolCalls?.filter((tool) => tool.status === "running").at(-1)
@@ -538,9 +680,10 @@ export function ChatMessageBubble({
   } else {
     statusLabel = message.turnStatus?.label;
   }
-  const toolStartedAt = message.turnStatus?.phase === "tool"
-    ? message.turnStatus.toolStartedAt
-    : undefined;
+  const toolStartedAt =
+    message.turnStatus?.phase === "tool"
+      ? message.turnStatus.toolStartedAt
+      : undefined;
   const showFeedback = Boolean(
     feedbackEnabled &&
     conversationId &&
@@ -552,7 +695,13 @@ export function ChatMessageBubble({
   return (
     <article
       role={thinking ? "status" : undefined}
-      aria-label={capacityNote ? "Assistant is waiting for capacity" : thinking ? "Assistant is thinking" : undefined}
+      aria-label={
+        capacityNote
+          ? t("Assistant is waiting for capacity")
+          : thinking
+            ? t("Assistant is thinking")
+            : undefined
+      }
       data-system-note={capacityNote ? "capacity_wait" : undefined}
       className="group/message flex items-start gap-2.5"
     >
@@ -577,20 +726,33 @@ export function ChatMessageBubble({
             />
           ))}
         {replyImages.length ? (
-          <div className={cn("flex flex-wrap gap-2", content ? "mb-2" : "mt-2")}>
+          <div
+            className={cn("flex flex-wrap gap-2", content ? "mb-2" : "mt-2")}
+          >
             {replyImages.map((image) => (
               <ToolImage key={image.id} image={image} />
             ))}
           </div>
         ) : null}
         {capacityNote ? (
-          <p role="note" className="text-12 leading-relaxed text-foreground">{CAPACITY_ACKNOWLEDGEMENT}</p>
-        ) : content ? <TextBlock text={content} streaming={streaming} /> : null}
-        {message.status === "error" && ["wallet_suspended", "plan_entitlement_required"].includes(message.errorCode ?? "") ? (
+          <p role="note" className="text-12 leading-relaxed text-foreground">
+            {CAPACITY_ACKNOWLEDGEMENT}
+          </p>
+        ) : content ? (
+          <TextBlock text={content} streaming={streaming} />
+        ) : null}
+        {message.status === "error" &&
+        ["wallet_suspended", "plan_entitlement_required"].includes(
+          message.errorCode ?? "",
+        ) ? (
           <BillingRemedy />
         ) : null}
-        {message.status === "complete" && message.turnMetadata && ((message.turnMetadata.capacityWaitMs ?? 0) > 0 || (message.turnMetadata.attempts ?? 0) > 1) ? (
-          <details className="mt-2 text-11 text-text-tertiary"><summary className="cursor-pointer">Details</summary>
+        {message.status === "complete" &&
+        message.turnMetadata &&
+        ((message.turnMetadata.capacityWaitMs ?? 0) > 0 ||
+          (message.turnMetadata.attempts ?? 0) > 1) ? (
+          <details className="mt-2 text-11 text-text-tertiary">
+            <summary className="cursor-pointer">{t("Details")}</summary>
             <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 rounded border border-hairline p-2 font-mono">
               <CapacityDetails {...message.turnMetadata} />
             </dl>
@@ -608,11 +770,11 @@ export function ChatMessageBubble({
               onClick={() => void retry()}
             >
               <RotateCcw className="size-3" aria-hidden />
-              {retrying ? "Retrying…" : "Retry"}
+              {retrying ? t("Retrying…") : t("Retry")}
             </button>
             {retryError ? (
               <p role="alert" className="mt-1 text-11 text-destructive">
-                {retryError}
+                {translateUi(retryError)}
               </p>
             ) : null}
           </div>
@@ -622,18 +784,32 @@ export function ChatMessageBubble({
             <p>{recoveryReason(message.recovery.reason)}</p>
             {message.recovery.text !== null ? (
               <>
-                <button type="button" className="inline-flex items-center gap-1 underline"
-                  onClick={() => setReviewOpen((open) => !open)} aria-expanded={reviewOpen}>
-                  <ChevronRight className={cn("size-3", reviewOpen && "rotate-90")} aria-hidden />
-                  Review request
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 underline"
+                  onClick={() => setReviewOpen((open) => !open)}
+                  aria-expanded={reviewOpen}
+                >
+                  <ChevronRight
+                    className={cn("size-3", reviewOpen && "rotate-90")}
+                    aria-hidden
+                  />
+                  {t("Review request")}
                 </button>
                 {reviewOpen ? (
                   <div className="max-h-56 overflow-auto rounded-md border border-border p-2">
-                    <p className="whitespace-pre-wrap break-words text-foreground">{message.recovery.text}</p>
+                    <p className="whitespace-pre-wrap break-words text-foreground">
+                      {message.recovery.text}
+                    </p>
                     {message.recovery.attachments.length ? (
-                      <p className="mt-2 break-all">Attachments: {message.recovery.attachments.join(", ")}</p>
+                      <p className="mt-2 break-all">
+                        {t("Attachments:")}{" "}
+                        {message.recovery.attachments.join(", ")}
+                      </p>
                     ) : null}
-                    <button type="button" className="mt-2 inline-flex items-center gap-1 underline"
+                    <button
+                      type="button"
+                      className="mt-2 inline-flex items-center gap-1 underline"
                       onClick={() => {
                         const text = message.recovery?.text;
                         if (text === null || text === undefined) return;
@@ -645,12 +821,18 @@ export function ChatMessageBubble({
                             setCopyState("failed");
                           }
                         })();
-                      }}>
-                      <Copy className="size-3" aria-hidden /> Copy request
+                      }}
+                    >
+                      <Copy className="size-3" aria-hidden />{" "}
+                      {t("Copy request")}
                     </button>
-                    {copyState ? <p role="status" className="mt-1">
-                      {copyState === "copied" ? "Request copied." : "Copy failed. Select the text above."}
-                    </p> : null}
+                    {copyState ? (
+                      <p role="status" className="mt-1">
+                        {copyState === "copied"
+                          ? t("Request copied.")
+                          : t("Copy failed. Select the text above.")}
+                      </p>
+                    ) : null}
                   </div>
                 ) : null}
               </>
@@ -659,18 +841,33 @@ export function ChatMessageBubble({
         ) : null}
         {message.status === "error" && onCheckRecovery ? (
           <div className="mt-2 text-11">
-            <button type="button" className="inline-flex items-center gap-1 underline disabled:opacity-50"
-              disabled={checking} onClick={() => {
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 underline disabled:opacity-50"
+              disabled={checking}
+              onClick={() => {
                 setChecking(true);
                 setCheckError(undefined);
-                void Promise.resolve().then(onCheckRecovery).catch((error: unknown) => {
-                  setCheckError(error instanceof Error ? error.message : "Could not check retry availability.");
-                }).finally(() => setChecking(false));
-              }}>
+                void Promise.resolve()
+                  .then(onCheckRecovery)
+                  .catch((error: unknown) => {
+                    setCheckError(
+                      error instanceof Error
+                        ? error.message
+                        : t("Could not check retry availability."),
+                    );
+                  })
+                  .finally(() => setChecking(false));
+              }}
+            >
               <RotateCcw className="size-3" aria-hidden />
-              {checking ? "Checking…" : "Check retry availability"}
+              {checking ? t("Checking…") : t("Check retry availability")}
             </button>
-            {checkError ? <p role="alert" className="mt-1 text-destructive">{checkError}</p> : null}
+            {checkError ? (
+              <p role="alert" className="mt-1 text-destructive">
+                {translateUi(checkError)}
+              </p>
+            ) : null}
           </div>
         ) : null}
         {interactiveCards
@@ -692,15 +889,22 @@ export function ChatMessageBubble({
             data-turn-status
             className="flex min-h-5 items-center gap-1 text-11 text-muted-foreground"
           >
-            {!content ? <span data-streaming-dots><PulseDot /></span> : null}
+            {!content ? (
+              <span data-streaming-dots>
+                <PulseDot />
+              </span>
+            ) : null}
             <span
-              {...(!content && runningTool ? { "data-running-tool": runningTool.name } : {})}
+              {...(!content && runningTool
+                ? { "data-running-tool": runningTool.name }
+                : {})}
               {...(!runningTool && lastTool ? { "data-last-tool": true } : {})}
             >
-              {toolStartedAt && !(capacityNote || message.waitingForCapacity) ? (
+              {toolStartedAt &&
+              !(capacityNote || message.waitingForCapacity) ? (
                 <>
                   <StatusLabel
-                    label={statusLabel ?? "Thinking"}
+                    label={statusLabel ?? t("Thinking")}
                     interrupted={message.turnStatus?.interrupted}
                   />
                   <ToolElapsed startedAt={toolStartedAt} />
@@ -720,11 +924,11 @@ export function ChatMessageBubble({
         {message.status === "stopped" ? (
           <p
             role="status"
-            aria-label="Turn stopped"
+            aria-label={t("Turn stopped")}
             className="flex min-h-5 items-center gap-1 text-11 text-muted-foreground"
           >
             <CircleAlert aria-hidden="true" className="h-3 w-3" />
-            Stopped
+            {t("Stopped")}
           </p>
         ) : null}
         {message.status === "error" && message.error ? (
@@ -741,11 +945,11 @@ export function ChatMessageBubble({
               <div
                 role="group"
                 className="flex items-center gap-1"
-                aria-label="Reply feedback"
+                aria-label={t("Reply feedback")}
               >
                 <button
                   type="button"
-                  aria-label="Helpful"
+                  aria-label={t("Helpful")}
                   aria-pressed={vote === "up"}
                   disabled={feedback.isPending}
                   onClick={() => void setFeedback("up")}
@@ -758,7 +962,7 @@ export function ChatMessageBubble({
                 </button>
                 <button
                   type="button"
-                  aria-label="Not helpful"
+                  aria-label={t("Not helpful")}
                   aria-pressed={vote === "down"}
                   disabled={feedback.isPending}
                   onClick={() => void setFeedback("down")}
@@ -771,11 +975,11 @@ export function ChatMessageBubble({
                 </button>
                 <button
                   type="button"
-                  aria-label="Add feedback comment"
+                  aria-label={t("Add feedback comment")}
                   onClick={() => setCommentOpen((open) => !open)}
                   className="ml-1 rounded px-2 py-1 text-10 text-text-tertiary hover:bg-overlay"
                 >
-                  Comment
+                  {t("Comment")}
                 </button>
               </div>
             ) : null}
@@ -790,7 +994,7 @@ export function ChatMessageBubble({
           <div className="mt-2 flex max-w-sm gap-2 rounded-lg border border-border bg-overlay p-2">
             <textarea
               autoFocus
-              aria-label="Optional feedback comment"
+              aria-label={t("Optional feedback comment")}
               onKeyDown={(event) => {
                 if (event.key === "Escape") setCommentOpen(false);
               }}
@@ -798,7 +1002,7 @@ export function ChatMessageBubble({
               maxLength={1000}
               onChange={(event) => setComment(event.target.value)}
               className="min-h-14 flex-1 resize-y bg-transparent text-11 outline-none"
-              placeholder="Optional comment"
+              placeholder={t("Optional comment")}
             />
             <button
               type="button"
@@ -815,13 +1019,13 @@ export function ChatMessageBubble({
                   .catch(() => setFeedbackError(true));
               }}
             >
-              Send
+              {t("Send")}
             </button>
           </div>
         ) : null}
         {feedbackError ? (
           <p role="alert" className="mt-1 text-11 text-destructive">
-            Unable to save feedback. Try again.
+            {t("Unable to save feedback. Try again.")}
           </p>
         ) : null}
       </div>
@@ -844,6 +1048,7 @@ export function ChatMessageEntry({
   readonly onRetry?: () => Promise<void> | void;
   readonly onCheckRecovery?: () => Promise<unknown> | void;
 }) {
+  const { t } = useAppTranslation();
   if (
     message.role === "system" &&
     message.id.startsWith("nyxagent-context-reset:")
@@ -851,7 +1056,7 @@ export function ChatMessageEntry({
     return (
       <p
         role="note"
-        aria-label="Conversation context reset"
+        aria-label={t("Conversation context reset")}
         className="text-xs text-text-tertiary"
       >
         {message.content}
@@ -887,7 +1092,7 @@ export function ChatMessageEntry({
   const displayName = authorName || roleLabel;
   return (
     <article
-      aria-label={`${displayName} ${roleLabel} message`}
+      aria-label={t("{{displayName}} {{roleLabel}} message", { displayName: displayName, roleLabel: roleLabel })}
       className="flex gap-2.5"
     >
       <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-hairline bg-overlay text-text-tertiary">
@@ -911,10 +1116,11 @@ export function ChatMessageEntry({
 }
 
 function EmptyState({ children }: { readonly children?: ReactNode }) {
+  const { t } = useAppTranslation();
   return (
     <div className="flex flex-1 items-center justify-center px-6 text-center text-12 text-text-tertiary">
       {children ??
-        "Ask NyxID to help with services, access, and account operations."}
+        t("Ask NyxID to help with services, access, and account operations.")}
     </div>
   );
 }
@@ -980,7 +1186,9 @@ const ROW_OVERSCAN = 6;
 /** A first guess at a row's height; real heights replace it once measured. */
 function estimateRowHeight(message: ChatMessage | undefined): number {
   if (!message) return 80;
-  const lines = Math.ceil(message.content.length / (message.role === "user" ? 70 : 95));
+  const lines = Math.ceil(
+    message.content.length / (message.role === "user" ? 70 : 95),
+  );
   return Math.min(2400, (message.role === "user" ? 44 : 64) + 20 * lines);
 }
 
@@ -1032,7 +1240,10 @@ export function ChatMessageList({
   // switch would lose. Once on, it stays on for that thread.
   const long = messages.length > WINDOW_AFTER_MESSAGES;
   const conversationKey = session?.conversationId ?? session?.clientId;
-  const modeRef = useRef<{ readonly conversation?: string; readonly windowed: boolean }>({
+  const modeRef = useRef<{
+    readonly conversation?: string;
+    readonly windowed: boolean;
+  }>({
     windowed: false,
   });
   if (modeRef.current.conversation !== conversationKey) {
@@ -1086,7 +1297,8 @@ export function ChatMessageList({
       // geometry on the rendered value.
       if (content) {
         const gap = Number.parseFloat(getComputedStyle(content).rowGap);
-        if (Number.isFinite(gap)) setRowGap((current) => (current === gap ? current : gap));
+        if (Number.isFinite(gap))
+          setRowGap((current) => (current === gap ? current : gap));
       }
       if (followingRef.current) pinRef.current(false);
     });
@@ -1102,20 +1314,22 @@ export function ChatMessageList({
   const terminalAssistant = messages.at(-1);
   const emptyTerminal = Boolean(
     session &&
-      session.status !== "streaming" &&
-      session.status !== "draft" &&
-      session.status !== "stopped" &&
-      terminalAssistant?.role === "assistant" &&
-      terminalAssistant.status !== "stopped" &&
-      !terminalAssistant.content.trim() &&
-      !terminalAssistant.error &&
-      !(
-        terminalAssistant.steps?.length ||
-        terminalAssistant.toolCalls?.length ||
-        terminalAssistant.images?.length
-      ) &&
-      !(terminalAssistant.artifacts?.length ||
-        terminalAssistant.authorizationBlockers?.length),
+    session.status !== "streaming" &&
+    session.status !== "draft" &&
+    session.status !== "stopped" &&
+    terminalAssistant?.role === "assistant" &&
+    terminalAssistant.status !== "stopped" &&
+    !terminalAssistant.content.trim() &&
+    !terminalAssistant.error &&
+    !(
+      terminalAssistant.steps?.length ||
+      terminalAssistant.toolCalls?.length ||
+      terminalAssistant.images?.length
+    ) &&
+    !(
+      terminalAssistant.artifacts?.length ||
+      terminalAssistant.authorizationBlockers?.length
+    ),
   );
   useEffect(() => {
     if (!emptyTerminal) return;
@@ -1173,7 +1387,9 @@ export function ChatMessageList({
   const revealedHashRef = useRef<string | undefined>(undefined);
   const revealHash = useCallback(() => {
     const id = hashMessageId();
-    const index = id ? messagesRef.current.findIndex((message) => message.id === id) : -1;
+    const index = id
+      ? messagesRef.current.findIndex((message) => message.id === id)
+      : -1;
     if (index < 0 || !windowedRef.current) return;
     revealedHashRef.current = id;
     followingRef.current = false;
@@ -1184,9 +1400,16 @@ export function ChatMessageList({
     return () => window.removeEventListener("hashchange", revealHash);
   }, [revealHash]);
   // A link opened with the hash already set: reveal it once its row has loaded.
-  const hashTargetLoaded = messages.some((message) => message.id === hashMessageId());
+  const hashTargetLoaded = messages.some(
+    (message) => message.id === hashMessageId(),
+  );
   useEffect(() => {
-    if (hashTargetLoaded && windowed && revealedHashRef.current !== hashMessageId()) revealHash();
+    if (
+      hashTargetLoaded &&
+      windowed &&
+      revealedHashRef.current !== hashMessageId()
+    )
+      revealHash();
   }, [hashTargetLoaded, revealHash, windowed]);
 
   function handleScroll(event: UIEvent<HTMLDivElement>) {
@@ -1201,7 +1424,9 @@ export function ChatMessageList({
   }
 
   const rows = windowed
-    ? virtualizer.getVirtualItems().map((item) => ({ index: item.index, start: item.start }))
+    ? virtualizer
+        .getVirtualItems()
+        .map((item) => ({ index: item.index, start: item.start }))
     : messages.map((_, index) => ({ index, start: 0 }));
   const firstStart = rows[0]?.start ?? scrollMargin;
 
@@ -1235,9 +1460,17 @@ export function ChatMessageList({
           style={windowed ? { height: virtualizer.getTotalSize() } : undefined}
         >
           <div
-            className={windowed ? "absolute inset-x-0 top-0 flex flex-col gap-4" : "contents"}
+            className={
+              windowed
+                ? "absolute inset-x-0 top-0 flex flex-col gap-4"
+                : "contents"
+            }
             style={
-              windowed ? { transform: `translateY(${String(firstStart - scrollMargin)}px)` } : undefined
+              windowed
+                ? {
+                    transform: `translateY(${String(firstStart - scrollMargin)}px)`,
+                  }
+                : undefined
             }
           >
             {rows.map(({ index }) => {

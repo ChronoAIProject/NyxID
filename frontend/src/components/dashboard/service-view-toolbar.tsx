@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState, type ReactNode, type Ref } from "react";
 import {
   ArrowLeftRight,
@@ -27,9 +29,9 @@ import type { ServiceConnectionGroup } from "@/lib/service-groups";
 import type { useServiceView } from "@/hooks/use-service-view";
 import type { KeyInfo } from "@/types/keys";
 const SOURCE_LABELS = {
-  personal: "Personal",
-  org: "Organization",
-  platform: "NyxID platform",
+  get personal() { return translateUi("Personal"); },
+  get org() { return translateUi("Organization"); },
+  get platform() { return translateUi("NyxID platform"); },
 };
 
 export function ServiceViewToolbar({
@@ -51,6 +53,7 @@ export function ServiceViewToolbar({
   readonly ref?: Ref<HTMLDivElement>;
   readonly stuck?: boolean;
 }) {
+  const { t } = useUiTranslation();
   const { filters, setFilters } = view;
   const inputRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState<string | null>(null);
@@ -152,7 +155,7 @@ export function ServiceViewToolbar({
             variant={filters.source === "all" ? "outline" : "secondary"}
             size={stuck ? "icon" : "default"}
             className="shrink-0 rounded-full"
-            aria-label={`Service view: ${filters.source === "all" ? "All services" : SOURCE_LABELS[filters.source]}`}
+            aria-label={t("Service view: {{value}}", { value: filters.source === "all" ? t("All services") : SOURCE_LABELS[filters.source] })}
             aria-pressed={filters.source !== "all"}
             onClick={() =>
               setFilters({
@@ -170,9 +173,9 @@ export function ServiceViewToolbar({
             )}
             {!stuck && (
               <>
-                <span className="text-muted-foreground">Show:</span>
+                <span className="text-muted-foreground">{t("Show:")}</span>
                 {filters.source === "all"
-                  ? "All services"
+                  ? t("All services")
                   : SOURCE_LABELS[filters.source]}
                 <ArrowLeftRight
                   className="ml-1 size-3 text-muted-foreground"
@@ -191,15 +194,15 @@ export function ServiceViewToolbar({
         >
           <p className="font-medium">
             {filters.source === "personal"
-              ? "Switch to all services"
-              : "Switch to personal services"}
+              ? t("Switch to all services")
+              : t("Switch to personal services")}
           </p>
           <p className="text-muted-foreground">
             {filters.source === "personal"
-              ? "Showing services with a personal connection, including their accessible organization and platform connections."
+              ? t("Showing services with a personal connection, including their accessible organization and platform connections.")
               : filters.source === "all"
-                ? "Showing all accessible services. Switch to keep only services with a personal connection and their counterparts."
-                : `Showing only ${SOURCE_LABELS[filters.source]} connections. Switch to services with a personal connection and their counterparts.`}
+                ? t("Showing all accessible services. Switch to keep only services with a personal connection and their counterparts.")
+                : t("Showing only {{value}} connections. Switch to services with a personal connection and their counterparts.", { value: SOURCE_LABELS[filters.source] })}
           </p>
         </TooltipContent>
       </Tooltip>
@@ -216,7 +219,7 @@ export function ServiceViewToolbar({
             size={stuck ? "icon" : "default"}
             className="shrink-0 rounded-full"
             aria-pressed={filters.show_auto_connected}
-            aria-label={`Auto-connected services: ${filters.show_auto_connected ? "shown" : "hidden"}`}
+            aria-label={t("Auto-connected services: {{value}}", { value: filters.show_auto_connected ? t("shown") : t("hidden") })}
             onClick={() =>
               setFilters({
                 ...filters,
@@ -230,9 +233,8 @@ export function ServiceViewToolbar({
               <EyeOff className="size-3.5" aria-hidden="true" />
             )}
             {!stuck && (
-              <>
-                Auto-connected:{" "}
-                {filters.show_auto_connected ? "Included" : "Hidden"}
+              <>{t("Auto-connected:")}{" "}
+                {filters.show_auto_connected ? t("Included") : t("Hidden")}
                 <span className="text-muted-foreground tabular-nums">
                   {autoConnected}
                 </span>
@@ -249,15 +251,14 @@ export function ServiceViewToolbar({
         >
           <p className="font-medium">
             {filters.show_auto_connected
-              ? "Hide auto-connected services"
-              : "Show auto-connected services"}
+              ? t("Hide auto-connected services")
+              : t("Show auto-connected services")}
           </p>
           <p className="text-muted-foreground">
-            {autoConnected} connection{autoConnected === 1 ? " was" : "s were"}{" "}
-            added automatically by NyxID.{" "}
+            {autoConnected}{t(" connection")}{autoConnected === 1 ? t(" was") : t("s were")}{" "}{t("added automatically by NyxID.")}{" "}
             {filters.show_auto_connected
-              ? "They are currently listed."
-              : "They are currently hidden. Turn this on to include them."}
+              ? t("They are currently listed.")
+              : t("They are currently hidden. Turn this on to include them.")}
           </p>
         </TooltipContent>
       </Tooltip>
@@ -268,7 +269,7 @@ export function ServiceViewToolbar({
     <div
       ref={ref}
       role="region"
-      aria-label="Service filters"
+      aria-label={t("Service filters")}
       data-stuck={stuck}
       className="service-filter-toolbar pointer-events-none sticky -top-2 z-20 sm:-top-3"
     >
@@ -294,11 +295,9 @@ export function ServiceViewToolbar({
             />
             <div
               className="flex flex-wrap items-center gap-2"
-              aria-label="Display filters"
+              aria-label={t("Display filters")}
             >
-              <span className="text-11 text-muted-foreground">
-                Display filters
-              </span>
+              <span className="text-11 text-muted-foreground">{t("Display filters")}</span>
               {autoToggle}
               {sourceToggle}
             </div>
@@ -325,7 +324,7 @@ export function ServiceViewToolbar({
               )}
             >
               <ServiceFilterMultiselect
-                label="Organization"
+                label={t("Organization")}
                 className={cn(
                   "grid-cols-[auto_minmax(0,1fr)_auto] gap-1.5 px-2.5 sm:w-44 md:h-8",
                   stuck && "w-44 shrink-0",
@@ -345,7 +344,7 @@ export function ServiceViewToolbar({
                 }
               />
               <ServiceFilterMultiselect
-                label="Service"
+                label={t("Service")}
                 className={cn(
                   "grid-cols-[auto_minmax(0,1fr)_auto] gap-1.5 px-2.5 sm:w-40 md:h-8",
                   stuck && "w-40 shrink-0",
@@ -363,7 +362,7 @@ export function ServiceViewToolbar({
               selectedField={null}
               inputRef={inputRef}
               value={draft ?? filters.search}
-              ariaLabel="Search services and connections"
+              ariaLabel={translateUi("Search services and connections")}
               maxLength={200}
               onFieldChange={() => undefined}
               onValueChange={setDraft}
@@ -387,7 +386,7 @@ export function ServiceViewToolbar({
           {Boolean(selections.length || filters.search || applied.length) && (
             <div
               className="service-filter-pills"
-              aria-label="Active service filters"
+              aria-label={t("Active service filters")}
             >
               {selections.map((selection) => (
                 <div
@@ -397,7 +396,7 @@ export function ServiceViewToolbar({
                   {selection.icon}
                   <span
                     className="min-w-0 truncate"
-                    title={`${selection.prefix}: ${selection.label}`}
+                    title={t("{{prefix}}: {{label}}", { prefix: selection.prefix, label: selection.label })}
                   >
                     <span className="text-muted-foreground">
                       {selection.prefix}:
@@ -406,7 +405,7 @@ export function ServiceViewToolbar({
                   </span>
                   <button
                     type="button"
-                    aria-label={`Remove ${selection.prefix}: ${selection.label}`}
+                    aria-label={t("Remove {{prefix}}: {{label}}", { prefix: selection.prefix, label: selection.label })}
                     className="flex h-full w-11 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring md:w-7"
                     onClick={() =>
                       setFilters({
@@ -427,16 +426,16 @@ export function ServiceViewToolbar({
                     type="button"
                     className="min-w-0 truncate px-2"
                     onClick={editSearch}
-                    aria-label="Edit search"
+                    aria-label={t("Edit search")}
                     title={filters.search}
                   >
-                    <span className="text-muted-foreground">Search:</span>{" "}
+                    <span className="text-muted-foreground">{t("Search:")}</span>{" "}
                     {filters.search}
                   </button>
                   <button
                     type="button"
                     className="flex h-full w-11 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring md:w-7"
-                    aria-label="Remove search"
+                    aria-label={t("Remove search")}
                     onClick={() => {
                       setDraft(null);
                       setFilters({ ...filters, search: "" });
@@ -458,7 +457,7 @@ export function ServiceViewToolbar({
                   <button
                     type="button"
                     className="flex h-full w-11 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring md:w-7"
-                    aria-label={`Remove ${label} filter`}
+                    aria-label={t("Remove {{label}} filter", { label: label })}
                     onClick={() =>
                       setFilters({
                         ...filters,
@@ -478,9 +477,7 @@ export function ServiceViewToolbar({
                 size="sm"
                 className="text-muted-foreground"
                 onClick={clear}
-              >
-                Clear filters
-              </Button>
+              >{t("Clear filters")}</Button>
             </div>
           )}
         </div>

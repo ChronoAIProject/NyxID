@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { useMachineActivity } from "@/hooks/use-machine-activity";
 import { Button } from "@/components/ui/button";
@@ -11,6 +13,7 @@ import {
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 
 export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
+  const { t } = useUiTranslation();
   const [agent, setAgent] = useState("");
   const [cursors, setCursors] = useState<string[]>([]);
   const before = cursors.at(-1);
@@ -24,36 +27,33 @@ export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
   }
   return (
     <div className="min-h-0 space-y-4 overflow-auto p-5">
-      <p className="text-xs text-muted-foreground">
-        Actions, agents and outcomes only. Commands, file paths, page contents
-        and private conversations are not shown.
-      </p>
+      <p className="text-xs text-muted-foreground">{t("Actions, agents and outcomes only. Commands, file paths, page contents and private conversations are not shown.")}</p>
       <div className="space-y-1 text-xs">
-        <label htmlFor="machine-activity-agent">Agent</label>
+        <label htmlFor="machine-activity-agent">{t("Agent")}</label>
         <Select value={agent || "all"} onValueChange={selectAgent}>
           <SelectTrigger
             id="machine-activity-agent"
-            aria-label="Filter by agent"
+            aria-label={t("Filter by agent")}
           >
-            <SelectValue placeholder="All agents" />
+            <SelectValue placeholder={t("All agents")} />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="all">All agents</SelectItem>
+            <SelectItem value="all">{t("All agents")}</SelectItem>
             {agents.map((option) => (
               <SelectItem key={option.id} value={option.id}>
                 {option.display_name?.trim()
-                  ? `${option.display_name} (@${option.name})`
-                  : `@${option.name}`}
+                  ? t("{{display_name}} (@{{name}})", { display_name: option.display_name, name: option.name })
+                  : t("@{{name}}", { name: option.name })}
               </SelectItem>
             ))}
-            <SelectItem value="unknown">Unknown (older node)</SelectItem>
+            <SelectItem value="unknown">{t("Unknown (older node)")}</SelectItem>
           </SelectContent>
         </Select>
       </div>
-      {query.isPending && <p role="status">Loading activity…</p>}
-      {query.error && <p role="alert">Could not load machine activity.</p>}
+      {query.isPending && <p role="status">{t("Loading activity…")}</p>}
+      {query.error && <p role="alert">{t("Could not load machine activity.")}</p>}
       {query.data?.entries.length === 0 && (
-        <p role="status">No activity for this selection.</p>
+        <p role="status">{t("No activity for this selection.")}</p>
       )}
       <ol className="space-y-3">
         {query.data?.entries.map((entry) => {
@@ -74,11 +74,11 @@ export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
                 <span className="min-w-0 break-words">
                   {namedAgent
                     ? namedAgent.display_name?.trim()
-                      ? `${namedAgent.display_name} (@${namedAgent.name})`
-                      : `@${namedAgent.name}`
+                      ? t("{{display_name}} (@{{name}})", { display_name: namedAgent.display_name, name: namedAgent.name })
+                      : t("@{{name}}", { name: namedAgent.name })
                     : entry.agent_id
-                      ? "Agent unavailable"
-                      : "Unknown (older node)"}
+                      ? t("Agent unavailable")
+                      : t("Unknown (older node)")}
                 </span>
               </div>
               <p className="break-words text-muted-foreground">{machineName}</p>
@@ -86,10 +86,10 @@ export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
                 className="text-muted-foreground"
                 dateTime={entry.created_at}
               >
-                {new Date(entry.created_at).toLocaleString()}
+                {new Date(entry.created_at).toLocaleString(getFormattingLocale())}
               </time>
               {entry.exit_code !== null && (
-                <span className="ml-2">Exit {entry.exit_code}</span>
+                <span className="ml-2">{t("Exit ")}{entry.exit_code}</span>
               )}
               {(namedAgent || !entry.agent_id) && (
                 <Button
@@ -98,12 +98,10 @@ export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
                   onClick={() => {
                     selectAgent(entry.agent_id ?? "unknown");
                   }}
-                >
-                  Show this agent
-                </Button>
+                >{t("Show this agent")}</Button>
               )}
               <details className="pt-1 text-muted-foreground">
-                <summary className="cursor-pointer">Correlation IDs</summary>
+                <summary className="cursor-pointer">{t("Correlation IDs")}</summary>
                 <dl className="space-y-1 break-all pt-2">
                   {[
                     ["Machine", nodeId],
@@ -130,18 +128,14 @@ export function MachineActivity({ nodeId }: { readonly nodeId: string }) {
         <Button
           disabled={!cursors.length}
           onClick={() => setCursors(cursors.slice(0, -1))}
-        >
-          Previous
-        </Button>
+        >{t("Previous")}</Button>
         <Button
           disabled={!query.data?.next_cursor}
           onClick={() => {
             if (query.data?.next_cursor)
               setCursors([...cursors, query.data.next_cursor]);
           }}
-        >
-          Next
-        </Button>
+        >{t("Next")}</Button>
       </div>
     </div>
   );

@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useCallback, useMemo } from "react";
 import type { ProviderConfig } from "@/types/api";
 import type { TelegramLoginData } from "@/types/api";
@@ -35,6 +36,7 @@ export function TelegramLoginDialog({
   provider,
   onClose,
 }: TelegramLoginDialogProps) {
+  const { t } = useUiTranslation();
   const widgetContainerRef = useRef<HTMLDivElement>(null);
   const scriptRef = useRef<HTMLScriptElement | null>(null);
 
@@ -119,14 +121,14 @@ export function TelegramLoginDialog({
     <Dialog open onOpenChange={onClose}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Login with {provider.name}</DialogTitle>
+          <DialogTitle>{t("Login with ")}{provider.name}</DialogTitle>
           <DialogDescription>
             {step === "loading" && "Loading Telegram login..."}
             {step === "ready" &&
               "Click the Telegram button below to verify your identity."}
             {step === "submitting" && "Verifying your Telegram identity..."}
             {step === "success" &&
-              `Successfully connected to ${provider.name}.`}
+              t("Successfully connected to {{name}}.", { name: provider.name })}
             {step === "error" && "An error occurred during the connection."}
           </DialogDescription>
         </DialogHeader>
@@ -134,9 +136,7 @@ export function TelegramLoginDialog({
         {step === "loading" && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">
-              Loading Telegram login widget...
-            </p>
+            <p className="text-12 text-muted-foreground">{t("Loading Telegram login widget...")}</p>
           </div>
         )}
 
@@ -144,15 +144,10 @@ export function TelegramLoginDialog({
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-4 py-4">
               <div ref={widgetContainerRef} className="flex justify-center" />
-              <p className="text-xs text-muted-foreground text-center">
-                A Telegram popup will open. Sign in and confirm to connect your
-                account.
-              </p>
+              <p className="text-xs text-muted-foreground text-center">{t("A Telegram popup will open. Sign in and confirm to connect your account.")}</p>
             </div>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={onClose}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={onClose}>{t("Cancel")}</Button>
             </DialogFooter>
           </div>
         )}
@@ -160,9 +155,7 @@ export function TelegramLoginDialog({
         {step === "submitting" && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">
-              Verifying your Telegram identity...
-            </p>
+            <p className="text-12 text-muted-foreground">{t("Verifying your Telegram identity...")}</p>
           </div>
         )}
 
@@ -170,14 +163,10 @@ export function TelegramLoginDialog({
           <div className="space-y-4">
             <div className="flex flex-col items-center gap-3 py-4">
               <CheckCircle2 className="h-8 w-8 text-success" />
-              <p className="text-12 text-muted-foreground text-center">
-                Your Telegram account has been connected successfully.
-              </p>
+              <p className="text-12 text-muted-foreground text-center">{t("Your Telegram account has been connected successfully.")}</p>
             </div>
             <DialogFooter>
-              <Button variant="primary" type="button" onClick={onClose}>
-                Done
-              </Button>
+              <Button variant="primary" type="button" onClick={onClose}>{t("Done")}</Button>
             </DialogFooter>
           </div>
         )}
@@ -191,9 +180,7 @@ export function TelegramLoginDialog({
               </p>
             </div>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={onClose}>
-                Close
-              </Button>
+              <Button type="button" variant="outline" onClick={onClose}>{t("Close")}</Button>
             </DialogFooter>
           </div>
         )}

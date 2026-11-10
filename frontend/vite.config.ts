@@ -7,6 +7,7 @@ import fs from "node:fs"
 import https from "node:https"
 import { allDocPages } from "./src/features/docs/manifest"
 import { routingPreview } from "./dev/routing-preview"
+import { multilingualPreview } from "./dev/multilingual-preview"
 import { machineSeccomp } from "./scripts/machine-seccomp"
 import { buildVersion } from "./scripts/build-version"
 
@@ -245,6 +246,7 @@ const BUILD_ID = SOURCE_COMMIT || Date.now().toString(36)
 
 export default defineConfig({
   plugins: [
+    ...(process.env.NYXID_MULTILINGUAL_PREVIEW === "1" ? [multilingualPreview()] : []),
     ...(process.env.NYXID_ROUTING_PREVIEW === "1" ? [routingPreview(backendUrl, expectedOrigin)] : []),
     telegramClaimReferrer(), react(), tailwindcss(), docsSync(), machineSeccomp(__dirname),
     buildVersion(BUILD_ID, SOURCE_COMMIT),

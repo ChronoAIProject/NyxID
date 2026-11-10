@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { ManagerRuntimeSettings } from "@/components/platform-manager-runtime";
 import { useState } from "react";
 import { z } from "zod";
@@ -40,6 +41,7 @@ export function GatewayCleanupControls({
 }: {
   profile: PlatformProfile;
 }) {
+  const { t } = useUiTranslation();
   const actor = useAuthStore((s) => s.user?.id);
   const tasks = useGatewayCleanup(profile);
   const mutation = useGatewayCleanupAction(profile);
@@ -74,13 +76,10 @@ export function GatewayCleanupControls({
   if (!tasks.data?.length && !tasks.error) return null;
   return (
     <section className="space-y-3 rounded-lg border border-border p-3">
-      <h3 className="text-12 font-medium">Previous gateway connections</h3>
-      <p className="text-12 text-muted-foreground">
-        Inspect a previous connection before resolving its cleanup. A changed
-        remote binding is kept; recovery never deletes a different version.
-      </p>
+      <h3 className="text-12 font-medium">{t("Previous gateway connections")}</h3>
+      <p className="text-12 text-muted-foreground">{t("Inspect a previous connection before resolving its cleanup. A changed remote binding is kept; recovery never deletes a different version.")}</p>
       {tasks.error && (
-        <ErrorBanner message="Could not load previous gateway connections." />
+        <ErrorBanner message={t("Could not load previous gateway connections.")} />
       )}
       {mutation.error && <ErrorBanner message={mutation.error.message} />}
       {tasks.data?.map((task) => (
@@ -88,9 +87,8 @@ export function GatewayCleanupControls({
           key={task.id}
           className="flex flex-wrap items-center justify-between gap-2 text-12"
         >
-          <span>
-            Previous connection · version{" "}
-            {task.captured_version ?? "unavailable"}
+          <span>{t("Previous connection · version")}{" "}
+            {task.captured_version ?? t("unavailable")}
           </span>
           <Button
             disabled={!actor || mutation.isPending}
@@ -106,29 +104,26 @@ export function GatewayCleanupControls({
                 },
               );
             }}
-          >
-            Inspect connection
-          </Button>
+          >{t("Inspect connection")}</Button>
         </div>
       ))}
       {current && (
         <div className="space-y-3 text-12">
-          <p>
-            Reviewed previous version {current.captured_version}.{" "}
+          <p>{t("Reviewed previous version ")}{current.captured_version}.{" "}
             {current.remote_exists
-              ? `Current remote version ${current.observed_version}.`
-              : "The remote connection is absent."}
+              ? t("Current remote version {{observed_version}}.", { observed_version: current.observed_version })
+              : t("The remote connection is absent.")}
           </p>
           <details>
-            <summary>Connection identifiers</summary>
+            <summary>{t("Connection identifiers")}</summary>
             <p className="break-all">{current.remote_channel_id}</p>
           </details>
           <p>
             {action === "preserve_changed"
-              ? "Keep the changed remote binding and close cleanup for the obsolete connection. No remote connection will be deleted."
+              ? t("Keep the changed remote binding and close cleanup for the obsolete connection. No remote connection will be deleted.")
               : action === "confirm_missing"
-                ? "Close cleanup for the absent remote connection."
-                : "Retry deletion of the original reviewed version. A later version change will stop the retry."}
+                ? t("Close cleanup for the absent remote connection.")
+                : t("Retry deletion of the original reviewed version. A later version change will stop the retry.")}
           </p>
           <div className="flex items-center gap-2">
             <Checkbox
@@ -138,9 +133,7 @@ export function GatewayCleanupControls({
                 setConfirmation(checked ? reviewKey : undefined)
               }
             />
-            <label htmlFor={`gateway-review-${current.task_id}`}>
-              I reviewed this connection and resolution.
-            </label>
+            <label htmlFor={`gateway-review-${current.task_id}`}>{t("I reviewed this connection and resolution.")}</label>
           </div>
           <Button
             disabled={
@@ -164,10 +157,10 @@ export function GatewayCleanupControls({
             }}
           >
             {action === "preserve_changed"
-              ? "Keep changed remote binding"
+              ? t("Keep changed remote binding")
               : action === "confirm_missing"
-                ? "Close completed cleanup"
-                : "Retry original cleanup"}
+                ? t("Close completed cleanup")
+                : t("Retry original cleanup")}
           </Button>
         </div>
       )}
@@ -176,6 +169,7 @@ export function GatewayCleanupControls({
 }
 
 function AdminProfiles() {
+  const { t } = useUiTranslation();
   const [before, setBefore] = useState<string>();
   const profiles = useAdminPlatformProfiles(before);
   const action = useAdminPlatformAction();
@@ -188,10 +182,10 @@ function AdminProfiles() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Platform BotFather"
-        description="Admin controls for the public onboarding manager. Client setups remain client-owned."
+        title={t("Platform BotFather")}
+        description={t("Admin controls for the public onboarding manager. Client setups remain client-owned.")}
       />
-      <DetailSection title="Convert a manager channel">
+      <DetailSection title={t("Convert a manager channel")}>
         <Form {...form}>
           <form
             className="space-y-4 p-4"
@@ -202,13 +196,9 @@ function AdminProfiles() {
               ),
             )}
           >
-            <p className="text-12 text-muted-foreground">
-              Conversion permanently closes personal routing, revokes old
-              assistant and route keys, and starts paused. Select a dedicated
-              organization you can administer as the funding destination.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("Conversion permanently closes personal routing, revokes old assistant and route keys, and starts paused. Select a dedicated organization you can administer as the funding destination.")}</p>
             {targets.error && (
-              <ErrorBanner message="Could not load your manager channels and funding organizations." />
+              <ErrorBanner message={t("Could not load your manager channels and funding organizations.")} />
             )}
             {(["channel_bot_id", "funding_owner_user_id"] as const).map(
               (name) => (
@@ -220,19 +210,18 @@ function AdminProfiles() {
                     <FormItem>
                       <FormLabel>
                         {name === "channel_bot_id"
-                          ? "Manager channel"
-                          : "Dedicated funding organization"}
+                          ? t("Manager channel")
+                          : t("Dedicated funding organization")}
                       </FormLabel>
                       <FormControl>
                         <select
                           {...field}
                           className="h-8 w-full rounded-lg border border-input bg-background px-3 text-12"
                         >
-                          <option value="">
-                            Choose{" "}
+                          <option value="">{t("Choose")}{" "}
                             {name === "channel_bot_id"
-                              ? "a manager"
-                              : "an organization"}
+                              ? t("a manager")
+                              : t("an organization")}
                           </option>
                           {name === "channel_bot_id"
                             ? targets.data?.bots.map((bot) => (
@@ -264,9 +253,7 @@ function AdminProfiles() {
                   !form.watch("funding_owner_user_id")
                 }
                 isLoading={action.isPending}
-              >
-                Convert and pause manager
-              </Button>
+              >{t("Convert and pause manager")}</Button>
             </div>
           </form>
         </Form>
@@ -274,19 +261,17 @@ function AdminProfiles() {
       {action.error && <ErrorBanner message={action.error.message} />}
       {profiles.error && (
         <ErrorBanner
-          message="Could not load platform profiles. Your live admin access may have changed."
+          message={t("Could not load platform profiles. Your live admin access may have changed.")}
           onRetry={() => void profiles.refetch()}
         />
       )}
       {profiles.isPending && (
-        <p role="status" className="text-12">
-          Loading platform profiles…
-        </p>
+        <p role="status" className="text-12">{t("Loading platform profiles…")}</p>
       )}
       {profiles.data?.profiles.map((profile) => (
         <DetailSection
           key={profile.id}
-          title={`Manager ${profile.manager_bot_id}`}
+          title={t("Manager {{manager_bot_id}}", { manager_bot_id: profile.manager_bot_id })}
         >
           <div className="space-y-3 p-4 text-12">
             <Badge
@@ -299,25 +284,17 @@ function AdminProfiles() {
               }
             >
               {profile.deleted_at
-                ? "Retired"
+                ? t("Retired")
                 : profile.enabled
-                  ? "Enabled"
-                  : "Paused"}
+                  ? t("Enabled")
+                  : t("Paused")}
             </Badge>
-            <p className="break-all">
-              Profile: {profile.id} · Generation {profile.generation}
+            <p className="break-all">{t("Profile: ")}{profile.id}{t(" · Generation ")}{profile.generation}
             </p>
-            <p className="text-sm text-muted-foreground">
-              Changing this profile pauses replies from existing client bots.
-              Clients must review their setups again before replies resume.
+            <p className="text-sm text-muted-foreground">{t("Changing this profile pauses replies from existing client bots. Clients must review their setups again before replies resume.")}</p>
+            <p className="break-all">{t("Funding organization: ")}{profile.funding_owner_user_id}
             </p>
-            <p className="break-all">
-              Funding organization: {profile.funding_owner_user_id}
-            </p>
-            <p className="text-muted-foreground">
-              The platform guide has no administrator inventory, private context
-              or credentials. Repair retains the shared native creation webhook.
-            </p>
+            <p className="text-muted-foreground">{t("The platform guide has no administrator inventory, private context or credentials. Repair retains the shared native creation webhook.")}</p>
             {!profile.deleted_at && (
             <ManagerRuntimeSettings
                 key={`${profile.id}:${profile.generation}`}
@@ -333,50 +310,32 @@ function AdminProfiles() {
                 <Button
                   disabled={action.isPending}
                   onClick={() => action.mutate({ action: "verify", profile })}
-                >
-                  Verify manager
-                </Button>
+                >{t("Verify manager")}</Button>
                 <Button
                   disabled={action.isPending}
                   onClick={() => action.mutate({ action: "repair", profile })}
-                >
-                  Repair webhook
-                </Button>
+                >{t("Repair webhook")}</Button>
                 <Button
                   disabled={action.isPending}
                   onClick={() => action.mutate({ action: "pause", profile })}
-                >
-                  Pause
-                </Button>
+                >{t("Pause")}</Button>
                 <Button
                   disabled={action.isPending}
                   onClick={() => setReview(profile)}
-                >
-                  Review retirement
-                </Button>
+                >{t("Review retirement")}</Button>
               </div>
             )}
             {review?.id === profile.id && (
               <div className="space-y-2">
-                <p>
-                  Retire this profile and deactivate its channel? Retired
-                  managers cannot return to personal routing.
-                </p>
+                <p>{t("Retire this profile and deactivate its channel? Retired managers cannot return to personal routing.")}</p>
                 {review.generation !== profile.generation && (
                   <>
-                    <p>
-                      This profile changed. Review its current configuration
-                      before retiring.
-                    </p>
-                    <Button onClick={() => setReview(profile)}>
-                      Review current profile
-                    </Button>
+                    <p>{t("This profile changed. Review its current configuration before retiring.")}</p>
+                    <Button onClick={() => setReview(profile)}>{t("Review current profile")}</Button>
                   </>
                 )}
                 <div className="flex justify-end gap-2">
-                  <Button onClick={() => setReview(undefined)}>
-                    Keep profile
-                  </Button>
+                  <Button onClick={() => setReview(undefined)}>{t("Keep profile")}</Button>
                   <Button
                     variant="destructive"
                     isLoading={action.isPending}
@@ -387,9 +346,7 @@ function AdminProfiles() {
                         { onSuccess: () => setReview(undefined) },
                       )
                     }
-                  >
-                    Retire platform manager
-                  </Button>
+                  >{t("Retire platform manager")}</Button>
                 </div>
               </div>
             )}
@@ -397,35 +354,32 @@ function AdminProfiles() {
         </DetailSection>
       ))}
       {profiles.data?.profiles.length === 0 && (
-        <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">
-          No platform profiles on this page.
-        </p>
+        <p className="rounded-lg border border-dashed border-border p-4 text-12 text-muted-foreground">{t("No platform profiles on this page.")}</p>
       )}
       <div className="flex justify-end gap-2">
         {before && (
-          <Button onClick={() => setBefore(undefined)}>Newest profiles</Button>
+          <Button onClick={() => setBefore(undefined)}>{t("Newest profiles")}</Button>
         )}
         {profiles.data?.next_before_id && (
           <Button
             onClick={() =>
               setBefore(profiles.data?.next_before_id ?? undefined)
             }
-          >
-            Older profiles
-          </Button>
+          >{t("Older profiles")}</Button>
         )}
       </div>
       <Button asChild>
-        <a href="/admin/platform-credentials">Manage platform credentials</a>
+        <a href="/admin/platform-credentials">{t("Manage platform credentials")}</a>
       </Button>
     </div>
   );
 }
 export function AdminPlatformBotsPage() {
+  const { t } = useUiTranslation();
   const user = useAuthStore((s) => s.user);
   return canAdminWrite(user) ? (
     <AdminProfiles key={user?.id} />
   ) : (
-    <ErrorBanner message="Live NyxID admin access is required for platform BotFather controls." />
+    <ErrorBanner message={t("Live NyxID admin access is required for platform BotFather controls.")} />
   );
 }

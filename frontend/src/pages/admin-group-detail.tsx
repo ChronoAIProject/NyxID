@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import {
   changedFields,
   describeChanges,
@@ -66,6 +69,7 @@ export function AdminGroupDetailPage() {
 }
 
 function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
@@ -130,7 +134,7 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
     async ({ before: _before, ...variables }) => {
       void _before;
       await updateMutation.mutateAsync(variables);
-      toast.success("Group updated successfully");
+      toast.success(translateUi("Group updated successfully"));
       setEditOpen(false);
     },
     (pending) =>
@@ -153,11 +157,11 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
   async function handleDelete() {
     try {
       await deleteMutation.mutateAsync(groupId);
-      toast.success("Group deleted");
+      toast.success(translateUi("Group deleted"));
       void navigate({ to: "/admin/groups" });
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to delete group",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to delete group"),
       );
     } finally {
       setDeleteOpen(false);
@@ -171,12 +175,12 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
         groupId,
         userId: newMemberUserId.trim(),
       });
-      toast.success("Member added");
+      toast.success(translateUi("Member added"));
       setNewMemberUserId("");
       setAddMemberOpen(false);
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to add member",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to add member"),
       );
     }
   }
@@ -188,10 +192,10 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
         groupId,
         userId: removeMemberId,
       });
-      toast.success("Member removed");
+      toast.success(translateUi("Member removed"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to remove member",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to remove member"),
       );
     } finally {
       setRemoveMemberId(null);
@@ -211,18 +215,12 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-center">
         <AlertCircle className="mb-4 h-12 w-12 text-muted-foreground/50" />
-        <h3 className="mb-2 font-display text-lg font-semibold">
-          Group not found
-        </h3>
-        <p className="mb-4 text-sm text-muted-foreground">
-          The group you are looking for does not exist or has been deleted.
-        </p>
+        <h3 className="mb-2 font-display text-lg font-semibold">{t("Group not found")}</h3>
+        <p className="mb-4 text-sm text-muted-foreground">{t("The group you are looking for does not exist or has been deleted.")}</p>
         <Button
           variant="outline"
           onClick={() => void navigate({ to: "/admin/groups" })}
-        >
-          Back to Groups
-        </Button>
+        >{t("Back to Groups")}</Button>
       </div>
     );
   }
@@ -238,42 +236,36 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
               <Button variant="outline" onClick={openEditDialog}>
                 <ButtonIcon>
                   <Pencil className="h-3 w-3" />
-                </ButtonIcon>
-                Edit
-              </Button>
+                </ButtonIcon>{t("Edit")}</Button>
               <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
                 <ButtonIcon variant="destructive">
                   <Trash2 className="h-3 w-3 text-destructive" />
-                </ButtonIcon>
-                Delete
-              </Button>
+                </ButtonIcon>{t("Delete")}</Button>
             </>
           ) : null
         }
       />
 
-      <DetailSection title="Group Information">
-        <DetailRow label="ID" value={group.id} copyable />
-        <DetailRow label="Name" value={group.name} />
-        <DetailRow label="Slug" value={group.slug} copyable />
-        <DetailRow label="Members" value={String(group.member_count)} />
+      <DetailSection title={t("Group Information")}>
+        <DetailRow label={t("ID")} value={group.id} copyable />
+        <DetailRow label={t("Name")} value={group.name} />
+        <DetailRow label={t("Slug")} value={group.slug} copyable />
+        <DetailRow label={t("Members")} value={String(group.member_count)} />
         {group.parent_group_id && (
           <DetailRow
-            label="Parent Group"
+            label={t("Parent Group")}
             value={group.parent_group_id}
             copyable
           />
         )}
-        <DetailRow label="Created" value={formatDate(group.created_at)} />
-        <DetailRow label="Updated" value={formatDate(group.updated_at)} />
+        <DetailRow label={t("Created")} value={formatDate(group.created_at)} />
+        <DetailRow label={t("Updated")} value={formatDate(group.updated_at)} />
       </DetailSection>
 
-      <DetailSection title="Inherited Roles">
+      <DetailSection title={t("Inherited Roles")}>
         <div className="px-4 py-3">
           {group.roles.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No roles assigned to this group.
-            </p>
+            <p className="text-sm text-muted-foreground">{t("No roles assigned to this group.")}</p>
           ) : (
             <div className="flex flex-wrap gap-2">
               {group.roles.map((role) => (
@@ -286,11 +278,11 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
         </div>
       </DetailSection>
 
-      <DetailSection title="Members">
+      <DetailSection title={t("Members")}>
         {canWrite && (
           <div className="px-4 py-3">
             <AddCtaButton
-              label="Add Member"
+              label={t("Add Member")}
               onClick={() => setAddMemberOpen(true)}
               icon={UserPlus}
             />
@@ -299,16 +291,14 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
         {members.length === 0 ? (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <BenchesIcon className="h-48 w-48 text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">
-              No members in this group.
-            </p>
+            <p className="text-12 text-muted-foreground">{t("No members in this group.")}</p>
           </div>
         ) : (
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Email</TableHead>
-                <TableHead>Name</TableHead>
+                <TableHead>{t("Email")}</TableHead>
+                <TableHead>{t("Name")}</TableHead>
                 <TableHead className="w-[60px]" />
               </TableRow>
             </TableHeader>
@@ -345,9 +335,8 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Edit Group</DialogTitle>
-            <DialogDescription>
-              Update group details for {group.name}.
+            <DialogTitle>{t("Edit Group")}</DialogTitle>
+            <DialogDescription>{t("Update group details for ")}{group.name}.
             </DialogDescription>
           </DialogHeader>
           <Form {...form}>
@@ -360,9 +349,9 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Name</FormLabel>
+                    <FormLabel>{t("Name")}</FormLabel>
                     <FormControl>
-                      <Input placeholder="Group name" {...field} />
+                      <Input placeholder={t("Group name")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -373,9 +362,9 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                 name="slug"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Slug</FormLabel>
+                    <FormLabel>{t("Slug")}</FormLabel>
                     <FormControl>
-                      <Input placeholder="group-slug" {...field} />
+                      <Input placeholder={"group-slug"} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -386,9 +375,9 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                 name="description"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Description</FormLabel>
+                    <FormLabel>{t("Description")}</FormLabel>
                     <FormControl>
-                      <Input placeholder="Optional description" {...field} />
+                      <Input placeholder={t("Optional description")} {...field} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -399,7 +388,7 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                 name="role_ids"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Roles</FormLabel>
+                    <FormLabel>{t("Roles")}</FormLabel>
                     <FormControl>
                       <select
                         className="flex w-full rounded-lg border border-input bg-popover px-3 py-1.5 text-12 text-foreground shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring [&_option]:bg-popover [&_option]:text-foreground [&_option:checked]:bg-primary/20"
@@ -432,9 +421,7 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                           .map((id) => (
                             <option key={id} value={id}>
                               {group.roles.find((role) => role.id === id)
-                                ?.name ?? id}{" "}
-                              (unavailable)
-                            </option>
+                                ?.name ?? id}{" "}{t("(unavailable)")}</option>
                           ))}
                         {availableRoles.map((role) => (
                           <option key={role.id} value={role.id}>
@@ -452,16 +439,12 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                   type="button"
                   variant="outline"
                   onClick={() => setEditOpen(false)}
-                >
-                  Cancel
-                </Button>
+                >{t("Cancel")}</Button>
                 <Button
                   type="submit"
                   variant="primary"
                   isLoading={updateMutation.isPending}
-                >
-                  Save Changes
-                </Button>
+                >{t("Save Changes")}</Button>
               </DialogFooter>
             </form>
           </Form>
@@ -472,23 +455,16 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete Group</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to delete &quot;{group.name}&quot;? All
-              members will be removed. This action cannot be undone.
-            </DialogDescription>
+            <DialogTitle>{t("Delete Group")}</DialogTitle>
+            <DialogDescription>{t("Are you sure you want to delete \"")}{group.name}{t("\"? All members will be removed. This action cannot be undone.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteOpen(false)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>{t("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
-            >
-              Delete Group
-            </Button>
+            >{t("Delete Group")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -497,19 +473,15 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
       <Dialog open={addMemberOpen} onOpenChange={setAddMemberOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Add Member</DialogTitle>
-            <DialogDescription>
-              Enter the user ID to add to this group.
-            </DialogDescription>
+            <DialogTitle>{t("Add Member")}</DialogTitle>
+            <DialogDescription>{t("Enter the user ID to add to this group.")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium" htmlFor="add-member-id">
-                User ID
-              </label>
+              <label className="text-sm font-medium" htmlFor="add-member-id">{t("User ID")}</label>
               <Input
                 id="add-member-id"
-                placeholder="Enter user ID"
+                placeholder={t("Enter user ID")}
                 value={newMemberUserId}
                 onChange={(e) => setNewMemberUserId(e.target.value)}
               />
@@ -522,15 +494,11 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
                 setAddMemberOpen(false);
                 setNewMemberUserId("");
               }}
-            >
-              Cancel
-            </Button>
+            >{t("Cancel")}</Button>
             <Button
               onClick={() => void handleAddMember()}
               isLoading={addMemberMutation.isPending}
-            >
-              Add Member
-            </Button>
+            >{t("Add Member")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -544,22 +512,16 @@ function AdminGroupDetailPageEditor({ groupId }: { readonly groupId: string }) {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Remove Member</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to remove this member from the group?
-            </DialogDescription>
+            <DialogTitle>{t("Remove Member")}</DialogTitle>
+            <DialogDescription>{t("Are you sure you want to remove this member from the group?")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRemoveMemberId(null)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setRemoveMemberId(null)}>{t("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleRemoveMember()}
               isLoading={removeMemberMutation.isPending}
-            >
-              Remove Member
-            </Button>
+            >{t("Remove Member")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useEffect } from "react";
 import { RefreshCw, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
@@ -30,13 +33,13 @@ import type {
 function getDecisionBadge(decision: ApprovalDecision) {
   switch (decision) {
     case "approved":
-      return <Badge variant="success">Approved</Badge>;
+      return <Badge variant="success">{translateUi("Approved")}</Badge>;
     case "denied":
-      return <Badge variant="destructive">Denied</Badge>;
+      return <Badge variant="destructive">{translateUi("Denied")}</Badge>;
     case "expired":
-      return <Badge variant="secondary">Expired</Badge>;
+      return <Badge variant="secondary">{translateUi("Expired")}</Badge>;
     case "cancelled":
-      return <Badge variant="secondary">Cancelled</Badge>;
+      return <Badge variant="secondary">{translateUi("Cancelled")}</Badge>;
   }
 }
 
@@ -85,18 +88,15 @@ function PendingSection({
     approved: boolean,
   ) => Promise<void>;
 }) {
+  const { t } = useUiTranslation();
   if (entries.length === 0) {
     return (
       <div className="flex flex-col items-center rounded-xl border border-border bg-card px-6 py-12 text-center">
         <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-success/25 bg-success/[0.06]">
           <ShieldCheck className="h-5 w-5 text-success" />
         </div>
-        <p className="mt-3 text-13 font-medium text-foreground">
-          Nothing waiting on you
-        </p>
-        <p className="mt-1 text-11 text-muted-foreground">
-          Approval requests show up here when a write needs your sign-off.
-        </p>
+        <p className="mt-3 text-13 font-medium text-foreground">{t("Nothing waiting on you")}</p>
+        <p className="mt-1 text-11 text-muted-foreground">{t("Approval requests show up here when a write needs your sign-off.")}</p>
       </div>
     );
   }
@@ -105,9 +105,7 @@ function PendingSection({
     <>
       {/* A div, not a p: `Badge` renders a div, which is invalid inside a p and
           gets reparented by the browser. */}
-      <div className="mb-2.5 flex items-center gap-2 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-        Waiting on you
-        <Badge variant="warning">{entries.length}</Badge>
+      <div className="mb-2.5 flex items-center gap-2 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">{t("Waiting on you")}<Badge variant="warning">{entries.length}</Badge>
       </div>
       <div className="space-y-5">
         {entries.map((entry) => (
@@ -132,11 +130,10 @@ function HistorySection({
 }: {
   readonly entries: readonly AssistantApprovalEntry[];
 }) {
+  const { t } = useUiTranslation();
   if (entries.length === 0) {
     return (
-      <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">
-        Decided approvals will show up here.
-      </div>
+      <div className="rounded-lg border border-dashed border-border px-4 py-3 text-12 text-muted-foreground">{t("Decided approvals will show up here.")}</div>
     );
   }
 
@@ -159,7 +156,7 @@ function HistorySection({
             <p className="mt-1.5 flex items-center gap-1.5 text-11 text-muted-foreground">
               <ServiceCell slug={entry.block.service_slug} />
               {entry.block.decision_channel !== null &&
-                `via ${channelLabel(entry.block.decision_channel)}`}
+                t("via {{value}}", { value: t(channelLabel(entry.block.decision_channel)) })}
             </p>
             <div className="mt-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
               <span className="text-11 text-muted-foreground">
@@ -178,11 +175,11 @@ function HistorySection({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Request</TableHead>
-              <TableHead>Service</TableHead>
-              <TableHead>Decision</TableHead>
-              <TableHead>Channel</TableHead>
-              <TableHead>When</TableHead>
+              <TableHead>{t("Request")}</TableHead>
+              <TableHead>{t("Service")}</TableHead>
+              <TableHead>{t("Decision")}</TableHead>
+              <TableHead>{t("Channel")}</TableHead>
+              <TableHead>{t("When")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -209,7 +206,7 @@ function HistorySection({
                     getDecisionBadge(entry.block.decision)}
                 </TableCell>
                 <TableCell className="text-muted-foreground">
-                  {channelLabel(entry.block.decision_channel)}
+                  {t(channelLabel(entry.block.decision_channel))}
                 </TableCell>
                 <TableCell className="text-muted-foreground">
                   {formatDate(entry.decidedAt ?? entry.requestedAt)}
@@ -224,13 +221,14 @@ function HistorySection({
 }
 
 export function ApprovalsView() {
+  const { t } = useUiTranslation();
   const approvals = useAssistantApprovals();
   // A dead backend must not take the view away: the failure is a toast, the
   // sections render whatever is cached (or their own empty states), and the
   // retry affordance lives inside the working view.
   useEffect(() => {
     if (!approvals.isError) return;
-    toast.error("Could not load approvals", {
+    toast.error(translateUi("Could not load approvals"), {
       id: "assistant-approvals-load-failed",
       description:
         "The assistant backend did not respond. Deciding from Telegram or mobile still works — retry below.",
@@ -262,9 +260,9 @@ export function ApprovalsView() {
       toast.success(approved ? "Request approved" : "Request denied");
     } catch (error) {
       toast.error(
-        error instanceof ApiError
+        translateErrorMessage(error instanceof ApiError
           ? error.message
-          : `Failed to ${approved ? "approve" : "deny"} the request`,
+          : `Failed to ${approved ? "approve" : "deny"} the request`),
       );
     }
   }
@@ -272,13 +270,8 @@ export function ApprovalsView() {
   return (
     <div className="h-full min-h-0 overflow-y-auto overscroll-contain">
       <div className="px-5 pt-6 sm:px-8">
-        <h1 className="text-22 font-bold tracking-[-0.03em] sm:text-28">
-          Approvals
-        </h1>
-        <p className="mt-1 max-w-2xl text-12 text-muted-foreground">
-          Write actions gated by your NyxID policy wait here for your decision.
-          Deciding here, in Telegram, or on mobile converges to the same result.
-        </p>
+        <h1 className="text-22 font-bold tracking-[-0.03em] sm:text-28">{t("Approvals")}</h1>
+        <p className="mt-1 max-w-2xl text-12 text-muted-foreground">{t("Write actions gated by your NyxID policy wait here for your decision. Deciding here, in Telegram, or on mobile converges to the same result.")}</p>
       </div>
 
       <div className="max-w-[680px] px-5 pb-10 pt-5 sm:px-8">
@@ -295,25 +288,19 @@ export function ApprovalsView() {
           <>
             {approvals.isError ? (
               <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-4 py-2.5">
-                <p className="text-12 text-muted-foreground">
-                  Approvals may be out of date until the backend responds.
-                </p>
+                <p className="text-12 text-muted-foreground">{t("Approvals may be out of date until the backend responds.")}</p>
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
                   onClick={approvals.refetch}
                 >
-                  <RefreshCw />
-                  Retry
-                </Button>
+                  <RefreshCw />{t("Retry")}</Button>
               </div>
             ) : null}
             <PendingSection entries={pending} onDecide={handleDecide} />
 
-            <p className="mb-2.5 mt-8 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">
-              History
-            </p>
+            <p className="mb-2.5 mt-8 text-10 font-semibold uppercase tracking-[1.5px] text-text-tertiary">{t("History")}</p>
             <HistorySection entries={decided} />
           </>
         )}

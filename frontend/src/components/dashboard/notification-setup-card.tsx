@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState, useCallback } from "react";
 import { Link } from "@tanstack/react-router";
 import { Button, ButtonIcon } from "@/components/ui/button";
@@ -32,6 +34,7 @@ const MOBILE_APP_LINK = "https://nyxid.onelink.me/REzJ/dql9w8fx";
 const DISMISSED_KEY = "nyxid:notification-setup-dismissed";
 
 export function NotificationSetupCard() {
+  const { t } = useUiTranslation();
   const { data: settings, isLoading } = useNotificationSettings();
   const { data: pushDevices } = usePushDevices();
   const updateMutation = useUpdateNotificationSettings();
@@ -62,7 +65,7 @@ export function NotificationSetupCard() {
       await telegramLinkMutation.mutateAsync();
       setLinkDialogOpen(true);
     } catch {
-      toast.error("Failed to generate link code");
+      toast.error(translateUi("Failed to generate link code"));
     }
   }
 
@@ -75,7 +78,7 @@ export function NotificationSetupCard() {
           : "Approval protection disabled",
       );
     } catch {
-      toast.error("Failed to update approval settings");
+      toast.error(translateUi("Failed to update approval settings"));
     }
   }
 
@@ -102,7 +105,7 @@ export function NotificationSetupCard() {
             variant="ghost"
             className="absolute right-2 top-2 h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
             onClick={handleDismiss}
-            aria-label="Dismiss"
+            aria-label={t("Dismiss")}
           >
             <X className="h-3.5 w-3.5" />
           </Button>
@@ -113,12 +116,8 @@ export function NotificationSetupCard() {
           <div className="flex items-center gap-3">
             <Bell className="h-5 w-5 text-primary-text" aria-hidden="true" />
             <div className="flex flex-col gap-0.5">
-              <h3 className="text-22 font-normal leading-tight">
-                Notifications & Approvals
-              </h3>
-              <p className="text-12 text-muted-foreground">
-                Control how AI agents access your services
-              </p>
+              <h3 className="text-22 font-normal leading-tight">{t("Notifications & Approvals")}</h3>
+              <p className="text-12 text-muted-foreground">{t("Control how AI agents access your services")}</p>
             </div>
           </div>
 
@@ -147,18 +146,13 @@ export function NotificationSetupCard() {
             <div className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-3">
               <div className="flex items-center gap-2">
                 <Shield className="h-4 w-4 text-primary-text" />
-                <span className="text-13 font-medium">
-                  Approval protection is active
-                </span>
+                <span className="text-13 font-medium">{t("Approval protection is active")}</span>
               </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                AI agents must request your approval before accessing services.{" "}
+              <p className="mt-1 text-xs text-muted-foreground">{t("AI agents must request your approval before accessing services.")}{" "}
                 <Link
                   to="/approvals/settings"
                   className="text-primary-text hover:underline"
-                >
-                  Manage settings
-                </Link>
+                >{t("Manage settings")}</Link>
               </p>
             </div>
           )}
@@ -167,15 +161,9 @@ export function NotificationSetupCard() {
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3">
               <div className="flex items-center gap-2">
                 <Shield className="h-4 w-4 text-amber-500" />
-                <span className="text-13 font-medium">
-                  Approval protection is suspended
-                </span>
+                <span className="text-13 font-medium">{t("Approval protection is suspended")}</span>
               </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Your approval preference remains on. Connect or re-enable
-                Telegram or push notifications and protection will resume
-                automatically.
-              </p>
+              <p className="mt-1 text-xs text-muted-foreground">{t("Your approval preference remains on. Connect or re-enable Telegram or push notifications and protection will resume automatically.")}</p>
             </div>
           )}
 
@@ -189,23 +177,19 @@ export function NotificationSetupCard() {
                   aria-hidden="true"
                 />
                 <div>
-                  <p className="text-13 font-medium">Telegram</p>
-                  <p className="text-xs text-muted-foreground">
-                    Receive approval requests via bot
-                  </p>
+                  <p className="text-13 font-medium">{t("Telegram")}</p>
+                  <p className="text-xs text-muted-foreground">{t("Receive approval requests via bot")}</p>
                 </div>
               </div>
               {telegramReady ? (
-                <Badge variant="success">Connected</Badge>
+                <Badge variant="success">{t("Connected")}</Badge>
               ) : (
                 <Button
                   variant="outline"
                   onClick={() => void handleLinkTelegram()}
                   isLoading={telegramLinkMutation.isPending}
                 >
-                  <ButtonIcon><MessageSquare className="h-3.5 w-3.5" /></ButtonIcon>
-                  Connect
-                </Button>
+                  <ButtonIcon><MessageSquare className="h-3.5 w-3.5" /></ButtonIcon>{t("Connect")}</Button>
               )}
             </div>
 
@@ -217,16 +201,13 @@ export function NotificationSetupCard() {
                   aria-hidden="true"
                 />
                 <div>
-                  <p className="text-13 font-medium">NyxID Mobile App</p>
-                  <p className="text-xs text-muted-foreground">
-                    Approve from your phone (iOS & Android)
-                  </p>
+                  <p className="text-13 font-medium">{t("NyxID Mobile App")}</p>
+                  <p className="text-xs text-muted-foreground">{t("Approve from your phone (iOS & Android)")}</p>
                 </div>
               </div>
               {pushReady ? (
                 <Badge variant="success">
-                  {pushDevices?.devices.length ?? 0} device
-                  {(pushDevices?.devices.length ?? 0) !== 1 ? "s" : ""}
+                  {pushDevices?.devices.length ?? 0}{t(" device")}{(pushDevices?.devices.length ?? 0) !== 1 ? "s" : ""}
                 </Badge>
               ) : (
                 <Button variant="outline" asChild>
@@ -235,9 +216,7 @@ export function NotificationSetupCard() {
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    <ButtonIcon><Download className="h-3.5 w-3.5" /></ButtonIcon>
-                    Download
-                    <ExternalLink className="h-3 w-3" />
+                    <ButtonIcon><Download className="h-3.5 w-3.5" /></ButtonIcon>{t("Download")}<ExternalLink className="h-3 w-3" />
                   </a>
                 </Button>
               )}
@@ -251,17 +230,11 @@ export function NotificationSetupCard() {
                 onClick={() => void handleToggleApproval(true)}
                 isLoading={updateMutation.isPending}
               >
-                <ButtonIcon><Shield className="h-4 w-4" /></ButtonIcon>
-                Enable Approval Protection
-              </Button>
+                <ButtonIcon><Shield className="h-4 w-4" /></ButtonIcon>{t("Enable Approval Protection")}</Button>
             )}
 
             {!hasChannel && (
-              <p className="text-xs text-muted-foreground">
-                Connect Telegram or download the mobile app to receive approval
-                requests. Then explicitly enable approval protection in this
-                card or Approval Settings.
-              </p>
+              <p className="text-xs text-muted-foreground">{t("Connect Telegram or download the mobile app to receive approval requests. Then explicitly enable approval protection in this card or Approval Settings.")}</p>
             )}
           </div>
         </div>
@@ -271,32 +244,24 @@ export function NotificationSetupCard() {
       <Dialog open={linkDialogOpen} onOpenChange={setLinkDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Connect Telegram</DialogTitle>
-            <DialogDescription>
-              Send the following command to the NyxID bot on Telegram to link
-              your account.
-            </DialogDescription>
+            <DialogTitle>{t("Connect Telegram")}</DialogTitle>
+            <DialogDescription>{t("Send the following command to the NyxID bot on Telegram to link your account.")}</DialogDescription>
           </DialogHeader>
           {linkData && (
             <div className="space-y-4">
               <div className="rounded-lg bg-muted p-4 text-center">
-                <p className="text-xs text-muted-foreground">
-                  Send this to @{linkData.bot_username}
+                <p className="text-xs text-muted-foreground">{t("Send this to @")}{linkData.bot_username}
                 </p>
                 <code className="mt-2 block text-lg font-semibold">
                   /start {linkData.link_code}
                 </code>
               </div>
-              <p className="text-xs text-muted-foreground">
-                This code expires in{" "}
-                {String(Math.floor(linkData.expires_in_secs / 60))} minutes.
-              </p>
+              <p className="text-xs text-muted-foreground">{t("This code expires in")}{" "}
+                {String(Math.floor(linkData.expires_in_secs / 60))}{t(" minutes.")}</p>
             </div>
           )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setLinkDialogOpen(false)}>
-              Close
-            </Button>
+            <Button variant="outline" onClick={() => setLinkDialogOpen(false)}>{t("Close")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

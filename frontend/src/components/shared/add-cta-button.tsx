@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Plus } from "lucide-react";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import {
@@ -37,6 +38,7 @@ export function AddCtaButton({
   icon: Icon = Plus,
   variant = "primary",
 }: AddCtaButtonProps) {
+  useUiTranslation();
   if (variant === "primary") {
     const button = (
       <Button

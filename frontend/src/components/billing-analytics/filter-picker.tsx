@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useId, useState, type ReactNode } from "react";
 import { Check, ChevronDown, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -69,6 +71,7 @@ export function FilterPicker({
   matches?: (value: string, option: FilterPickerOption) => boolean;
   limit?: number;
 }) {
+  const { t } = useUiTranslation();
   const [draft, setDraft] = useState<string[]>([...values]);
   // Every opening starts from the applied selection, however it was opened
   // (trigger, keyboard, or a caller such as a filter chip).
@@ -90,7 +93,7 @@ export function FilterPicker({
       <PopoverTrigger asChild>
         <Button
           variant="outline"
-          aria-label={`Filter ${label.toLowerCase()}`}
+          aria-label={t("Filter {{value}}", { value: label.toLowerCase() })}
           className="justify-between"
           disabled={disabled}
         >
@@ -102,8 +105,7 @@ export function FilterPicker({
         <div className="flex items-center justify-between">
           <span className="text-12 font-medium">{label}</span>
           <span className="text-11 text-muted-foreground">
-            {draft.length} selected
-          </span>
+            {draft.length}{t(" selected")}</span>
         </div>
         {description && (
           <p className="-mt-1.5 text-11 text-muted-foreground">
@@ -116,7 +118,7 @@ export function FilterPicker({
             value={search}
             onChange={(e) => onSearchChange(e.target.value)}
             placeholder={searchPlaceholder}
-            aria-label={`Search ${label.toLowerCase()}`}
+            aria-label={t("Search {{value}}", { value: label.toLowerCase() })}
             className="pl-8"
           />
         </div>
@@ -124,7 +126,7 @@ export function FilterPicker({
           <Skeleton className="h-24" />
         ) : options.status === "error" ? (
           <ErrorBanner
-            message={`Could not load ${label.toLowerCase()}.`}
+            message={t("Could not load {{value}}.", { value: label.toLowerCase() })}
             onRetry={options.onRetry}
           />
         ) : (
@@ -162,14 +164,10 @@ export function FilterPicker({
               </Button>
             ))}
             {options.options.length === 0 && (
-              <p className="p-2 text-12 text-muted-foreground">
-                No matches.
-              </p>
+              <p className="p-2 text-12 text-muted-foreground">{t("No matches.")}</p>
             )}
             {options.total > options.options.length && (
-              <p className="text-10 text-muted-foreground">
-                Search to narrow {options.total.toLocaleString()} matches.
-              </p>
+              <p className="text-10 text-muted-foreground">{t("Search to narrow ")}{options.total.toLocaleString(getFormattingLocale())}{t(" matches.")}</p>
             )}
           </div>
         )}
@@ -179,17 +177,13 @@ export function FilterPicker({
             size="sm"
             disabled={!draft.length}
             onClick={() => setDraft([])}
-          >
-            Clear
-          </Button>
+          >{t("Clear")}</Button>
           <Button
             variant="outline"
             size="sm"
             className="ml-auto"
             onClick={() => onOpenChange(false)}
-          >
-            Cancel
-          </Button>
+          >{t("Cancel")}</Button>
           <Button
             variant="primary"
             size="sm"
@@ -197,9 +191,7 @@ export function FilterPicker({
               onChange(draft);
               onOpenChange(false);
             }}
-          >
-            Apply
-          </Button>
+          >{t("Apply")}</Button>
         </div>
       </PopoverContent>
     </Popover>

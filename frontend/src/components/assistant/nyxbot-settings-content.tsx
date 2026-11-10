@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { AutomationPreferences } from "./automation-preferences";
 import { PlatformPersonalBindings } from "./platform-personal-bindings";
 import { useState } from "react";
@@ -23,7 +26,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ACCESS_MODE_DESCRIPTION, ACCESS_MODE_LABEL } from "@/lib/assistant/nyxbot-labels";
+import {
+  ACCESS_MODE_DESCRIPTION,
+  ACCESS_MODE_LABEL,
+} from "@/lib/assistant/nyxbot-labels";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { ChannelBotsManager } from "@/components/assistant/nyxbot-channels";
 import {
@@ -44,18 +50,19 @@ function errorMessage(error: unknown, fallback: string): string {
 }
 
 export function NyxBotSettingsContent() {
+  const { t } = useAppTranslation();
   const settings = useNyxBotSettings();
   return (
-    <section aria-label="NyxBot settings" className="space-y-8">
-      <DetailSection title="General">
+    <section aria-label={t("NyxBot settings")} className="space-y-8">
+      <DetailSection title={t("General")}>
         <div className="p-5">
           {settings.isPending ? (
             <p role="status" className="text-12 text-text-tertiary">
-              Loading settings...
+              {t("Loading settings...")}
             </p>
           ) : settings.error ? (
             <ErrorBanner
-              message={`Could not load settings. ${settings.error.message}`}
+              message={t("Could not load settings. {{message}}", { message: translateErrorMessage(settings.error.message) })}
               onRetry={() => void settings.refetch()}
             />
           ) : (
@@ -63,24 +70,30 @@ export function NyxBotSettingsContent() {
           )}
         </div>
       </DetailSection>
-      <DetailSection title="Automations">
+      <DetailSection title={t("Automations")}>
         <div className="p-5">
           <AutomationPreferences />
         </div>
       </DetailSection>
-      <DetailSection title="Channel bots">
+      <DetailSection title={t("Channel bots")}>
         <div className="@container/channel-bots p-5">
           <ChannelBotsSection />
         </div>
       </DetailSection>
-      <DetailSection title="Personal Telegram links"><div className="p-5"><PlatformPersonalBindings /></div></DetailSection>
+      <DetailSection title={t("Personal Telegram links")}>
+        <div className="p-5">
+          <PlatformPersonalBindings />
+        </div>
+      </DetailSection>
     </section>
   );
 }
 
 function formValues(settings: NyxAgentSettings): NyxAgentSettingsForm {
   return {
-    access_mode: settings.access_mode ?? (settings.skip_destructive_confirmation ? "autopilot" : "nyxmode"),
+    access_mode:
+      settings.access_mode ??
+      (settings.skip_destructive_confirmation ? "autopilot" : "nyxmode"),
     max_auto_continuations: settings.max_auto_continuations ?? 8,
     max_live_subagents: settings.max_live_subagents,
     max_concurrent_subagent_turns: settings.max_concurrent_subagent_turns,
@@ -91,6 +104,7 @@ function formValues(settings: NyxAgentSettings): NyxAgentSettingsForm {
 }
 
 function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
+  const { t } = useAppTranslation();
   const update = useUpdateNyxBotSettings();
   const form = useAppForm<NyxAgentSettingsForm>({
     resolver: zodResolver(nyxAgentSettingsFormSchema(settings)),
@@ -129,14 +143,14 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
     try {
       form.reset(formValues(await update.mutateAsync(body)));
     } catch (cause) {
-      setError(errorMessage(cause, "Could not save settings. Try again."));
+      setError(errorMessage(cause, t("Could not save settings. Try again.")));
     }
   }
 
   return (
     <Form {...form}>
       <form
-        aria-label="NyxBot preferences"
+        aria-label={t("NyxBot preferences")}
         // Limits are validated by the schema so messages match the rest of the form.
         noValidate
         onSubmit={form.handleSubmit(save)}
@@ -147,37 +161,42 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
           name="access_mode"
           render={({ field }) => (
             <FormItem className="space-y-2 rounded-lg border border-border p-4">
-              <FormLabel>Access mode</FormLabel>
+              <FormLabel>{t("Access mode")}</FormLabel>
               <FormDescription className="text-12">
-                When NyxBot and your specialists ask you before acting. An agent can
-                have its own mode in its details.
+                {t(
+                  "When NyxBot and your specialists ask you before acting. An agent can have its own mode in its details.",
+                )}
               </FormDescription>
               <Select value={field.value} onValueChange={field.onChange}>
                 <FormControl>
-                  <SelectTrigger aria-label="Access mode">
+                  <SelectTrigger aria-label={t("Access mode")}>
                     <SelectValue />
                   </SelectTrigger>
                 </FormControl>
                 <SelectContent>
                   {nyxAgentAccessModeSchema.options.map((option) => (
                     <SelectItem key={option} value={option}>
-                      {ACCESS_MODE_LABEL[option]}
+                      {t(ACCESS_MODE_LABEL[option])}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-12 text-muted-foreground">{ACCESS_MODE_DESCRIPTION[mode]}</p>
+              <p className="text-12 text-muted-foreground">
+                {t(ACCESS_MODE_DESCRIPTION[mode])}
+              </p>
               {mode === "autopilot" ? (
                 <div
                   role="alert"
                   className="flex items-start gap-2 rounded-xl border border-warning/15 bg-warning/[0.04] px-3 py-2.5 text-12 text-warning"
                 >
-                  <AlertTriangle aria-hidden="true" className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <AlertTriangle
+                    aria-hidden="true"
+                    className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                  />
                   <span>
-                    Approvals are bypassed: NyxBot deletes keys, channel bots, services and
-                    nodes and changes access without asking you first. Deletions cannot be
-                    undone. Automation, machine, saved-login, publication and service-approval
-                    confirmations are also bypassed and recorded in chat.
+                    {t(
+                      "Approvals are bypassed: NyxBot deletes keys, channel bots, services and nodes and changes access without asking you first. Deletions cannot be undone. Automation, machine, saved-login, publication and service-approval confirmations are also bypassed and recorded in chat.",
+                    )}
                   </span>
                 </div>
               ) : null}
@@ -188,39 +207,40 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
           [
             {
               name: "max_auto_continuations",
-              label: "Automatic task continuations",
+              label: t("Automatic task continuations"),
               min: 0,
               max: 32,
-              description:
+              description: t(
                 "Resume long tasks automatically when the assistant reaches a tool or time budget, keeping its context. Default 8; 0 turns this off, up to 32. Stop always ends the task. Continuing uses credits at the usual rates.",
+              ),
             },
             {
               name: "max_live_subagents",
-              label: "Live specialists",
+              label: t("Live specialists"),
               min: 0,
               max: settings.max_live_subagents_limit,
-              description: `0 to ${settings.max_live_subagents_limit}. 0 stops new specialists.`,
+              description: t("0 to {{max_live_subagents_limit}}. 0 stops new specialists.", { max_live_subagents_limit: settings.max_live_subagents_limit }),
             },
             {
               name: "max_concurrent_subagent_turns",
-              label: "Specialists working at once",
+              label: t("Specialists working at once"),
               min: 1,
               max: settings.max_concurrent_subagent_turns_limit,
-              description: `1 to ${settings.max_concurrent_subagent_turns_limit}.`,
+              description: t("1 to {{max_concurrent_subagent_turns_limit}}.", { max_concurrent_subagent_turns_limit: settings.max_concurrent_subagent_turns_limit }),
             },
             {
               name: "max_group_handoffs",
-              label: "Group hand-offs per message",
+              label: t("Group hand-offs per message"),
               min: 0,
               max: settings.max_group_handoffs_limit,
-              description: `How many times agents in a group may pass work to each other after one of your messages. 0 to ${settings.max_group_handoffs_limit}; 0 turns hand-offs off.`,
+              description: t("How many times agents in a group may pass work to each other after one of your messages. 0 to {{max_group_handoffs_limit}}; 0 turns hand-offs off.", { max_group_handoffs_limit: settings.max_group_handoffs_limit }),
             },
             {
               name: "max_group_handoffs_per_hour",
-              label: "Group hand-offs per hour",
+              label: t("Group hand-offs per hour"),
               min: 0,
               max: settings.max_group_handoffs_per_hour_limit,
-              description: `Across all your groups. 0 to ${settings.max_group_handoffs_per_hour_limit}.`,
+              description: t("Across all your groups. 0 to {{max_group_handoffs_per_hour_limit}}.", { max_group_handoffs_per_hour_limit: settings.max_group_handoffs_per_hour_limit }),
             },
           ] as const
         ).map(({ name, label, min, max, description }) => (
@@ -260,37 +280,45 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
           name="specialist_access_requests"
           render={({ field }) => (
             <FormItem className="space-y-2 rounded-lg border border-border p-4">
-              <FormLabel>Specialist access requests</FormLabel>
+              <FormLabel>{t("Specialist access requests")}</FormLabel>
               <FormDescription className="text-12">
-                Only you, and NyxBot for work it assigned or a group it is in, can grant access; specialists
-                cannot grant themselves or each other anything.
+                {t(
+                  "Only you, and NyxBot for work it assigned or a group it is in, can grant access; specialists cannot grant themselves or each other anything.",
+                )}
               </FormDescription>
               <Select value={field.value} onValueChange={field.onChange}>
                 <FormControl>
-                  <SelectTrigger aria-label="Specialist access requests">
+                  <SelectTrigger aria-label={t("Specialist access requests")}>
                     <SelectValue />
                   </SelectTrigger>
                 </FormControl>
                 <SelectContent>
-                  <SelectItem value="denied">Deny requests</SelectItem>
-                  <SelectItem value="routed_to_nyxbot">Route to NyxBot</SelectItem>
+                  <SelectItem value="denied">{t("Deny requests")}</SelectItem>
+                  <SelectItem value="routed_to_nyxbot">
+                    {t("Route to NyxBot")}
+                  </SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-12 text-muted-foreground">
                 {field.value === "denied"
-                  ? "A specialist you talk to directly tells you what it is missing and continues; you grant it in the specialist's details. Only work NyxBot assigned, or work in a group NyxBot is in, reports to NyxBot instead."
-                  : "For work NyxBot assigned, or in a group with NyxBot, a specialist's request goes to NyxBot, which approves or denies it; you can decide it on its card instead. A specialist you talk to directly still tells you what it is missing."}
+                  ? t(
+                      "A specialist you talk to directly tells you what it is missing and continues; you grant it in the specialist's details. Only work NyxBot assigned, or work in a group NyxBot is in, reports to NyxBot instead.",
+                    )
+                  : t(
+                      "For work NyxBot assigned, or in a group with NyxBot, a specialist's request goes to NyxBot, which approves or denies it; you can decide it on its card instead. A specialist you talk to directly still tells you what it is missing.",
+                    )}
               </p>
             </FormItem>
           )}
         />
         <p className="text-11 text-muted-foreground">
-          Every specialist turn and group hand-off is billed to your credits
-          like any other NyxBot turn, so higher limits can spend credits faster.
+          {t(
+            "Every specialist turn and group hand-off is billed to your credits like any other NyxBot turn, so higher limits can spend credits faster.",
+          )}
         </p>
         {error ? (
           <p role="alert" className="text-12 text-destructive">
-            {error}
+            {translateUi(error)}
           </p>
         ) : null}
         <div className="flex justify-end">
@@ -300,7 +328,7 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
             isLoading={update.isPending}
             disabled={!form.formState.isDirty}
           >
-            Save settings
+            {t("Save settings")}
           </Button>
         </div>
       </form>
@@ -309,12 +337,14 @@ function SettingsForm({ settings }: { readonly settings: NyxAgentSettings }) {
 }
 
 function ChannelBotsSection() {
+  const { t } = useAppTranslation();
   const agents = useNyxBotAgents();
   return (
-    <section aria-label="Channel bots" className="space-y-3">
+    <section aria-label={t("Channel bots")} className="space-y-3">
       <p className="text-12 text-muted-foreground">
-        Each channel bot reaches one agent: NyxBot or a specialist. The agent
-        only replies to the chat account you verify with a one-time link.
+        {t(
+          "Each channel bot reaches one agent: NyxBot or a specialist. The agent only replies to the chat account you verify with a one-time link.",
+        )}
       </p>
       <ChannelBotsManager agents={agents.data?.agents ?? []} />
     </section>

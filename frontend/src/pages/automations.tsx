@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { formatCapacityWait } from "@/lib/assistant/capacity-wait";
 import { storedError } from "@/lib/assistant/nyxagent-transport";
 import { Link, useSearch } from "@tanstack/react-router";
@@ -87,6 +90,7 @@ const message = (e: unknown) =>
   e instanceof Error ? e.message : "Could not save automation";
 
 export function AutomationsPage() {
+  const { t } = useUiTranslation();
   const search = parseAutomationSearch(useSearch({ strict: false }));
   const setup = useAutomationSetup(search.setup);
   const settings = useNyxBotSettings();
@@ -113,12 +117,12 @@ export function AutomationsPage() {
     const delivery = row.delivery;
     return delivery.type === "assistant"
       ? (agents.data?.agents.find((a) => a.id === delivery.agent_id)?.name ??
-          "Agent")
+          t("Agent"))
       : delivery.type === "agent"
-        ? "Device agent"
+        ? t("Device agent")
         : delivery.type === "notification"
-          ? "Notification"
-          : "Webhook";
+          ? t("Notification")
+          : t("Webhook");
   };
   function actions(row: TriggerResponse) {
     return (
@@ -127,15 +131,13 @@ export function AutomationsPage() {
           <Button
             variant="ghost"
             size="icon"
-            aria-label={`Actions for ${row.label}`}
+            aria-label={t("Actions for {{label}}", { label: row.label })}
           >
             <MoreVertical className="h-4 w-4" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DropdownMenuItem onClick={() => setEditing(row)}>
-            Edit
-          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setEditing(row)}>{t("Edit")}</DropdownMenuItem>
           <DropdownMenuItem
             onClick={() => {
               void update
@@ -145,31 +147,25 @@ export function AutomationsPage() {
                     status: row.status === "active" ? "disabled" : "active",
                   },
                 })
-                .catch((e: unknown) => toast.error(message(e)));
+                .catch((e: unknown) => toast.error(translateErrorMessage(message(e))));
             }}
           >
-            {row.status === "active" ? "Pause" : "Resume"}
+            {row.status === "active" ? t("Pause") : t("Resume")}
           </DropdownMenuItem>
           <DropdownMenuItem
             disabled={row.status !== "active" || run.isPending}
             onClick={() => {
               void run
                 .mutateAsync(row.id)
-                .then(() => toast.success("Run queued"))
-                .catch((e: unknown) => toast.error(message(e)));
+                .then(() => toast.success(translateUi("Run queued")))
+                .catch((e: unknown) => toast.error(translateErrorMessage(message(e))));
             }}
-          >
-            Run now
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => setHistory(row)}>
-            Run history
-          </DropdownMenuItem>
+          >{t("Run now")}</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setHistory(row)}>{t("Run history")}</DropdownMenuItem>
           <DropdownMenuItem
             className="text-destructive"
             onClick={() => setDeleting(row)}
-          >
-            Delete
-          </DropdownMenuItem>
+          >{t("Delete")}</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     );
@@ -177,11 +173,11 @@ export function AutomationsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Automations"
-        description="Scheduled work, reminders and webhook events for your agents."
+        title={t("Automations")}
+        description={t("Scheduled work, reminders and webhook events for your agents.")}
         actions={
           <AddCtaButton
-            label="Create automation"
+            label={t("Create automation")}
             onClick={() => setEditing("new")}
           />
         }
@@ -194,23 +190,21 @@ export function AutomationsPage() {
         />
       )}
       {triggers.isPending ? (
-        <Skeleton className="h-36 w-full" aria-label="Loading automations" />
+        <Skeleton className="h-36 w-full" aria-label={t("Loading automations")} />
       ) : rows.length === 0 ? (
-        <p className="text-13 text-muted-foreground">
-          No automations yet. Ask NyxBot to schedule a task or create one here.
-        </p>
+        <p className="text-13 text-muted-foreground">{t("No automations yet. Ask NyxBot to schedule a task or create one here.")}</p>
       ) : (
         <>
           <div className="hidden overflow-hidden rounded-xl border border-border/50 bg-card md:block">
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Automation</TableHead>
-                  <TableHead>Target</TableHead>
-                  <TableHead>Next run</TableHead>
-                  <TableHead>Last run</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Actions</TableHead>
+                  <TableHead>{t("Automation")}</TableHead>
+                  <TableHead>{t("Target")}</TableHead>
+                  <TableHead>{t("Next run")}</TableHead>
+                  <TableHead>{t("Last run")}</TableHead>
+                  <TableHead>{t("Status")}</TableHead>
+                  <TableHead>{t("Actions")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -223,7 +217,7 @@ export function AutomationsPage() {
                       >
                         {row.label}
                         <span className="block text-11 text-muted-foreground">
-                          {row.source ?? "webhook"}
+                          {row.source ?? t("webhook")}
                         </span>
                       </button>
                     </TableCell>
@@ -240,7 +234,7 @@ export function AutomationsPage() {
                           row.status === "active" ? "success" : "secondary"
                         }
                       >
-                        {row.status === "active" ? "Active" : "Paused"}
+                        {row.status === "active" ? t("Active") : t("Paused")}
                       </Badge>
                       {row.pause_reason && (
                         <span className="block text-11">
@@ -266,13 +260,11 @@ export function AutomationsPage() {
                 </div>
                 <p className="text-12 text-muted-foreground">
                   {target(row)} ·{" "}
-                  {row.status === "active" ? "Active" : "Paused"}
+                  {row.status === "active" ? t("Active") : t("Paused")}
                 </p>
-                <p className="text-12">
-                  Next: {formatAutomationTime(row.next_run_at, zone)}
+                <p className="text-12">{t("Next: ")}{formatAutomationTime(row.next_run_at, zone)}
                 </p>
-                <p className="text-12 capitalize">
-                  Last run: {row.last_run?.outcome ?? "—"}
+                <p className="text-12 capitalize">{t("Last run: ")}{row.last_run?.outcome ?? "—"}
                 </p>
                 {row.pause_reason && (
                   <p className="text-12">
@@ -285,13 +277,11 @@ export function AutomationsPage() {
         </>
       )}
       <p className="text-12 text-muted-foreground">
-        <Link className="underline" to="/triggers">
-          Webhook secrets and delivery replay
-        </Link>
+        <Link className="underline" to="/triggers">{t("Webhook secrets and delivery replay")}</Link>
       </p>
       {setup.error && <ErrorBanner message={setup.error.message} />}
       {search.setup && setup.isPending && (
-        <Skeleton className="h-24 w-full" aria-label="Loading setup" />
+        <Skeleton className="h-24 w-full" aria-label={t("Loading setup")} />
       )}
       {editing && (!search.setup || setup.data) && (
         <AutomationEditor
@@ -312,8 +302,8 @@ export function AutomationsPage() {
           if (!open) setSecrets([]);
         }}
         values={secrets}
-        title="Automation secrets"
-        description="Save these secrets now. They are shown only once."
+        title={t("Automation secrets")}
+        description={t("Save these secrets now. They are shown only once.")}
       />
       <Dialog
         open={Boolean(deleting)}
@@ -323,15 +313,11 @@ export function AutomationsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete {deleting?.label}?</DialogTitle>
-            <DialogDescription>
-              Future runs stop. Existing run threads remain available.
-            </DialogDescription>
+            <DialogTitle>{t("Delete ")}{deleting?.label}?</DialogTitle>
+            <DialogDescription>{t("Future runs stop. Existing run threads remain available.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleting(null)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setDeleting(null)}>{t("Cancel")}</Button>
             <Button
               variant="destructive"
               disabled={remove.isPending}
@@ -340,11 +326,9 @@ export function AutomationsPage() {
                   void remove
                     .mutateAsync(deleting.id)
                     .then(() => setDeleting(null))
-                    .catch((e: unknown) => toast.error(message(e)));
+                    .catch((e: unknown) => toast.error(translateErrorMessage(message(e))));
               }}
-            >
-              Delete
-            </Button>
+            >{t("Delete")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -367,6 +351,7 @@ export function AutomationEditor({
   readonly onClose: () => void;
   readonly onSecrets: (values: readonly OneTimeSecretValue[]) => void;
 }) {
+  const { t } = useUiTranslation();
   const settings = useNyxBotSettings();
   const saveSettings = useUpdateNyxBotSettings();
   const agents = useNyxBotAgents();
@@ -429,7 +414,7 @@ export function AutomationEditor({
   function input(name: keyof AutomationForm, label: string, type = "text") {
     return (
       <label className="block space-y-1 text-12" key={name}>
-        {label}
+        {t(label)}
         <Input
           type={type}
           disabled={Boolean(row) && name === "signature_header"}
@@ -437,7 +422,7 @@ export function AutomationEditor({
         />
         {form.formState.errors[name] && (
           <span role="alert" className="text-destructive">
-            {form.formState.errors[name]?.message}
+            {translateUi(form.formState.errors[name]?.message ?? "")}
           </span>
         )}
       </label>
@@ -451,7 +436,7 @@ export function AutomationEditor({
   ) {
     return (
       <div className="block space-y-1 text-12">
-        {label}
+        {t(label)}
         <Select
           value={String(form.watch(name)) || "__empty"}
           onValueChange={(value) =>
@@ -462,7 +447,7 @@ export function AutomationEditor({
           }
           disabled={disabled}
         >
-          <SelectTrigger aria-label={label}>
+          <SelectTrigger aria-label={t(label)}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -475,7 +460,7 @@ export function AutomationEditor({
         </Select>
         {form.formState.errors[name] && (
           <span role="alert" className="text-destructive">
-            {form.formState.errors[name]?.message}
+            {translateUi(form.formState.errors[name]?.message ?? "")}
           </span>
         )}
       </div>
@@ -489,7 +474,7 @@ export function AutomationEditor({
     return (
       <AutomationDateTime
         timezone={values.timezone}
-        label={label}
+        label={t(label)}
         optional={optional}
         value={values[name]}
         onChange={(value) => form.setValue(name, value)}
@@ -557,91 +542,79 @@ export function AutomationEditor({
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
           <DialogTitle>
-            {row ? "Edit automation" : "Create automation"}
+            {row ? t("Edit automation") : t("Create automation")}
           </DialogTitle>
-          <DialogDescription>
-            Choose when to run, what to do and where the answer arrives.
-          </DialogDescription>
+          <DialogDescription>{t("Choose when to run, what to do and where the answer arrives.")}</DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form className="space-y-4" onSubmit={form.handleSubmit(save)}>
-            {input("label", "Label")}
+            {input("label", t("Label"))}
             {select(
               "source",
-              "Source",
+              t("Source"),
               [
-                ["schedule", "Schedule"],
-                ["webhook", "Webhook"],
+                ["schedule", t("Schedule")],
+                ["webhook", t("Webhook")],
               ],
               Boolean(row),
             )}
             {values.source === "schedule" ? (
               <div className="space-y-3 rounded-lg border border-border p-3">
                 <TimezoneSelect
-                  label="IANA timezone"
+                  label={t("IANA timezone")}
                   value={values.timezone}
                   onChange={(zone) => form.setValue("timezone", zone)}
                 />
-                {select("kind", "Schedule type", [
-                  ["cron", "Calendar / cron"],
-                  ["every", "Every interval"],
-                  ["at", "Once"],
+                {select("kind", t("Schedule type"), [
+                  ["cron", t("Calendar / cron")],
+                  ["every", t("Every interval")],
+                  ["at", t("Once")],
                 ])}
                 {values.kind === "cron" ? (
                   <>
                     <div className="space-y-1 text-12">
-                      <span>Preset</span>
+                      <span>{t("Preset")}</span>
                       <Select
                         onValueChange={(value) =>
                           form.setValue("expression", value)
                         }
                       >
-                        <SelectTrigger aria-label="Preset">
-                          <SelectValue placeholder="Choose a preset…" />
+                        <SelectTrigger aria-label={t("Preset")}>
+                          <SelectValue placeholder={t("Choose a preset…")} />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="0 8 * * 1-5">
-                            Weekdays at 8:00
-                          </SelectItem>
-                          <SelectItem value="0 9 * * *">
-                            Daily at 9:00
-                          </SelectItem>
-                          <SelectItem value="0 17 * * 5">
-                            Friday at 17:00
-                          </SelectItem>
+                          <SelectItem value="0 8 * * 1-5">{t("Weekdays at 8:00")}</SelectItem>
+                          <SelectItem value="0 9 * * *">{t("Daily at 9:00")}</SelectItem>
+                          <SelectItem value="0 17 * * 5">{t("Friday at 17:00")}</SelectItem>
                         </SelectContent>
                       </Select>
                     </div>
-                    {input("expression", "Cron expression")}
-                    <p className="text-11 text-muted-foreground">
-                      Minute · hour · day · month · weekday. Missing DST times
-                      run once at the first valid time after the gap; repeated
-                      times use the earlier instant.
-                    </p>
+                    {input("expression", t("Cron expression"))}
+                    <p className="text-11 text-muted-foreground">{t("Minute · hour · day · month · weekday. Missing DST times run once at the first valid time after the gap; repeated times use the earlier instant.")}</p>
                   </>
                 ) : values.kind === "every" ? (
                   <>
-                    {input("amount", "Interval amount", "number")}
-                    {select("unit", "Interval unit", [
-                      ["minutes", "Minutes"],
-                      ["hours", "Hours"],
-                      ["days", "Days"],
+                    {input("amount", t("Interval amount"), "number")}
+                    {select("unit", t("Interval unit"), [
+                      ["minutes", t("Minutes")],
+                      ["hours", t("Hours")],
+                      ["days", t("Days")],
                     ])}
-                    {dateTime("anchor", "Anchor", false)}
+                    {dateTime("anchor", t("Anchor"), false)}
                   </>
                 ) : (
-                  dateTime("at", "Run at", false)
+                  dateTime("at", t("Run at"), false)
                 )}
                 <div aria-live="polite" className="text-12">
-                  <strong>Next runs</strong>
+                  <strong>{t("Next runs")}</strong>
                   {preview.isFetching ? (
                     <Skeleton
                       className="h-12 w-full"
-                      aria-label="Calculating next runs"
+                      aria-label={t("Calculating next runs")}
                     />
                   ) : preview.error ? (
                     <p role="alert" className="text-destructive">
-                      {preview.error.message}
+                      {translateUi(preview.error.message ?? "")}
                     </p>
                   ) : (
                     <>
@@ -660,16 +633,14 @@ export function AutomationEditor({
                   )}
                 </div>
                 <details>
-                  <summary className="cursor-pointer text-12">
-                    Start, end and run limits
-                  </summary>
+                  <summary className="cursor-pointer text-12">{t("Start, end and run limits")}</summary>
                   <div className="mt-3 space-y-3">
-                    {dateTime("start", "Start", true)}
-                    {dateTime("end", "End", true)}
-                    {input("max_runs", "Maximum occurrences", "number")}
+                    {dateTime("start", t("Start"), true)}
+                    {dateTime("end", t("End"), true)}
+                    {input("max_runs", t("Maximum occurrences"), "number")}
                     {input(
                       "grace_seconds",
-                      "Grace window in seconds (optional)",
+                      t("Grace window in seconds (optional)"),
                       "number",
                     )}
                   </div>
@@ -679,28 +650,28 @@ export function AutomationEditor({
               <>
                 {select(
                   "verification_mode",
-                  "Inbound verification",
+                  t("Inbound verification"),
                   [
-                    ["bearer", "Bearer token"],
-                    ["query", "Query token"],
-                    ["hmac", "HMAC-SHA256"],
+                    ["bearer", t("Bearer token")],
+                    ["query", t("Query token")],
+                    ["hmac", t("HMAC-SHA256")],
                   ],
                   Boolean(row),
                 )}
                 {values.verification_mode === "hmac" &&
-                  input("signature_header", "Signature header")}
+                  input("signature_header", t("Signature header"))}
               </>
             )}
-            {select("delivery_type", "Delivery", [
-              ["assistant", "NyxBot / specialist"],
-              ["notification", "Notification reminder"],
-              ["webhook", "Webhook"],
-              ["agent", "Device agent"],
+            {select("delivery_type", t("Delivery"), [
+              ["assistant", t("NyxBot / specialist")],
+              ["notification", t("Notification reminder")],
+              ["webhook", t("Webhook")],
+              ["agent", t("Device agent")],
             ])}
             {values.delivery_type === "assistant" ? (
               <>
-                {select("agent_id", "Target agent", [
-                  ["", "Choose an agent…"],
+                {select("agent_id", t("Target agent"), [
+                  ["", t("Choose an agent…")],
                   ...(agents.data?.agents
                     .filter((a) => a.status !== "destroyed")
                     .map((a) => [a.id, a.display_name ?? a.name] as const) ??
@@ -708,57 +679,45 @@ export function AutomationEditor({
                 ])}
                 {values.source === "webhook" && (
                   <>
-                    {select("confirmation_policy", "Confirm webhook actions", [
-                      ["changes", "Every changing action (recommended)"],
-                      ["destructive", "Only destructive actions"],
+                    {select("confirmation_policy", t("Confirm webhook actions"), [
+                      ["changes", t("Every changing action (recommended)")],
+                      ["destructive", t("Only destructive actions")],
                     ])}
                     {values.confirmation_policy === "destructive" && (
-                      <p role="alert" className="text-12 text-warning">
-                        Untrusted webhook content can cause changes using your
-                        account without confirmation. Choose this only for event
-                        sources you trust.
-                      </p>
+                      <p role="alert" className="text-12 text-warning">{t("Untrusted webhook content can cause changes using your account without confirmation. Choose this only for event sources you trust.")}</p>
                     )}
                   </>
                 )}
-                {select("thread_policy", "Thread", [
+                {select("thread_policy", t("Thread"), [
                   [
                     "default",
                     values.source === "webhook"
-                      ? "Default (dedicated thread)"
-                      : "Default (NyxBot home, specialist dedicated)",
+                      ? t("Default (dedicated thread)")
+                      : t("Default (NyxBot home, specialist dedicated)"),
                   ],
-                  ["home", "Home thread"],
-                  ["dedicated", "One thread for this automation"],
-                  ["new", "New thread each run"],
+                  ["home", t("Home thread")],
+                  ["dedicated", t("One thread for this automation")],
+                  ["new", t("New thread each run")],
                 ])}
                 {values.source === "webhook" &&
                   values.thread_policy === "home" && (
-                    <p role="alert" className="text-12 text-warning">
-                      Untrusted webhook content will remain in your home thread
-                      and can influence later owner turns, including private
-                      channel chats, with full account authority. Webhook
-                      confirmations do not protect those later turns. Choose
-                      this only if you accept that risk.
-                    </p>
+                    <p role="alert" className="text-12 text-warning">{t("Untrusted webhook content will remain in your home thread and can influence later owner turns, including private channel chats, with full account authority. Webhook confirmations do not protect those later turns. Choose this only if you accept that risk.")}</p>
                   )}
-                <label className="block space-y-1 text-12">
-                  Instruction
-                  <Textarea {...form.register("instruction")} />
+                <label className="block space-y-1 text-12">{t("Instruction")}<Textarea {...form.register("instruction")} />
                   {form.formState.errors.instruction && (
                     <span role="alert" className="text-destructive">
-                      {form.formState.errors.instruction.message}
+                      {translateUi(form.formState.errors.instruction.message ?? "")}
                     </span>
                   )}
                 </label>
-                {select("deliver_type", "Send result to", [
-                  ["thread", "Web thread"],
-                  ["chat", "Channel chat"],
-                  ["notification", "Notification"],
+                {select("deliver_type", t("Send result to"), [
+                  ["thread", t("Web thread")],
+                  ["chat", t("Channel chat")],
+                  ["notification", t("Notification")],
                 ])}
                 {values.deliver_type === "chat" &&
-                  select("chat_id", "Chat (posting must be allowed)", [
-                    ["", "Choose a chat…"],
+                  select("chat_id", t("Chat (posting must be allowed)"), [
+                    ["", t("Choose a chat…")],
                     ...(chats.data?.map(
                       (chat) =>
                         [
@@ -769,23 +728,21 @@ export function AutomationEditor({
                   ])}
               </>
             ) : values.delivery_type === "webhook" ? (
-              input("webhook_url", "Delivery HTTPS URL")
+              input("webhook_url", t("Delivery HTTPS URL"))
             ) : values.delivery_type === "agent" ? (
-              input("conversation_id", "Device conversation ID")
+              input("conversation_id", t("Device conversation ID"))
             ) : null}
-            {select("overlap", "If the previous run is still active", [
-              ["skip", "Skip"],
-              ["queue", "Queue one"],
+            {select("overlap", t("If the previous run is still active"), [
+              ["skip", t("Skip")],
+              ["queue", t("Queue one")],
             ])}
             {error && (
               <p role="alert" className="text-12 text-destructive">
-                {error}
+                {translateUi(error)}
               </p>
             )}
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={onClose}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={onClose}>{t("Cancel")}</Button>
               <Button
                 type="submit"
                 variant="primary"
@@ -794,9 +751,7 @@ export function AutomationEditor({
                   update.isPending ||
                   (Boolean(row) && !form.formState.isDirty)
                 }
-              >
-                Save automation
-              </Button>
+              >{t("Save automation")}</Button>
             </DialogFooter>
           </form>
         </Form>
@@ -812,6 +767,7 @@ function AutomationHistory({
   readonly row: TriggerResponse;
   readonly onClose: () => void;
 }) {
+  const { t } = useUiTranslation();
   const settings = useNyxBotSettings();
   const zone = settings.data?.timezone ?? browserTimezone();
   const history = useAutomationRuns(row.id);
@@ -825,17 +781,15 @@ function AutomationHistory({
     >
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{row.label}: run history</DialogTitle>
-          <DialogDescription>
-            Up to 1,000 recent runs are retained for 90 days.
-          </DialogDescription>
+          <DialogTitle>{row.label}{t(": run history")}</DialogTitle>
+          <DialogDescription>{t("Up to 1,000 recent runs are retained for 90 days.")}</DialogDescription>
         </DialogHeader>
         {history.error ? (
           <ErrorBanner message={history.error.message} />
         ) : history.isPending ? (
-          <Skeleton className="h-24 w-full" aria-label="Loading runs" />
+          <Skeleton className="h-24 w-full" aria-label={t("Loading runs")} />
         ) : !runs.length ? (
-          <p>No runs yet.</p>
+          <p>{t("No runs yet.")}</p>
         ) : (
           <ul className="space-y-3">
             {runs.map((run) => (
@@ -843,30 +797,26 @@ function AutomationHistory({
                 key={run.id}
                 className="rounded-lg border border-border p-3 text-12"
               >
-                <strong className="capitalize">{run.outcome}</strong> ·{" "}
-                Scheduled {formatAutomationTime(run.scheduled_at, zone, true)}
-                {run.started_at && <p>Started {formatAutomationTime(run.started_at, zone, true)}</p>}
-                {run.capacity_wait_ms != null && run.capacity_wait_ms > 0 && <p>waited {formatCapacityWait(run.capacity_wait_ms)} for capacity</p>}
+                <strong className="capitalize">{run.outcome}</strong> ·{" "}{t("Scheduled ")}{formatAutomationTime(run.scheduled_at, zone, true)}
+                {run.started_at && <p>{t("Started ")}{formatAutomationTime(run.started_at, zone, true)}</p>}
+                {run.capacity_wait_ms != null && run.capacity_wait_ms > 0 && <p>{t("waited ")}{formatCapacityWait(run.capacity_wait_ms)}{t(" for capacity")}</p>}
                 {run.missed ? (
-                  <p>
-                    Missed {run.missed.count} occurrences between{" "}
-                    {formatAutomationTime(run.missed.from, zone)} and{" "}
+                  <p>{t("Missed ")}{run.missed.count}{t(" occurrences between")}{" "}
+                    {formatAutomationTime(run.missed.from, zone)}{t(" and")}{" "}
                     {formatAutomationTime(run.missed.through, zone)}.
                   </p>
                 ) : (
                   run.reason && <p>{run.reason.replaceAll("_", " ")}</p>
                 )}
                 {run.duration_ms !== null && (
-                  <p>{(run.duration_ms / 1000).toFixed(1)} seconds</p>
+                  <p>{(run.duration_ms / 1000).toFixed(1)}{t(" seconds")}</p>
                 )}
                 {run.thread_id && (
                   <Link
                     className="text-primary-text underline"
                     to="/assistant"
                     search={{ c: run.thread_id }}
-                  >
-                    Open thread
-                  </Link>
+                  >{t("Open thread")}</Link>
                 )}
               </li>
             ))}
@@ -876,9 +826,7 @@ function AutomationHistory({
           <Button
             disabled={history.isFetchingNextPage}
             onClick={() => void history.fetchNextPage()}
-          >
-            Load older runs
-          </Button>
+          >{t("Load older runs")}</Button>
         )}
       </DialogContent>
     </Dialog>

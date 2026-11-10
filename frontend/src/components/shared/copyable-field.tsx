@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -16,16 +18,17 @@ export function CopyableField({
   value,
   size = "md",
 }: CopyableFieldProps) {
+  const { t } = useUiTranslation();
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
     try {
       await copyToClipboard(value);
       setCopied(true);
-      toast.success(`${label} copied`);
+      toast.success(translateUi("{{label}} copied", { label: label }));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error("Failed to copy");
+      toast.error(translateUi("Failed to copy"));
     }
   }
 
@@ -57,7 +60,7 @@ export function CopyableField({
           ) : (
             <Copy className="h-3 w-3" />
           )}
-          <span className="sr-only">Copy {label}</span>
+          <span className="sr-only">{t("Copy ")}{label}</span>
         </Button>
       </div>
     </div>

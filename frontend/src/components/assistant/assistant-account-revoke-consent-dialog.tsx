@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { z } from "zod";
 import { Badge } from "@/components/ui/badge";
@@ -22,6 +24,7 @@ export function AssistantAccountRevokeConsentDialog({
   readonly params: AssistantAccountRevokeConsentParams;
   readonly onComplete: (userId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const submittingRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const [confirmed, setConfirmed] = useState(false);
@@ -54,12 +57,12 @@ export function AssistantAccountRevokeConsentDialog({
     <Dialog open={open} onOpenChange={(next) => !next && close()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{verifiedUserId ? "Consent revoked" : "Revoke app consent"}</DialogTitle>
-          <DialogDescription>{verifiedUserId ? "The consent projection is absent, confirming revocation." : "This app will need to ask for consent again before it can act."}</DialogDescription>
+          <DialogTitle>{verifiedUserId ? t("Consent revoked") : t("Revoke app consent")}</DialogTitle>
+          <DialogDescription>{verifiedUserId ? t("The consent projection is absent, confirming revocation.") : t("This app will need to ask for consent again before it can act.")}</DialogDescription>
         </DialogHeader>
-        {!verifiedUserId ? <div className="space-y-3 border-y border-border py-4 text-12"><div className="flex items-center justify-between"><span className="text-muted-foreground">Client</span><Badge variant="secondary" className="font-mono">{params.clientId}</Badge></div><label className="flex items-start gap-2"><Checkbox checked={confirmed} onCheckedChange={(value) => setConfirmed(value === true)} /><span>I understand this app will need fresh consent.</span></label></div> : null}
-        {error ? <p role="alert" className="text-11 text-destructive">{error}</p> : null}
-        <DialogFooter>{verifiedUserId ? <Button type="button" variant="primary" onClick={() => { onComplete(verifiedUserId); close(); }}>Done</Button> : <><Button type="button" variant="outline" onClick={close}>Cancel</Button><Button type="button" variant="destructive" isLoading={submitting} disabled={submitting || !confirmed} onClick={() => void submit()}>Revoke consent</Button></>}</DialogFooter>
+        {!verifiedUserId ? <div className="space-y-3 border-y border-border py-4 text-12"><div className="flex items-center justify-between"><span className="text-muted-foreground">{t("Client")}</span><Badge variant="secondary" className="font-mono">{params.clientId}</Badge></div><label className="flex items-start gap-2"><Checkbox checked={confirmed} onCheckedChange={(value) => setConfirmed(value === true)} /><span>{t("I understand this app will need fresh consent.")}</span></label></div> : null}
+        {error ? <p role="alert" className="text-11 text-destructive">{translateUi(error)}</p> : null}
+        <DialogFooter>{verifiedUserId ? <Button type="button" variant="primary" onClick={() => { onComplete(verifiedUserId); close(); }}>{t("Done")}</Button> : <><Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button><Button type="button" variant="destructive" isLoading={submitting} disabled={submitting || !confirmed} onClick={() => void submit()}>{t("Revoke consent")}</Button></>}</DialogFooter>
       </DialogContent>
     </Dialog>
   );

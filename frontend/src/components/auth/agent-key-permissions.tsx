@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Badge } from "@/components/ui/badge";
 import {
   effectivePermissions,
@@ -5,34 +7,35 @@ import {
 } from "@/schemas/agent-key-login";
 
 export function AgentKeyPermissions({ apiKey }: { apiKey: AgentKeySummary }) {
+  const { t } = useUiTranslation();
   return (
     <div className="space-y-2 text-12">
       <div className="flex flex-wrap items-center gap-2">
         <strong className="break-words">{apiKey.name}</strong>
         <Badge variant={apiKey.owner_type === "org" ? "info" : "secondary"}>
-          {apiKey.owner_type === "org" ? "Organization" : "Personal"}
+          {apiKey.owner_type === "org" ? t("Organization") : t("Personal")}
         </Badge>
       </div>
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 [&_dt]:text-muted-foreground [&_dd]:break-words">
-        <dt>Owner</dt>
+        <dt>{t("Owner")}</dt>
         <dd>{apiKey.owner_name}</dd>
         {apiKey.key_prefix && (
           <>
-            <dt>Prefix</dt>
+            <dt>{t("Prefix")}</dt>
             <dd className="font-mono">{apiKey.key_prefix}</dd>
           </>
         )}
-        <dt>Effective permissions</dt>
+        <dt>{t("Effective permissions")}</dt>
         <dd>{effectivePermissions(apiKey.scopes)}</dd>
-        <dt>Scopes</dt>
+        <dt>{t("Scopes")}</dt>
         <dd>{apiKey.scopes}</dd>
-        <dt>Services</dt>
+        <dt>{t("Services")}</dt>
         <dd>
           {apiKey.allow_all_services
-            ? "All services"
+            ? t("All services")
             : [
                 apiKey.allow_auto_connected_services
-                  ? "All auto-connected platform services (including future additions)"
+                  ? t("All auto-connected platform services (including future additions)")
                   : "",
                 ...apiKey.allowed_services.map(
                   (item) =>
@@ -40,55 +43,48 @@ export function AgentKeyPermissions({ apiKey }: { apiKey: AgentKeySummary }) {
                 ),
               ]
                 .filter(Boolean)
-                .join(", ") || "None"}
+                .join(", ") || t("None")}
         </dd>
-        <dt>Nodes</dt>
+        <dt>{t("Nodes")}</dt>
         <dd>
           {apiKey.allow_all_nodes
-            ? "All nodes"
+            ? t("All nodes")
             : apiKey.allowed_nodes.map((item) => item.name).join(", ") ||
-              "None"}
+              t("None")}
         </dd>
-        <dt>Key expiry</dt>
+        <dt>{t("Key expiry")}</dt>
         <dd>
           {apiKey.expires_at
-            ? new Date(apiKey.expires_at).toLocaleString()
-            : "No expiry"}
+            ? new Date(apiKey.expires_at).toLocaleString(getFormattingLocale())
+            : t("No expiry")}
         </dd>
-        <dt>Rate limit</dt>
+        <dt>{t("Rate limit")}</dt>
         <dd>
           {apiKey.rate_limit_per_second === null
-            ? "Default"
-            : `${apiKey.rate_limit_per_second} requests/s`}
-          ; burst {apiKey.rate_limit_burst ?? "default"}
+            ? t("Default")
+            : t("{{rate_limit_per_second}} requests/s", { rate_limit_per_second: apiKey.rate_limit_per_second })}{t("; burst ")}{apiKey.rate_limit_burst ?? t("default")}
         </dd>
-        <dt>Platform</dt>
-        <dd>{apiKey.platform ?? "Not specified"}</dd>
+        <dt>{t("Platform")}</dt>
+        <dd>{apiKey.platform ?? t("Not specified")}</dd>
       </dl>
       {(apiKey.allow_all_services || apiKey.allow_all_nodes) && (
-        <p role="note" className="text-warning">
-          Unrestricted{" "}
+        <p role="note" className="text-warning">{t("Unrestricted")}{" "}
           {apiKey.allow_all_services && apiKey.allow_all_nodes
-            ? "service and node"
+            ? t("service and node")
             : apiKey.allow_all_services
-              ? "service"
-              : "node"}{" "}
-          access, including future resources.
-        </p>
+              ? t("service")
+              : t("node")}{" "}{t("access, including future resources.")}</p>
       )}
     </div>
   );
 }
 
 export function AgentKeyIssuanceNotice({ existing }: { existing: boolean }) {
+  const { t } = useUiTranslation();
   return (
-    <p className="border-l-2 border-info pl-3 text-12 text-muted-foreground">
-      A new login credential will be issued for this key.{" "}
+    <p className="border-l-2 border-info pl-3 text-12 text-muted-foreground">{t("A new login credential will be issued for this key.")}{" "}
       {existing
-        ? "The key's existing secret and other consumers are unaffected. "
-        : "The key's primary secret will not be shown. "}
-      Revoke this login credential on the key's Login credentials section, or
-      revoke the key to invalidate all its credentials.
-    </p>
+        ? t("The key's existing secret and other consumers are unaffected. ")
+        : t("The key's primary secret will not be shown. ")}{t("Revoke this login credential on the key's Login credentials section, or revoke the key to invalidate all its credentials.")}</p>
   );
 }

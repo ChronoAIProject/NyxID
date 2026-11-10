@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useChangeReview } from "@/components/shared/change-review-dialog";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -83,6 +86,7 @@ import { flattenRedemptions } from "./admin-invite-codes.helpers";
 const DEFAULT_MAX_USES = 10;
 
 export function AdminInviteCodesPage() {
+  const { t } = useUiTranslation();
   const { data: publicConfig } = usePublicConfig();
   const currentUser = useAuthStore((s) => s.user);
   const canWrite = canAdminWrite(currentUser);
@@ -172,10 +176,10 @@ export function AdminInviteCodesPage() {
         note: formData.note || undefined,
       });
       setCreatedCode(created);
-      toast.success("Invite code created");
+      toast.success(translateUi("Invite code created"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to create invite code",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to create invite code"),
       );
     }
   }
@@ -184,12 +188,12 @@ export function AdminInviteCodesPage() {
     try {
       await copyToClipboard(code);
       setCopiedId(id);
-      toast.success("Code copied to clipboard");
+      toast.success(translateUi("Code copied to clipboard"));
       setTimeout(() => {
         setCopiedId((current) => (current === id ? null : current));
       }, 2000);
     } catch {
-      toast.error("Failed to copy to clipboard");
+      toast.error(translateUi("Failed to copy to clipboard"));
     }
   }
 
@@ -198,12 +202,12 @@ export function AdminInviteCodesPage() {
       const link = `${window.location.origin}/register?code=${encodeURIComponent(code)}`;
       await copyToClipboard(link);
       setCopiedLinkId(id);
-      toast.success("Invite link copied to clipboard");
+      toast.success(translateUi("Invite link copied to clipboard"));
       setTimeout(() => {
         setCopiedLinkId((current) => (current === id ? null : current));
       }, 2000);
     } catch {
-      toast.error("Failed to copy to clipboard");
+      toast.error(translateUi("Failed to copy to clipboard"));
     }
   }
 
@@ -211,10 +215,10 @@ export function AdminInviteCodesPage() {
     if (!deactivateTarget) return;
     try {
       await deactivateMutation.mutateAsync(deactivateTarget.id);
-      toast.success(`Invite code ${deactivateTarget.code} deactivated`);
+      toast.success(translateUi("Invite code {{code}} deactivated", { code: deactivateTarget.code }));
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to deactivate code",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to deactivate code"),
       );
     } finally {
       setDeactivateTarget(null);
@@ -235,14 +239,14 @@ export function AdminInviteCodesPage() {
           // first opened.
           lastSyncedNoteRef.current = updated.note ?? "";
         }
-        toast.success("Note updated");
+        toast.success(translateUi("Note updated"));
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") {
-          toast.error("Save timed out after 10 seconds. Try again.");
+          toast.error(translateUi("Save timed out after 10 seconds. Try again."));
         } else if (err instanceof ApiError) {
-          toast.error(err.message);
+          toast.error(translateErrorMessage(err.message));
         } else {
-          toast.error("Failed to update note");
+          toast.error(translateUi("Failed to update note"));
         }
         throw err;
       }
@@ -264,36 +268,33 @@ export function AdminInviteCodesPage() {
 
   function getStatusBadge(ic: InviteCode) {
     const exhausted = ic.used_count >= ic.max_uses;
-    if (!ic.is_active) return <Badge variant="destructive">Deactivated</Badge>;
-    if (exhausted) return <Badge variant="warning">Exhausted</Badge>;
-    return <Badge variant="success">Active</Badge>;
+    if (!ic.is_active) return <Badge variant="destructive">{t("Deactivated")}</Badge>;
+    if (exhausted) return <Badge variant="warning">{t("Exhausted")}</Badge>;
+    return <Badge variant="success">{t("Active")}</Badge>;
   }
 
   return (
     <div className="space-y-8">
       {noteReview.dialog}
       <PageHeader
-        title="Invite Codes"
-        description="Create and manage invite codes for new user registration. Each code can grant a bounded number of registrations and can be deactivated at any time."
+        title={t("Invite Codes")}
+        description={t("Create and manage invite codes for new user registration. Each code can grant a bounded number of registrations and can be deactivated at any time.")}
         actions={null}
       />
       {publicConfig?.invite_code_required === false && (
-        <p role="status" className="text-sm text-muted-foreground">
-          Invitation codes are currently not required for signup. Enable the
-          invitation-code feature flag to require them again.
-        </p>
+        <p role="status" className="text-sm text-muted-foreground">{t("Invitation codes are currently not required for signup. Enable the invitation-code feature flag to require them again.")}</p>
       )}
 
       <Tabs value={view} onValueChange={setView}>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between sm:gap-4">
           <TabsList className="min-w-0">
-            <TabsTrigger value="codes">Codes</TabsTrigger>
-            <TabsTrigger value="users">By User</TabsTrigger>
+            <TabsTrigger value="codes">{t("Codes")}</TabsTrigger>
+            <TabsTrigger value="users">{t("By User")}</TabsTrigger>
           </TabsList>
           {canWrite && view === "codes" && (
             <div className="flex shrink-0 items-center gap-4 sm:pb-1">
               <AddCtaButton
-                label="Create Invite Code"
+                label={t("Create Invite Code")}
                 onClick={openCreateDialog}
               />
             </div>
@@ -314,24 +315,16 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-12 font-medium text-muted-foreground">
-                  Failed to load invite codes
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Please try again later.
-                </p>
+                <p className="text-12 font-medium text-muted-foreground">{t("Failed to load invite codes")}</p>
+                <p className="text-xs text-muted-foreground">{t("Please try again later.")}</p>
               </div>
             </div>
           ) : inviteCodes.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-12 font-medium text-muted-foreground">
-                  No invite codes found
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Create one to allow a new user to register.
-                </p>
+                <p className="text-12 font-medium text-muted-foreground">{t("No invite codes found")}</p>
+                <p className="text-xs text-muted-foreground">{t("Create one to allow a new user to register.")}</p>
               </div>
             </div>
           ) : (
@@ -376,18 +369,14 @@ export function AdminInviteCodesPage() {
                                 void handleCopyCode(ic.code, ic.id);
                               }}
                             >
-                              <Copy className="h-3 w-3" />
-                              Copy code
-                            </DropdownMenuItem>
+                              <Copy className="h-3 w-3" />{t("Copy code")}</DropdownMenuItem>
                             <DropdownMenuItem
                               onClick={(e) => {
                                 e.stopPropagation();
                                 void handleCopyLink(ic.code, ic.id);
                               }}
                             >
-                              <Link2 className="h-3 w-3" />
-                              Copy invite link
-                            </DropdownMenuItem>
+                              <Link2 className="h-3 w-3" />{t("Copy invite link")}</DropdownMenuItem>
                             {canWrite && ic.is_active && (
                               <DropdownMenuItem
                                 className="text-destructive focus:text-destructive"
@@ -396,9 +385,7 @@ export function AdminInviteCodesPage() {
                                   setDeactivateTarget(ic);
                                 }}
                               >
-                                <Ban className="h-3 w-3" />
-                                Deactivate
-                              </DropdownMenuItem>
+                                <Ban className="h-3 w-3" />{t("Deactivate")}</DropdownMenuItem>
                             )}
                           </DropdownMenuContent>
                         </DropdownMenu>
@@ -406,8 +393,7 @@ export function AdminInviteCodesPage() {
                     </div>
                     <div className="mt-2 text-xs text-muted-foreground">
                       <span className="tabular-nums">
-                        {String(ic.used_count)}/{String(ic.max_uses)} uses
-                      </span>
+                        {String(ic.used_count)}/{String(ic.max_uses)}{t(" uses")}</span>
                       {ic.note && (
                         <>
                           <span className="text-border mx-1.5">|</span>
@@ -416,7 +402,7 @@ export function AdminInviteCodesPage() {
                       )}
                     </div>
                     <div className="mt-1.5 text-xs text-muted-foreground">
-                      <span>Created {formatDate(ic.created_at)}</span>
+                      <span>{t("Created ")}{formatDate(ic.created_at)}</span>
                     </div>
                   </div>
                 ))}
@@ -427,12 +413,12 @@ export function AdminInviteCodesPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>Code</TableHead>
-                      <TableHead>Uses</TableHead>
-                      <TableHead>Status</TableHead>
-                      <TableHead>Note</TableHead>
-                      <TableHead>Created</TableHead>
-                      <TableHead className="w-[100px]">Actions</TableHead>
+                      <TableHead>{t("Invite code")}</TableHead>
+                      <TableHead>{t("Uses")}</TableHead>
+                      <TableHead>{t("Status")}</TableHead>
+                      <TableHead>{t("Note")}</TableHead>
+                      <TableHead>{t("Created")}</TableHead>
+                      <TableHead className="w-[100px]">{t("Actions")}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -490,18 +476,14 @@ export function AdminInviteCodesPage() {
                                   void handleCopyCode(ic.code, ic.id);
                                 }}
                               >
-                                <Copy className="h-3 w-3" />
-                                Copy code
-                              </DropdownMenuItem>
+                                <Copy className="h-3 w-3" />{t("Copy code")}</DropdownMenuItem>
                               <DropdownMenuItem
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   void handleCopyLink(ic.code, ic.id);
                                 }}
                               >
-                                <Link2 className="h-3 w-3" />
-                                Copy invite link
-                              </DropdownMenuItem>
+                                <Link2 className="h-3 w-3" />{t("Copy invite link")}</DropdownMenuItem>
                               {canWrite && ic.is_active && (
                                 <DropdownMenuItem
                                   className="text-destructive focus:text-destructive"
@@ -510,9 +492,7 @@ export function AdminInviteCodesPage() {
                                     setDeactivateTarget(ic);
                                   }}
                                 >
-                                  <Ban className="h-3 w-3" />
-                                  Deactivate
-                                </DropdownMenuItem>
+                                  <Ban className="h-3 w-3" />{t("Deactivate")}</DropdownMenuItem>
                               )}
                             </DropdownMenuContent>
                           </DropdownMenu>
@@ -540,12 +520,8 @@ export function AdminInviteCodesPage() {
             <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
               <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
               <div className="space-y-1">
-                <p className="text-12 font-medium text-muted-foreground">
-                  Failed to load invite codes
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  Please try again later.
-                </p>
+                <p className="text-12 font-medium text-muted-foreground">{t("Failed to load invite codes")}</p>
+                <p className="text-xs text-muted-foreground">{t("Please try again later.")}</p>
               </div>
             </div>
           ) : (
@@ -571,21 +547,19 @@ export function AdminInviteCodesPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {createdCode ? "Invite code created" : "Create Invite Code"}
+              {createdCode ? t("Invite code created") : t("Create Invite Code")}
             </DialogTitle>
             <DialogDescription>
               {createdCode
-                ? "Share the code below with the user who should register. The code is also visible in the table."
-                : "Generate a new invite code. The code is created server-side and shown once it is ready."}
+                ? t("Share the code below with the user who should register. The code is also visible in the table.")
+                : t("Generate a new invite code. The code is created server-side and shown once it is ready.")}
             </DialogDescription>
           </DialogHeader>
 
           {createdCode ? (
             <div className="space-y-4">
               <div className="rounded-md border border-border bg-muted/30 p-4">
-                <p className="mb-2 text-xs uppercase tracking-wider text-text-tertiary">
-                  Invite code
-                </p>
+                <p className="mb-2 text-xs uppercase tracking-wider text-text-tertiary">{t("Invite code")}</p>
                 <div className="flex items-center justify-between gap-2">
                   <span className="font-mono text-lg font-medium text-foreground">
                     {createdCode.code}
@@ -602,23 +576,17 @@ export function AdminInviteCodesPage() {
                         <Check
                           className="h-3 w-3 text-success"
                           aria-hidden="true"
-                        />
-                        Copied
-                      </>
+                        />{t("Copied")}</>
                     ) : (
                       <>
-                        <Copy className="h-3 w-3" aria-hidden="true" />
-                        Copy
-                      </>
+                        <Copy className="h-3 w-3" aria-hidden="true" />{t("Copy")}</>
                     )}
                   </Button>
                 </div>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  Up to {String(createdCode.max_uses)} registrations.
-                </p>
+                <p className="mt-2 text-xs text-muted-foreground">{t("Up to ")}{String(createdCode.max_uses)}{t(" registrations.")}</p>
               </div>
               <DialogFooter>
-                <Button onClick={() => setCreateOpen(false)}>Done</Button>
+                <Button onClick={() => setCreateOpen(false)}>{t("Done")}</Button>
               </DialogFooter>
             </div>
           ) : (
@@ -634,7 +602,7 @@ export function AdminInviteCodesPage() {
                   name="max_uses"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Max uses</FormLabel>
+                      <FormLabel>{t("Max uses")}</FormLabel>
                       <FormControl>
                         <Input
                           type="number"
@@ -650,10 +618,7 @@ export function AdminInviteCodesPage() {
                           ref={field.ref}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
-                        Maximum number of registrations this code can grant
-                        (1-1000).
-                      </p>
+                      <p className="text-xs text-muted-foreground">{t("Maximum number of registrations this code can grant (1-1000).")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -663,18 +628,15 @@ export function AdminInviteCodesPage() {
                   name="note"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Note</FormLabel>
+                      <FormLabel>{t("Note")}</FormLabel>
                       <FormControl>
                         <Input
-                          placeholder="e.g. alice@corp"
+                          placeholder={t("e.g. alice@corp")}
                           maxLength={512}
                           {...field}
                         />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
-                        Optional reminder of who this code is for. Visible to
-                        admins only.
-                      </p>
+                      <p className="text-xs text-muted-foreground">{t("Optional reminder of who this code is for. Visible to admins only.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -684,16 +646,12 @@ export function AdminInviteCodesPage() {
                     type="button"
                     variant="outline"
                     onClick={() => setCreateOpen(false)}
-                  >
-                    Cancel
-                  </Button>
+                  >{t("Cancel")}</Button>
                   <Button
                     type="submit"
                     variant="primary"
                     isLoading={createMutation.isPending}
-                  >
-                    Create Invite Code
-                  </Button>
+                  >{t("Create Invite Code")}</Button>
                 </DialogFooter>
               </form>
             </Form>
@@ -710,24 +668,20 @@ export function AdminInviteCodesPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Deactivate invite code</DialogTitle>
+            <DialogTitle>{t("Deactivate invite code")}</DialogTitle>
             <DialogDescription>
               {deactivateTarget
-                ? `Deactivating ${deactivateTarget.code} immediately blocks any further registrations with it. This cannot be undone — mint a new code if a user needs another attempt.`
+                ? t("Deactivating {{code}} immediately blocks any further registrations with it. This cannot be undone — mint a new code if a user needs another attempt.", { code: deactivateTarget.code })
                 : ""}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeactivateTarget(null)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setDeactivateTarget(null)}>{t("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDeactivate()}
               isLoading={deactivateMutation.isPending}
-            >
-              Deactivate
-            </Button>
+            >{t("Deactivate")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -761,9 +715,7 @@ export function AdminInviteCodesPage() {
                   </SheetTitle>
                   {getStatusBadge(selectedCode)}
                 </div>
-                <SheetDescription>
-                  Detailed usage and editable note for this invite code.
-                </SheetDescription>
+                <SheetDescription>{t("Detailed usage and editable note for this invite code.")}</SheetDescription>
                 <div className="flex items-center gap-2 pt-2">
                   <Button
                     variant="outline"
@@ -777,14 +729,10 @@ export function AdminInviteCodesPage() {
                         <Check
                           className="h-3 w-3 text-success"
                           aria-hidden="true"
-                        />
-                        Copied
-                      </>
+                        />{t("Copied")}</>
                     ) : (
                       <>
-                        <Copy className="h-3 w-3" aria-hidden="true" />
-                        Copy code
-                      </>
+                        <Copy className="h-3 w-3" aria-hidden="true" />{t("Copy code")}</>
                     )}
                   </Button>
                   <Button
@@ -799,14 +747,10 @@ export function AdminInviteCodesPage() {
                         <Check
                           className="h-3 w-3 text-success"
                           aria-hidden="true"
-                        />
-                        Copied
-                      </>
+                        />{t("Copied")}</>
                     ) : (
                       <>
-                        <Link2 className="h-3 w-3" aria-hidden="true" />
-                        Copy invite link
-                      </>
+                        <Link2 className="h-3 w-3" aria-hidden="true" />{t("Copy invite link")}</>
                     )}
                   </Button>
                 </div>
@@ -814,26 +758,20 @@ export function AdminInviteCodesPage() {
 
               <div className="grid grid-cols-2 gap-4 rounded-md border border-border bg-muted/20 p-4 text-sm">
                 <div>
-                  <p className="text-xs uppercase tracking-wider text-text-tertiary">
-                    Uses
-                  </p>
+                  <p className="text-xs uppercase tracking-wider text-text-tertiary">{t("Uses")}</p>
                   <p className="mt-1 tabular-nums">
                     {String(selectedCode.used_count)}/
                     {String(selectedCode.max_uses)}
                   </p>
                 </div>
                 <div>
-                  <p className="text-xs uppercase tracking-wider text-text-tertiary">
-                    Created
-                  </p>
+                  <p className="text-xs uppercase tracking-wider text-text-tertiary">{t("Created")}</p>
                   <p className="mt-1 text-muted-foreground">
                     {formatDate(selectedCode.created_at)}
                   </p>
                 </div>
                 <div className="col-span-2">
-                  <p className="text-xs uppercase tracking-wider text-text-tertiary">
-                    Created by
-                  </p>
+                  <p className="text-xs uppercase tracking-wider text-text-tertiary">{t("Created by")}</p>
                   {(() => {
                     // Mirror the Redemptions list fallback chain: display_name →
                     // email → UUID. Use truthy checks + optional chaining so a
@@ -874,22 +812,20 @@ export function AdminInviteCodesPage() {
                 <label
                   htmlFor="invite-code-note"
                   className="text-sm font-medium"
-                >
-                  Note
-                </label>
+                >{t("Note")}</label>
                 <Input
                   id="invite-code-note"
                   value={noteDraft}
                   onChange={(e) => setNoteDraft(e.target.value)}
-                  placeholder="e.g. alice@corp"
+                  placeholder={t("e.g. alice@corp")}
                   maxLength={512}
                   readOnly={!canWrite}
                 />
                 <div className="flex items-center justify-between">
                   <p className="text-xs text-muted-foreground">
                     {canWrite
-                      ? "Visible to admins only. Leave blank to clear."
-                      : "Read-only — only admins can edit notes."}
+                      ? t("Visible to admins only. Leave blank to clear.")
+                      : t("Read-only — only admins can edit notes.")}
                   </p>
                   {canWrite && (
                     <Button
@@ -897,24 +833,19 @@ export function AdminInviteCodesPage() {
                       onClick={() => void handleSaveNote()}
                       disabled={!noteHasChanges || isSaving}
                       isLoading={isSaving}
-                    >
-                      Save
-                    </Button>
+                    >{t("Save")}</Button>
                   )}
                 </div>
               </div>
 
               <div className="space-y-3">
                 <div className="flex items-baseline justify-between">
-                  <h3 className="text-sm font-medium">Redemptions</h3>
+                  <h3 className="text-sm font-medium">{t("Redemptions")}</h3>
                   <span className="text-xs text-muted-foreground">
-                    {selectedCode.usages.length} total
-                  </span>
+                    {selectedCode.usages.length}{t(" total")}</span>
                 </div>
                 {selectedCode.usages.length === 0 ? (
-                  <div className="rounded-md border border-dashed border-border py-8 text-center text-11 text-text-tertiary">
-                    No redemptions yet.
-                  </div>
+                  <div className="rounded-md border border-dashed border-border py-8 text-center text-11 text-text-tertiary">{t("No redemptions yet.")}</div>
                 ) : (
                   <ul className="divide-y divide-border rounded-md border border-border">
                     {selectedCode.usages.map((usage) => {
@@ -941,9 +872,7 @@ export function AdminInviteCodesPage() {
                             )}
                             {usage.user_email === null &&
                               usage.user_display_name === null && (
-                                <p className="truncate font-mono text-xs text-muted-foreground">
-                                  account deleted
-                                </p>
+                                <p className="truncate font-mono text-xs text-muted-foreground">{t("account deleted")}</p>
                               )}
                           </div>
                           <span className="shrink-0 text-xs text-muted-foreground">
@@ -970,12 +899,11 @@ interface UserNameLinkProps {
 }
 
 function UserNameLink({ email, displayName, userId }: UserNameLinkProps) {
+  const { t } = useUiTranslation();
   // A deleted account loses its users join, leaving both fields null.
   if (email === null) {
     return (
-      <span className="font-mono text-xs text-muted-foreground">
-        account deleted
-      </span>
+      <span className="font-mono text-xs text-muted-foreground">{t("account deleted")}</span>
     );
   }
 
@@ -1002,6 +930,7 @@ function InviteCodesByUserView({
   onOpenCode,
   isSaving,
 }: InviteCodesByUserViewProps) {
+  const { t } = useUiTranslation();
   const redemptions = useMemo(
     () => flattenRedemptions(inviteCodes),
     [inviteCodes],
@@ -1012,12 +941,8 @@ function InviteCodesByUserView({
       <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
         <MysteryBoxIcon className="h-64 w-64 text-muted-foreground" />
         <div className="space-y-1">
-          <p className="text-12 font-medium text-muted-foreground">
-            No redemptions found
-          </p>
-          <p className="text-xs text-muted-foreground">
-            Invite codes will appear here once they are redeemed by users.
-          </p>
+          <p className="text-12 font-medium text-muted-foreground">{t("No redemptions found")}</p>
+          <p className="text-xs text-muted-foreground">{t("Invite codes will appear here once they are redeemed by users.")}</p>
         </div>
       </div>
     );
@@ -1062,7 +987,7 @@ function InviteCodesByUserView({
                 {r.note ? (
                   <span>{r.note}</span>
                 ) : (
-                  <span className="text-text-tertiary">No note</span>
+                  <span className="text-text-tertiary">{t("No note")}</span>
                 )}
               </div>
               <span className="shrink-0 tabular-nums">
@@ -1078,11 +1003,11 @@ function InviteCodesByUserView({
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Name</TableHead>
-              <TableHead>Email</TableHead>
-              <TableHead>Code</TableHead>
-              <TableHead>Remarks</TableHead>
-              <TableHead>Redeemed</TableHead>
+              <TableHead>{t("Name")}</TableHead>
+              <TableHead>{t("Email")}</TableHead>
+              <TableHead>{t("Invite code")}</TableHead>
+              <TableHead>{t("Remarks")}</TableHead>
+              <TableHead>{t("Redeemed")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>

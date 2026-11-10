@@ -1,3 +1,4 @@
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { Link } from "@tanstack/react-router";
 import { ChevronRight } from "lucide-react";
 import type { StudioBreadcrumb } from "@/lib/studio-breadcrumbs";
@@ -80,11 +81,12 @@ export function StudioBreadcrumbTrail({
 }: {
   readonly crumbs: readonly StudioBreadcrumb[];
 }) {
+  const { t } = useAppTranslation();
   if (crumbs.length === 0) return null;
 
   return (
     <nav
-      aria-label="Breadcrumb"
+      aria-label={t("Breadcrumb")}
       className="hidden md:flex items-center gap-1 text-12 min-w-0"
     >
       {crumbs.map((crumb, i) => (

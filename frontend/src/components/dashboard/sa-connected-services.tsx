@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import {
   useSaConnections,
@@ -37,6 +40,7 @@ interface SaConnectedServicesProps {
 }
 
 export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
+  const { t } = useUiTranslation();
   const { data: saConnections, isLoading: connectionsLoading } =
     useSaConnections(saId);
   const { data: allServices } = useServices();
@@ -71,12 +75,12 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
   async function handleConnectServiceDirect(serviceId: string) {
     try {
       await connectServiceMutation.mutateAsync({ saId, serviceId });
-      toast.success("Service connected");
+      toast.success(translateUi("Service connected"));
     } catch (err) {
       if (err instanceof ApiError) {
-        toast.error(err.message);
+        toast.error(translateErrorMessage(err.message));
       } else {
-        toast.error("Failed to connect service");
+        toast.error(translateUi("Failed to connect service"));
       }
     }
   }
@@ -96,7 +100,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
           credential,
           credentialLabel: label,
         });
-        toast.success(`Connected to ${service.name}`);
+        toast.success(translateUi("Connected to {{name}}", { name: service.name }));
       } else {
         await updateConnectionCredentialMutation.mutateAsync({
           saId,
@@ -104,17 +108,17 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
           credential,
           credentialLabel: label,
         });
-        toast.success("Credential updated");
+        toast.success(translateUi("Credential updated"));
       }
       setServiceCredentialDialog(null);
     } catch (err) {
       if (err instanceof ApiError) {
-        toast.error(err.message);
+        toast.error(translateErrorMessage(err.message));
       } else {
         toast.error(
-          mode === "connect"
+          translateErrorMessage(mode === "connect"
             ? "Failed to connect service"
-            : "Failed to update credential",
+            : "Failed to update credential"),
         );
       }
     }
@@ -130,19 +134,19 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
   async function handleDisconnectService(serviceId: string) {
     try {
       await disconnectServiceMutation.mutateAsync({ saId, serviceId });
-      toast.success("Service disconnected");
+      toast.success(translateUi("Service disconnected"));
     } catch (err) {
       if (err instanceof ApiError) {
-        toast.error(err.message);
+        toast.error(translateErrorMessage(err.message));
       } else {
-        toast.error("Failed to disconnect service");
+        toast.error(translateUi("Failed to disconnect service"));
       }
     }
   }
 
   return (
     <>
-      <DetailSection title="Connected Services">
+      <DetailSection title={t("Connected Services")}>
         <div className="space-y-3 p-4">
         {connectionsLoading ? (
           <Skeleton className="h-24 w-full" />
@@ -151,13 +155,13 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Service</TableHead>
-                  <TableHead>Category</TableHead>
-                  <TableHead>Auth Type</TableHead>
-                  <TableHead>Credential</TableHead>
-                  <TableHead>Label</TableHead>
-                  <TableHead>Connected</TableHead>
-                  <TableHead>Actions</TableHead>
+                  <TableHead>{t("Service")}</TableHead>
+                  <TableHead>{t("Category")}</TableHead>
+                  <TableHead>{t("Auth Type")}</TableHead>
+                  <TableHead>{t("Credential")}</TableHead>
+                  <TableHead>{t("Label")}</TableHead>
+                  <TableHead>{t("Connected")}</TableHead>
+                  <TableHead>{t("Actions")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -176,7 +180,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                       <Badge
                         variant={conn.has_credential ? "success" : "secondary"}
                       >
-                        {conn.has_credential ? "Stored" : "None"}
+                        {conn.has_credential ? t("Stored") : t("None")}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-muted-foreground">
@@ -197,9 +201,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                               updateConnectionCredentialMutation.isPending
                             }
                           >
-                            <ButtonIcon><KeyRound className="h-3 w-3" /></ButtonIcon>
-                            Update
-                          </Button>
+                            <ButtonIcon><KeyRound className="h-3 w-3" /></ButtonIcon>{t("Update")}</Button>
                         )}
                         <Button
                           variant="ghost"
@@ -208,9 +210,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
                           }
                           disabled={disconnectServiceMutation.isPending}
                         >
-                          <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>
-                          Disconnect
-                        </Button>
+                          <ButtonIcon><Unlink className="h-3 w-3" /></ButtonIcon>{t("Disconnect")}</Button>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -219,9 +219,7 @@ export function SaConnectedServices({ saId }: SaConnectedServicesProps) {
             </Table>
           </div>
         ) : (
-          <p className="text-12 text-muted-foreground">
-            No services connected to this service account.
-          </p>
+          <p className="text-12 text-muted-foreground">{t("No services connected to this service account.")}</p>
         )}
 
         {availableServices.length > 0 && (
@@ -258,13 +256,12 @@ function ConnectServiceDropdown({
   readonly services: readonly DownstreamService[];
   readonly onSelect: (service: DownstreamService) => void;
 }) {
+  const { t } = useUiTranslation();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button variant="outline">
-          <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>
-          Connect Service
-        </Button>
+          <ButtonIcon><Plug className="h-3 w-3" /></ButtonIcon>{t("Connect Service")}</Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent style={{ maxHeight: "16rem", overflowY: "auto" }}>
         {services.map((s) => (

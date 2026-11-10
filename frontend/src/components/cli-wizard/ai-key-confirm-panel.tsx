@@ -1,3 +1,4 @@
+import { useWizardTranslation } from "@/i18n/wizard";
 import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
 import type { LanePricingView } from "@/schemas/platform-keys";
 // ai-key (service-add) pairing panel.
@@ -192,6 +193,7 @@ export function AiKeyConfirm({
   onSuccess,
   onSlugPicked,
 }: AiKeyConfirmProps) {
+  const { t } = useWizardTranslation();
   // Issue #414: when the CLI passes `--custom`, drop straight onto
   // the `__custom__` step so the user lands on the custom-service
   // form (skipping the catalog grid). The form pre-populates from
@@ -238,7 +240,7 @@ export function AiKeyConfirm({
   const entryErrorMessage = (() => {
     if (!entryError) return null;
     if (entryError instanceof ApiError) return entryError.message;
-    return `Couldn't load catalog entry "${trimmedSlug}".`;
+    return t('Couldn\'t load catalog entry "{{slug}}".', { slug: trimmedSlug });
   })();
 
   // Manage-scopes mode (NyxID#917 follow-up): `nyxid service scopes <slug>`
@@ -273,13 +275,13 @@ export function AiKeyConfirm({
     ? "Pick a service to connect. Simple-bearer APIs (OpenAI, Anthropic, Gemini) land in the guided form. Anything else — self-hosted, OAuth, device code, custom endpoint — goes to the power-user form."
     : onCustomStep
       ? "For services not in the catalog — paste your own endpoint URL and credential."
-      : `Your CLI wants to add ${trimmedSlug || "a service"} to NyxID. Confirm the details here.`;
+      : t("Your CLI wants to add {{service}} to NyxID. Confirm the details here.", { service: trimmedSlug || t("a service") });
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{title}</h2>
-        <p className="text-12 text-muted-foreground">{subtitle}</p>
+        <h2 className="font-serif text-28 font-normal">{t(title)}</h2>
+        <p className="text-12 text-muted-foreground">{t(subtitle)}</p>
       </div>
 
       <OwnerPicker value={targetOrgId} onChange={setTargetOrgId} />
@@ -362,6 +364,7 @@ function ManageScopesPanel({
   readonly pairingId: string;
   readonly onSuccess: (result: AiKeyPairingSuccess) => void;
 }) {
+  const { t } = useWizardTranslation();
   const {
     data: key,
     isLoading: keyLoading,
@@ -436,7 +439,7 @@ function ManageScopesPanel({
     return <ErrorLine message={errMsg} />;
   }
   if (!key || !entry) {
-    return <ErrorLine message="Connection not found." />;
+    return <ErrorLine message={t("Connection not found.")} />;
   }
 
   const isOAuth = (entry.provider_type ?? "").toLowerCase() === "oauth2";
@@ -445,11 +448,9 @@ function ManageScopesPanel({
   if (!isOAuth || !entry.provider_config_id || entry.supports_oauth_scopes === false) {
     return (
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">Manage permissions</h2>
+        <h2 className="font-serif text-28 font-normal">{t("Manage permissions")}</h2>
         <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
-          {entry.name} doesn't support managing scopes here — its permissions
-          are fixed by the provider.
-        </p>
+          {entry.name}{t(" doesn't support managing scopes here — its permissions are fixed by the provider.")}</p>
       </div>
     );
   }
@@ -482,11 +483,8 @@ function ManageScopesPanel({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">Manage permissions</h2>
-        <p className="text-12 text-muted-foreground">
-          Adjust what {key.label} can do, then re-authorize at the provider.
-          Your CLI is waiting for you to finish here.
-        </p>
+        <h2 className="font-serif text-28 font-normal">{t("Manage permissions")}</h2>
+        <p className="text-12 text-muted-foreground">{t("Adjust what ")}{key.label}{t(" can do, then re-authorize at the provider. Your CLI is waiting for you to finish here.")}</p>
       </div>
 
       <div className="flex items-start gap-3 rounded-lg border bg-muted/30 p-3">
@@ -510,9 +508,7 @@ function ManageScopesPanel({
         idPrefix="pair-manage-scope"
       />
 
-      <Button variant="primary" onClick={() => setAuthFlowActive(true)}>
-        Re-authorize with these permissions
-      </Button>
+      <Button variant="primary" onClick={() => setAuthFlowActive(true)}>{t("Re-authorize with these permissions")}</Button>
     </div>
   );
 }
@@ -524,6 +520,7 @@ function OwnerPicker({
   readonly value: string | null;
   readonly onChange: (orgId: string | null) => void;
 }) {
+  const { t } = useWizardTranslation();
   const { data: orgs } = useOrgs();
   const hasAdminOrg = (orgs ?? []).some((o) => o.your_role === "admin");
   if (!hasAdminOrg) return null;
@@ -531,17 +528,12 @@ function OwnerPicker({
     <div className="rounded-lg border border-border bg-muted/30 px-3 py-2">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-          <Building2 className="h-3.5 w-3.5" />
-          Owner
-        </div>
+          <Building2 className="h-3.5 w-3.5" />{t("Owner")}</div>
         <div className="w-[220px]">
-          <OrgScopeSelect value={value} onChange={onChange} label="Owner" />
+          <OrgScopeSelect value={value} onChange={onChange} label={t("Owner")} />
         </div>
       </div>
-      <p className="mt-1 text-11 text-muted-foreground">
-        Org-owned services are shared with every admin of that organization
-        and can be proxied by its members.
-      </p>
+      <p className="mt-1 text-11 text-muted-foreground">{t("Org-owned services are shared with every admin of that organization and can be proxied by its members.")}</p>
     </div>
   );
 }
@@ -637,6 +629,7 @@ function CustomServiceForm({
   onSuccess,
   onBack,
 }: CustomServiceFormProps) {
+  const { t } = useWizardTranslation();
   // Issue #414: when the CLI passed `--auth-method`, `--auth-key-name`,
   // `--slug`, `--via-node`, etc. alongside `--custom`, those values
   // pre-populate the form and let the user submit with just the
@@ -675,12 +668,12 @@ function CustomServiceForm({
     (needsCredential && !trimmedCredential);
   const credentialLabel =
     authMethod === "bot_bearer"
-      ? "Bot token"
+      ? t("Bot token")
       : authMethod === "basic"
         ? "user:pass"
         : authMethod === "body"
-          ? `${authKeyName.trim() || defaultAuthKeyName(authMethod)} value`
-          : "API key / credential";
+          ? t("{{field}} value", { field: authKeyName.trim() || defaultAuthKeyName(authMethod) })
+          : t("API key / credential");
 
   async function submit() {
     setLoading(true);
@@ -739,7 +732,7 @@ function CustomServiceForm({
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center">
-            <Label htmlFor="pair-custom-label">Label</Label>
+            <Label htmlFor="pair-custom-label">{t("Label")}</Label>
             <RequiredMarker />
           </div>
           <Input
@@ -748,18 +741,16 @@ function CustomServiceForm({
             onChange={(e) => {
               setLabel(e.target.value);
             }}
-            placeholder="e.g. My Self-hosted OpenAI Proxy"
+            placeholder={t("e.g. My Self-hosted OpenAI Proxy")}
             autoFocus
             aria-required="true"
           />
-          <p className="text-xs text-muted-foreground">
-            Shown everywhere in the CLI and web UI.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("Shown everywhere in the CLI and web UI.")}</p>
         </div>
 
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center">
-            <Label htmlFor="pair-custom-endpoint">Endpoint URL</Label>
+            <Label htmlFor="pair-custom-endpoint">{t("Endpoint URL")}</Label>
             <RequiredMarker />
           </div>
           <Input
@@ -771,14 +762,12 @@ function CustomServiceForm({
             placeholder="https://api.example.com"
             aria-required="true"
           />
-          <p className="text-xs text-muted-foreground">
-            The base URL NyxID proxies requests to.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("The base URL NyxID proxies requests to.")}</p>
         </div>
 
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center">
-            <Label htmlFor="pair-custom-auth-method">Auth method</Label>
+            <Label htmlFor="pair-custom-auth-method">{t("Auth method")}</Label>
             <RequiredMarker />
           </div>
           <select
@@ -806,19 +795,17 @@ function CustomServiceForm({
             className="flex h-10 w-full rounded-lg border border-input bg-transparent px-[14px] py-2 text-13 text-foreground focus-visible:outline-none focus-visible:border-input-focus"
             aria-required="true"
           >
-            <option value="bearer">bearer (Authorization: Bearer …)</option>
-            <option value="bot_bearer">bot_bearer (Authorization: Bot …)</option>
-            <option value="header">header (custom header)</option>
-            <option value="query">query (?key=…)</option>
-            <option value="path">path (path-prefix injection)</option>
-            <option value="ifttt_webhook">IFTTT Webhooks (raw key)</option>
-            <option value="basic">basic (Authorization: Basic …)</option>
-            <option value="body">body (JSON-body field injection)</option>
-            <option value="none">none (no auth injection)</option>
+            <option value="bearer">{t("bearer (Authorization: Bearer …)")}</option>
+            <option value="bot_bearer">{t("bot_bearer (Authorization: Bot …)")}</option>
+            <option value="header">{t("header (custom header)")}</option>
+            <option value="query">{t("query (?key=…)")}</option>
+            <option value="path">{t("path (path-prefix injection)")}</option>
+            <option value="ifttt_webhook">{t("IFTTT Webhooks (raw key)")}</option>
+            <option value="basic">{t("basic (Authorization: Basic …)")}</option>
+            <option value="body">{t("body (JSON-body field injection)")}</option>
+            <option value="none">{t("none (no auth injection)")}</option>
           </select>
-          <p className="text-xs text-muted-foreground">
-            How NyxID attaches the credential to outgoing requests.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("How NyxID attaches the credential to outgoing requests.")}</p>
         </div>
 
         {needsCredential ? (
@@ -840,9 +827,7 @@ function CustomServiceForm({
               autoFocus={Boolean(prefill.custom)}
               aria-required="true"
             />
-            <p className="text-xs text-muted-foreground">
-              Pasted once, encrypted at rest.
-              {authMethod === "basic" ? " Format: user:pass." : ""}
+            <p className="text-xs text-muted-foreground">{t("Pasted once, encrypted at rest.")}{authMethod === "basic" ? t(" Format: user:pass.") : ""}
             </p>
           </div>
         ) : null}
@@ -851,12 +836,12 @@ function CustomServiceForm({
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="pair-custom-auth-key-name">
               {authMethod === "header"
-                ? "Header name"
+                ? t("Header name")
                 : authMethod === "query"
-                  ? "Query parameter name"
+                  ? t("Query parameter name")
                   : authMethod === "path"
-                    ? "Path prefix segment"
-                    : "Body field name"}
+                    ? t("Path prefix segment")
+                    : t("Body field name")}
             </Label>
             <Input
               id="pair-custom-auth-key-name"
@@ -875,42 +860,34 @@ function CustomServiceForm({
           // id is locked at this point — to change it the user
           // re-runs the CLI with a different `--via-node`.
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
-            <p className="text-xs font-medium text-foreground">Routed via node</p>
+            <p className="text-xs font-medium text-foreground">{t("Routed via node")}</p>
             <code className="font-mono text-11 text-muted-foreground">
               {viaNode}
             </code>
-            <p className="text-11 text-muted-foreground mt-1">
-              Credential will be encrypted and pushed to this node over
-              the existing WebSocket channel. NyxID never logs it.
-            </p>
+            <p className="text-11 text-muted-foreground mt-1">{t("Credential will be encrypted and pushed to this node over the existing WebSocket channel. NyxID never logs it.")}</p>
           </div>
         ) : null}
 
         <div className="flex flex-col gap-1.5">
-          <Label htmlFor="pair-custom-slug">Custom slug (optional)</Label>
+          <Label htmlFor="pair-custom-slug">{t("Custom slug (optional)")}</Label>
           <Input
             id="pair-custom-slug"
             value={slug}
             onChange={(e) => {
               setSlug(e.target.value);
             }}
-            placeholder="auto-generated from label"
+            placeholder={t("auto-generated from label")}
           />
-          <p className="text-xs text-muted-foreground">
-            URL segment at <code>/proxy/s/&lt;slug&gt;/…</code>. Leave
-            blank to let NyxID derive it from the label.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("URL segment at ")}<code>/proxy/s/&lt;slug&gt;/…</code>{t(". Leave blank to let NyxID derive it from the label.")}</p>
         </div>
       </div>
 
       {error ? <ErrorLine message={error} /> : null}
 
       <div className="flex items-center justify-between gap-2">
-        <Button variant="outline" onClick={onBack} disabled={loading}>
-          ← Back
-        </Button>
+        <Button variant="outline" onClick={onBack} disabled={loading}>{t("← Back")}</Button>
         <Button variant="primary" onClick={() => void submit()} disabled={submitDisabled}>
-          {loading ? "Connecting…" : "Connect service"}
+          {loading ? t("Connecting…") : t("Connect service")}
         </Button>
       </div>
     </div>
@@ -934,6 +911,7 @@ function CatalogConfirmForm({
   pairingId,
   onSuccess,
 }: CatalogConfirmFormProps) {
+  const { t } = useWizardTranslation();
   const [platformChoice, setPlatformChoice] = useState(true);
   const usePlatformKey = Boolean(entry.platform_key?.available && !prefill.via_node && platformChoice);
   const shape = usePlatformKey ? "no-auth" : classifyFlow(entry);
@@ -958,6 +936,7 @@ function CatalogConfirmForm({
   );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [missingField, setMissingField] = useState<string | null>(null);
   const viaNode = prefill.via_node?.trim() ?? "";
   // Set once the user clicks "Continue" for an OAuth / device-code
   // flow; drops the confirm UI and mounts the sub-flow panel. Reset
@@ -968,6 +947,7 @@ function CatalogConfirmForm({
   async function submit() {
     setLoading(true);
     setError(null);
+    setMissingField(null);
     try {
       const body: Record<string, unknown> = {
         service_slug: entry.slug,
@@ -982,7 +962,7 @@ function CatalogConfirmForm({
         for (const f of fields) {
           const val = tokenFields[f.name]?.trim();
           if (!val) {
-            setError(`${f.label || f.name} is required.`);
+            setMissingField(f.label || f.name);
             setLoading(false);
             return;
           }
@@ -1068,10 +1048,7 @@ function CatalogConfirmForm({
       // has already been cancelled.
       if (window.__WIZARD_BOOTSTRAP__?.context === "local") {
         alert(
-          "This auth shape isn't supported in the CLI wizard. " +
-            "Open your NyxID dashboard and complete setup on the " +
-            "Keys page (tab: External Services). " +
-            "You can close this tab now.",
+          t("This authentication method is not supported in the CLI wizard. Open your NyxID dashboard and finish setup on the Keys page (External Services tab). You can close this tab now."),
         );
         return;
       }
@@ -1088,16 +1065,12 @@ function CatalogConfirmForm({
     return (
       <div className="flex flex-col gap-3">
         <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
-          {entry.name} is an SSH service. Use{" "}
-          <code>nyxid service add-ssh</code> from your CLI instead
-          (certificate-based auth, not a credential binding).
-        </p>
+          {entry.name}{t(" is an SSH service. Use")}{" "}
+          <code>nyxid service add-ssh</code>{t(" from your CLI instead (certificate-based auth, not a credential binding).")}</p>
         <Button
           variant="outline"
           onClick={() => void cancelThenNavigate(null)}
-        >
-          Go Back
-        </Button>
+        >{t("Go Back")}</Button>
       </div>
     );
   }
@@ -1118,18 +1091,12 @@ function CatalogConfirmForm({
     return (
       <div className="flex flex-col gap-3">
         <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
-          {entry.name} uses <code>{entry.auth_method}</code> auth,
-          which isn't supported via remote pairing. Complete setup on
-          the main Keys page. Your CLI will receive a cancel and
-          print a "finish in browser" hint.
-        </p>
+          {entry.name}{t(" uses ")}<code>{entry.auth_method}</code>{t(" auth, which isn't supported via remote pairing. Complete setup on the main Keys page. Your CLI will receive a cancel and print a \"finish in browser\" hint.")}</p>
         <Button
           variant="primary"
           onClick={() => void cancelThenNavigate(href)}
           className="justify-center gap-2"
-        >
-          Open Keys page
-          <ExternalLink className="h-4 w-4" />
+        >{t("Open Keys page")}<ExternalLink className="h-4 w-4" />
         </Button>
       </div>
     );
@@ -1249,15 +1216,14 @@ function CatalogConfirmForm({
           {entry.description ? (
             <p className="text-xs text-muted-foreground">{entry.description}</p>
           ) : null}
-          <p className="text-xs text-muted-foreground">
-            Auth: <code>{entry.auth_method}</code>
+          <p className="text-xs text-muted-foreground">{t("Auth: ")}<code>{entry.auth_method}</code>
           </p>
         </div>
       </div>
 
       {entry.platform_key?.available && !viaNode && <CredentialBindingChoice value={usePlatformKey} onChange={setPlatformChoice} platformPrice={entry.platform_key.pricing} byokPrice={entry.byok_pricing} legacyBillable={entry.billing?.platform_billable} resaleBillable={entry.billing?.resale_billable} disabled={loading} />}
       <div className="flex flex-col gap-3">
-        <Field label="Label" htmlFor="pair-aikey-label">
+        <Field label={t("Label")} htmlFor="pair-aikey-label">
           <Input
             id="pair-aikey-label"
             value={label}
@@ -1270,7 +1236,7 @@ function CatalogConfirmForm({
 
         {!usePlatformKey && entry.requires_gateway_url ? (
           <Field
-            label={isSupabase ? "Supabase Project URL" : "Instance URL"}
+            label={isSupabase ? t("Supabase Project URL") : t("Instance URL")}
             htmlFor="pair-aikey-url"
           >
             <Input
@@ -1290,7 +1256,7 @@ function CatalogConfirmForm({
 
         {needsCredentialInput && !viaNode ? (
           <Field
-            label={isSupabase ? "Supabase API key" : "API key"}
+            label={isSupabase ? t("Supabase API key") : t("API key")}
             htmlFor="pair-aikey-credential"
           >
             <Input
@@ -1302,7 +1268,7 @@ function CatalogConfirmForm({
                 setCredential(e.target.value);
               }}
               placeholder={
-                isSupabase ? "sb_secret_... or sb_publishable_..." : "sk-..."
+                isSupabase ? t("sb_secret_... or sb_publishable_...") : "sk-..."
               }
             />
             {entry.api_key_url ? (
@@ -1311,9 +1277,7 @@ function CatalogConfirmForm({
                 target="_blank"
                 rel="noopener noreferrer"
                 className="mt-1 inline-flex items-center gap-1 text-xs text-muted-foreground underline-offset-2 hover:underline"
-              >
-                Get an API key
-                <ExternalLink className="h-3 w-3" />
+              >{t("Get an API key")}<ExternalLink className="h-3 w-3" />
               </a>
             ) : null}
           </Field>
@@ -1353,37 +1317,29 @@ function CatalogConfirmForm({
             idPrefix="pair-aikey-scope"
           />
         ) : shape === "device-code" ? (
-          <p className="text-xs text-muted-foreground">
-            This provider does not accept additional scopes — they are
-            fixed by the upstream client registration.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("This provider does not accept additional scopes — they are fixed by the upstream client registration.")}</p>
         ) : null}
 
         {viaNode ? (
           <div className="rounded-lg border border-border bg-muted/40 px-3 py-2">
-            <p className="text-xs font-medium text-foreground">Routed via node</p>
+            <p className="text-xs font-medium text-foreground">{t("Routed via node")}</p>
             <code className="font-mono text-11 text-muted-foreground">
               {viaNode}
             </code>
-            <p className="text-11 text-muted-foreground mt-1">
-              Credential will be configured on the node agent. NyxID
-              never sees or stores it.
-            </p>
+            <p className="text-11 text-muted-foreground mt-1">{t("Credential will be configured on the node agent. NyxID never sees or stores it.")}</p>
           </div>
         ) : null}
 
         {shape === "no-auth" ? (
-          <p className="text-xs text-muted-foreground">
-            This service doesn't need a credential. Click Connect to
-            add it to your services.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("This service doesn't need a credential. Click Connect to add it to your services.")}</p>
         ) : null}
       </div>
 
+      {missingField ? <ErrorLine message={t("{{field}} is required.", { field: missingField })} /> : null}
       {error ? <ErrorLine message={error} /> : null}
 
       <Button variant="primary" onClick={handleSubmit} disabled={submitDisabled}>
-        {submitLabel}
+        {t(submitLabel)}
       </Button>
     </div>
   );
@@ -1407,9 +1363,10 @@ function Field({
 }
 
 function ErrorLine({ message }: { readonly message: string }) {
+  const { t } = useWizardTranslation();
   return (
     <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-12 text-destructive">
-      {message}
+      {t(message)}
     </p>
   );
 }

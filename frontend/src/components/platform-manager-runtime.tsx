@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -54,25 +55,22 @@ export function ManagerRuntimeSettings({
 }: {
   profile: PlatformProfile;
 }) {
+  const { t } = useUiTranslation();
   const query = useManagerRuntime(profile.id);
   if (query.isPending)
     return (
-      <p role="status" className="text-12">
-        Loading bot access settings...
-      </p>
+      <p role="status" className="text-12">{t("Loading bot access settings...")}</p>
     );
   if (query.error)
     return (
       <ErrorBanner
-        message="Public and personal bot access is unavailable. The server may not support this feature yet."
+        message={t("Public and personal bot access is unavailable. The server may not support this feature yet.")}
         onRetry={() => void query.refetch()}
       />
     );
   if (!query.data.supported)
     return (
-      <p role="status" className="text-12 text-muted-foreground">
-        Public and personal bot access is not supported by this server.
-      </p>
+      <p role="status" className="text-12 text-muted-foreground">{t("Public and personal bot access is not supported by this server.")}</p>
     );
   const runtime = query.data.runtime;
   return (
@@ -90,6 +88,7 @@ function RuntimeForm({
   profile: PlatformProfile;
   value: ManagerRuntime;
 }) {
+  const { t } = useUiTranslation();
   const runtime = value.runtime;
   const policy = runtime?.public_policy;
   const mutation = useManagerRuntimeAction(profile.id);
@@ -237,34 +236,26 @@ function RuntimeForm({
         onSubmit={form.handleSubmit(enable)}
       >
         <div className="flex flex-wrap gap-2">
-          <Badge variant={runtime?.public_enabled ? "success" : "secondary"}>
-            Public {runtime?.public_enabled ? "enabled" : "paused"}
+          <Badge variant={runtime?.public_enabled ? "success" : "secondary"}>{t(runtime?.public_enabled ? "Public enabled" : "Public paused")}
           </Badge>
-          <Badge variant={runtime?.personal_enabled ? "success" : "secondary"}>
-            Personal {runtime?.personal_enabled ? "enabled" : "paused"}
+          <Badge variant={runtime?.personal_enabled ? "success" : "secondary"}>{t("Personal ")}{runtime?.personal_enabled ? t("enabled") : t("paused")}
           </Badge>
-          {stopped && <Badge variant="destructive">Manager stopped</Badge>}
+          {stopped && <Badge variant="destructive">{t("Manager stopped")}</Badge>}
         </div>
-        <p>
-          Public FAQ and signup use the sponsor organization's credits. Linked
-          personal chats use each person's existing NyxBot access and normal
-          billing.
-        </p>
+        <p>{t("Public FAQ and signup use the sponsor organization's credits. Linked personal chats use each person's existing NyxBot access and normal billing.")}</p>
         <FormField
           control={form.control}
           name="source"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Agent source</FormLabel>
+              <FormLabel>{t("Agent source")}</FormLabel>
               <FormControl>
                 <select
                   {...field}
                   className="h-8 w-full rounded-lg border border-input bg-background px-3"
                 >
-                  <option value="nyxagent">
-                    NyxAgent
-                    {profiles.find((row) => row.id === selection)
-                      ? ` · ${profiles.find((row) => row.id === selection)!.label}`
+                  <option value="nyxagent">{t("NyxAgent")}{profiles.find((row) => row.id === selection)
+                      ? t(" · {{label}}", { label: profiles.find((row) => row.id === selection)!.label })
                       : ""}
                   </option>
                 </select>
@@ -290,27 +281,23 @@ function RuntimeForm({
                   <FormControl>
                     <Input {...field} inputMode="decimal" />
                   </FormControl>
-                  <p className="text-11 text-muted-foreground">Credits</p>
+                  <p className="text-11 text-muted-foreground">{t("Credits")}</p>
                   <FormMessage />
                 </FormItem>
               )}
             />
           ))}
         </div>
-        <p>
-          Sponsor organization:{" "}
+        <p>{t("Sponsor organization:")}{" "}
           <span className="font-mono">
             {form.watch("sponsor_owner_user_id") ||
-              "Select an authorized organization in Advanced"}
+              t("Select an authorized organization in Advanced")}
           </span>
         </p>
-        <p className="text-muted-foreground">
-          Public tools can read the public FAQ and offer signup or linking. They
-          cannot access anyone's account, services, memory or machines.
-        </p>
+        <p className="text-muted-foreground">{t("Public tools can read the public FAQ and offer signup or linking. They cannot access anyone's account, services, memory or machines.")}</p>
         <p role="status" className="text-muted-foreground">
           {readiness.status === "ready"
-            ? "Readiness was verified. Enable validates the exact settings again."
+            ? t("Readiness was verified. Enable validates the exact settings again.")
             : reasons[readiness.reason!]}
         </p>
         {error && <ErrorBanner message={error} />}
@@ -325,9 +312,9 @@ function RuntimeForm({
           >
             {runtime
               ? runtime.public_enabled
-                ? "Save public settings"
-                : "Enable public guide"
-              : "Enable bot"}
+                ? t("Save public settings")
+                : t("Enable public guide")
+              : t("Enable bot")}
           </Button>
           {runtime?.public_enabled && (
             <Button
@@ -335,19 +322,17 @@ function RuntimeForm({
               variant="outline"
               disabled={pending}
               onClick={() => void control("public-pause")}
-            >
-              Pause public guide
-            </Button>
+            >{t("Pause public guide")}</Button>
           )}
         </div>
         <details className="space-y-3 rounded-lg border border-border p-3">
-          <summary className="cursor-pointer font-medium">Advanced</summary>
+          <summary className="cursor-pointer font-medium">{t("Advanced")}</summary>
           <FormField
             control={form.control}
             name="profile"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Public NyxAgent profile</FormLabel>
+                <FormLabel>{t("Public NyxAgent profile")}</FormLabel>
                 <FormControl>
                   <select
                     {...field}
@@ -355,8 +340,7 @@ function RuntimeForm({
                   >
                     {!profiles.some((row) => row.id === field.value) && (
                       <option value={field.value}>
-                        {field.value} (unverified draft)
-                      </option>
+                        {field.value}{t(" (unverified draft)")}</option>
                     )}
                     {profiles.map((row) => (
                       <option key={row.id} value={row.id}>
@@ -374,28 +358,25 @@ function RuntimeForm({
             variant="outline"
             disabled={pending || stopped}
             onClick={() => void discover()}
-          >
-            Refresh public profiles
-          </Button>
+          >{t("Refresh public profiles")}</Button>
           <FormField
             control={form.control}
             name="sponsor_owner_user_id"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Sponsor organization</FormLabel>
+                <FormLabel>{t("Sponsor organization")}</FormLabel>
                 <FormControl>
                   <select
                     {...field}
                     className="h-8 w-full rounded-lg border border-input bg-background px-3"
                   >
-                    <option value="">Choose an organization</option>
+                    <option value="">{t("Choose an organization")}</option>
                     {field.value &&
                       !targets.data?.orgs.some(
                         (org) => org.id === field.value,
                       ) && (
                         <option value={field.value}>
-                          {field.value} (authorization rechecked on save)
-                        </option>
+                          {field.value}{t(" (authorization rechecked on save)")}</option>
                       )}
                     {targets.data?.orgs.map((org) => (
                       <option key={org.id} value={org.id}>
@@ -408,23 +389,11 @@ function RuntimeForm({
               </FormItem>
             )}
           />
-          <p>
-            Profile discovery and readiness may consume sponsor credits. Public
-            limits count admitted maximum costs for forwarded work, while
-            billing settles actual usage. Public quotas do not limit personal
-            chats.
-          </p>
-          <p>
-            Rate, concurrency and execution limits are validated by the server.
-            This API does not offer editable runtime bounds.
-          </p>
+          <p>{t("Profile discovery and readiness may consume sponsor credits. Public limits count admitted maximum costs for forwarded work, while billing settles actual usage. Public quotas do not limit personal chats.")}</p>
+          <p>{t("Rate, concurrency and execution limits are validated by the server. This API does not offer editable runtime bounds.")}</p>
           <div className="space-y-2 border-t border-border pt-3">
-            <p className="font-medium">Personal Telegram access</p>
-            <p>
-              Enable personal access independently while public access is
-              unavailable. Each person still signs in, reviews consent and
-              confirms in the same private chat.
-            </p>
+            <p className="font-medium">{t("Personal Telegram access")}</p>
+            <p>{t("Enable personal access independently while public access is unavailable. Each person still signs in, reviews consent and confirms in the same private chat.")}</p>
             <Button
               type="button"
               variant="outline"
@@ -438,8 +407,8 @@ function RuntimeForm({
               }
             >
               {runtime?.personal_enabled
-                ? "Pause personal access"
-                : "Enable personal access only"}
+                ? t("Pause personal access")
+                : t("Enable personal access only")}
             </Button>
           </div>
           {runtime?.emergency_stopped && (
@@ -451,19 +420,14 @@ function RuntimeForm({
                     setClearConfirmed(checked === true)
                   }
                 />
-                <span>
-                  I reviewed the manager stop and want to clear it. This does
-                  not enable either access lane.
-                </span>
+                <span>{t("I reviewed the manager stop and want to clear it. This does not enable either access lane.")}</span>
               </label>
               <Button
                 type="button"
                 variant="destructive"
                 disabled={!clearConfirmed || pending}
                 onClick={() => void control("clear")}
-              >
-                Clear manager emergency stop
-              </Button>
+              >{t("Clear manager emergency stop")}</Button>
             </div>
           )}
         </details>

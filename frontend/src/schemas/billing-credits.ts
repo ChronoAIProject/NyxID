@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { creditsSchema } from "./credits";
 import { z } from "zod";
 import { billingMetricSchema } from "@/schemas/billing";
@@ -318,7 +319,7 @@ function refineBillingTargets(
   },
   ctx: z.RefinementCtx,
 ) {
-  for (const [kind, field, label] of [
+  for (const [kind, field] of [
     ["selected_users", "target_user_ids", "owner"],
     ["org_members", "target_org_ids", "organization"],
     ["groups", "target_group_ids", "group"],
@@ -329,7 +330,7 @@ function refineBillingTargets(
         ctx.addIssue({
           code: "custom",
           path: [field],
-          message: `Select 1 to 500 ${label}s`,
+          message: translateUi(field === "target_user_ids" ? "Select 1 to 500 owners" : field === "target_org_ids" ? "Select 1 to 500 organizations" : "Select 1 to 500 groups"),
         });
       }
       if (

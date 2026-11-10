@@ -1,6 +1,12 @@
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { FileText, Paperclip, X } from "lucide-react";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -52,12 +58,16 @@ type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
 
 /** Keyed by owner + conversation at the call site: drafts never cross threads. */
 export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
+  const { t } = useAppTranslation();
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const [preview, setPreview] = useState<Pending>();
   const attachmentStrip = useRef<HTMLUListElement>(null);
   const revealNewAttachment = useRef(false);
-  const [attachmentEdges, setAttachmentEdges] = useState({ left: false, right: false });
+  const [attachmentEdges, setAttachmentEdges] = useState({
+    left: false,
+    right: false,
+  });
   const pending = useRef(new Map<string, Pending>());
   const input = useRef<HTMLInputElement>(null);
   const attach = useRef<HTMLButtonElement>(null);
@@ -66,7 +76,11 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
   const scopeId = useRef<Promise<string> | undefined>(undefined);
   const resolved = useRef<UploadScope>(scope);
   const alive = useRef(true);
-  const handleCounts = useRef<Record<AttachmentKind, number>>({ image: 0, file: 0, "pasted-text": 0 });
+  const handleCounts = useRef<Record<AttachmentKind, number>>({
+    image: 0,
+    file: 0,
+    "pasted-text": 0,
+  });
   const locked = props.disabled || props.active || props.sending;
   useEffect(() => {
     alive.current = true;
@@ -90,13 +104,20 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
     }
     const updateEdges = () => {
       const left = strip.scrollLeft > 1;
-      const right = strip.scrollWidth - strip.clientWidth - strip.scrollLeft > 1;
-      setAttachmentEdges((previous) => previous.left === left && previous.right === right
-        ? previous : { left, right });
+      const right =
+        strip.scrollWidth - strip.clientWidth - strip.scrollLeft > 1;
+      setAttachmentEdges((previous) =>
+        previous.left === left && previous.right === right
+          ? previous
+          : { left, right },
+      );
     };
     updateEdges();
     strip.addEventListener("scroll", updateEdges, { passive: true });
-    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(updateEdges);
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? undefined
+        : new ResizeObserver(updateEdges);
     observer?.observe(strip);
     return () => {
       strip.removeEventListener("scroll", updateEdges);
@@ -119,14 +140,20 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
     requestAnimationFrame(() => attach.current?.focus());
   }
   /** Queues `incoming` for upload and returns the handles it was given. */
-  function add(incoming: File[], kind?: AttachmentKind, text?: string): string[] {
+  function add(
+    incoming: File[],
+    kind?: AttachmentKind,
+    text?: string,
+  ): string[] {
     if (locked) return [];
     setNotice(undefined);
     const handles: string[] = [];
     for (const file of incoming) {
       if (pending.current.size >= 10) {
         setNotice(
-          "Up to 10 files fit in one message. Send the remaining files in another message.",
+          t(
+            "Up to 10 files fit in one message. Send the remaining files in another message.",
+          ),
         );
         break;
       }
@@ -187,7 +214,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
           entry.progress = 100;
         } catch (error) {
           entry.error =
-            error instanceof Error ? error.message : "Upload failed.";
+            error instanceof Error ? error.message : t("Upload failed.");
           // A failed draft request can be retried by removing and adding again.
           if (!resolved.current.id) scopeId.current = undefined;
         }
@@ -197,24 +224,45 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
     return handles;
   }
   async function openVoice() {
-    if (locked || openingVoice.current || pending.current.size || scope.kind !== "conversations" || !onVoice) return;
+    if (
+      locked ||
+      openingVoice.current ||
+      pending.current.size ||
+      scope.kind !== "conversations" ||
+      !onVoice
+    )
+      return;
     openingVoice.current = true;
     try {
-      scopeId.current ??= scope.id ? Promise.resolve(scope.id) : createUploadDraft(scope.agentId);
+      scopeId.current ??= scope.id
+        ? Promise.resolve(scope.id)
+        : createUploadDraft(scope.agentId);
       const id = await scopeId.current;
       resolved.current = { ...scope, id };
       if (alive.current) await onVoice(id);
     } catch {
       if (!resolved.current.id) scopeId.current = undefined;
-      if (alive.current) setNotice("Voice could not open. Please try again.");
-    } finally { openingVoice.current = false; }
+      if (alive.current)
+        setNotice(t("Voice could not open. Please try again."));
+    } finally {
+      openingVoice.current = false;
+    }
   }
   return (
     <ChatComposer
       {...props}
-      onVoice={onVoice ? () => { void openVoice(); } : undefined}
+      onVoice={
+        onVoice
+          ? () => {
+              void openVoice();
+            }
+          : undefined
+      }
       hasAttachments={files.some((file) => file.item)}
-      uploadBlocked={files.some((file) => !file.item) || Boolean(props.active && files.length)}
+      uploadBlocked={
+        files.some((file) => !file.item) ||
+        Boolean(props.active && files.length)
+      }
       onFiles={(items) => void add(items)}
       // Every chip, failed ones included: a reference goes only when its chip is removed.
       attachmentMentions={files.map((file) => ({
@@ -225,7 +273,10 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
       onLongText={(text) => {
         if (locked || pending.current.size >= 10) return undefined;
         // Keep the descriptive filename separate from its short @text-N handle.
-        const file = pastedTextFile(text, handleCounts.current["pasted-text"] + 1);
+        const file = pastedTextFile(
+          text,
+          handleCounts.current["pasted-text"] + 1,
+        );
         return add([file], "pasted-text", text)[0];
       }}
       draftText={(content) =>
@@ -245,21 +296,21 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
             <div className="relative min-w-0">
               <ul
                 ref={attachmentStrip}
-                aria-label="Attachments"
+                aria-label={t("Attachments")}
                 tabIndex={0}
                 className="assistant-scrollbar flex gap-2 overflow-x-auto overscroll-x-contain py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-xl"
               >
                 {files.map((file) => (
                   <li
                     key={file.key}
-                    title={`${file.name} · Type @${file.handle} to refer to this file`}
+                    title={t("{{name}} · Type @{{handle}} to refer to this file", { name: file.name, handle: file.handle })}
                     className={`relative h-24 shrink-0 overflow-hidden rounded-xl border bg-card text-xs ${file.error ? "border-destructive/50" : "border-hairline"} ${file.preview ? "w-24" : "w-44"}`}
                   >
                     {file.preview ? (
                       <button
                         type="button"
                         className="h-full w-full bg-muted/30 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                        aria-label={`Preview ${file.name}`}
+                        aria-label={t("Preview {{name}}", { name: file.name })}
                         onClick={() => setPreview(file)}
                       >
                         <img
@@ -271,36 +322,68 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                     ) : (
                       <div className="flex h-full flex-col justify-between p-3">
                         {file.kind === "pasted-text" ? (
-                          <p className="line-clamp-2 pr-5 text-[10px] leading-3 text-muted-foreground">{file.text}</p>
+                          <p className="line-clamp-2 pr-5 text-[10px] leading-3 text-muted-foreground">
+                            {file.text}
+                          </p>
                         ) : (
-                          <FileText aria-hidden="true" className="h-6 w-6 text-muted-foreground" strokeWidth={1.5} />
+                          <FileText
+                            aria-hidden="true"
+                            className="h-6 w-6 text-muted-foreground"
+                            strokeWidth={1.5}
+                          />
                         )}
                         <div className="min-w-0">
                           <p className="truncate font-medium">
-                            {file.kind === "pasted-text" ? "Pasted text" : file.item?.label ?? file.name}
+                            {file.kind === "pasted-text"
+                              ? t("Pasted text")
+                              : (file.item?.label ?? file.name)}
                           </p>
                           {!file.error && file.item && (
                             <p className="mt-0.5 text-[10px] text-muted-foreground">
-                              {file.kind === "pasted-text" ? "TEXT" : file.name.includes(".") ? file.name.split(".").pop()?.toUpperCase() : "FILE"}
-                              {" · "}{file.size < 1024 ? `${file.size} B` : file.size < 1024 * 1024 ? `${Math.ceil(file.size / 1024)} KB` : `${(file.size / (1024 * 1024)).toFixed(1)} MB`}
+                              {file.kind === "pasted-text"
+                                ? t("TEXT")
+                                : file.name.includes(".")
+                                  ? file.name.split(".").pop()?.toUpperCase()
+                                  : t("FILE")}
+                              {" · "}
+                              {file.size < 1024
+                                ? t("{{size}} B", { size: file.size })
+                                : file.size < 1024 * 1024
+                                  ? t("{{value}} KB", { value: Math.ceil(file.size / 1024) })
+                                  : t("{{value}} MB", { value: (file.size / (1024 * 1024)).toFixed(1) })}
                             </p>
                           )}
                         </div>
                       </div>
                     )}
                     {file.error ? (
-                      <p role="alert" title={file.error} className="absolute inset-x-0 bottom-0 line-clamp-2 bg-card/95 px-2 py-1 text-[10px] leading-3 text-destructive">
+                      <p
+                        role="alert"
+                        title={file.error}
+                        className="absolute inset-x-0 bottom-0 line-clamp-2 bg-card/95 px-2 py-1 text-[10px] leading-3 text-destructive"
+                      >
                         {file.error}
                       </p>
                     ) : (
-                      <p role="status" className={file.item ? "sr-only" : "absolute inset-x-0 bottom-0 bg-card/95 px-2 py-1 text-[10px] text-muted-foreground"}>
-                        {file.item ? "Ready" : file.progress >= 99 ? "Checking file…" : `Uploading ${file.progress}%`}
+                      <p
+                        role="status"
+                        className={
+                          file.item
+                            ? "sr-only"
+                            : "absolute inset-x-0 bottom-0 bg-card/95 px-2 py-1 text-[10px] text-muted-foreground"
+                        }
+                      >
+                        {file.item
+                          ? t("Ready")
+                          : file.progress >= 99
+                            ? t("Checking file…")
+                            : t("Uploading {{progress}}%", { progress: file.progress })}
                       </p>
                     )}
                     <button
                       type="button"
                       className="absolute right-1 top-1 flex size-6 items-center justify-center rounded-full border border-hairline bg-background/95 text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-                      aria-label={`Remove ${file.name}`}
+                      aria-label={t("Remove {{name}}", { name: file.name })}
                       onClick={() => remove(file.key)}
                       disabled={props.sending}
                     >
@@ -332,8 +415,13 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
               if (!open) setPreview(undefined);
             }}
           >
-            <DialogContent aria-describedby={undefined} className="md:max-w-3xl">
-              <DialogTitle className="truncate pr-8">{preview?.name}</DialogTitle>
+            <DialogContent
+              aria-describedby={undefined}
+              className="md:max-w-3xl"
+            >
+              <DialogTitle className="truncate pr-8">
+                {preview?.name}
+              </DialogTitle>
               {preview?.preview && (
                 <img
                   src={preview.preview}
@@ -344,7 +432,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
               <DialogFooter>
                 <DialogClose asChild>
                   <Button type="button" variant="secondary">
-                    Close preview
+                    {t("Close preview")}
                   </Button>
                 </DialogClose>
               </DialogFooter>
@@ -363,7 +451,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
             multiple
             className="sr-only"
             tabIndex={-1}
-            aria-label="Choose attachments"
+            aria-label={t("Choose attachments")}
             disabled={locked}
             onChange={(event) => {
               void add(Array.from(event.target.files ?? []));
@@ -379,7 +467,7 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                   size="icon"
                   className="shrink-0 text-muted-foreground"
                   ref={attach}
-                  aria-label="Attach files"
+                  aria-label={t("Attach files")}
                   disabled={locked || files.length >= 10}
                   onClick={() => input.current?.click()}
                 >
@@ -387,8 +475,9 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
                 </Button>
               </TooltipTrigger>
               <TooltipContent className="max-w-64">
-                PNG, JPEG, GIF, WebP, PDF, DOCX, text, Markdown, CSV and JSON.
-                Up to 20 MB each, 10 files per message.
+                {t(
+                  "PNG, JPEG, GIF, WebP, PDF, DOCX, text, Markdown, CSV and JSON. Up to 20 MB each, 10 files per message.",
+                )}
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -405,7 +494,11 @@ export function UploadComposer({ scope, onSend, onVoice, ...props }: Props) {
           await onSend(
             resolveAttachmentMentions(
               text,
-              items.map((file) => ({ handle: file.handle, label: file.item!.label, kind: file.kind })),
+              items.map((file) => ({
+                handle: file.handle,
+                label: file.item!.label,
+                kind: file.kind,
+              })),
             ),
             items.length
               ? {

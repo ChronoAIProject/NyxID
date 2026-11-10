@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useWatch } from "react-hook-form";
@@ -58,13 +60,14 @@ import { DishAntennaIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
-  oauth2: "OAuth 2.0",
-  api_key: "API Key",
-  device_code: "Device Code",
-  telegram_widget: "Telegram Widget",
+  get oauth2() { return translateUi("OAuth 2.0"); },
+  get api_key() { return translateUi("API Key"); },
+  get device_code() { return translateUi("Device Code"); },
+  get telegram_widget() { return translateUi("Telegram Widget"); },
 };
 
 export function ProviderListPage() {
+  const { t } = useUiTranslation();
   const { data: providers, isLoading } = useProviders();
   const createMutation = useCreateProvider();
   const navigate = useNavigate();
@@ -112,7 +115,7 @@ export function ProviderListPage() {
           typeof createMutation.mutateAsync
         >[0],
       );
-      toast.success("Provider created successfully");
+      toast.success(translateUi("Provider created successfully"));
       setCreateOpen(false);
       form.reset();
       void navigate({ to: "/providers/$providerId", params: { providerId: created.id } });
@@ -120,7 +123,7 @@ export function ProviderListPage() {
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
       } else {
-        toast.error("Failed to create provider");
+        toast.error(translateUi("Failed to create provider"));
       }
     }
   }
@@ -129,22 +132,15 @@ export function ProviderListPage() {
     <div className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-            Manage Providers
-          </h2>
-          <p className="text-12 text-muted-foreground">
-            Create and manage OAuth, Telegram, device code, and API key
-            providers.
-          </p>
+          <h2 className="text-28 font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>{t("Manage Providers")}</h2>
+          <p className="text-12 text-muted-foreground">{t("Create and manage OAuth, Telegram, device code, and API key providers.")}</p>
         </div>
-        <AddCtaButton label="Add Provider" onClick={() => setCreateOpen(true)} />
+        <AddCtaButton label={t("Add Provider")} onClick={() => setCreateOpen(true)} />
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Add Provider</DialogTitle>
-              <DialogDescription>
-                Register a new external provider for user connections.
-              </DialogDescription>
+              <DialogTitle>{t("Add Provider")}</DialogTitle>
+              <DialogDescription>{t("Register a new external provider for user connections.")}</DialogDescription>
             </DialogHeader>
 
             <Form {...form}>
@@ -154,7 +150,7 @@ export function ProviderListPage() {
               >
                 {form.formState.errors.root && (
                   <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
-                    {form.formState.errors.root.message}
+                    {translateUi(form.formState.errors.root.message ?? "")}
                   </div>
                 )}
 
@@ -163,9 +159,9 @@ export function ProviderListPage() {
                   name="name"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Name</FormLabel>
+                      <FormLabel>{t("Name")}</FormLabel>
                       <FormControl>
-                        <Input placeholder="GitHub" {...field} />
+                        <Input placeholder={t("GitHub")} {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -177,13 +173,11 @@ export function ProviderListPage() {
                   name="slug"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Slug</FormLabel>
+                      <FormLabel>{t("Slug")}</FormLabel>
                       <FormControl>
-                        <Input placeholder="github" {...field} />
+                        <Input placeholder={t("github")} {...field} />
                       </FormControl>
-                      <p className="text-xs text-muted-foreground">
-                        Lowercase letters, digits, and hyphens only.
-                      </p>
+                      <p className="text-xs text-muted-foreground">{t("Lowercase letters, digits, and hyphens only.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -194,11 +188,11 @@ export function ProviderListPage() {
                   name="description"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Description</FormLabel>
+                      <FormLabel>{t("Description")}</FormLabel>
                       <FormControl>
                         <textarea
                           className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
-                          placeholder="Optional description"
+                          placeholder={t("Optional description")}
                           {...field}
                         />
                       </FormControl>
@@ -212,7 +206,7 @@ export function ProviderListPage() {
                   name="provider_type"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Provider Type</FormLabel>
+                      <FormLabel>{t("Provider Type")}</FormLabel>
                       <Select
                         value={field.value}
                         onValueChange={(nextValue) => {
@@ -249,7 +243,7 @@ export function ProviderListPage() {
                       >
                         <FormControl>
                           <SelectTrigger>
-                            <SelectValue placeholder="Select provider type" />
+                            <SelectValue placeholder={t("Select provider type")} />
                           </SelectTrigger>
                         </FormControl>
                         <SelectContent>
@@ -272,7 +266,7 @@ export function ProviderListPage() {
                     name="credential_mode"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Credential Mode</FormLabel>
+                        <FormLabel>{t("Credential Mode")}</FormLabel>
                         <Select
                           value={field.value ?? "admin"}
                           onValueChange={field.onChange}
@@ -283,15 +277,12 @@ export function ProviderListPage() {
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
-                            <SelectItem value="admin">Admin Only</SelectItem>
-                            <SelectItem value="user">User Provided</SelectItem>
-                            <SelectItem value="both">Admin or User</SelectItem>
+                            <SelectItem value="admin">{t("Admin Only")}</SelectItem>
+                            <SelectItem value="user">{t("User Provided")}</SelectItem>
+                            <SelectItem value="both">{t("Admin or User")}</SelectItem>
                           </SelectContent>
                         </Select>
-                        <p className="text-xs text-muted-foreground">
-                          Choose whether users rely on admin-managed OAuth apps,
-                          bring their own, or can use either.
-                        </p>
+                        <p className="text-xs text-muted-foreground">{t("Choose whether users rely on admin-managed OAuth apps, bring their own, or can use either.")}</p>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -303,7 +294,7 @@ export function ProviderListPage() {
                   name="icon_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Icon URL</FormLabel>
+                      <FormLabel>{t("Icon URL")}</FormLabel>
                       <FormControl>
                         <Input
                           placeholder="https://example.com/icon.svg"
@@ -320,7 +311,7 @@ export function ProviderListPage() {
                   name="documentation_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Documentation URL</FormLabel>
+                      <FormLabel>{t("Documentation URL")}</FormLabel>
                       <FormControl>
                         <Input
                           placeholder="https://docs.example.com"
@@ -335,16 +326,14 @@ export function ProviderListPage() {
                 {watchedProviderType === "oauth2" && (
                   <>
                     <Separator />
-                    <h4 className="text-13 font-semibold">
-                      OAuth 2.0 Configuration
-                    </h4>
+                    <h4 className="text-13 font-semibold">{t("OAuth 2.0 Configuration")}</h4>
 
                     <FormField
                       control={form.control}
                       name="authorization_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Authorization URL</FormLabel>
+                          <FormLabel>{t("Authorization URL")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://provider.com/oauth/authorize"
@@ -361,7 +350,7 @@ export function ProviderListPage() {
                       name="token_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Token URL</FormLabel>
+                          <FormLabel>{t("Token URL")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://provider.com/oauth/token"
@@ -378,16 +367,14 @@ export function ProviderListPage() {
                       name="revocation_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Revocation URL</FormLabel>
+                          <FormLabel>{t("Revocation URL")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://provider.com/oauth/revoke"
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
-                            Optional. Used to revoke tokens on disconnect.
-                          </p>
+                          <p className="text-xs text-muted-foreground">{t("Optional. Used to revoke tokens on disconnect.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -398,16 +385,14 @@ export function ProviderListPage() {
                       name="default_scopes"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Default Scopes</FormLabel>
+                          <FormLabel>{t("Default Scopes")}</FormLabel>
                           <FormControl>
                             <Input
-                              placeholder="read, write, user:email"
+                              placeholder={t("read, write, user:email")}
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
-                            Comma-separated list of scopes.
-                          </p>
+                          <p className="text-xs text-muted-foreground">{t("Comma-separated list of scopes.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -418,14 +403,14 @@ export function ProviderListPage() {
                       name="client_id"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Client ID</FormLabel>
+                          <FormLabel>{t("Client ID")}</FormLabel>
                           <FormControl>
-                            <Input placeholder="OAuth client ID" {...field} />
+                            <Input placeholder={t("OAuth client ID")} {...field} />
                           </FormControl>
                           <p className="text-xs text-muted-foreground">
                             {watchedCredentialMode === "admin"
-                              ? "Required in admin mode."
-                              : "Optional. Leave blank to require users to supply their own OAuth app credentials."}
+                              ? t("Required in admin mode.")
+                              : t("Optional. Leave blank to require users to supply their own OAuth app credentials.")}
                           </p>
                           <FormMessage />
                         </FormItem>
@@ -437,18 +422,18 @@ export function ProviderListPage() {
                       name="client_secret"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Client Secret</FormLabel>
+                          <FormLabel>{t("Client Secret")}</FormLabel>
                           <FormControl>
                             <Input
                               type="password"
-                              placeholder="OAuth client secret"
+                              placeholder={t("OAuth client secret")}
                               {...field}
                             />
                           </FormControl>
                           <p className="text-xs text-muted-foreground">
                             {watchedCredentialMode === "admin"
-                              ? "Required for OAuth 2.0 admin credentials."
-                              : "Optional. Only set this when configuring an admin fallback OAuth app."}
+                              ? t("Required for OAuth 2.0 admin credentials.")
+                              : t("Optional. Only set this when configuring an admin fallback OAuth app.")}
                           </p>
                           <FormMessage />
                         </FormItem>
@@ -461,10 +446,8 @@ export function ProviderListPage() {
                       render={({ field }) => (
                         <FormItem className="flex items-center justify-between rounded-lg border p-3">
                           <div className="space-y-0.5">
-                            <FormLabel>Supports PKCE</FormLabel>
-                            <p className="text-xs text-muted-foreground">
-                              Enable Proof Key for Code Exchange.
-                            </p>
+                            <FormLabel>{t("Supports PKCE")}</FormLabel>
+                            <p className="text-xs text-muted-foreground">{t("Enable Proof Key for Code Exchange.")}</p>
                           </div>
                           <FormControl>
                             <Switch
@@ -481,25 +464,21 @@ export function ProviderListPage() {
                 {watchedProviderType === "device_code" && (
                   <>
                     <Separator />
-                    <h4 className="text-13 font-semibold">
-                      Device Code Configuration (RFC 8628)
-                    </h4>
+                    <h4 className="text-13 font-semibold">{t("Device Code Configuration (RFC 8628)")}</h4>
 
                     <FormField
                       control={form.control}
                       name="device_code_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Device Code URL</FormLabel>
+                          <FormLabel>{t("Device Code URL")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://auth.openai.com/deviceauth/usercode"
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
-                            Endpoint to request a device code (RFC 8628 step 1).
-                          </p>
+                          <p className="text-xs text-muted-foreground">{t("Endpoint to request a device code (RFC 8628 step 1).")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -510,16 +489,14 @@ export function ProviderListPage() {
                       name="device_token_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Device Token URL</FormLabel>
+                          <FormLabel>{t("Device Token URL")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://auth.openai.com/deviceauth/token"
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
-                            Endpoint to poll for token (RFC 8628 step 3).
-                          </p>
+                          <p className="text-xs text-muted-foreground">{t("Endpoint to poll for token (RFC 8628 step 3).")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -530,7 +507,7 @@ export function ProviderListPage() {
                       name="authorization_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Authorization URL (fallback)</FormLabel>
+                          <FormLabel>{t("Authorization URL (fallback)")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://auth.openai.com/oauth/authorize"
@@ -547,7 +524,7 @@ export function ProviderListPage() {
                       name="token_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Token URL (fallback)</FormLabel>
+                          <FormLabel>{t("Token URL (fallback)")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://auth.openai.com/oauth/token"
@@ -564,16 +541,14 @@ export function ProviderListPage() {
                       name="default_scopes"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Default Scopes</FormLabel>
+                          <FormLabel>{t("Default Scopes")}</FormLabel>
                           <FormControl>
                             <Input
-                              placeholder="openid, profile, offline_access"
+                              placeholder={t("openid, profile, offline_access")}
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
-                            Comma-separated list of scopes.
-                          </p>
+                          <p className="text-xs text-muted-foreground">{t("Comma-separated list of scopes.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -584,17 +559,17 @@ export function ProviderListPage() {
                       name="client_id"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Client ID</FormLabel>
+                          <FormLabel>{t("Client ID")}</FormLabel>
                           <FormControl>
                             <Input
-                              placeholder="app_EMoamEEZ73f0CkXaXp7hrann"
+                              placeholder={t("app_EMoamEEZ73f0CkXaXp7hrann")}
                               {...field}
                             />
                           </FormControl>
                           <p className="text-xs text-muted-foreground">
                             {watchedCredentialMode === "admin"
-                              ? "Required in admin mode."
-                              : "Optional. Needed only when configuring an admin fallback client."}
+                              ? t("Required in admin mode.")
+                              : t("Optional. Needed only when configuring an admin fallback client.")}
                           </p>
                           <FormMessage />
                         </FormItem>
@@ -606,17 +581,15 @@ export function ProviderListPage() {
                       name="client_secret"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Client Secret (optional)</FormLabel>
+                          <FormLabel>{t("Client Secret (optional)")}</FormLabel>
                           <FormControl>
                             <Input
                               type="password"
-                              placeholder="OAuth client secret (if required)"
+                              placeholder={t("OAuth client secret (if required)")}
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
-                            Optional for public OAuth clients.
-                          </p>
+                          <p className="text-xs text-muted-foreground">{t("Optional for public OAuth clients.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -627,23 +600,18 @@ export function ProviderListPage() {
                 {watchedProviderType === "telegram_widget" && (
                   <>
                     <Separator />
-                    <h4 className="text-13 font-semibold">
-                      Telegram Widget Configuration
-                    </h4>
+                    <h4 className="text-13 font-semibold">{t("Telegram Widget Configuration")}</h4>
 
                     <FormField
                       control={form.control}
                       name="client_id_param_name"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Bot Username</FormLabel>
+                          <FormLabel>{t("Bot Username")}</FormLabel>
                           <FormControl>
-                            <Input placeholder="NyxIdBot" {...field} />
+                            <Input placeholder={t("NyxIdBot")} {...field} />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
-                            Enter the BotFather username. A leading
-                            <span> @</span> is optional.
-                          </p>
+                          <p className="text-xs text-muted-foreground">{t("Enter the BotFather username. A leading")}<span> @</span>{t(" is optional.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -654,18 +622,15 @@ export function ProviderListPage() {
                       name="client_secret"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Bot Token</FormLabel>
+                          <FormLabel>{t("Bot Token")}</FormLabel>
                           <FormControl>
                             <Input
                               type="password"
-                              placeholder="123456:ABC-DEF1234567890"
+                              placeholder={t("123456:ABC-DEF1234567890")}
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
-                            BotFather token used to verify Telegram Login Widget
-                            callbacks.
-                          </p>
+                          <p className="text-xs text-muted-foreground">{t("BotFather token used to verify Telegram Login Widget callbacks.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -676,20 +641,18 @@ export function ProviderListPage() {
                 {watchedProviderType === "api_key" && (
                   <>
                     <Separator />
-                    <h4 className="text-13 font-semibold">
-                      API Key Configuration
-                    </h4>
+                    <h4 className="text-13 font-semibold">{t("API Key Configuration")}</h4>
 
                     <FormField
                       control={form.control}
                       name="api_key_instructions"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>API Key Instructions</FormLabel>
+                          <FormLabel>{t("API Key Instructions")}</FormLabel>
                           <FormControl>
                             <textarea
                               className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-12 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
-                              placeholder="Instructions for users to obtain an API key"
+                              placeholder={t("Instructions for users to obtain an API key")}
                               {...field}
                             />
                           </FormControl>
@@ -703,16 +666,14 @@ export function ProviderListPage() {
                       name="api_key_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>API Key URL</FormLabel>
+                          <FormLabel>{t("API Key URL")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://provider.com/api-keys"
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-xs text-muted-foreground">
-                            Link where users can generate an API key.
-                          </p>
+                          <p className="text-xs text-muted-foreground">{t("Link where users can generate an API key.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -725,12 +686,8 @@ export function ProviderListPage() {
                     type="button"
                     variant="outline"
                     onClick={() => setCreateOpen(false)}
-                  >
-                    Cancel
-                  </Button>
-                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!form.formState.isValid || createMutation.isPending}>
-                    Create Provider
-                  </Button>
+                  >{t("Cancel")}</Button>
+                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!form.formState.isValid || createMutation.isPending}>{t("Create Provider")}</Button>
                 </DialogFooter>
               </form>
             </Form>
@@ -748,10 +705,8 @@ export function ProviderListPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <DishAntennaIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">No Providers</p>
-            <p className="text-xs text-muted-foreground">
-              Add a provider to get started.
-            </p>
+            <p className="text-12 font-medium text-muted-foreground">{t("No Providers")}</p>
+            <p className="text-xs text-muted-foreground">{t("Add a provider to get started.")}</p>
           </div>
         </div>
       ) : (
@@ -800,7 +755,7 @@ export function ProviderListPage() {
                       <Badge
                         variant={provider.is_active ? "success" : "secondary"}
                       >
-                        {provider.is_active ? "Active" : "Inactive"}
+                        {provider.is_active ? t("Active") : t("Inactive")}
                       </Badge>
                     </div>
                     <span className="text-xs text-muted-foreground">

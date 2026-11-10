@@ -1,3 +1,5 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { useWizardTranslation, translateWizard as t } from "@/i18n/wizard";
 /**
  * Step 1 of the `nyxid service add` (ai-key) wizard: pick a service.
  *
@@ -68,19 +70,19 @@ function flowShapeOf(entry: CatalogEntry): FlowShape {
 function shapeLabel(shape: FlowShape, entry: CatalogEntry): string {
   switch (shape) {
     case "no-auth":
-      return "1-click connect"
+      return t("1-click connect")
     case "gateway-url":
-      return "URL + API key"
+      return t("URL + API key")
     case "token-exchange":
-      return `${(entry.token_exchange_credential_fields ?? []).length} fields`
+      return t("{{count}} fields", { count: (entry.token_exchange_credential_fields ?? []).length })
     case "oauth":
-      return "OAuth sign-in"
+      return t("OAuth sign-in")
     case "device-code":
-      return "device code"
+      return t("device code")
     case "ssh":
-      return "SSH cert"
+      return t("SSH cert")
     case "paste-key":
-      return "paste API key"
+      return t("paste API key")
   }
 }
 
@@ -131,6 +133,7 @@ function fuzzyScore(target: string, query: string): number | null {
 }
 
 export function CatalogGrid({ onSelect }: CatalogGridProps) {
+  const { t } = useWizardTranslation();
   const [filter, setFilter] = useState("")
   const { data, isLoading, error } = useQuery({
     queryKey: ["cli-wizard", "catalog"],
@@ -173,13 +176,11 @@ export function CatalogGrid({ onSelect }: CatalogGridProps) {
         <label
           htmlFor="catalog-search"
           className="text-xs font-medium uppercase tracking-wide text-muted-foreground"
-        >
-          Search
-        </label>
+        >{t("Search")}</label>
         <Input
           id="catalog-search"
           type="search"
-          placeholder="search services…"
+          placeholder={t("search services…")}
           autoComplete="off"
           spellCheck={false}
           value={filter}
@@ -189,18 +190,18 @@ export function CatalogGrid({ onSelect }: CatalogGridProps) {
         />
       </div>
 
-      <SectionLabel>Simple setup</SectionLabel>
+      <SectionLabel>{t("Simple setup")}</SectionLabel>
       {isLoading ? (
-        <p className="text-12 text-muted-foreground">Loading catalog…</p>
+        <p className="text-12 text-muted-foreground">{t("Loading catalog…")}</p>
       ) : error ? (
         <p className="text-12 text-destructive">
           {error instanceof ApiError
-            ? `Couldn't load the catalog: ${error.message} (${String(error.status)})`
-            : "Couldn't load the catalog. Check the CLI logs for details."}
+            ? t("Couldn't load the catalog: {{message}} ({{status}})", { message: translateErrorMessage(error.message), status: error.status })
+            : t("Couldn't load the catalog. Check the CLI logs for details.")}
         </p>
       ) : visible.length === 0 ? (
         <p className="text-12 text-muted-foreground">
-          {f ? "No services match your search." : "Catalog is empty."}
+          {f ? t("No services match your search.") : t("Catalog is empty.")}
         </p>
       ) : (
         // Cap the grid at ~3 rows (6 cards on 2-col layouts) and let
@@ -226,7 +227,7 @@ export function CatalogGrid({ onSelect }: CatalogGridProps) {
         </div>
       )}
 
-      <SectionLabel>Advanced</SectionLabel>
+      <SectionLabel>{t("Advanced")}</SectionLabel>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <CustomCard
           onClick={() => {
@@ -264,7 +265,7 @@ function CatalogCard({
     >
       {badge ? (
         <span className="absolute right-3 top-3 rounded-full border border-border bg-muted/60 px-2 py-0.5 text-10 uppercase tracking-wide text-muted-foreground">
-          {badge}
+          {t(badge)}
         </span>
       ) : null}
       <div className="flex w-full items-center gap-2">
@@ -286,19 +287,15 @@ function CatalogCard({
 }
 
 function CustomCard({ onClick }: { readonly onClick: () => void }) {
+  const { t } = useWizardTranslation();
   return (
     <button
       type="button"
       onClick={onClick}
       className="flex min-h-[132px] flex-col items-start gap-1 rounded-xl border border-dashed border-border/50 bg-transparent p-4 text-left transition-colors duration-300 hover:border-hairline-strong hover:bg-card/40 focus-visible:outline-none"
     >
-      <span className="text-13 font-semibold text-foreground">
-        Custom / self-hosted…
-      </span>
-      <span className="text-xs text-muted-foreground">
-        For anything that isn't in the catalog above — paste your own
-        endpoint URL + credential.
-      </span>
+      <span className="text-13 font-semibold text-foreground">{t("Custom / self-hosted…")}</span>
+      <span className="text-xs text-muted-foreground">{t("For anything that isn't in the catalog above — paste your own endpoint URL + credential.")}</span>
     </button>
   )
 }

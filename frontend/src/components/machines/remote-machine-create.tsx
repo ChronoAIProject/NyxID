@@ -1,3 +1,7 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import {
   assertRemoteMachineAdmission,
   useRemoteMachineAdmission,
@@ -76,16 +80,18 @@ type Props = {
 
 /** The single hosted creation form, mounted by the fourth machine setup option. */
 export function RemoteMachineCreate(props: Props) {
+  const { t } = useUiTranslation();
   const ownerId = useAuthStore((state) => state.user?.id);
   const enabled = useRemoteMachineAdmission();
   if (!enabled)
     return (
-      <p role="status">Remote Machines are not enabled for this account.</p>
+      <p role="status">{t("Remote Machines are not enabled for this account.")}</p>
     );
   return <HostedCreateForm key={ownerId} {...props} />;
 }
 
 function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
+  const { t } = useUiTranslation();
   const user = useAuthStore((state) => state.user);
   const ownerId = user?.id;
   const entitlement = useRemoteMachineEntitlement();
@@ -266,20 +272,20 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
   return (
     <Form {...form}>
       <form
-        aria-label="NyxID hosted machine configuration"
+        aria-label={t("NyxID hosted machine configuration")}
         className="space-y-4"
         onSubmit={form.handleSubmit(submit)}
       >
         <div className="space-y-1 text-12">
-          <p className="font-medium">Machine owner</p>
-          <p>Personal account{user?.email ? ` · ${user.email}` : ""}</p>
+          <p className="font-medium">{t("Machine owner")}</p>
+          <p>{t("Personal account")}{user?.email ? t(" · {{email}}", { email: user.email }) : ""}</p>
         </div>
         <FormField
           control={form.control}
           name="name"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Machine name</FormLabel>
+              <FormLabel>{t("Machine name")}</FormLabel>
               <FormControl>
                 <Input {...field} disabled={locked} autoComplete="off" />
               </FormControl>
@@ -288,9 +294,7 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
           )}
         />
         <fieldset disabled={locked} className="space-y-3">
-          <legend className="mb-2 text-12 font-medium">
-            Enable on this machine
-          </legend>
+          <legend className="mb-2 text-12 font-medium">{t("Enable on this machine")}</legend>
           {(["shell", "files", "browser", "computer"] as const).map(
             (capability) => (
               <label
@@ -325,7 +329,7 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
           )}
           {form.formState.errors.capabilities?.message ? (
             <p role="alert" className="text-12 text-destructive">
-              {form.formState.errors.capabilities.message}
+              {translateUi(form.formState.errors.capabilities.message ?? "")}
             </p>
           ) : null}
         </fieldset>
@@ -334,7 +338,7 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
           name="specialist_id"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Select a specialist for this machine</FormLabel>
+              <FormLabel>{t("Select a specialist for this machine")}</FormLabel>
               <Select
                 value={field.value ?? "none"}
                 disabled={locked || agents.isPending || Boolean(agents.error)}
@@ -348,12 +352,10 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
                   </SelectTrigger>
                 </FormControl>
                 <SelectContent>
-                  <SelectItem value="none">No specialist assignment</SelectItem>
+                  <SelectItem value="none">{t("No specialist assignment")}</SelectItem>
                   {selectedSpecialist &&
                   !options.some((agent) => agent.id === selectedSpecialist) ? (
-                    <SelectItem value={selectedSpecialist}>
-                      Previously selected specialist
-                    </SelectItem>
+                    <SelectItem value={selectedSpecialist}>{t("Previously selected specialist")}</SelectItem>
                   ) : null}
                   {options.map((agent) => (
                     <SelectItem key={agent.id} value={agent.id}>
@@ -368,22 +370,17 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
         />
         {agents.error ? (
           <ErrorBanner
-            message="Specialists could not be loaded. You can create without assignment or retry loading."
+            message={t("Specialists could not be loaded. You can create without assignment or retry loading.")}
             onRetry={() => void agents.refetch()}
           />
         ) : null}
-        <p className="text-12 text-muted-foreground">
-          Enabling a capability does not grant access to a client. Specialist
-          assignment and permissions are separate; review any pending
-          permissions in agent settings after creation. External OAuth and Agent
-          Key tools remain limited to authorized Commands and Files.
-        </p>
+        <p className="text-12 text-muted-foreground">{t("Enabling a capability does not grant access to a client. Specialist assignment and permissions are separate; review any pending permissions in agent settings after creation. External OAuth and Agent Key tools remain limited to authorized Commands and Files.")}</p>
         <section
-          aria-label="Remote machine preflight"
+          aria-label={t("Remote machine preflight")}
           className="space-y-3 rounded-xl border border-border bg-card p-4 text-12"
         >
           <h3 className="text-13 font-semibold">
-            {freeSlot ? "Personal free slot" : "Paid account-balance runtime"}
+            {freeSlot ? t("Personal free slot") : t("Paid account-balance runtime")}
           </h3>
           <Button
             type="button"
@@ -394,25 +391,20 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
               form.setValue("acknowledged", false);
             }}
           >
-            {freeSlot ? "Review paid creation" : "Review free slot"}
+            {freeSlot ? t("Review paid creation") : t("Review free slot")}
           </Button>
           {saved ? (
-            <p>
-              A previously submitted request is saved for this account.
-              Configuration is locked. Retrying recovers the same Machine
-              request, original policies and quote even if fresh preflight is
-              unavailable. It does not create a replacement.
-            </p>
+            <p>{t("A previously submitted request is saved for this account. Configuration is locked. Retrying recovers the same Machine request, original policies and quote even if fresh preflight is unavailable. It does not create a replacement.")}</p>
           ) : null}
           {saved?.body.quote_id ? (
-            <p>Original quote: {saved.body.quote_id}</p>
+            <p>{t("Original quote: ")}{saved.body.quote_id}</p>
           ) : null}
           {saved?.body.profile_version ? (
-            <p>Original profile: {saved.body.profile_version}</p>
+            <p>{t("Original profile: ")}{saved.body.profile_version}</p>
           ) : null}
           {entitlement.error ? (
             <ErrorBanner
-              message={`Eligibility is unavailable. ${entitlement.error.message}`}
+              message={t("Eligibility is unavailable. {{message}}", { message: translateErrorMessage(entitlement.error.message) })}
               onRetry={refresh}
             />
           ) : entitlement.data ? (
@@ -420,14 +412,14 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
               <Badge
                 variant={entitlement.data.eligible ? "success" : "warning"}
               >
-                {entitlement.data.eligible ? "Eligible" : "Ineligible"}
+                {entitlement.data.eligible ? t("Eligible") : t("Ineligible")}
               </Badge>
               <p>
                 {entitlement.data.eligible
                   ? entitlement.data.free_slot_available
-                    ? "Your personal free slot is available."
-                    : "Your personal free slot is occupied."
-                  : "This account is not eligible for a personal free slot."}
+                    ? t("Your personal free slot is available.")
+                    : t("Your personal free slot is occupied.")
+                  : t("This account is not eligible for a personal free slot.")}
               </p>
               {entitlement.data.reason ? (
                 <p>{entitlement.data.reason.replaceAll("_", " ")}</p>
@@ -437,49 +429,35 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
                   <Link
                     to="/assistant/machines"
                     search={{ machine: entitlement.data.machine_id }}
-                  >
-                    View the machine occupying this slot
-                  </Link>
+                  >{t("View the machine occupying this slot")}</Link>
                 </Button>
               ) : null}
             </>
           ) : null}
           {quote.error ? (
             <ErrorBanner
-              message={`Preflight is unavailable. ${quote.error.message}`}
+              message={t("Preflight is unavailable. {{message}}", { message: translateErrorMessage(quote.error.message) })}
               onRetry={refresh}
             />
           ) : null}
-          {quote.isPending ? <p role="status">Refreshing preflight…</p> : null}
+          {quote.isPending ? <p role="status">{t("Refreshing preflight…")}</p> : null}
           {!freeSlot ? (
             <>
               {saved && !offer ? (
-                <p>
-                  The original quoted price remains bound to the saved request.
-                  Its runtime estimate is unavailable here.
-                </p>
+                <p>{t("The original quoted price remains bound to the saved request. Its runtime estimate is unavailable here.")}</p>
               ) : offer ? (
                 <>
-                  <p>
-                    Offered rate:{" "}
+                  <p>{t("Offered rate:")}{" "}
                     <strong>
-                      {offer.credits_per_second} Credits per cumulative whole
-                      running second
-                    </strong>
+                      {offer.credits_per_second}{t(" Credits per cumulative whole running second")}</strong>
                     .
                   </p>
-                  <p>Rate version: {offer.rate_version}</p>
-                  <p>
-                    Quote expires:{" "}
-                    {new Date(offer.valid_until).toLocaleString()}. Quotes are
-                    valid for 15 minutes.
-                  </p>
+                  <p>{t("Rate version: ")}{offer.rate_version}</p>
+                  <p>{t("Quote expires:")}{" "}
+                    {new Date(offer.valid_until).toLocaleString(getFormattingLocale())}{t(". Quotes are valid for 15 minutes.")}</p>
                 </>
               ) : (
-                <p role="alert">
-                  A synchronized, priced runtime quote is unavailable. Review a
-                  fresh quote before starting.
-                </p>
+                <p role="alert">{t("A synchronized, priced runtime quote is unavailable. Review a fresh quote before starting.")}</p>
               )}
               <RemoteMachineBillingPreflight
                 preflight={
@@ -493,14 +471,7 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
                 quotePrice={offer?.credits_per_second}
                 now={now}
               />
-              <p>
-                Charging draws continuously from the shared account balance with
-                no per-instance spending cap. A ready machine continues billing
-                while idle; there is no automatic idle pause. Cumulative whole
-                running seconds are charged at the accepted rate; a final
-                fractional second is free. Downstream service usage is charged
-                separately.
-              </p>
+              <p>{t("Charging draws continuously from the shared account balance with no per-instance spending cap. A ready machine continues billing while idle; there is no automatic idle pause. Cumulative whole running seconds are charged at the accepted rate; a final fractional second is free. Downstream service usage is charged separately.")}</p>
             </>
           ) : null}
           <RemoteMachinePlatformReadiness platform={platform} />
@@ -511,78 +482,29 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
             }
           />
           {expired ? (
-            <p role="alert">
-              This preflight has expired. Refresh before making a new request.
-            </p>
+            <p role="alert">{t("This preflight has expired. Refresh before making a new request.")}</p>
           ) : null}
           <p>
             {preflight ? (
-              <>
-                Profile: {preflight.profile.profile_version}. New Machine fixed
-                specification: {preflight.profile.cpu_millis / 1000} vCPU ·{" "}
-                {preflight.profile.memory_mib / 1024} GiB memory ·{" "}
-                {preflight.profile.workspace_gib} GiB /workspace.{" "}
+              <>{t("Profile: ")}{preflight.profile.profile_version}{t(". New Machine fixed specification: ")}{preflight.profile.cpu_millis / 1000}{t(" vCPU ·")}{" "}
+                {preflight.profile.memory_mib / 1024}{t(" GiB memory ·")}{" "}
+                {preflight.profile.workspace_gib}{t(" GiB /workspace.")}{" "}
               </>
             ) : (
-              "Machine specification is unavailable until preflight succeeds. "
-            )}
-            Memory includes the supervisor, browser, desktop and output cache.
-            Workspace expansion and automatic upgrades are not available.
-            Bandwidth and IOPS are not unlimited.
-          </p>
-          <p>
-            Temporary storage is managed by the deployment environment, with no
-            fixed capacity commitment, selectable size or extra storage charge.
-            HOME, /tmp, logs and the writable layer remain temporary. Temporary
-            data may be lost after pause or Pod recreation. Full disks can cause
-            writes and jobs to fail, and disk pressure can evict the Pod.
-          </p>
-          <p>
-            Each personal account has one free slot, with no entitlement expiry
-            or monthly runtime limit. A paused Machine still occupies the slot
-            and retains its workspace indefinitely until owner-confirmed
-            deletion. Cleanup and accounting finalization must complete before
-            the slot becomes available again.
-          </p>
-          <p>
-            Account wallet available:{" "}
+              t("Machine specification is unavailable until preflight succeeds. ")
+            )}{t("Memory includes the supervisor, browser, desktop and output cache. Workspace expansion and automatic upgrades are not available. Bandwidth and IOPS are not unlimited.")}</p>
+          <p>{t("Temporary storage is managed by the deployment environment, with no fixed capacity commitment, selectable size or extra storage charge. HOME, /tmp, logs and the writable layer remain temporary. Temporary data may be lost after pause or Pod recreation. Full disks can cause writes and jobs to fail, and disk pressure can evict the Pod.")}</p>
+          <p>{t("Each personal account has one free slot, with no entitlement expiry or monthly runtime limit. A paused Machine still occupies the slot and retains its workspace indefinitely until owner-confirmed deletion. Cleanup and accounting finalization must complete before the slot becomes available again.")}</p>
+          <p>{t("Account wallet available:")}{" "}
             {available === null
-              ? "Unavailable"
-              : `${formatExactCredits(available, 12)} Credits`}
-            . Free runtime does not require a funded wallet. Downstream services
-            use their own billing and authorization.
-          </p>
-          <p>
-            Paid creation requires a live synchronized quote and explicit
-            account-balance acceptance. An occupied free slot never switches
-            this request to paid. Paid running Machines share account funds and
-            have no per-instance spending cap; adding funds never resumes a
-            paused Machine automatically.
-          </p>
-          <p>
-            All clients share the OS and workspace. File roots do not isolate
-            shell commands. No inbound ports, public IP, persistent environment
-            variables, snapshots or restore. Only /workspace persists; HOME,
-            /tmp, browser profiles and downloads are temporary unless safely
-            saved in the workspace. Job environment variables are temporary.
-          </p>
-          <p>
-            At most two jobs run concurrently. Default command timeout is 120
-            seconds, maximum one hour. Each output cache is bounded to 1 MiB;
-            the Machine cache is bounded to 32 MiB. Raw output remains only on
-            the Node, lasts at most one hour after termination, and may
-            disappear sooner.
-          </p>
-          <p>
-            Job metadata remains for 30 days and terminal operation history for
-            90 days. Deletion permanently removes the workspace, targets cleanup
-            within 24 hours, and retains necessary billing, cleanup and
-            idempotency evidence. Paused workspace storage is free.
-          </p>
+              ? t("Unavailable")
+              : t("{{value}} Credits", { value: formatExactCredits(available, 12) })}{t(". Free runtime does not require a funded wallet. Downstream services use their own billing and authorization.")}</p>
+          <p>{t("Paid creation requires a live synchronized quote and explicit account-balance acceptance. An occupied free slot never switches this request to paid. Paid running Machines share account funds and have no per-instance spending cap; adding funds never resumes a paused Machine automatically.")}</p>
+          <p>{t("All clients share the OS and workspace. File roots do not isolate shell commands. No inbound ports, public IP, persistent environment variables, snapshots or restore. Only /workspace persists; HOME, /tmp, browser profiles and downloads are temporary unless safely saved in the workspace. Job environment variables are temporary.")}</p>
+          <p>{t("At most two jobs run concurrently. Default command timeout is 120 seconds, maximum one hour. Each output cache is bounded to 1 MiB; the Machine cache is bounded to 32 MiB. Raw output remains only on the Node, lasts at most one hour after termination, and may disappear sooner.")}</p>
+          <p>{t("Job metadata remains for 30 days and terminal operation history for 90 days. Deletion permanently removes the workspace, targets cleanup within 24 hours, and retains necessary billing, cleanup and idempotency evidence. Paused workspace storage is free.")}</p>
           {policy || saved ? (
-            <p>
-              Policy: {saved?.body.policy_version ?? policy?.policy_version}.
-              Data policy:{" "}
+            <p>{t("Policy: ")}{saved?.body.policy_version ?? policy?.policy_version}{t(". Data policy:")}{" "}
               {saved?.body.data_policy_version ?? policy?.data_policy_version}.
             </p>
           ) : null}
@@ -608,8 +530,8 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
               <div>
                 <FormLabel>
                   {freeSlot
-                    ? "I accept the shared environment, fixed specification, and data policies."
-                    : "I accept this exact rate, continuous account-balance charging with no per-instance cap, and the displayed profile, shared environment, and data policy versions."}
+                    ? t("I accept the shared environment, fixed specification, and data policies.")
+                    : t("I accept this exact rate, continuous account-balance charging with no per-instance cap, and the displayed profile, shared environment, and data policy versions.")}
                 </FormLabel>
                 <FormMessage />
               </div>
@@ -618,12 +540,10 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
         />
         {error ? <ErrorBanner message={error} /> : null}
         {unreadable ? (
-          <ErrorBanner message="The saved request cannot be read. Review and reset it before continuing." />
+          <ErrorBanner message={t("The saved request cannot be read. Review and reset it before continuing.")} />
         ) : null}
         {conflict || unreadable ? (
-          <Button type="button" variant="secondary" onClick={reviewAgain}>
-            Discard saved request and review again
-          </Button>
+          <Button type="button" variant="secondary" onClick={reviewAgain}>{t("Discard saved request and review again")}</Button>
         ) : null}
         <div className="flex flex-wrap gap-2">
           <Button
@@ -631,9 +551,7 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
             variant="secondary"
             onClick={refresh}
             disabled={create.isPending}
-          >
-            Refresh preflight
-          </Button>
+          >{t("Refresh preflight")}</Button>
           <Button
             type="submit"
             variant="primary"
@@ -646,10 +564,10 @@ function HostedCreateForm({ onCreated, initialFreeSlot = true }: Props) {
             }
           >
             {saved
-              ? "Retry saved create request"
+              ? t("Retry saved create request")
               : freeSlot
-                ? "Create free remote machine"
-                : "Accept quote and create"}
+                ? t("Create free remote machine")
+                : t("Accept quote and create")}
           </Button>
         </div>
       </form>

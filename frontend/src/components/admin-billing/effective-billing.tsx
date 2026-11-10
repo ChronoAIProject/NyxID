@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { Badge } from "@/components/ui/badge";
 import { useAdminBillingService } from "@/hooks/use-admin-billing";
 import { metricLabel } from "@/schemas/billing-metrics";
@@ -11,11 +13,11 @@ import type {
 } from "@/schemas/admin-billing";
 
 const SOURCE_LABELS: Record<BillingSource, string> = {
-  env: "Environment",
-  global: "Global default",
-  service: "Service",
-  legacy: "Legacy",
-  free: "Free",
+  get env() { return translateUi("Environment"); },
+  get global() { return translateUi("Global default"); },
+  get service() { return translateUi("Service"); },
+  get legacy() { return translateUi("Legacy"); },
+  get free() { return translateUi("Free"); },
 };
 
 const SOURCE_VARIANTS: Record<
@@ -30,12 +32,12 @@ const SOURCE_VARIANTS: Record<
 };
 
 const CLASS_LABELS: Record<CredentialClass, string> = {
-  nyxid_managed_master: "NyxID platform key",
-  nyxid_platform_oauth_app: "NyxID shared OAuth app",
-  user_owned: "Own key",
-  agent_override_user_owned: "Agent credential override",
-  node_managed: "Node credential",
-  no_auth: "No credential",
+  get nyxid_managed_master() { return translateUi("NyxID platform key"); },
+  get nyxid_platform_oauth_app() { return translateUi("NyxID shared OAuth app"); },
+  get user_owned() { return translateUi("Own key"); },
+  get agent_override_user_owned() { return translateUi("Agent credential override"); },
+  get node_managed() { return translateUi("Node credential"); },
+  get no_auth() { return translateUi("No credential"); },
 };
 
 const REASON_TEXT: Record<EffectiveReason, string> = {
@@ -56,17 +58,18 @@ const REASON_TEXT: Record<EffectiveReason, string> = {
 };
 
 const ORIGIN_LABELS: Record<EffectivePrice["origin"], string> = {
-  lane_primary: "lane price",
-  lane_component: "lane component",
-  operation: "operation price",
-  service_price: "legacy service price",
-  legacy_plan: "Lago plan price",
-  resale_plan: "resale",
+  get lane_primary() { return translateUi("lane price"); },
+  get lane_component() { return translateUi("lane component"); },
+  get operation() { return translateUi("operation price"); },
+  get service_price() { return translateUi("legacy service price"); },
+  get legacy_plan() { return translateUi("Lago plan price"); },
+  get resale_plan() { return translateUi("resale"); },
 };
 
 export function SourceBadge({ source }: { readonly source: BillingSource }) {
+  const { t } = useUiTranslation();
   return (
-    <Badge variant={SOURCE_VARIANTS[source]} title={`Source: ${source}`}>
+    <Badge variant={SOURCE_VARIANTS[source]} title={t("Source: {{source}}", { source: source })}>
       {SOURCE_LABELS[source]}
     </Badge>
   );
@@ -77,14 +80,15 @@ function SyncBadge({
 }: {
   readonly status: EffectivePrice["sync_status"];
 }) {
+  const { t } = useUiTranslation();
   if (!status) return null;
   return (
     <Badge variant={status === "synced" ? "success" : "warning"}>
       {status === "synced"
-        ? "Synced"
+        ? t("Synced")
         : status === "failed"
-          ? "Failed"
-          : "Pending"}
+          ? t("Failed")
+          : t("Pending")}
     </Badge>
   );
 }
@@ -101,14 +105,15 @@ function priceLabel(price: EffectivePrice): string {
 }
 
 export function PriceLine({ price }: { readonly price: EffectivePrice }) {
+  const { t } = useUiTranslation();
   return (
     <li className="flex flex-wrap items-center gap-1.5 text-12">
       <span>{priceLabel(price)}</span>
       <SourceBadge source={price.source} />
       <SyncBadge status={price.sync_status} />
-      {price.cached_rate?.stale && <Badge variant="warning">Stale rate</Badge>}
+      {price.cached_rate?.stale && <Badge variant="warning">{t("Stale rate")}</Badge>}
       {price.cached_rate?.retired && (
-        <Badge variant="destructive">Retired rate</Badge>
+        <Badge variant="destructive">{t("Retired rate")}</Badge>
       )}
       {price.sync_error && (
         <span className="text-11 text-destructive">{price.sync_error}</span>
@@ -122,6 +127,7 @@ export function EffectiveClassBlock({
 }: {
   readonly group: EffectiveClass;
 }) {
+  const { t } = useUiTranslation();
   return (
     <div className="space-y-1" data-testid="effective-class">
       <div className="flex flex-wrap items-center gap-1.5 text-12 font-medium">
@@ -130,9 +136,9 @@ export function EffectiveClassBlock({
         </span>
         <SourceBadge source={group.source} />
         {group.platform_charged ? (
-          <Badge variant="default">Charged</Badge>
+          <Badge variant="default">{t("Charged")}</Badge>
         ) : (
-          <Badge variant="secondary">Not charged</Badge>
+          <Badge variant="secondary">{t("Not charged")}</Badge>
         )}
       </div>
       <p className="text-11 text-muted-foreground">
@@ -150,9 +156,7 @@ export function EffectiveClassBlock({
       )}
       {group.pending.length > 0 && (
         <div className="space-y-1">
-          <div className="text-11 text-muted-foreground">
-            Configured, not charged until synced:
-          </div>
+          <div className="text-11 text-muted-foreground">{t("Configured, not charged until synced:")}</div>
           <ul className="space-y-1">
             {group.pending.map((price) => (
               <PriceLine
@@ -172,6 +176,7 @@ export function EffectiveBilling({
 }: {
   readonly service: BillingService;
 }) {
+  const { t } = useUiTranslation();
   const { resale } = service.effective;
   return (
     <div className="space-y-3">
@@ -182,11 +187,10 @@ export function EffectiveBilling({
         />
       ))}
       {resale.configured && (
-        <p className="flex items-center gap-1.5 text-11 text-muted-foreground">
-          Resale{" "}
+        <p className="flex items-center gap-1.5 text-11 text-muted-foreground">{t("Resale")}{" "}
           {resale.applied
-            ? "applies to NyxID platform-key traffic"
-            : "is configured but disabled"}
+            ? t("applies to NyxID platform-key traffic")
+            : t("is configured but disabled")}
           <SourceBadge source={resale.source} />
         </p>
       )}
@@ -200,23 +204,20 @@ export function EffectiveBillingSummary({
 }: {
   readonly serviceId: string;
 }) {
+  const { t } = useUiTranslation();
   const { data, isLoading, error } = useAdminBillingService(serviceId);
   return (
     <section className="space-y-2 rounded-lg border border-border/50 p-3">
-      <h3 className="text-13 font-semibold">Effective billing</h3>
+      <h3 className="text-13 font-semibold">{t("Effective billing")}</h3>
       {isLoading && (
-        <p className="text-12 text-muted-foreground">Resolving prices…</p>
+        <p className="text-12 text-muted-foreground">{t("Resolving prices…")}</p>
       )}
       {error && (
-        <p className="text-12 text-destructive">
-          Effective billing is unavailable: {error.message}
+        <p className="text-12 text-destructive">{t("Effective billing is unavailable: ")}{translateUi(error.message ?? "")}
         </p>
       )}
       {data && <EffectiveBilling service={data} />}
-      <p className="text-11 text-muted-foreground">
-        Resolved by the server from the saved configuration exactly as billing
-        charges it. Global defaults live in Admin → Billing.
-      </p>
+      <p className="text-11 text-muted-foreground">{t("Resolved by the server from the saved configuration exactly as billing charges it. Global defaults live in Admin → Billing.")}</p>
     </section>
   );
 }

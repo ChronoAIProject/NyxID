@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useRef, useState } from "react";
 import { Anchor as PopoverAnchor } from "@radix-ui/react-popover";
 import { ChevronDown, Search, X } from "lucide-react";
@@ -44,6 +45,7 @@ export function LoginPermissionPicker({
   disabled: boolean;
   connections?: ConnectionSelection;
 }) {
+  const { t } = useUiTranslation();
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
@@ -143,17 +145,14 @@ export function LoginPermissionPicker({
             tabIndex={-1}
             id="selected-permissions-title"
             className="font-semibold"
-          >
-            Permission filters
-          </h3>
+          >{t("Permission filters")}</h3>
           <span role="status" className="text-11">
-            {total} selected
-          </span>
+            {total}{t(" selected")}</span>
         </div>
         <p className="text-11 text-muted-foreground">
           {connections
-            ? "Find permissions and choose the connected accounts to include."
-            : "Find keys that include these permissions. Matching keys may grant more access."}
+            ? t("Find permissions and choose the connected accounts to include.")
+            : t("Find keys that include these permissions. Matching keys may grant more access.")}
         </p>
       </div>
       <Popover open={open && !disabled} onOpenChange={setOpen}>
@@ -171,8 +170,8 @@ export function LoginPermissionPicker({
           >
             <label htmlFor="login-permission-search" className="sr-only">
               {connections
-                ? "Search permissions & connections"
-                : "Search permissions"}
+                ? t("Search permissions & connections")
+                : t("Search permissions")}
             </label>
             <div className="relative">
               <Search className="pointer-events-none absolute left-3 top-2.5 size-3 text-muted-foreground" />
@@ -184,8 +183,8 @@ export function LoginPermissionPicker({
                 className="pl-8 pr-10"
                 placeholder={
                   connections
-                    ? "Find a service, account, or permission…"
-                    : "Search services or permissions…"
+                    ? t("Find a service, account, or permission…")
+                    : t("Search services or permissions…")
                 }
                 aria-expanded={open && !disabled}
                 aria-controls="login-permission-options"
@@ -214,7 +213,7 @@ export function LoginPermissionPicker({
               <PopoverTrigger asChild>
                 <button
                   type="button"
-                  aria-label="Show permission options"
+                  aria-label={t("Show permission options")}
                   aria-controls="login-permission-options"
                   disabled={disabled}
                   className="absolute right-0 top-0 flex h-8 w-9 items-center justify-center"
@@ -228,7 +227,7 @@ export function LoginPermissionPicker({
         <PopoverContent
           ref={menu}
           align="start"
-          aria-label="Permission options"
+          aria-label={t("Permission options")}
           className="flex w-[var(--radix-popover-trigger-width)] max-h-[var(--radix-popover-content-available-height)] flex-col rounded-lg bg-card p-3 text-12"
           id="login-permission-options"
           onOpenAutoFocus={(event) => event.preventDefault()}
@@ -244,14 +243,14 @@ export function LoginPermissionPicker({
           <div className="mb-2 flex shrink-0 justify-between text-11 text-muted-foreground">
             <span>
               {connections
-                ? "Permissions and connected accounts"
-                : "Available permissions"}
+                ? t("Permissions and connected accounts")
+                : t("Available permissions")}
             </span>
-            <span>{total} selected</span>
+            <span>{total}{t(" selected")}</span>
           </div>
           <div
             className="min-h-0 max-h-72 overflow-y-auto overscroll-contain"
-            aria-label="Available permissions"
+            aria-label={t("Available permissions")}
           >
             {visibleGroups.map(({ id, items, visible }) => {
               const count = items.filter(chosen).length;
@@ -277,7 +276,7 @@ export function LoginPermissionPicker({
                   {items[0]!.field !== "services" && (
                     <label className="flex items-center gap-2 py-1">
                       <Checkbox
-                        aria-label={`${items[0]!.service}: All ${items.length} permissions`}
+                        aria-label={t("{{service}}: All {{length}} permissions", { service: items[0]!.service, length: items.length })}
                         checked={
                           count === items.length
                             ? true
@@ -287,7 +286,7 @@ export function LoginPermissionPicker({
                         }
                         onCheckedChange={(v) => toggle(items, v === true)}
                       />
-                      <span>Select all {items.length}</span>
+                      <span>{t("Select all ")}{items.length}</span>
                       {count > 0 && (
                         <span className="ml-auto text-muted-foreground">
                           {count}/{items.length}
@@ -304,7 +303,7 @@ export function LoginPermissionPicker({
                         .join(" · ")}
                     >
                       <Checkbox
-                        aria-label={`${option.service}: ${option.label}`}
+                        aria-label={t("{{service}}: {{label}}", { service: option.service, label: option.label })}
                         checked={chosen(option)}
                         onCheckedChange={(v) => toggle([option], v === true)}
                       />
@@ -317,7 +316,7 @@ export function LoginPermissionPicker({
                 </fieldset>
               );
             })}
-            {!visibleGroups.length && <p>No matching service or permission.</p>}
+            {!visibleGroups.length && <p>{t("No matching service or permission.")}</p>}
           </div>
         </PopoverContent>
       </Popover>
@@ -349,13 +348,13 @@ export function LoginPermissionPicker({
                       title={pill
                         .map((p) => `${p.service}: ${p.value}`)
                         .join(", ")}
-                      aria-label={`Remove ${items[0]!.service}: ${all ? `All ${items.length} permissions` : pill[0]!.label}`}
+                      aria-label={t("Remove {{service}}: {{value}}", { service: items[0]!.service, value: all ? `All ${items.length} permissions` : pill[0]!.label })}
                       className="flex max-w-full items-center gap-2 rounded-md border border-border bg-overlay px-2 py-1 text-11 hover:bg-overlay-strong focus-visible:outline-2 focus-visible:outline-primary"
                       onClick={(e) => remove(pill, e.currentTarget)}
                     >
                       <span className="break-all">
                         {all
-                          ? `All ${items.length} permissions`
+                          ? t("All {{length}} permissions", { length: items.length })
                           : pill[0]!.label}
                       </span>
                       <X className="size-3 shrink-0" />
@@ -368,8 +367,8 @@ export function LoginPermissionPicker({
           {!total && (
             <p className="text-muted-foreground">
               {connections
-                ? "Search above to choose permissions."
-                : "No filters. Showing all eligible keys."}
+                ? t("Search above to choose permissions.")
+                : t("No filters. Showing all eligible keys.")}
             </p>
           )}
         </div>
@@ -381,9 +380,7 @@ export function LoginPermissionPicker({
               className="h-auto px-0 py-1 text-11"
               disabled={disabled}
               onClick={() => onChange(linkFilters)}
-            >
-              Reset to link filters
-            </Button>
+            >{t("Reset to link filters")}</Button>
           ) : (
             <span />
           )}
@@ -400,9 +397,7 @@ export function LoginPermissionPicker({
                   service_permissions: [],
                 })
               }
-            >
-              Clear filters
-            </Button>
+            >{t("Clear filters")}</Button>
           )}
         </div>
       </section>

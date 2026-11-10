@@ -1,3 +1,5 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+import { useAppTranslation } from "@/i18n/use-app-translation";
 import { useState } from "react";
 import { useOrgs } from "@/hooks/use-orgs";
 import { useFeature } from "@/hooks/use-feature-flag";
@@ -67,9 +69,12 @@ export function ServiceGrantPicker({
   readonly onChange: (slugs: string[]) => void;
   readonly disabled?: boolean;
 }) {
+  const { t } = useAppTranslation();
   const keys = useKeys({ includeTools: true });
   const services = (keys.data ?? [])
-    .filter((key) => key.is_active &&
+    .filter(
+      (key) =>
+        key.is_active &&
         (!org ||
           (key.credential_source?.type === "org" &&
             key.credential_source.org_id === org &&
@@ -79,27 +84,34 @@ export function ServiceGrantPicker({
   const known = new Set(services.map((service) => service.slug));
   const rows = [
     ...services,
-    ...value.filter((slug) => !known.has(slug)).map((slug) => ({ slug, label: slug })),
+    ...value
+      .filter((slug) => !known.has(slug))
+      .map((slug) => ({ slug, label: slug })),
   ];
   function toggle(slug: string, checked: boolean) {
-    onChange(checked ? [...value, slug] : value.filter((item) => item !== slug));
+    onChange(
+      checked ? [...value, slug] : value.filter((item) => item !== slug),
+    );
   }
   if (keys.isPending) {
     return (
-      <p className="text-12 text-text-tertiary">Loading your services...</p>
+      <p className="text-12 text-text-tertiary">
+        {t("Loading your services...")}
+      </p>
     );
   }
   if (!rows.length) {
     return (
       <p className="rounded-lg border border-dashed border-border px-3 py-2 text-12 text-muted-foreground">
-        You have no connected services yet. Connect a service first, then grant it
-        here; the agent uses only what you grant.
+        {t(
+          "You have no connected services yet. Connect a service first, then grant it here; the agent uses only what you grant.",
+        )}
       </p>
     );
   }
   return (
     <ul
-      aria-label="Services"
+      aria-label={t("Services")}
       className="assistant-scrollbar relative max-h-44 space-y-0.5 overflow-y-auto rounded-lg border border-border p-1"
     >
       {rows.map((service) => {
@@ -114,7 +126,9 @@ export function ServiceGrantPicker({
                 id={id}
                 checked={value.includes(service.slug)}
                 disabled={disabled}
-                onCheckedChange={(checked) => toggle(service.slug, checked === true)}
+                onCheckedChange={(checked) =>
+                  toggle(service.slug, checked === true)
+                }
               />
               <span className="min-w-0 flex-1 truncate text-foreground">
                 {service.label}
@@ -137,6 +151,7 @@ function AgentOwnerPicker({
   readonly value?: string;
   readonly onChange: (id: string | undefined) => void;
 }) {
+  const { t } = useAppTranslation();
   const orgs = useOrgs();
   const writable = (orgs.data ?? []).filter((org) =>
     ["admin", "member", "owner"].includes(org.your_role),
@@ -144,7 +159,7 @@ function AgentOwnerPicker({
   return (
     <div className="space-y-2">
       <label className="text-12 font-medium" htmlFor="agent-owner">
-        Ownership
+        {t("Ownership")}
       </label>
       <Select
         value={value ?? "personal"}
@@ -154,7 +169,7 @@ function AgentOwnerPicker({
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="personal">Personal</SelectItem>
+          <SelectItem value="personal">{t("Personal")}</SelectItem>
           {writable.map((org) => (
             <SelectItem key={org.id} value={org.id}>
               {org.display_name ?? org.slug}
@@ -164,8 +179,9 @@ function AgentOwnerPicker({
       </Select>
       {value ? (
         <p className="text-11 text-muted-foreground">
-          Admins and Members maintain this agent. Each member has private chats;
-          memory is shared.
+          {t(
+            "Admins and Members maintain this agent. Each member has private chats; memory is shared.",
+          )}
         </p>
       ) : null}
     </div>
@@ -178,8 +194,12 @@ export function NewAgentDialog({
   onCreated,
 }: {
   readonly onClose: () => void;
-  readonly onCreated: (created: { id: string; home_conversation_id: string }) => void;
+  readonly onCreated: (created: {
+    id: string;
+    home_conversation_id: string;
+  }) => void;
 }) {
+  const { t } = useAppTranslation();
   const create = useCreateNyxBotAgent();
   const orgAgentsEnabled = useFeature(FEATURE_FLAG.ORG_AGENTS);
   const form = useAppForm<AssistantAgentCreate>({
@@ -204,7 +224,9 @@ export function NewAgentDialog({
       const created = await create.mutateAsync(values);
       onCreated(created);
     } catch (cause) {
-      setError(errorMessage(cause, "Could not create the agent. Try again."));
+      setError(
+        errorMessage(cause, t("Could not create the agent. Try again.")),
+      );
     }
   }
 
@@ -217,12 +239,11 @@ export function NewAgentDialog({
     >
       <DialogContent scrollMode="body" className="md:max-w-lg">
         <DialogHeader className="shrink-0 pr-6">
-          <DialogTitle>New agent</DialogTitle>
+          <DialogTitle>{t("New agent")}</DialogTitle>
           <DialogDescription>
-            A specialist keeps its own memory and threads and uses only the
-            services you grant here. When you talk to it directly it handles
-            the work itself and tells you what it is missing; you add grants
-            in its details.
+            {t(
+              "A specialist keeps its own memory and threads and uses only the services you grant here. When you talk to it directly it handles the work itself and tells you what it is missing; you add grants in its details.",
+            )}
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
@@ -241,7 +262,7 @@ export function NewAgentDialog({
                 />
               ) : (
                 <p className="text-11 text-text-tertiary">
-                  Organization agents are not enabled yet.
+                  {t("Organization agents are not enabled yet.")}
                 </p>
               )}
               <FormField
@@ -249,18 +270,20 @@ export function NewAgentDialog({
                 name="name"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Name</FormLabel>
+                    <FormLabel>{t("Name")}</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder="researcher"
+                        placeholder={t("researcher")}
                         autoComplete="off"
                         maxLength={32}
                         {...field}
-                        onChange={(event) => field.onChange(event.target.value.toLowerCase())}
+                        onChange={(event) =>
+                          field.onChange(event.target.value.toLowerCase())
+                        }
                       />
                     </FormControl>
                     <FormDescription className="text-11">
-                      The @handle: lowercase letters, digits and hyphens.
+                      {t("The @handle: lowercase letters, digits and hyphens.")}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -272,21 +295,21 @@ export function NewAgentDialog({
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>
-                      Display name{" "}
+                      {t("Display name")}{" "}
                       <span className="font-normal text-text-tertiary">
-                        (optional)
+                        {t("(optional)")}
                       </span>
                     </FormLabel>
                     <FormControl>
                       <Input
-                        placeholder="Luna"
+                        placeholder={t("Luna")}
                         autoComplete="off"
                         maxLength={ASSISTANT_AGENT_DISPLAY_NAME_MAX}
                         {...field}
                       />
                     </FormControl>
                     <FormDescription className="text-11">
-                      Shown instead of the @handle.
+                      {t("Shown instead of the @handle.")}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -297,12 +320,14 @@ export function NewAgentDialog({
                 name="description"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Role</FormLabel>
+                    <FormLabel>{t("Role")}</FormLabel>
                     <FormControl>
                       <textarea
                         className={TEXTAREA_CLASS}
                         maxLength={2048}
-                        placeholder="Tracks open GitHub issues and reports the urgent ones."
+                        placeholder={t(
+                          "Tracks open GitHub issues and reports the urgent ones.",
+                        )}
                         {...field}
                       />
                     </FormControl>
@@ -316,9 +341,9 @@ export function NewAgentDialog({
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>
-                      Persona{" "}
+                      {t("Persona")}{" "}
                       <span className="font-normal text-text-tertiary">
-                        (optional)
+                        {t("(optional)")}
                       </span>
                     </FormLabel>
                     <FormControl>
@@ -330,8 +355,9 @@ export function NewAgentDialog({
                       />
                     </FormControl>
                     <FormDescription className="text-11">
-                      Personality and tone only; it never changes what the agent
-                      may do.
+                      {t(
+                        "Personality and tone only; it never changes what the agent may do.",
+                      )}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>
@@ -342,59 +368,80 @@ export function NewAgentDialog({
                 name="services"
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>Services it may use</FormLabel>
+                    <FormLabel>{t("Services it may use")}</FormLabel>
                     <ServiceGrantPicker
                       org={org}
-                      value={field.value} onChange={field.onChange} />
+                      value={field.value}
+                      onChange={field.onChange}
+                    />
                     <FormMessage />
                   </FormItem>
                 )}
               />
-              {(["machines", ...(org ? [] : ["logins"])] as (
+              {(
+                ["machines", ...(org ? [] : ["logins"])] as (
                   | "machines"
                   | "logins"
                 )[]
               ).map((kind) => (
-                <FormField key={kind} control={form.control} name={kind} render={({ field }) => (
-                  <FormItem>
+                <FormField
+                  key={kind}
+                  control={form.control}
+                  name={kind}
+                  render={({ field }) => (
+                    <FormItem>
                       <MachineGrantPicker
                         org={org}
-                        kind={kind} value={field.value ?? []} onChange={field.onChange} disabled={create.isPending} />
+                        kind={kind}
+                        value={field.value ?? []}
+                        onChange={field.onChange}
+                        disabled={create.isPending}
+                      />
                       <FormMessage />
                     </FormItem>
-                )} />
+                  )}
+                />
               ))}
               {!org ? (
                 <FormField
-                control={form.control}
-                name="account_read"
-                render={({ field }) => (
-                  <FormItem>
-                    <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
-                      <div className="space-y-1">
-                        <FormLabel>Read my account</FormLabel>
-                        <FormDescription className="text-12">
-                            Lets it look up your keys, services and nodes. It
-                            can never change or delete them.
+                  control={form.control}
+                  name="account_read"
+                  render={({ field }) => (
+                    <FormItem>
+                      <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
+                        <div className="space-y-1">
+                          <FormLabel>{t("Read my account")}</FormLabel>
+                          <FormDescription className="text-12">
+                            {t(
+                              "Lets it look up your keys, services and nodes. It can never change or delete them.",
+                            )}
                           </FormDescription>
+                        </div>
+                        <FormControl>
+                          <Switch
+                            checked={field.value}
+                            onCheckedChange={field.onChange}
+                          />
+                        </FormControl>
                       </div>
-                      <FormControl>
-                        <Switch checked={field.value} onCheckedChange={field.onChange} />
-                      </FormControl>
-                    </div>
-                  </FormItem>
-                )}
-              />
+                    </FormItem>
+                  )}
+                />
               ) : null}
               {error ? (
                 <p role="alert" className="text-12 text-destructive">
-                  {error}
+                  {translateUi(error)}
                 </p>
               ) : null}
             </DialogBody>
             <DialogFooter className="pt-4">
-              <Button type="button" variant="ghost" onClick={onClose} disabled={create.isPending}>
-                Cancel
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={onClose}
+                disabled={create.isPending}
+              >
+                {t("Cancel")}
               </Button>
               <Button
                 type="submit"
@@ -402,7 +449,7 @@ export function NewAgentDialog({
                 isLoading={create.isPending}
                 disabled={!name.trim() || !description.trim()}
               >
-                Create agent
+                {t("Create agent")}
               </Button>
             </DialogFooter>
           </form>

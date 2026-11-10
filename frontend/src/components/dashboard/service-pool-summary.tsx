@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Cable } from "lucide-react";
 import {
   Tooltip,
@@ -30,21 +31,22 @@ export function ServicePoolSummary({
   readonly contentId: string;
   readonly onOpen: () => void;
 }) {
+  const { t } = useUiTranslation();
   const first = pools[0];
   const name =
     first?.name ??
     (loading
-      ? "Loading pools…"
+      ? t("Loading pools…")
       : incomplete
-        ? "Pool access incomplete"
-        : "Direct connections · no pool");
+        ? t("Pool access incomplete")
+        : t("Direct connections · no pool"));
   const failover = first
     ? poolFailoverSummary(pools)
     : loading
-      ? "Loading…"
+      ? t("Loading…")
       : incomplete
-        ? "Not confirmed"
-        : "No pool";
+        ? t("Not confirmed")
+        : t("No pool");
   const memberIds = new Set(
     pools.flatMap((pool) =>
       pool.members.map((member) => member.user_service_id),
@@ -54,21 +56,21 @@ export function ServicePoolSummary({
     ...new Set(
       pools.map(
         (pool) =>
-          ({
+          t(({
             priority: "Priority",
             weighted: "Weighted",
             round_robin: "Round-robin",
-          })[pool.strategy],
+          })[pool.strategy]),
       ),
     ),
   ].join(" / ");
   const config = first
-    ? `${memberIds.size} ${memberIds.size === 1 ? "connection" : "connections"} · ${formats}`
+    ? t(memberIds.size === 1 ? "{{count}} connection · {{formats}}" : "{{count}} connections · {{formats}}", { count: memberIds.size, formats })
     : loading
-      ? "Loading routing…"
+      ? t("Loading routing…")
       : incomplete
-        ? "Routing not confirmed"
-        : "Each connection uses its own slug";
+        ? t("Routing not confirmed")
+        : t("Each connection uses its own slug");
 
   return (
     <TooltipProvider delayDuration={180}>
@@ -77,7 +79,7 @@ export function ServicePoolSummary({
           <button
             type="button"
             className="flex h-8 w-full min-w-0 flex-col rounded-sm text-left text-xs leading-4 focus-visible:outline-2 focus-visible:outline-ring"
-            aria-label={`Show routing for ${serviceName}`}
+            aria-label={t("Show routing for {{serviceName}}", { serviceName: serviceName })}
             aria-expanded={expanded}
             aria-controls={contentId}
             onClick={onOpen}
@@ -102,13 +104,12 @@ export function ServicePoolSummary({
               </span>
               {pools.length > 1 && (
                 <span className="ml-auto shrink-0 text-muted-foreground">
-                  {pools.length} pools
-                </span>
+                  {pools.length}{t(" pools")}</span>
               )}
             </span>
             <span className="block w-full truncate pl-[22px] text-muted-foreground">
               {first
-                ? `${pools.length === 1 ? `${name} · ` : "Failover · "}${failover}`
+                ? t("{{value}}{{failover}}", { value: pools.length === 1 ? `${name} · ` : t("Failover · "), failover: failover })
                 : config}
             </span>
           </button>
@@ -130,8 +131,8 @@ export function ServicePoolSummary({
                 </span>
               </p>
               <p>
-                {pool.members.filter((member) => member.enabled).length} of{" "}
-                {pool.members.length} connections enabled ·{" "}
+                {pool.members.filter((member) => member.enabled).length}{t(" of")}{" "}
+                {pool.members.length}{t(" connections enabled ·")}{" "}
                 {poolFailoverLabel(pool)}
               </p>
               <code>/api/v1/proxy/s/{pool.slug}</code>
@@ -139,18 +140,15 @@ export function ServicePoolSummary({
           ))}
           <p className="text-muted-foreground">
             {first
-              ? "Configured policy applies when calling the pool slug. Actual attempts depend on eligible members and the request. Individual connection slugs run directly."
+              ? t("Configured policy applies when calling the pool slug. Actual attempts depend on eligible members and the request. Individual connection slugs run directly.")
               : loading
-                ? "Loading saved pool membership."
+                ? t("Loading saved pool membership.")
                 : incomplete
-                  ? "Pool membership could not be fully checked."
-                  : "No saved pool contains these connections. Individual connection slugs run directly."}
+                  ? t("Pool membership could not be fully checked.")
+                  : t("No saved pool contains these connections. Individual connection slugs run directly.")}
           </p>
           {first && incomplete && (
-            <p className="text-muted-foreground">
-              Showing known pools only; additional organization pools may
-              require admin access.
-            </p>
+            <p className="text-muted-foreground">{t("Showing known pools only; additional organization pools may require admin access.")}</p>
           )}
         </TooltipContent>
       </Tooltip>

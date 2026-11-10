@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState } from "react";
 import { Check, ExternalLink, Loader2 } from "lucide-react";
 import { useTelegramNew } from "@/hooks/use-telegram-new";
@@ -25,6 +27,7 @@ export function TelegramNew({
   readonly onCancelled?: () => void | Promise<void>;
   readonly onConnected: (id: string, username?: string | null) => void;
 }) {
+  const { t } = useUiTranslation();
   const { configuration, begin, launch, cancel, connect } =
     useTelegramNew(requestId);
   const link = useChannelConnectLinkContext();
@@ -131,9 +134,7 @@ export function TelegramNew({
 
   if (configuration.isPending)
     return (
-      <p role="status" className="text-sm text-muted-foreground">
-        Checking Telegram setup…
-      </p>
+      <p role="status" className="text-sm text-muted-foreground">{t("Checking Telegram setup…")}</p>
     );
   if (configuration.error && !configuration.data)
     return (
@@ -143,27 +144,19 @@ export function TelegramNew({
           type="button"
           variant="outline"
           onClick={() => void configuration.refetch()}
-        >
-          Check progress
-        </Button>
+        >{t("Check progress")}</Button>
       </div>
     );
   if (!configuration.data?.available)
     return (
       <div className="space-y-3">
         {error && <ErrorBanner message={error.message} />}
-        <p className="text-sm text-muted-foreground">
-          An administrator needs to configure a manager bot in Admin → Platform
-          Credentials → Telegram — bot creation. You can use Telegram bot token
-          to connect an existing bot.
-        </p>
+        <p className="text-sm text-muted-foreground">{t("An administrator needs to configure a manager bot in Admin → Platform Credentials → Telegram — bot creation. You can use Telegram bot token to connect an existing bot.")}</p>
         <Button
           type="button"
           variant="outline"
           onClick={() => void configuration.refetch()}
-        >
-          Check configuration
-        </Button>
+        >{t("Check configuration")}</Button>
       </div>
     );
 
@@ -175,26 +168,20 @@ export function TelegramNew({
     <div className={fullPage ? "space-y-4 break-words" : "space-y-4 break-words rounded-xl border border-border bg-card p-4 sm:p-5"}>
       {error && <ErrorBanner message={error.message} />}
       {link && begin.error && (
-        <a href="/channel-bots?connect=telegram-new" target="_blank" rel="noopener noreferrer" className="text-sm underline underline-offset-4">
-          Open existing Telegram setup
-        </a>
+        <a href="/channel-bots?connect=telegram-new" target="_blank" rel="noopener noreferrer" className="text-sm underline underline-offset-4">{t("Open existing Telegram setup")}</a>
       )}
       {(connecting && request?.auto_connect) || connected ? (
         <div className="space-y-3">
           <p role="status" className="flex items-center gap-2 text-sm">
             {connected ? <Check className="size-3 text-success" /> : <Loader2 className="size-3 animate-spin" />}
-            {connected ? `@${request?.bot_username} is connected.` : `Connecting @${request?.bot_username}…`}
+            {connected ? t("@{{bot_username}} is connected.", { bot_username: request?.bot_username }) : t("Connecting @{{bot_username}}…", { bot_username: request?.bot_username })}
           </p>
-          <p className="text-xs text-muted-foreground">
-            You can close this {stayInPlace ? "dialog" : "page"}. NyxID will finish connecting your bot and send a message in the Telegram setup chat.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("You can close this ")}{stayInPlace ? t("dialog") : t("page")}{t(". NyxID will finish connecting your bot and send a message in the Telegram setup chat.")}</p>
           {request?.connection_error && <p role="status" className="text-xs text-muted-foreground">{request.connection_error}</p>}
         </div>
       ) : fullPage ? (
         <div className="space-y-4">
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Choose your bot’s name and username in Telegram. NyxID connects it automatically when you finish.
-          </p>
+          <p className="text-xs leading-relaxed text-muted-foreground">{t("Choose your bot’s name and username in Telegram. NyxID connects it automatically when you finish.")}</p>
           {canLaunch && (
             <Button
               type="button"
@@ -204,27 +191,26 @@ export function TelegramNew({
               disabled={pending || ((!request || terminal) && !label.trim())}
               onClick={() => void prepare()}
             >
-              {request && !terminal ? "Reopen Telegram" : "Continue in Telegram"}
+              {request && !terminal ? t("Reopen Telegram") : t("Continue in Telegram")}
               <ExternalLink className="size-3" aria-hidden="true" />
             </Button>
           )}
           {launchUrl && canLaunch && (
-            <p className="text-xs text-muted-foreground">
-              Telegram didn’t open?{" "}
-              <a className="ph-no-capture underline" href={launchUrl} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">Open Telegram</a>
+            <p className="text-xs text-muted-foreground">{t("Telegram didn’t open?")}{" "}
+              <a className="ph-no-capture underline" href={launchUrl} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer">{t("Open Telegram")}</a>
             </p>
           )}
           {creating && (
             <p role="status" className="flex items-center gap-2 text-xs text-muted-foreground">
               <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden="true" />
-              {connecting ? `Connecting @${request?.bot_username}…` : "Waiting for you to create your bot in Telegram…"}
+              {connecting ? t("Connecting @{{bot_username}}…", { bot_username: request?.bot_username }) : t("Waiting for you to create your bot in Telegram…")}
             </p>
           )}
           {connecting && request?.connection_error && (
             <p role="status" className="text-xs text-muted-foreground">{request.connection_error}</p>
           )}
         </div>
-      ) : <ol aria-label="Telegram setup steps" className="space-y-4">
+      ) : <ol aria-label={t("Telegram setup steps")} className="space-y-4">
         <li className="flex gap-3">
           <span
             className="flex size-7 shrink-0 items-center justify-center rounded-full border border-border text-xs"
@@ -233,11 +219,8 @@ export function TelegramNew({
             {creating ? <Check className="size-3 text-success" /> : "1"}
           </span>
           <div className="space-y-2">
-            <p className="text-sm font-medium">Continue in Telegram</p>
-            <p className="text-xs text-muted-foreground">
-              Create a new bot for the account selected above. NyxID will
-              connect it automatically when you finish Telegram’s form.
-            </p>
+            <p className="text-sm font-medium">{t("Continue in Telegram")}</p>
+            <p className="text-xs text-muted-foreground">{t("Create a new bot for the account selected above. NyxID will connect it automatically when you finish Telegram’s form.")}</p>
             {canLaunch && (
               <Button
                 type="button"
@@ -248,22 +231,19 @@ export function TelegramNew({
               >
                 <ExternalLink className="size-3" />
                 {request && !terminal
-                  ? "Reopen Telegram"
-                  : "Continue in Telegram"}
+                  ? t("Reopen Telegram")
+                  : t("Continue in Telegram")}
               </Button>
             )}
             {launchUrl && canLaunch && (
-              <p className="text-xs text-muted-foreground">
-                Telegram didn’t open?{" "}
+              <p className="text-xs text-muted-foreground">{t("Telegram didn’t open?")}{" "}
                 <a
                   className="ph-no-capture underline"
                   href={launchUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   referrerPolicy="no-referrer"
-                >
-                  Open Telegram
-                </a>
+                >{t("Open Telegram")}</a>
               </p>
             )}
           </div>
@@ -279,16 +259,9 @@ export function TelegramNew({
             {connected ? <Check className="size-3 text-success" /> : "2"}
           </span>
           <div className="space-y-2">
-            <p className="text-sm font-medium">Create your bot</p>
-            <p className="text-xs text-muted-foreground">
-              In the setup chat, tap <strong>Create bot</strong> and finish
-              Telegram’s name and username form. Tap <strong>Start</strong>{" "}
-              first if Telegram asks.
-            </p>
-            <p className="text-xs text-muted-foreground">
-              You can stay in Telegram. This page updates automatically when the
-              connection is complete.
-            </p>
+            <p className="text-sm font-medium">{t("Create your bot")}</p>
+            <p className="text-xs text-muted-foreground">{t("In the setup chat, tap ")}<strong>{t("Create bot")}</strong>{t(" and finish Telegram’s name and username form. Tap ")}<strong>{t("Start")}</strong>{" "}{t("first if Telegram asks.")}</p>
+            <p className="text-xs text-muted-foreground">{t("You can stay in Telegram. This page updates automatically when the connection is complete.")}</p>
             {creating && (
               <p role="status" className="flex items-center gap-2 text-sm">
                 {connected ? (
@@ -297,10 +270,10 @@ export function TelegramNew({
                   <Loader2 className="size-3 animate-spin" />
                 )}
                 {connected
-                  ? `@${request?.bot_username} is connected.`
+                  ? t("@{{bot_username}} is connected.", { bot_username: request?.bot_username })
                   : connecting
-                    ? `Connecting @${request?.bot_username}…`
-                    : "Waiting for you to create your bot in Telegram…"}
+                    ? t("Connecting @{{bot_username}}…", { bot_username: request?.bot_username })
+                    : t("Waiting for you to create your bot in Telegram…")}
               </p>
             )}
             {connecting && request?.connection_error && (
@@ -313,9 +286,7 @@ export function TelegramNew({
       </ol>}
       {request && !request.auto_connect && !terminal && (
         <div className="space-y-2 rounded-lg border border-border p-3 text-xs">
-          <p>
-            This setup was started with the previous flow. Finish its Telegram
-            approval, then complete the saved connection below{fullPage ? "." : ", or cancel and start again."}
+          <p>{t("This setup was started with the previous flow. Finish its Telegram approval, then complete the saved connection below")}{fullPage ? "." : t(", or cancel and start again.")}
           </p>
           {connecting && (
             <Button
@@ -324,7 +295,7 @@ export function TelegramNew({
               disabled={pending}
               onClick={() => void finishLegacyRequest()}
             >
-              {connect.isPending ? "Connecting…" : "Finish saved connection"}
+              {connect.isPending ? t("Connecting…") : t("Finish saved connection")}
             </Button>
           )}
         </div>
@@ -332,21 +303,19 @@ export function TelegramNew({
       {terminal && (
         <p role="status" className="text-sm text-muted-foreground">
           {request?.status === "expired"
-            ? "This setup expired. Start again to create a new bot."
+            ? t("This setup expired. Start again to create a new bot.")
             : request?.status === "suspended"
-              ? "This bot’s management changed. Manage the saved bot from Channel Bots."
-              : "Setup cancelled. You can start again."}
+              ? t("This bot’s management changed. Manage the saved bot from Channel Bots.")
+              : t("Setup cancelled. You can start again.")}
         </p>
       )}
       {!fullPage && request && !terminal && !connected && (
         <div className="space-y-2 border-t border-border pt-3">
-          <p className="text-xs text-muted-foreground">
-            Setting up: {request.label}.{" "}
+          <p className="text-xs text-muted-foreground">{t("Setting up: ")}{request.label}.{" "}
             {request.status !== "provisioning" && (
-              <>
-                Saved until{" "}
+              <>{t("Saved until")}{" "}
                 <time dateTime={request.expires_at}>
-                  {new Date(request.expires_at).toLocaleTimeString([], {
+                  {new Date(request.expires_at).toLocaleTimeString(getFormattingLocale(), {
                     hour: "numeric",
                     minute: "2-digit",
                   })}
@@ -361,9 +330,7 @@ export function TelegramNew({
             size="sm"
             disabled={pending}
             onClick={() => void configuration.refetch()}
-          >
-            Check progress
-          </Button>
+          >{t("Check progress")}</Button>
           {request.status !== "provisioning" && (
             <Button
               type="button"
@@ -380,9 +347,7 @@ export function TelegramNew({
                   })
                   .catch(() => {});
               }}
-            >
-              Cancel setup
-            </Button>
+            >{t("Cancel setup")}</Button>
           )}
         </div>
       )}

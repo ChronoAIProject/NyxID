@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import {
   Fragment,
   useCallback,
@@ -85,6 +86,7 @@ export function DeviceApproval({ flow }: { flow: LoginFlow }) {
 }
 
 function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
+  const { t } = useUiTranslation();
   const [resumed] = useState(() => resolveLoginResume(flow, query));
   const [hints] = useState(() => {
     const parsed = parseLoginRequestHints(
@@ -460,16 +462,14 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                 <NyxidIcon className="size-9" />
               </div>
               <div className="space-y-1.5">
-                <h1 className="text-22 font-semibold tracking-tight">
-                  Approve {flow === "device" ? "device" : "Agent Key"} login
-                </h1>
+                <h1 className="text-22 font-semibold tracking-tight">{t("Approve ")}{flow === "device" ? t("device") : t("Agent Key")}{t(" login")}</h1>
                 {!terminal && (
                   <p className="text-12 leading-relaxed text-muted-foreground">
                     {step === 1
                       ? context
-                        ? "Match this code with the one on your requesting device."
-                        : "Enter the code shown on your device or terminal."
-                      : "Choose what the requesting device can access."}
+                        ? t("Match this code with the one on your requesting device.")
+                        : t("Enter the code shown on your device or terminal.")
+                      : t("Choose what the requesting device can access.")}
                   </p>
                 )}
               </div>
@@ -491,20 +491,15 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                 <h1
                   id="expired-request-title"
                   className="text-22 font-semibold tracking-tight"
-                >
-                  Request expired
-                </h1>
-                <p className="text-12 leading-relaxed text-muted-foreground">
-                  Get a new code from the device or terminal you’re signing in
-                  to, then enter it here.
-                </p>
+                >{t("Request expired")}</h1>
+                <p className="text-12 leading-relaxed text-muted-foreground">{t("Get a new code from the device or terminal you’re signing in to, then enter it here.")}</p>
               </div>
               <Button
                 asChild
                 variant="primary"
                 className="h-9 w-full rounded-md"
               >
-                <a href={`/login/${flow}`}>Enter a new code</a>
+                <a href={`/login/${flow}`}>{t("Enter a new code")}</a>
               </Button>
             </section>
           ) : terminal ? (
@@ -516,25 +511,25 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
               )}
               <h2 className="text-15 font-semibold">
                 {terminal === "approved"
-                  ? "Approved — return to the requesting device"
-                  : "Request denied"}
+                  ? t("Approved — return to the requesting device")
+                  : t("Request denied")}
               </h2>
               <p className="text-12 text-muted-foreground">
                 {terminal === "approved"
-                  ? "The requester can now receive the approved credential."
-                  : "This request cannot be approved. Start a new login on the requesting device."}
+                  ? t("The requester can now receive the approved credential.")
+                  : t("This request cannot be approved. Start a new login on the requesting device.")}
               </p>
               {approval.identity?.verified && (
                 <p className="text-12 text-muted-foreground">
                   {approval.identity.keep_signed_in
-                    ? "You are also signed in to NyxID in this browser."
-                    : "Identity verified only for this request. No browser sign-in was created."}
+                    ? t("You are also signed in to NyxID in this browser.")
+                    : t("Identity verified only for this request. No browser sign-in was created.")}
                 </p>
               )}
             </section>
           ) : (
             <>
-              <nav aria-label="Approval steps" className="py-1">
+              <nav aria-label={t("Approval steps")} className="py-1">
                 <ol className="grid grid-cols-3">
                   {title.map((label, index) => {
                     const current = step === index + 1;
@@ -571,18 +566,18 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                   : "text-muted-foreground"
                             }
                           >
-                            <span className="sr-only">Step {index + 1}: </span>
+                            <span className="sr-only">{t("Step ")}{index + 1}: </span>
                             {label}
                             <span
                               className={`mt-1 block text-10 font-normal ${complete ? "text-success" : latest ? "text-primary-text" : "text-muted-foreground"}`}
                             >
                               {reviewing
-                                ? "Reviewing"
+                                ? t("Reviewing")
                                 : complete
-                                  ? "Completed"
+                                  ? t("Completed")
                                   : latest
-                                    ? "In progress"
-                                    : "Pending"}
+                                    ? t("In progress")
+                                    : t("Pending")}
                             </span>
                           </span>
                         </button>
@@ -606,7 +601,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                   <span>
                     {context.client_label ||
                       context.client_app ||
-                      "Requesting device"}{" "}
+                      t("Requesting device")}{" "}
                     ·{" "}
                     <span className="font-mono">
                       {formatAuthDeviceUserCodeInput(code)}
@@ -621,13 +616,11 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                       setDetailsOpen(true);
                       setStep(1);
                     }}
-                  >
-                    Review request
-                  </Button>
+                  >{t("Review request")}</Button>
                 </div>
               )}
               <section hidden={step !== 1} className="space-y-4">
-                <h2 className="sr-only">Verify request</h2>
+                <h2 className="sr-only">{t("Verify request")}</h2>
                 {!context ? (
                   <form
                     className="space-y-4"
@@ -650,9 +643,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                         busy || !validCode.success || !!hints.errors.length
                       }
                       isLoading={busy}
-                    >
-                      Continue
-                    </Button>
+                    >{t("Continue")}</Button>
                   </form>
                 ) : (
                   <>
@@ -666,7 +657,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                     />
                     <ApprovalCaution />
                     {isLoading ? (
-                      <p className="text-12">Verifying your identity…</p>
+                      <p className="text-12">{t("Verifying your identity…")}</p>
                     ) : !isAuthenticated ? (
                       <LoginIdentityCard
                         approval={approval}
@@ -685,19 +676,15 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                             setCompleted(Math.max(1, completed));
                             setStep(2);
                           }}
-                        >
-                          Continue
-                        </Button>
+                        >{t("Continue")}</Button>
                       </LoginActions>
                     )}
                   </>
                 )}
               </section>
               <section hidden={step !== 2} className="space-y-4">
-                <h2 className="text-15 font-semibold">Choose access</h2>
-                <p className="text-12 text-muted-foreground">
-                  Choose the access this device should receive.
-                </p>
+                <h2 className="text-15 font-semibold">{t("Choose access")}</h2>
+                <p className="text-12 text-muted-foreground">{t("Choose the access this device should receive.")}</p>
                 <div className="grid gap-3 sm:grid-cols-2">
                   {[
                     ...(flow === "device"
@@ -774,10 +761,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                   ))}
                 </div>
                 {mode === "agent" && !supportsRestricted && (
-                  <p role="alert" className="text-12 text-warning">
-                    This legacy request cannot receive an Agent Key. Start a
-                    capable request, or explicitly choose full account access.
-                  </p>
+                  <p role="alert" className="text-12 text-warning">{t("This legacy request cannot receive an Agent Key. Start a capable request, or explicitly choose full account access.")}</p>
                 )}
                 <LoginActions onDeny={denyRequest} disabled={busy}>
                   <Button
@@ -787,40 +771,30 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                     }
                     isLoading={busy}
                     onClick={() => void continueAccess()}
-                  >
-                    Continue to approval
-                  </Button>
+                  >{t("Continue to approval")}</Button>
                 </LoginActions>
               </section>
               <section hidden={step !== 3} className="space-y-4">
                 {((!chosen && choice !== "new") || mode === "full") && (
                   <>
-                    <h2 className="text-15 font-semibold">
-                      Scope &amp; approval
-                    </h2>
+                    <h2 className="text-15 font-semibold">{t("Scope & approval")}</h2>
                     <p className="text-11 text-muted-foreground">
                       {mode === "full"
-                        ? "Full account access · No scope configuration needed."
-                        : "Scope optional · Select permissions to find a matching key."}
+                        ? t("Full account access · No scope configuration needed.")
+                        : t("Scope optional · Select permissions to find a matching key.")}
                     </p>
                   </>
                 )}
                 {mode === "full" ? (
                   <>
-                    <p className="text-12 text-muted-foreground">
-                      Approve full account access for the requesting device. Its
-                      session can refresh until it expires or you revoke it in
-                      Settings.
-                    </p>
+                    <p className="text-12 text-muted-foreground">{t("Approve full account access for the requesting device. Its session can refresh until it expires or you revoke it in Settings.")}</p>
                     <LoginActions onDeny={denyRequest} disabled={busy}>
                       <Button
                         disabled={blocked}
                         isLoading={busy}
                         className="border-success bg-success text-white hover:border-success hover:bg-success/90"
                         onClick={() => void decide()}
-                      >
-                        Approve full account access
-                      </Button>
+                      >{t("Approve full account access")}</Button>
                     </LoginActions>
                   </>
                 ) : (
@@ -840,10 +814,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                         />
                       )}
                       {problems.length > 0 && (
-                        <p role="alert" className="text-12 text-warning">
-                          Unknown permissions or services: {problems.join(", ")}
-                          . Remove them or clear the filters.
-                        </p>
+                        <p role="alert" className="text-12 text-warning">{t("Unknown permissions or services: ")}{problems.join(", ")}{t(". Remove them or clear the filters.")}</p>
                       )}
                       {choice !== "new" ? (
                         <>
@@ -854,19 +825,17 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                   ref={keyChoiceTitle}
                                   tabIndex={-1}
                                   className="font-semibold outline-none"
-                                >
-                                  Choose an existing Agent Key
-                                </h3>
+                                >{t("Choose an existing Agent Key")}</h3>
                                 <span>
                                   {comparisons.length}{" "}
                                   {comparisons.length === 1
-                                    ? "match"
-                                    : "matches"}
+                                    ? t("match")
+                                    : t("matches")}
                                 </span>
                               </div>
                               <fieldset
                                 disabled={blocked}
-                                aria-label="Matching Agent Keys"
+                                aria-label={t("Matching Agent Keys")}
                                 className="max-h-96 space-y-3 overflow-y-auto"
                               >
                                 {comparisons.map(({ key, comparison }) => (
@@ -890,25 +859,22 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                         className={`ml-auto shrink-0 text-10 ${comparison.exact ? "text-success" : "text-warning"}`}
                                       >
                                         {comparison.exact
-                                          ? "Exact match"
-                                          : `Matched + ${comparison.extras.length} extra${comparison.extras.length === 1 ? "" : "s"}`}
+                                          ? t("Exact match")
+                                          : t("Matched + {{count}} extra permissions", { count: comparison.extras.length })}
                                       </span>
                                     </span>
                                     <span className="block break-words pl-6 text-11 text-muted-foreground">
                                       {key.owner_name} ·{" "}
                                       {effectivePermissions(key.scopes)} ·{" "}
                                       {key.allow_all_services
-                                        ? "All services"
-                                        : `${key.allowed_services.length} ${key.allowed_services.length === 1 ? "service" : "services"}`}
+                                        ? t("All services")
+                                        : t("{{length}} {{value}}", { length: key.allowed_services.length, value: key.allowed_services.length === 1 ? t("service") : t("services") })}
                                     </span>
                                   </button>
                                 ))}
                               </fieldset>
                               {!comparisons.length && (
-                                <p className="text-12 text-muted-foreground">
-                                  No matching Agent Key. Create one with the
-                                  requested access or edit the filters.
-                                </p>
+                                <p className="text-12 text-muted-foreground">{t("No matching Agent Key. Create one with the requested access or edit the filters.")}</p>
                               )}
                               <LoginActions
                                 onDeny={denyRequest}
@@ -918,15 +884,10 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                   variant="primary"
                                   disabled={blocked || !!problems.length}
                                   onClick={beginNew}
-                                >
-                                  Create new Agent Key
-                                </Button>
+                                >{t("Create new Agent Key")}</Button>
                               </LoginActions>
                               {hints.key_source === "new" && (
-                                <p className="text-11 text-muted-foreground">
-                                  The requester suggested creating a new key.
-                                  You can also choose a matching existing key.
-                                </p>
+                                <p className="text-11 text-muted-foreground">{t("The requester suggested creating a new key. You can also choose a matching existing key.")}</p>
                               )}
                             </>
                           )}
@@ -938,9 +899,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                 disabled={blocked}
                                 onClick={changeKey}
                               >
-                                <ArrowLeft aria-hidden="true" />
-                                Change key
-                              </Button>
+                                <ArrowLeft aria-hidden="true" />{t("Change key")}</Button>
                               <LoginGrantReview
                                 key={chosen.key.id}
                                 apiKey={chosen.key}
@@ -950,11 +909,9 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                 customize={
                                   <>
                                     <AgentKeyPermissions apiKey={chosen.key} />
-                                    <label className="block space-y-2 text-12">
-                                      Login credential expiry (optional)
-                                      <Input
+                                    <label className="block space-y-2 text-12">{t("Login credential expiry (optional)")}<Input
                                         type="datetime-local"
-                                        aria-label="Login credential expiry (optional)"
+                                        aria-label={t("Login credential expiry (optional)")}
                                         value={credentialExpiry}
                                         disabled={blocked}
                                         onChange={(e) =>
@@ -992,9 +949,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                                           api_key_id: chosen.key.id,
                                         })
                                       }
-                                    >
-                                      Approve access with this key
-                                    </Button>
+                                    >{t("Approve access with this key")}</Button>
                                   </LoginActions>
                                 }
                               >
@@ -1018,9 +973,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                               disabled={blocked}
                               onClick={changeKey}
                             >
-                              <ArrowLeft aria-hidden="true" />
-                              Back to matching keys
-                            </Button>
+                              <ArrowLeft aria-hidden="true" />{t("Back to matching keys")}</Button>
                             <LoginKeyDraft
                               onDeny={denyRequest}
                               initial={draft}
@@ -1054,12 +1007,11 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
         </div>
         {isAuthenticated && !terminal && (
           <footer className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t border-border/50 px-5 py-3 text-11 text-muted-foreground sm:px-6">
-            <span>
-              Approving as{" "}
+            <span>{t("Approving as")}{" "}
               <strong className="text-foreground">
                 {user?.display_name || user?.email}
               </strong>
-              {user?.display_name && user?.email ? ` · ${user.email}` : ""}
+              {user?.display_name && user?.email ? t(" · {{email}}", { email: user.email }) : ""}
             </span>
             <Button
               variant="link"
@@ -1090,15 +1042,13 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
               }}
             >
               {approval.identity && !approval.identity.keep_signed_in
-                ? "Change account"
-                : "Sign out of this browser"}
+                ? t("Change account")
+                : t("Sign out of this browser")}
             </Button>
           </footer>
         )}
       </div>
-      <p className="text-center text-11 text-muted-foreground">
-        Device login by NyxID
-      </p>
+      <p className="text-center text-11 text-muted-foreground">{t("Device login by NyxID")}</p>
     </LoginDeviceShell>
   );
 }
@@ -1122,6 +1072,7 @@ function ApprovalCodeInput({
   readonly disabled: boolean;
   readonly onChange: (value: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
   const compact = compactApprovalCode(value);
   const length = compact.startsWith("2") ? 9 : 8;
@@ -1183,7 +1134,7 @@ function ApprovalCodeInput({
   return (
     <div
       role="group"
-      aria-label="User code"
+      aria-label={t("User code")}
       className="mx-auto flex w-full max-w-md items-center justify-center gap-1 sm:gap-2"
     >
       {chars.map((character, index) => (
@@ -1200,7 +1151,7 @@ function ApprovalCodeInput({
             ref={(element) => {
               inputRefs.current[index] = element;
             }}
-            aria-label={`User code character ${index + 1}`}
+            aria-label={t("User code character {{value}}", { value: index + 1 })}
             value={character}
             disabled={disabled}
             autoComplete={index === 0 ? "one-time-code" : "off"}

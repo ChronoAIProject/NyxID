@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import type { UseFormReturn } from "react-hook-form";
 import type { CreditSchedule, ScheduleForm } from "@/schemas/billing-credits";
 import type { DownstreamService } from "@/types/api";
@@ -51,6 +52,7 @@ export function ScheduleDialog({
   readonly editingSchedule: CreditSchedule | null;
   readonly onSubmit: (value: ScheduleForm) => Promise<void>;
 }) {
+  const { t } = useUiTranslation();
   const expiry = form.watch("expiry");
   const allServices = form.watch("all_services");
 
@@ -60,13 +62,10 @@ export function ScheduleDialog({
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>
             {editingSchedule
-              ? "Edit credit schedule"
-              : "Create credit schedule"}
+              ? t("Edit credit schedule")
+              : t("Create credit schedule")}
           </DialogTitle>
-          <DialogDescription>
-            Disburse wallet credits on a UTC cycle. Credits are wallet currency,
-            not service units such as tokens, requests, or bytes.
-          </DialogDescription>
+          <DialogDescription>{t("Disburse wallet credits on a UTC cycle. Credits are wallet currency, not service units such as tokens, requests, or bytes.")}</DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)}>
@@ -78,7 +77,7 @@ export function ScheduleDialog({
                     name="amount_credits"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Wallet credits per owner</FormLabel>
+                        <FormLabel>{t("Wallet credits per owner")}</FormLabel>
                         <FormControl>
                           <Input
                             type="number"
@@ -90,10 +89,7 @@ export function ScheduleDialog({
                             }
                           />
                         </FormControl>
-                        <FormDescription className="text-11">
-                          Minted as an ordinary promotional credit grant each
-                          period.
-                        </FormDescription>
+                        <FormDescription className="text-11">{t("Minted as an ordinary promotional credit grant each period.")}</FormDescription>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -103,7 +99,7 @@ export function ScheduleDialog({
                     name="recurrence"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Recurrence</FormLabel>
+                        <FormLabel>{t("Recurrence")}</FormLabel>
                         <Select
                           value={field.value}
                           disabled={editingSchedule !== null}
@@ -115,16 +111,13 @@ export function ScheduleDialog({
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
-                            <SelectItem value="daily">Daily</SelectItem>
-                            <SelectItem value="weekly">Weekly</SelectItem>
-                            <SelectItem value="monthly">Monthly</SelectItem>
+                            <SelectItem value="daily">{t("Daily")}</SelectItem>
+                            <SelectItem value="weekly">{t("Weekly")}</SelectItem>
+                            <SelectItem value="monthly">{t("Monthly")}</SelectItem>
                           </SelectContent>
                         </Select>
                         {editingSchedule ? (
-                          <FormDescription className="text-11">
-                            Pause this schedule and create another to change its
-                            recurrence.
-                          </FormDescription>
+                          <FormDescription className="text-11">{t("Pause this schedule and create another to change its recurrence.")}</FormDescription>
                         ) : null}
                         <FormMessage />
                       </FormItem>
@@ -138,29 +131,27 @@ export function ScheduleDialog({
                   render={({ field }) => (
                     <FormItem>
                       <fieldset className="space-y-2">
-                        <legend className="text-xs font-medium text-muted-foreground">
-                          Expiry policy
-                        </legend>
+                        <legend className="text-xs font-medium text-muted-foreground">{t("Expiry policy")}</legend>
                         <div className="grid gap-2 sm:grid-cols-3">
                           <ExpiryOption
-                            label="End of each period"
-                            description="No rollover"
+                            label={t("End of each period")}
+                            description={t("No rollover")}
                             checked={field.value.kind === "end_of_period"}
                             onChange={() =>
                               field.onChange({ kind: "end_of_period" })
                             }
                           />
                           <ExpiryOption
-                            label="After a fixed number of days"
-                            description="From disbursement"
+                            label={t("After a fixed number of days")}
+                            description={t("From disbursement")}
                             checked={field.value.kind === "after_days"}
                             onChange={() =>
                               field.onChange({ kind: "after_days", days: 30 })
                             }
                           />
                           <ExpiryOption
-                            label="Never"
-                            description="Credits do not expire"
+                            label={t("Never")}
+                            description={t("Credits do not expire")}
                             checked={field.value.kind === "never"}
                             onChange={() => field.onChange({ kind: "never" })}
                           />
@@ -176,7 +167,7 @@ export function ScheduleDialog({
                     name="expiry.days"
                     render={({ field }) => (
                       <FormItem className="max-w-52">
-                        <FormLabel>Days until expiry</FormLabel>
+                        <FormLabel>{t("Days until expiry")}</FormLabel>
                         <FormControl>
                           <Input
                             type="number"
@@ -195,7 +186,7 @@ export function ScheduleDialog({
                   />
                 ) : null}
 
-                <RecipientTargetFields description="Recipient policy is captured when each period opens. Later signups and organization joins wait until the next period." />
+                <RecipientTargetFields description={t("Recipient policy is captured when each period opens. Later signups and organization joins wait until the next period.")} />
 
                 <FormField
                   control={form.control}
@@ -203,10 +194,8 @@ export function ScheduleDialog({
                   render={({ field }) => (
                     <FormItem className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
                       <div>
-                        <FormLabel>All services</FormLabel>
-                        <p className="text-11 text-muted-foreground">
-                          Allow each period&apos;s credits to fund any service.
-                        </p>
+                        <FormLabel>{t("All services")}</FormLabel>
+                        <p className="text-11 text-muted-foreground">{t("Allow each period's credits to fund any service.")}</p>
                       </div>
                       <FormControl>
                         <Switch
@@ -226,7 +215,7 @@ export function ScheduleDialog({
                     name="service_refs"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Service scope</FormLabel>
+                        <FormLabel>{t("Service scope")}</FormLabel>
                         <FormControl>
                           <ServicePicker
                             services={services}
@@ -235,10 +224,7 @@ export function ScheduleDialog({
                             multiple
                           />
                         </FormControl>
-                        <FormDescription className="text-11">
-                          Service metrics do not change the scheduled credit
-                          amount.
-                        </FormDescription>
+                        <FormDescription className="text-11">{t("Service metrics do not change the scheduled credit amount.")}</FormDescription>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -250,12 +236,12 @@ export function ScheduleDialog({
                   name="reason"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Reason / note</FormLabel>
+                      <FormLabel>{t("Reason / note")}</FormLabel>
                       <FormControl>
                         <textarea
                           rows={3}
                           className="w-full resize-y rounded-lg border border-input bg-transparent px-3 py-2 text-12 outline-none focus:border-input-focus"
-                          placeholder="Why these recurring credits are issued"
+                          placeholder={t("Why these recurring credits are issued")}
                           {...field}
                         />
                       </FormControl>
@@ -270,11 +256,9 @@ export function ScheduleDialog({
                 type="button"
                 variant="ghost"
                 onClick={() => onOpenChange(false)}
-              >
-                Cancel
-              </Button>
+              >{t("Cancel")}</Button>
               <Button type="submit" variant="primary" isLoading={pending}>
-                {editingSchedule ? "Save changes" : "Create schedule"}
+                {editingSchedule ? t("Save changes") : t("Create schedule")}
               </Button>
             </DialogFooter>
           </form>

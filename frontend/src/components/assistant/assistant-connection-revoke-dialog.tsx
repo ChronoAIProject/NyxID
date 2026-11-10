@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useRef, useState } from "react";
 import { RefreshCw, ShieldAlert } from "lucide-react";
 import { z } from "zod";
@@ -58,6 +60,7 @@ export function AssistantConnectionRevokeDialog({
   readonly params: AssistantConnectionRevokeParams;
   readonly onComplete: (serviceId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const submittingRef = useRef(false);
   const verifyingRef = useRef(false);
   const expectedVersionRef = useRef<number | null>(null);
@@ -158,18 +161,18 @@ export function AssistantConnectionRevokeDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {resultId ? "Connection revoked" : "Revoke service connection"}
+            {resultId ? t("Connection revoked") : t("Revoke service connection")}
           </DialogTitle>
           <DialogDescription>
             {resultId
-              ? "NyxID cleared this connection's stored credential."
-              : "This disables the legacy connection and securely clears its stored credential."}
+              ? t("NyxID cleared this connection's stored credential.")
+              : t("This disables the legacy connection and securely clears its stored credential.")}
           </DialogDescription>
         </DialogHeader>
         {!resultId ? (
           <div className="space-y-3 border-y border-border py-4 text-12">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-muted-foreground">Service</span>
+              <span className="text-muted-foreground">{t("Service")}</span>
               <Badge variant="secondary" className="max-w-[70%] truncate font-mono">
                 {params.serviceId}
               </Badge>
@@ -180,32 +183,26 @@ export function AssistantConnectionRevokeDialog({
                 onCheckedChange={(value) => setConfirmed(value === true)}
               />
               <span className="flex items-start gap-1.5 text-destructive">
-                <ShieldAlert className="mt-0.5 size-3 shrink-0" />I understand
-                this clears the legacy connection credential.
-              </span>
+                <ShieldAlert className="mt-0.5 size-3 shrink-0" />{t("I understand this clears the legacy connection credential.")}</span>
             </label>
           </div>
         ) : null}
-        {error ? <p role="alert" className="text-11 text-destructive">{error}</p> : null}
-        {verified ? <p className="text-11 text-success">Revocation evidence verified.</p> : null}
+        {error ? <p role="alert" className="text-11 text-destructive">{translateUi(error)}</p> : null}
+        {verified ? <p className="text-11 text-success">{t("Revocation evidence verified.")}</p> : null}
         <DialogFooter>
           {!resultId ? (
             <>
-              <Button type="button" variant="outline" onClick={close}>Cancel</Button>
-              <Button type="button" variant="destructive" isLoading={submitting} disabled={submitting || !confirmed} onClick={() => void submit()}>
-                Revoke connection
-              </Button>
+              <Button type="button" variant="outline" onClick={close}>{t("Cancel")}</Button>
+              <Button type="button" variant="destructive" isLoading={submitting} disabled={submitting || !confirmed} onClick={() => void submit()}>{t("Revoke connection")}</Button>
             </>
           ) : (
             <>
               {!verified && expectedVersionRef.current !== null ? (
                 <Button type="button" variant="outline" isLoading={verifying} onClick={() => void verify(resultId, expectedVersionRef.current!)}>
-                  <RefreshCw />
-                  Retry verification
-                </Button>
+                  <RefreshCw />{t("Retry verification")}</Button>
               ) : null}
               <Button type="button" variant="primary" disabled={!verified} onClick={() => { onComplete(resultId); close(); }}>
-                {replayed ? "Report revoked connection" : "Done"}
+                {replayed ? t("Report revoked connection") : t("Done")}
               </Button>
             </>
           )}

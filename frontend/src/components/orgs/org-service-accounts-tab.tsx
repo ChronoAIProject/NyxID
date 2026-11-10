@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { ServiceAccountScopePicker } from "@/components/service-accounts/service-account-scope-picker";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
@@ -66,6 +68,7 @@ export function OrgServiceAccountsTab({
   orgId,
   orgName,
 }: OrgServiceAccountsTabProps) {
+  const { t } = useUiTranslation();
   const navigate = useNavigate();
   const [page, setPage] = useState(1);
   const [searchInput, setSearchInput] = useState("");
@@ -141,12 +144,12 @@ export function OrgServiceAccountsTab({
         target_org_id: orgId,
       });
       setCreatedResult(result);
-      toast.success("Service account created");
+      toast.success(translateUi("Service account created"));
     } catch (err) {
       if (err instanceof ApiError) {
         createForm.setError("root", { message: err.message });
       } else {
-        toast.error("Failed to create service account");
+        toast.error(translateUi("Failed to create service account"));
       }
     }
   }
@@ -158,15 +161,13 @@ export function OrgServiceAccountsTab({
           <div className="relative max-w-sm flex-1">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Search by name..."
+              placeholder={t("Search by name...")}
               value={searchInput}
               onChange={(event) => setSearchInput(event.target.value)}
               className="pl-9"
             />
           </div>
-          <Button type="submit" variant="outline">
-            Search
-          </Button>
+          <Button type="submit" variant="outline">{t("Search")}</Button>
           {search && (
             <Button
               type="button"
@@ -176,15 +177,11 @@ export function OrgServiceAccountsTab({
                 setSearch("");
                 setPage(1);
               }}
-            >
-              Clear
-            </Button>
+            >{t("Clear")}</Button>
           )}
         </form>
         <Button variant="primary" onClick={openCreateDialog}>
-          <ButtonIcon><Plus className="h-4 w-4" /></ButtonIcon>
-          Create Service Account
-        </Button>
+          <ButtonIcon><Plus className="h-4 w-4" /></ButtonIcon>{t("Create Service Account")}</Button>
       </div>
 
       {isLoading ? (
@@ -198,19 +195,19 @@ export function OrgServiceAccountsTab({
         </div>
       ) : error ? (
         <div className="py-12">
-          <ErrorBanner message={`Failed to load service accounts owned by ${orgName}.`} onRetry={refetch} />
+          <ErrorBanner message={t("Failed to load service accounts owned by {{orgName}}.", { orgName: orgName })} onRetry={refetch} />
         </div>
       ) : accounts.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <RoboticArmIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
             <p className="text-12 font-medium text-muted-foreground">
-              {search ? "No Results" : "No Service Accounts"}
+              {search ? t("No Results") : t("No Service Accounts")}
             </p>
             <p className="text-xs text-muted-foreground">
               {search
-                ? `No service accounts owned by ${orgName} match your search.`
-                : `No service accounts owned by ${orgName}.`}
+                ? t("No service accounts owned by {{orgName}} match your search.", { orgName: orgName })
+                : t("No service accounts owned by {{orgName}}.", { orgName: orgName })}
             </p>
           </div>
         </div>
@@ -220,12 +217,12 @@ export function OrgServiceAccountsTab({
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Client ID</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Scopes</TableHead>
-                  <TableHead>Created</TableHead>
-                  <TableHead>Last Used</TableHead>
+                  <TableHead>{t("Name")}</TableHead>
+                  <TableHead>{t("Client ID")}</TableHead>
+                  <TableHead>{t("Status")}</TableHead>
+                  <TableHead>{t("Scopes")}</TableHead>
+                  <TableHead>{t("Created")}</TableHead>
+                  <TableHead>{t("Last Used")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -257,7 +254,7 @@ export function OrgServiceAccountsTab({
                     </TableCell>
                     <TableCell>
                       <Badge variant={sa.is_active ? "success" : "destructive"}>
-                        {sa.is_active ? "Active" : "Inactive"}
+                        {sa.is_active ? t("Active") : t("Inactive")}
                       </Badge>
                     </TableCell>
                     <TableCell
@@ -279,30 +276,22 @@ export function OrgServiceAccountsTab({
           </div>
 
           <div className="flex items-center justify-between">
-            <p className="text-11 text-text-tertiary">
-              Showing {String((page - 1) * PER_PAGE + 1)}-
-              {String(Math.min(page * PER_PAGE, total))} of {String(total)}{" "}
-              service accounts
-            </p>
+            <p className="text-11 text-text-tertiary">{t("Showing ")}{String((page - 1) * PER_PAGE + 1)}-
+              {String(Math.min(page * PER_PAGE, total))}{t(" of ")}{String(total)}{" "}{t("service accounts")}</p>
             <div className="flex items-center gap-2">
               <Button
                 variant="outline"
                 disabled={page <= 1}
                 onClick={() => setPage((current) => Math.max(1, current - 1))}
               >
-                <ChevronLeft className="h-4 w-4" />
-                Previous
-              </Button>
-              <span className="text-11 text-text-tertiary">
-                Page {String(page)} of {String(totalPages)}
+                <ChevronLeft className="h-4 w-4" />{t("Previous")}</Button>
+              <span className="text-11 text-text-tertiary">{t("Page ")}{String(page)}{t(" of ")}{String(totalPages)}
               </span>
               <Button
                 variant="outline"
                 disabled={page >= totalPages}
                 onClick={() => setPage((current) => current + 1)}
-              >
-                Next
-                <ChevronRight className="h-4 w-4" />
+              >{t("Next")}<ChevronRight className="h-4 w-4" />
               </Button>
             </div>
           </div>
@@ -312,9 +301,8 @@ export function OrgServiceAccountsTab({
       <Dialog open={createOpen} onOpenChange={closeCreateDialog}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Create Service Account</DialogTitle>
-            <DialogDescription>
-              Create a machine-to-machine service account owned by {orgName}.
+            <DialogTitle>{t("Create Service Account")}</DialogTitle>
+            <DialogDescription>{t("Create a machine-to-machine service account owned by ")}{orgName}.
             </DialogDescription>
           </DialogHeader>
 
@@ -324,26 +312,23 @@ export function OrgServiceAccountsTab({
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="mt-0.5 h-4 w-4 text-amber-600" />
-                  <p className="text-12 text-amber-700 dark:text-amber-400">
-                    Save these credentials now. The client secret cannot be
-                    retrieved later.
-                  </p>
+                  <p className="text-12 text-amber-700 dark:text-amber-400">{t("Save these credentials now. The client secret cannot be retrieved later.")}</p>
                 </div>
               </div>
 
               <CredentialRow
-                label="Client ID"
+                label={t("Client ID")}
                 value={createdResult.client_id}
-                copyLabel="Client ID"
+                copyLabel={t("Client ID")}
               />
               <CredentialRow
-                label="Client Secret"
+                label={t("Client Secret")}
                 value={createdResult.client_secret}
-                copyLabel="Client secret"
+                copyLabel={t("Client secret")}
               />
 
               <DialogFooter>
-                <Button variant="primary" onClick={closeCreateDialog}>Done</Button>
+                <Button variant="primary" onClick={closeCreateDialog}>{t("Done")}</Button>
               </DialogFooter>
             </div>
           ) : (
@@ -357,7 +342,7 @@ export function OrgServiceAccountsTab({
                 <OrgReadOnlyRow orgName={orgName} />
                 {createForm.formState.errors.root && (
                   <div className="rounded-lg bg-destructive/10 p-3 text-12 text-destructive">
-                    {createForm.formState.errors.root.message}
+                    {translateUi(createForm.formState.errors.root.message ?? "")}
                   </div>
                 )}
                 <FormField
@@ -365,9 +350,9 @@ export function OrgServiceAccountsTab({
                   name="name"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Name</FormLabel>
+                      <FormLabel>{t("Name")}</FormLabel>
                       <FormControl>
-                        <Input placeholder="e.g. CI/CD Pipeline" {...field} />
+                        <Input placeholder={t("e.g. CI/CD Pipeline")} {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -378,9 +363,9 @@ export function OrgServiceAccountsTab({
                   name="description"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Description</FormLabel>
+                      <FormLabel>{t("Description")}</FormLabel>
                       <FormControl>
-                        <Input placeholder="Optional description" {...field} />
+                        <Input placeholder={t("Optional description")} {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -391,7 +376,7 @@ export function OrgServiceAccountsTab({
                   name="allowed_scopes"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Allowed Scopes</FormLabel>
+                      <FormLabel>{t("Allowed Scopes")}</FormLabel>
                       <FormControl>
                         <ServiceAccountScopePicker ownerId={orgId} {...field} />
                       </FormControl>
@@ -404,11 +389,9 @@ export function OrgServiceAccountsTab({
                   name="role_ids"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>
-                        Role IDs (comma-separated, optional)
-                      </FormLabel>
+                      <FormLabel>{t("Role IDs (comma-separated, optional)")}</FormLabel>
                       <FormControl>
-                        <Input placeholder="Optional" {...field} />
+                        <Input placeholder={t("Optional")} {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -419,11 +402,11 @@ export function OrgServiceAccountsTab({
                   name="rate_limit_override"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Rate Limit Override (optional)</FormLabel>
+                      <FormLabel>{t("Rate Limit Override (optional)")}</FormLabel>
                       <FormControl>
                         <Input
                           type="number"
-                          placeholder="Requests per second"
+                          placeholder={t("Requests per second")}
                           {...field}
                         />
                       </FormControl>
@@ -436,12 +419,8 @@ export function OrgServiceAccountsTab({
                     type="button"
                     variant="outline"
                     onClick={closeCreateDialog}
-                  >
-                    Cancel
-                  </Button>
-                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!createForm.formState.isValid || createMutation.isPending}>
-                    Create
-                  </Button>
+                  >{t("Cancel")}</Button>
+                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!createForm.formState.isValid || createMutation.isPending}>{t("Create")}</Button>
                 </DialogFooter>
               </form>
             </Form>
@@ -474,8 +453,8 @@ function CredentialRow({
           className="h-8 w-8"
           onClick={() =>
             void copyToClipboard(value).then(
-              () => toast.success(`${copyLabel} copied`),
-              () => toast.error("Failed to copy"),
+              () => toast.success(translateUi("{{copyLabel}} copied", { copyLabel: copyLabel })),
+              () => toast.error(translateUi("Failed to copy")),
             )
           }
         >

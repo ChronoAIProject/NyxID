@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { creditsLabel, knownTotal } from "@/lib/billing-display";
 import type { BillingUsageRow } from "@/schemas/billing";
 
@@ -27,6 +28,7 @@ function percentage(value: bigint, total: bigint) {
 }
 
 export function BillingFundingChart({ rows }: { rows: BillingUsageRow[] }) {
+  const { t } = useUiTranslation();
   const estimated = creditsLabel(rows, "estimated_credits_micros");
   const values = lanes.map((lane) => ({
     ...lane,
@@ -50,20 +52,20 @@ export function BillingFundingChart({ rows }: { rows: BillingUsageRow[] }) {
     : "No known funding values for this period";
 
   return (
-    <section className="funding-visual" aria-label="Funding composition">
+    <section className="funding-visual" aria-label={t("Funding composition")}>
       <header>
         <div>
-          <h4>Funding composition</h4>
-          <p className="fine-print">How the estimated period cost is covered</p>
+          <h4>{t("Funding composition")}</h4>
+          <p className="fine-print">{t("How the estimated period cost is covered")}</p>
         </div>
         <strong className="funding-visual-total">
-          {estimated.text} <small>credits</small>
+          {estimated.text} <small>{t("credits")}</small>
         </strong>
       </header>
       <div
         className={`funding-track${hasKnownFunding ? "" : " funding-track-empty"}`}
         role="img"
-        aria-label={`${incomplete > 0 ? "Known funding" : "Funding"}: ${barLabel}`}
+        aria-label={t("{{value}}: {{barLabel}}", { value: incomplete > 0 ? t("Known funding") : t("Funding"), barLabel: barLabel })}
       >
         {values.map((lane) => (
           <span
@@ -87,16 +89,13 @@ export function BillingFundingChart({ rows }: { rows: BillingUsageRow[] }) {
             />
             <span>
               <span className="funding-legend-label">{lane.label}</span>
-              <strong>{lane.display.text} credits</strong>
+              <strong>{lane.display.text}{t(" credits")}</strong>
             </span>
           </div>
         ))}
       </div>
       {incomplete > 0 && (
-        <p className="fine-print funding-visual-note">
-          Some funding values are unavailable. The bar shows only known funding
-          and the displayed estimated cost remains a lower bound where marked ≥.
-        </p>
+        <p className="fine-print funding-visual-note">{t("Some funding values are unavailable. The bar shows only known funding and the displayed estimated cost remains a lower bound where marked ≥.")}</p>
       )}
     </section>
   );

@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { ProviderConfig } from "@/types/api";
 import type { SaDeviceCodePollResponse } from "@/types/service-accounts";
@@ -38,6 +40,7 @@ export function SaDeviceCodeDialog({
   provider,
   onClose,
 }: SaDeviceCodeDialogProps) {
+  const { t } = useUiTranslation();
   const [step, setStep] = useState<FlowStep>("requesting");
   const [userCode, setUserCode] = useState("");
   const [verificationUri, setVerificationUri] = useState("");
@@ -179,7 +182,7 @@ export function SaDeviceCodeDialog({
 
   function handleCopyCode() {
     void copyToClipboard(userCode).then(() => {
-      toast.success("Code copied to clipboard");
+      toast.success(translateUi("Code copied to clipboard"));
     });
   }
 
@@ -222,13 +225,13 @@ export function SaDeviceCodeDialog({
     <Dialog open onOpenChange={handleClose}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Connect {provider.name} for Service Account</DialogTitle>
+          <DialogTitle>{t("Connect ")}{provider.name}{t(" for Service Account")}</DialogTitle>
           <DialogDescription>
             {step === "requesting" && "Requesting authentication code..."}
             {step === "show_code" &&
               "Enter the code below on the authentication page to connect this provider for the service account."}
             {step === "success" &&
-              `Successfully connected ${provider.name} for the service account.`}
+              t("Successfully connected {{name}} for the service account.", { name: provider.name })}
             {step === "error" && "An error occurred during the connection."}
           </DialogDescription>
         </DialogHeader>
@@ -236,8 +239,7 @@ export function SaDeviceCodeDialog({
         {step === "requesting" && (
           <div className="flex flex-col items-center gap-3 py-8">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-            <p className="text-12 text-muted-foreground">
-              Requesting code from {provider.name}...
+            <p className="text-12 text-muted-foreground">{t("Requesting code from ")}{provider.name}...
             </p>
           </div>
         )}
@@ -245,9 +247,7 @@ export function SaDeviceCodeDialog({
         {step === "show_code" && (
           <div className="space-y-5">
             <div className="flex flex-col items-center gap-3 rounded-lg border-2 border-dashed border-primary/30 bg-primary/5 p-6">
-              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                Your code
-              </p>
+              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">{t("Your code")}</p>
               <div className="flex items-center gap-3">
                 <code className="text-3xl font-bold tracking-[0.3em] font-mono text-primary-text">
                   {userCode}
@@ -257,7 +257,7 @@ export function SaDeviceCodeDialog({
                   variant="ghost"
                   onClick={handleCopyCode}
                   className="h-8 w-8 p-0"
-                  title="Copy code"
+                  title={t("Copy code")}
                 >
                   <Copy className="h-4 w-4" />
                 </Button>
@@ -271,36 +271,30 @@ export function SaDeviceCodeDialog({
                   target="_blank"
                   rel="noopener noreferrer"
                 >
-                  <ButtonIcon><ExternalLink className="h-4 w-4" /></ButtonIcon>
-                  Open {provider.name} Authentication
-                </a>
+                  <ButtonIcon><ExternalLink className="h-4 w-4" /></ButtonIcon>{t("Open ")}{provider.name}{t(" Authentication")}</a>
               </Button>
             </div>
 
             <div className="rounded-lg bg-muted p-3 text-12 text-muted-foreground">
               <ol className="list-decimal list-inside space-y-1">
-                <li>Click the link above to open the authentication page</li>
-                <li>Enter the code shown above</li>
-                <li>
-                  Sign in with the account to link to this service account
-                </li>
+                <li>{t("Click the link above to open the authentication page")}</li>
+                <li>{t("Enter the code shown above")}</li>
+                <li>{t("Sign in with the account to link to this service account")}</li>
               </ol>
             </div>
 
             <div className="flex items-center justify-between text-xs text-muted-foreground">
               <div className="flex items-center gap-2">
                 <Loader2 className="h-3 w-3 animate-spin" />
-                <span>Waiting for authentication...</span>
+                <span>{t("Waiting for authentication...")}</span>
               </div>
               {secondsRemaining > 0 && (
-                <span>Expires in {formatTime(secondsRemaining)}</span>
+                <span>{t("Expires in ")}{formatTime(secondsRemaining)}</span>
               )}
             </div>
 
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={handleClose}>
-                Cancel
-              </Button>
+              <Button type="button" variant="outline" onClick={handleClose}>{t("Cancel")}</Button>
             </DialogFooter>
           </div>
         )}
@@ -310,14 +304,10 @@ export function SaDeviceCodeDialog({
             <div className="flex flex-col items-center gap-3 py-4">
               <CheckCircle2 className="h-8 w-8 text-emerald-500" />
               <p className="text-12 text-muted-foreground text-center">
-                {provider.name} has been connected to the service account
-                successfully. Tokens are encrypted and stored securely.
-              </p>
+                {provider.name}{t(" has been connected to the service account successfully. Tokens are encrypted and stored securely.")}</p>
             </div>
             <DialogFooter>
-              <Button variant="primary" type="button" onClick={handleClose}>
-                Done
-              </Button>
+              <Button variant="primary" type="button" onClick={handleClose}>{t("Done")}</Button>
             </DialogFooter>
           </div>
         )}
@@ -331,12 +321,8 @@ export function SaDeviceCodeDialog({
               </p>
             </div>
             <DialogFooter>
-              <Button type="button" variant="outline" onClick={handleClose}>
-                Cancel
-              </Button>
-              <Button variant="primary" type="button" onClick={handleRetry}>
-                Try Again
-              </Button>
+              <Button type="button" variant="outline" onClick={handleClose}>{t("Cancel")}</Button>
+              <Button variant="primary" type="button" onClick={handleRetry}>{t("Try Again")}</Button>
             </DialogFooter>
           </div>
         )}

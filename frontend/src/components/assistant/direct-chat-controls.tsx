@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Info, X } from "lucide-react";
 import {
@@ -19,6 +20,7 @@ export const DIRECT_MODE_COPY =
   "Direct model chat — no tools, no approvals, and conversations are not saved.";
 
 export function DirectModeBanner() {
+  const { t } = useUiTranslation();
   const [dismissed, setDismissed] = useState(
     () => localStorage.getItem(BANNER_DISMISSED_KEY) === "true",
   );
@@ -26,7 +28,7 @@ export function DirectModeBanner() {
 
   return (
     <div
-      aria-label="Direct chat mode notice"
+      aria-label={t("Direct chat mode notice")}
       className="flex min-h-9 shrink-0 items-center gap-2 border-b border-border/60 bg-overlay px-4 py-2 text-11 text-muted-foreground sm:px-6"
       role="status"
     >
@@ -34,7 +36,7 @@ export function DirectModeBanner() {
       <span className="min-w-0 flex-1">{DIRECT_MODE_COPY}</span>
       <button
         type="button"
-        aria-label="Dismiss direct chat notice"
+        aria-label={t("Dismiss direct chat notice")}
         className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-tertiary hover:bg-overlay-strong hover:text-foreground focus-visible:outline-none"
         onClick={() => {
           localStorage.setItem(BANNER_DISMISSED_KEY, "true");
@@ -54,6 +56,7 @@ export function DirectChatControls({
   readonly conversationId: string | undefined;
   readonly disabled?: boolean;
 }) {
+  const { t } = useUiTranslation();
   const models = useDirectModels();
   const skills = useDirectSkills();
   const efforts = useDirectEfforts();
@@ -68,16 +71,14 @@ export function DirectChatControls({
         <label
           htmlFor="direct-chat-model"
           className="mb-1 block text-10 font-medium text-text-tertiary"
-        >
-          Model
-        </label>
+        >{t("Model")}</label>
         <Select
           value={settings.model}
           onValueChange={setModel}
           disabled={disabled || !canUpdate || models.isLoading}
         >
           <SelectTrigger id="direct-chat-model" className="h-7 rounded-md px-2">
-            <SelectValue placeholder="Choose model" />
+            <SelectValue placeholder={t("Choose model")} />
           </SelectTrigger>
           <SelectContent>
             {(models.data ?? []).map((model) => (
@@ -92,9 +93,7 @@ export function DirectChatControls({
         <label
           htmlFor="direct-chat-effort"
           className="mb-1 block text-10 font-medium text-text-tertiary"
-        >
-          Reasoning effort
-        </label>
+        >{t("Reasoning effort")}</label>
         <Select
           value={settings.effort ?? "default"}
           onValueChange={(value) =>
@@ -106,10 +105,10 @@ export function DirectChatControls({
             id="direct-chat-effort"
             className="h-7 rounded-md px-2"
           >
-            <SelectValue placeholder="Model default" />
+            <SelectValue placeholder={t("Model default")} />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="default">Model default</SelectItem>
+            <SelectItem value="default">{t("Model default")}</SelectItem>
             {(efforts.data ?? []).map((effort) => (
               <SelectItem key={effort.id} value={effort.id}>
                 {effort.label}
@@ -122,19 +121,17 @@ export function DirectChatControls({
         <label
           htmlFor="direct-chat-skill"
           className="mb-1 block text-10 font-medium text-text-tertiary"
-        >
-          NyxID knowledge
-        </label>
+        >{t("NyxID knowledge")}</label>
         <Select
           value={settings.skillSlug ?? "none"}
           onValueChange={(value) => setSkill(value === "none" ? null : value)}
           disabled={disabled || !canUpdate || skills.isLoading}
         >
           <SelectTrigger id="direct-chat-skill" className="h-7 rounded-md px-2">
-            <SelectValue placeholder="No skill" />
+            <SelectValue placeholder={t("No skill")} />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="none">No skill</SelectItem>
+            <SelectItem value="none">{t("No skill")}</SelectItem>
             {(skills.data ?? []).map((skill) => (
               <SelectItem key={skill.slug} value={skill.slug}>
                 {skill.label}
@@ -142,9 +139,7 @@ export function DirectChatControls({
             ))}
           </SelectContent>
         </Select>
-        <p className="mt-1 text-10 leading-4 text-text-tertiary">
-          A skill teaches the model about NyxID; it cannot take actions here.
-        </p>
+        <p className="mt-1 text-10 leading-4 text-text-tertiary">{t("A skill teaches the model about NyxID; it cannot take actions here.")}</p>
       </div>
     </div>
   );

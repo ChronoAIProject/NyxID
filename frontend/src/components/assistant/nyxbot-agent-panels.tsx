@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState, type ReactNode } from "react";
 import { ChevronRight, PanelRightOpen, Users } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -48,7 +49,8 @@ export function AgentKindBadge({ kind }: { readonly kind: AssistantAgentKind }) 
 
 /** A thread that came from a chat app (Telegram, ...). */
 export function ChannelBadge({ platform }: { readonly platform: string }) {
-  return <Badge variant="secondary">via {channelPlatformName(platform)}</Badge>;
+  const { t } = useUiTranslation();
+  return <Badge variant="secondary">{t("via ")}{channelPlatformName(platform)}</Badge>;
 }
 
 /**
@@ -79,6 +81,7 @@ export function ThreadHeader({
   /** The thread's access mode and model controls. */
   readonly controls?: ReactNode;
 }) {
+  const { t } = useUiTranslation();
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2">
@@ -93,12 +96,10 @@ export function ThreadHeader({
             size="sm"
             variant="ghost"
             className="ml-auto"
-            aria-label="Agent details"
+            aria-label={t("Agent details")}
             onClick={onOpenDetails}
           >
-            <PanelRightOpen aria-hidden="true" />
-            Details
-          </Button>
+            <PanelRightOpen aria-hidden="true" />{t("Details")}</Button>
         ) : null}
       </div>
       {destroyed ? (
@@ -106,8 +107,7 @@ export function ThreadHeader({
           role="status"
           className="rounded-lg bg-overlay px-3 py-2 text-11 text-muted-foreground"
         >
-          {name} was destroyed. Its access is revoked and this thread is read-only.
-        </p>
+          {name}{t(" was destroyed. Its access is revoked and this thread is read-only.")}</p>
       ) : null}
     </div>
   );
@@ -129,6 +129,7 @@ export function TeamStrip({
   readonly agents: readonly AssistantAgent[];
   readonly onOpenConversation: (conversationId: string) => void;
 }) {
+  const { t } = useUiTranslation();
   const [open, setOpen] = useState(true);
   // Live specialists, most recently active first.
   const specialists = agents
@@ -138,7 +139,7 @@ export function TeamStrip({
   const requests = specialists.reduce((total, agent) => total + agent.pending_requests.length, 0);
   const running = specialists.filter((agent) => agent.status === "running").length;
   return (
-    <section aria-label="Team" className="rounded-xl border border-border/50 bg-card">
+    <section aria-label={t("Team")} className="rounded-xl border border-border/50 bg-card">
       <button
         type="button"
         aria-expanded={open}
@@ -147,14 +148,14 @@ export function TeamStrip({
       >
         <ChevronRight className={cn("h-3 w-3 transition-transform", open && "rotate-90")} />
         <Users aria-hidden="true" className="h-3.5 w-3.5 text-text-tertiary" />
-        <span className="font-medium text-foreground">Team</span>
+        <span className="font-medium text-foreground">{t("Team")}</span>
         <span>
-          {specialists.length} {specialists.length === 1 ? "specialist" : "specialists"}
-          {running ? ` · ${String(running)} working` : ""}
+          {specialists.length} {specialists.length === 1 ? t("specialist") : t("specialists")}
+          {running ? t(" · {{value}} working", { value: String(running) }) : ""}
         </span>
         {requests ? (
           <span className="ml-auto rounded-md border border-warning/30 bg-warning/10 px-1.5 text-10 font-medium text-warning">
-            {requests} {requests === 1 ? "request" : "requests"}
+            {requests} {requests === 1 ? t("request") : t("requests")}
           </span>
         ) : null}
       </button>
@@ -197,11 +198,9 @@ export function TeamStrip({
                   <Button
                     size="sm"
                     variant="outline"
-                    aria-label={`Review ${agentTitle(agent)}'s request: ${request.summary}`}
+                    aria-label={t("Review {{value}}'s request: {{summary}}", { value: agentTitle(agent), summary: request.summary })}
                     onClick={() => onOpenConversation(request.conversation_id)}
-                  >
-                    Review
-                  </Button>
+                  >{t("Review")}</Button>
                 </div>
               ))}
             </li>
@@ -224,11 +223,12 @@ export function WaitingNote({
   readonly items: readonly NyxAgentWaiting[];
   readonly agentName: string;
 }) {
+  const { t } = useUiTranslation();
   if (!items.length) return null;
   return (
     <div
       role="status"
-      aria-label="Waiting"
+      aria-label={t("Waiting")}
       className="space-y-1 rounded-lg border border-border px-3 py-2"
     >
       {items.map((item) => (
@@ -240,8 +240,7 @@ export function WaitingNote({
             />
             <span className="min-w-0 truncate">{item.title}</span>
             {item.expires_at ? (
-              <span className="ml-auto shrink-0 text-11 text-text-tertiary">
-                expires {formatTimeDistance(item.expires_at)}
+              <span className="ml-auto shrink-0 text-11 text-text-tertiary">{t("expires ")}{formatTimeDistance(item.expires_at)}
               </span>
             ) : null}
           </p>
@@ -251,8 +250,7 @@ export function WaitingNote({
         </div>
       ))}
       <p className="text-11 text-text-tertiary">
-        {agentName} continues here by itself when this happens; no need to reply.
-      </p>
+        {agentName}{t(" continues here by itself when this happens; no need to reply.")}</p>
     </div>
   );
 }
@@ -265,10 +263,10 @@ export function PendingEventsNote({
   readonly count: number;
   readonly agentName: string;
 }) {
+  const { t } = useUiTranslation();
   if (count <= 0) return null;
   return (
     <p role="status" className="px-1 text-11 text-text-tertiary">
-      {count} {count === 1 ? "update" : "updates"} waiting for {agentName}&apos;s next turn
-    </p>
+      {count} {count === 1 ? t("update") : t("updates")}{t(" waiting for ")}{agentName}{t("'s next turn")}</p>
   );
 }

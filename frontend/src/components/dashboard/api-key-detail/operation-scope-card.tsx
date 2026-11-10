@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { ListChecks } from "lucide-react";
 import { OperationSelectionForm } from "@/components/assistant/agent-operation-scopes";
 import {
@@ -24,6 +25,7 @@ export function OperationScopeCard({
   readonly keyId: string;
   readonly canWrite: boolean;
 }) {
+  const { t } = useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.AGENT_OPERATION_SCOPES);
   const query = useApiKeyOperations(keyId, enabled);
   // Scheduled and permission-bound keys have their own authority models;
@@ -35,27 +37,18 @@ export function OperationScopeCard({
     <Card className="md:col-span-2">
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
-          <ListChecks className="h-4 w-4" aria-hidden />
-          Service operations
-        </CardTitle>
-        <CardDescription>
-          Limit this key to the operations it needs within each service.
-          Approvals still apply to every call.
-        </CardDescription>
+          <ListChecks className="h-4 w-4" aria-hidden />{t("Service operations")}</CardTitle>
+        <CardDescription>{t("Limit this key to the operations it needs within each service. Approvals still apply to every call.")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {query.isLoading ? (
-          <p className="text-12 text-muted-foreground">Loading operations…</p>
+          <p className="text-12 text-muted-foreground">{t("Loading operations…")}</p>
         ) : null}
         {query.error ? (
-          <p role="alert" className="text-12 text-destructive">
-            Could not load operations.
-          </p>
+          <p role="alert" className="text-12 text-destructive">{t("Could not load operations.")}</p>
         ) : null}
         {query.data && !query.data.length ? (
-          <p className="text-12 text-muted-foreground">
-            This key has no services to limit yet.
-          </p>
+          <p className="text-12 text-muted-foreground">{t("This key has no services to limit yet.")}</p>
         ) : null}
         {query.data?.map((service) => (
           <KeyServiceOperations

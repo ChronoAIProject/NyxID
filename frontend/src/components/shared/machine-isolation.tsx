@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Badge } from "@/components/ui/badge";
 import {
   SINGLE_USER_SHELL_WARNING,
@@ -9,12 +10,13 @@ export function MachineIsolationBadge({
 }: {
   readonly machine: MachineProfile;
 }) {
+  const { t } = useUiTranslation();
   if (!machine.shell || machine.commands_isolated === true) return null;
   return (
     <Badge variant="warning">
       {machine.commands_isolated === false
-        ? "Not isolated"
-        : "Isolation unknown: update to check"}
+        ? t("Not isolated")
+        : t("Isolation unknown: update to check")}
     </Badge>
   );
 }
@@ -24,12 +26,13 @@ export function MachineIsolationDetails({
 }: {
   readonly machine: MachineProfile;
 }) {
+  const { t } = useUiTranslation();
   if (!machine.shell || machine.commands_isolated !== false) return null;
   return (
     <div className="space-y-1 text-muted-foreground">
-      <p>Agent commands can read this node’s stored credentials and token.</p>
+      <p>{t("Agent commands can read this node’s stored credentials and token.")}</p>
       <details>
-        <summary className="cursor-pointer text-foreground">Details</summary>
+        <summary className="cursor-pointer text-foreground">{t("Details")}</summary>
         <p className="pt-2">{SINGLE_USER_SHELL_WARNING}</p>
       </details>
     </div>
@@ -38,5 +41,6 @@ export function MachineIsolationDetails({
 
 /** Distinct from command-vs-node credential isolation. All current contexts share. */
 export function MachineSharingBadge() {
-  return <Badge variant="warning" title="Agents granted this machine share its workspace and authenticated browser sessions.">Shared workspace and browser</Badge>;
+  const { t } = useUiTranslation();
+  return <Badge variant="warning" title={t("Agents granted this machine share its workspace and authenticated browser sessions.")}>{t("Shared workspace and browser")}</Badge>;
 }

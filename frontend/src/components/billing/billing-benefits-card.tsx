@@ -1,3 +1,4 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import type {
   CreditGrant,
   UserAllowanceBalance,
@@ -27,6 +28,7 @@ export function BillingBenefitsCard({
   allowances: readonly UserAllowanceBalance[];
   catalog: BillingCatalog;
 }) {
+  const { t } = useUiTranslation();
   const services = new Map<string, UserAllowanceBalance[]>();
   for (const balance of allowances) {
     const id = balance.allowance.service_id;
@@ -35,7 +37,7 @@ export function BillingBenefitsCard({
   return (
     <Card className="benefits-card compact-benefits">
       <CardHeader>
-        <CardTitle>Credit grants & free usage</CardTitle>
+        <CardTitle>{t("Credit grants & free usage")}</CardTitle>
       </CardHeader>
       <CardContent className="benefits-container">
         <section className="benefit-section">
@@ -92,8 +94,8 @@ export function BillingBenefitsCard({
                       0,
                     ),
                     limit,
-                    legend: `${compact(remaining)} left`,
-                    detail: `${compact(remaining)} of ${compact(limit)} left`,
+                    legend: t("{{amount}} left", { amount: compact(remaining) }),
+                    detail: t("{{remaining}} of {{limit}} left", { remaining: compact(remaining), limit: compact(limit) }),
                   };
                 }),
             );
@@ -108,17 +110,15 @@ export function BillingBenefitsCard({
                 <summary className="benefit-summary">
                   <div className="compact-benefit-label">
                     <strong>{serviceName(catalog, slug)}</strong>
-                    <span className="benefit-label-with-help">
-                      Free usage
-                      <FreeUsageHelp balances={balances} />· {balances.length}{" "}
-                      {balances.length === 1 ? "allowance" : "allowances"}
+                    <span className="benefit-label-with-help">{t("Free usage")}<FreeUsageHelp balances={balances} />· {balances.length}{" "}
+                      {balances.length === 1 ? t("allowance") : t("allowances")}
                     </span>
                   </div>
                   <DetailsAction />
                   <div className="benefit-summary-metric">
                     <ul
                       className="compact-coverage stack-legend"
-                      aria-label="Remaining free usage"
+                      aria-label={t("Remaining free usage")}
                     >
                       {stack.entries.map((entry) => (
                         <li
@@ -134,8 +134,8 @@ export function BillingBenefitsCard({
                           {entry.status !== "normal" && (
                             <span className="sr-only">
                               {entry.status === "exhausted"
-                                ? "(used up)"
-                                : "(nearly used up)"}
+                                ? t("(used up)")
+                                : t("(nearly used up)")}
                             </span>
                           )}
                         </li>
@@ -143,7 +143,7 @@ export function BillingBenefitsCard({
                     </ul>
                     <StackedMeter
                       stack={stack}
-                      label={`${serviceName(catalog, slug)} free usage`}
+                      label={t("{{value}} free usage", { value: serviceName(catalog, slug) })}
                     />
                   </div>
                 </summary>
@@ -154,7 +154,7 @@ export function BillingBenefitsCard({
             );
           })}
           {!services.size && (
-            <p className="empty-inline">No free usage allowances.</p>
+            <p className="empty-inline">{t("No free usage allowances.")}</p>
           )}
         </section>
       </CardContent>
@@ -180,14 +180,13 @@ function sentence(text: string) {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 function shortMetric(metric: string) {
-  return (
-    (
+  const label = (
       {
         input_tokens: "Input",
         output_tokens: "Output",
         cache_read_tokens: "Cache read",
         cache_write_tokens: "Cache write",
       } as Record<string, string>
-    )[metric] ?? sentence(billingMetricLabel(metric))
-  );
+    )[metric];
+  return label === undefined ? sentence(billingMetricLabel(metric)) : translateUi(label);
 }

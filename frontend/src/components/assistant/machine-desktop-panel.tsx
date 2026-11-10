@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ExternalLink,
@@ -46,6 +48,7 @@ export function MachineDesktopPanel({
   readonly initialDisplay?: "secure" | "dev";
   readonly initialContextId?: string | null;
 }) {
+  const { t } = useUiTranslation();
   const collapseKey = conversationId
     ? `nyxid:desktop-collapsed:${conversationId}:${nodeId}:${initialContextId ?? "legacy"}`
     : null;
@@ -362,13 +365,13 @@ export function MachineDesktopPanel({
     <section
       ref={panel}
       className="space-y-3 rounded-xl border border-border/50 bg-card p-3 text-12"
-      aria-label="Live machine desktop"
+      aria-label={t("Live machine desktop")}
       data-private="true"
       data-ph-no-capture
     >
       <div
         role="group"
-        aria-label="Desktop display"
+        aria-label={t("Desktop display")}
         className="flex flex-wrap gap-1"
       >
         {(["secure", "dev"] as const).map((value) => (
@@ -383,17 +386,15 @@ export function MachineDesktopPanel({
               setDisplay(value);
             }}
           >
-            {value === "secure" ? "Secure browser" : "Dev browser"}
+            {value === "secure" ? t("Secure browser") : t("Dev browser")}
           </Button>
         ))}
         {controls ? (
-          <span className="self-center text-muted-foreground">
-            Hand back to switch displays.
-          </span>
+          <span className="self-center text-muted-foreground">{t("Hand back to switch displays.")}</span>
         ) : null}
       </div>
       <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <span className="text-muted-foreground">Workspace and browser</span>
+        <span className="text-muted-foreground">{t("Workspace and browser")}</span>
         <Select
           value={contextId ?? "legacy"}
           onValueChange={(value) => {
@@ -402,23 +403,21 @@ export function MachineDesktopPanel({
           }}
           disabled={controls}
         >
-          <SelectTrigger aria-label="Desktop context" className="max-w-full sm:w-80">
+          <SelectTrigger aria-label={t("Desktop context")} className="max-w-full sm:w-80">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="legacy">Shared legacy desktop</SelectItem>
+            <SelectItem value="legacy">{t("Shared legacy desktop")}</SelectItem>
             {(contexts.data ?? []).map((context) => (
               <SelectItem key={context.context_id} value={context.context_id}>
                 {context.agent_name} · {context.actor_label}
-                {context.group_id ? " · group task" : ""} · generation {context.generation}
+                {context.group_id ? t(" · group task") : ""}{t(" · generation ")}{context.generation}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
         {contexts.isError ? (
-          <span role="status" className="text-muted-foreground">
-            Separated contexts are unavailable on this machine.
-          </span>
+          <span role="status" className="text-muted-foreground">{t("Separated contexts are unavailable on this machine.")}</span>
         ) : null}
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -428,18 +427,18 @@ export function MachineDesktopPanel({
         </span>
         <span className="text-muted-foreground">
           {!connected
-            ? "Connecting…"
+            ? t("Connecting…")
             : controls
-              ? "You are in control"
+              ? t("You are in control")
               : controller === "owner"
-                ? "Owner in control in another tab"
-                : "Watching the agent"}
+                ? t("Owner in control in another tab")
+                : t("Watching the agent")}
         </span>
         {conversationId ? (
           <Button
             size="sm"
             variant="ghost"
-            aria-label={collapsed ? "Show desktop" : "Minimise desktop"}
+            aria-label={collapsed ? t("Show desktop") : t("Minimise desktop")}
             aria-expanded={!collapsed}
             onClick={() => collapse(!collapsed)}
           >
@@ -454,7 +453,7 @@ export function MachineDesktopPanel({
         <Button
           size="sm"
           variant="ghost"
-          aria-label="Expand desktop"
+          aria-label={t("Expand desktop")}
           onClick={() => {
             void panel.current?.requestFullscreen();
           }}
@@ -464,7 +463,7 @@ export function MachineDesktopPanel({
         <Button
           size="sm"
           variant="ghost"
-          aria-label="Pop out desktop"
+          aria-label={t("Pop out desktop")}
           onClick={() =>
             window.open(
               `/assistant/machines/${encodeURIComponent(nodeId)}/desktop?display=${display}${conversationId ? `&conversation_id=${encodeURIComponent(conversationId)}` : ""}${contextId ? `&context_id=${encodeURIComponent(contextId)}` : ""}`,
@@ -477,8 +476,7 @@ export function MachineDesktopPanel({
         </Button>
       </div>
       {(reason || controller === "requested") && !controls ? (
-        <p role="status" className="rounded-lg border border-warning/30 p-3">
-          NyxBot needs you on this machine: {reason ?? "Please take control."}
+        <p role="status" className="rounded-lg border border-warning/30 p-3">{t("NyxBot needs you on this machine: ")}{reason ?? t("Please take control.")}
         </p>
       ) : null}
       <div hidden={collapsed}>
@@ -487,7 +485,7 @@ export function MachineDesktopPanel({
           width={1280}
           height={800}
           tabIndex={controls ? 0 : -1}
-          aria-label="Machine screen. Take control to use mouse and keyboard."
+          aria-label={t("Machine screen. Take control to use mouse and keyboard.")}
           className={`block max-h-[65vh] w-full rounded-lg bg-background object-contain focus:outline-none focus:ring-1 focus:ring-primary ${controls ? "cursor-crosshair" : "cursor-default"}`}
           onPointerMove={(event) => {
             const position = point(event);
@@ -598,13 +596,12 @@ export function MachineDesktopPanel({
         />
       </div>
       {!collapsed && action && !controls && controller === "agent" ? (
-        <p className="text-muted-foreground" aria-live="polite">
-          Agent action: {action}
+        <p className="text-muted-foreground" aria-live="polite">{t("Agent action: ")}{action}
         </p>
       ) : null}
       {error ? (
         <p role="alert" className="text-destructive">
-          {error}
+          {translateUi(error)}
         </p>
       ) : null}
       <DesktopControls
@@ -615,10 +612,7 @@ export function MachineDesktopPanel({
         reconnect={() => setAttempt((value) => value + 1)}
       />
       {controls ? (
-        <p className="text-muted-foreground">
-          The agent cannot use this machine while you control it. Screen frames
-          and input are not recorded.
-        </p>
+        <p className="text-muted-foreground">{t("The agent cannot use this machine while you control it. Screen frames and input are not recorded.")}</p>
       ) : null}
     </section>
   );
@@ -636,20 +630,19 @@ function DesktopControls({
   readonly control: (type: string, note?: string) => void;
   readonly reconnect: () => void;
 }) {
+  const { t } = useUiTranslation();
   const form = useAppForm({ defaultValues: { note: "" } });
   return (
     <div className="flex flex-wrap items-center gap-2">
       {!connected ? (
-        <Button onClick={() => reconnect()}>Reconnect</Button>
+        <Button onClick={() => reconnect()}>{t("Reconnect")}</Button>
       ) : null}
       {!controls ? (
         <Button
           variant="primary"
           disabled={!connected || controller === "taking"}
           onClick={() => control("take_control")}
-        >
-          Take control
-        </Button>
+        >{t("Take control")}</Button>
       ) : (
         <form
           className="flex flex-1 gap-2"
@@ -659,23 +652,19 @@ function DesktopControls({
           })}
         >
           <Input
-            aria-label="Hand-back note"
-            placeholder="Optional note, e.g. logged in"
+            aria-label={t("Hand-back note")}
+            placeholder={t("Optional note, e.g. logged in")}
             maxLength={2000}
             {...form.register("note")}
           />
-          <Button type="submit" variant="primary">
-            Hand back
-          </Button>
+          <Button type="submit" variant="primary">{t("Hand back")}</Button>
         </form>
       )}
       <Button
         variant="destructive"
         disabled={!connected}
         onClick={() => control("stop")}
-      >
-        Stop
-      </Button>
+      >{t("Stop")}</Button>
     </div>
   );
 }

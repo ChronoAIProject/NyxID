@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { useApprovalRequests, useDecideApproval } from "@/hooks/use-approvals";
 import { ApiError } from "@/lib/api-client";
@@ -47,29 +50,30 @@ import { SeoKeywordIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 const STATUS_OPTIONS = [
-  { value: "all", label: "All Statuses" },
-  { value: "pending", label: "Pending" },
-  { value: "approved", label: "Approved" },
-  { value: "rejected", label: "Rejected" },
-  { value: "expired", label: "Expired" },
+  { value: "all", get label() { return translateUi("All Statuses"); } },
+  { value: "pending", get label() { return translateUi("Pending"); } },
+  { value: "approved", get label() { return translateUi("Approved"); } },
+  { value: "rejected", get label() { return translateUi("Rejected"); } },
+  { value: "expired", get label() { return translateUi("Expired"); } },
 ] as const;
 
 function getStatusBadge(status: string) {
   switch (status) {
     case "approved":
-      return <Badge variant="success">Approved</Badge>;
+      return <Badge variant="success">{translateUi("Approved")}</Badge>;
     case "rejected":
-      return <Badge variant="destructive">Rejected</Badge>;
+      return <Badge variant="destructive">{translateUi("Rejected")}</Badge>;
     case "expired":
-      return <Badge variant="secondary">Expired</Badge>;
+      return <Badge variant="secondary">{translateUi("Expired")}</Badge>;
     case "pending":
-      return <Badge variant="warning">Pending</Badge>;
+      return <Badge variant="warning">{translateUi("Pending")}</Badge>;
     default:
       return <Badge variant="secondary">{status}</Badge>;
   }
 }
 
 export function ApprovalHistoryPage() {
+  const { t } = useUiTranslation();
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState("all");
   const [decideTarget, setDecideTarget] = useState<{
@@ -106,9 +110,9 @@ export function ApprovalHistoryPage() {
       );
     } catch (err) {
       toast.error(
-        err instanceof ApiError
+        translateErrorMessage(err instanceof ApiError
           ? err.message
-          : `Failed to ${decideTarget.action} request`,
+          : `Failed to ${decideTarget.action} request`),
       );
     } finally {
       setDecideTarget(null);
@@ -118,8 +122,8 @@ export function ApprovalHistoryPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Approval History"
-        description="View past and pending approval requests."
+        title={t("Approval History")}
+        description={t("View past and pending approval requests.")}
         actions={
           <Select
             value={statusFilter}
@@ -149,15 +153,13 @@ export function ApprovalHistoryPage() {
           ))}
         </div>
       ) : error ? (
-        <ErrorBanner message="Failed to load approval history. Please try again." onRetry={refetch} />
+        <ErrorBanner message={t("Failed to load approval history. Please try again.")} onRetry={refetch} />
       ) : requests.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <SeoKeywordIcon className="h-64 w-64 text-muted-foreground" />
           <div className="max-w-md space-y-1">
-            <p className="text-12 font-medium text-muted-foreground">No Approval Requests</p>
-            <p className="text-12 text-muted-foreground">
-              No approval requests match the current filter.
-            </p>
+            <p className="text-12 font-medium text-muted-foreground">{t("No Approval Requests")}</p>
+            <p className="text-12 text-muted-foreground">{t("No approval requests match the current filter.")}</p>
           </div>
         </div>
       ) : (
@@ -184,7 +186,7 @@ export function ApprovalHistoryPage() {
                 </div>
                 <p className="mt-1.5 text-11 text-muted-foreground line-clamp-2">
                   {isToolApproval(request)
-                    ? request.tool_arguments ?? "Tool execution approval"
+                    ? request.tool_arguments ?? t("Tool execution approval")
                     : primaryActionLabel(request)}
                 </p>
                 {shouldShowRawIdentityLine(request) && (
@@ -193,11 +195,11 @@ export function ApprovalHistoryPage() {
                   </p>
                 )}
                 {request.is_destructive && (
-                  <Badge variant="destructive" className="mt-1.5">Destructive</Badge>
+                  <Badge variant="destructive" className="mt-1.5">{t("Destructive")}</Badge>
                 )}
                 <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-11 text-muted-foreground">
                   <span>{formatDate(request.created_at)}</span>
-                  {request.decided_at && <span>Decided {formatDate(request.decided_at)}</span>}
+                  {request.decided_at && <span>{t("Decided ")}{formatDate(request.decided_at)}</span>}
                 </div>
                 {request.status === "pending" && (
                   <div className="mt-3 flex gap-2 border-t border-border/40 pt-3">
@@ -214,9 +216,7 @@ export function ApprovalHistoryPage() {
                         })
                       }
                     >
-                      <ButtonIcon><CheckCircle2 className="h-3 w-3 text-success" /></ButtonIcon>
-                      Approve
-                    </Button>
+                      <ButtonIcon><CheckCircle2 className="h-3 w-3 text-success" /></ButtonIcon>{t("Approve")}</Button>
                     <Button
                       variant="outline"
                       size="sm"
@@ -230,9 +230,7 @@ export function ApprovalHistoryPage() {
                         })
                       }
                     >
-                      <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>
-                      Reject
-                    </Button>
+                      <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>{t("Reject")}</Button>
                   </div>
                 )}
               </div>
@@ -244,14 +242,14 @@ export function ApprovalHistoryPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Service</TableHead>
-                  <TableHead>Requester</TableHead>
-                  <TableHead>Action</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Requested</TableHead>
-                  <TableHead>Decided</TableHead>
+                  <TableHead>{t("Service")}</TableHead>
+                  <TableHead>{t("Requester")}</TableHead>
+                  <TableHead>{t("Action")}</TableHead>
+                  <TableHead>{t("Status")}</TableHead>
+                  <TableHead>{t("Requested")}</TableHead>
+                  <TableHead>{t("Decided")}</TableHead>
                   {requests.some((r) => r.status === "pending") && (
-                    <TableHead className="w-[100px]">Actions</TableHead>
+                    <TableHead className="w-[100px]">{t("Actions")}</TableHead>
                   )}
                 </TableRow>
               </TableHeader>
@@ -268,7 +266,7 @@ export function ApprovalHistoryPage() {
                             </span>
                           </div>
                           {request.is_destructive && (
-                            <Badge variant="destructive">Destructive</Badge>
+                            <Badge variant="destructive">{t("Destructive")}</Badge>
                           )}
                         </div>
                       ) : (
@@ -296,9 +294,7 @@ export function ApprovalHistoryPage() {
                       <div className="flex flex-col gap-0.5">
                         {isToolApproval(request) ? (
                           <>
-                            <span>
-                              Tool execution approval
-                            </span>
+                            <span>{t("Tool execution approval")}</span>
                             {request.tool_arguments && (
                               <span className="max-w-[300px] truncate text-11 text-muted-foreground">
                                 {request.tool_arguments}
@@ -350,9 +346,7 @@ export function ApprovalHistoryPage() {
                                 })
                               }
                             >
-                              <ButtonIcon><CheckCircle2 className="h-3 w-3 text-success" /></ButtonIcon>
-                              Approve
-                            </Button>
+                              <ButtonIcon><CheckCircle2 className="h-3 w-3 text-success" /></ButtonIcon>{t("Approve")}</Button>
                             <Button
                               variant="ghost"
                               className="h-7 text-xs"
@@ -365,9 +359,7 @@ export function ApprovalHistoryPage() {
                                 })
                               }
                             >
-                              <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>
-                              Reject
-                            </Button>
+                              <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>{t("Reject")}</Button>
                           </div>
                         )}
                       </TableCell>
@@ -381,9 +373,8 @@ export function ApprovalHistoryPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-11 text-text-tertiary">
-                Showing {String((page - 1) * perPage + 1)}-
-                {String(Math.min(page * perPage, total))} of {String(total)}
+              <p className="text-11 text-text-tertiary">{t("Showing ")}{String((page - 1) * perPage + 1)}-
+                {String(Math.min(page * perPage, total))}{t(" of ")}{String(total)}
               </p>
               <div className="flex items-center gap-2">
                 <Button
@@ -391,19 +382,18 @@ export function ApprovalHistoryPage() {
                   size="icon"
                   disabled={page <= 1}
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  aria-label="Previous page"
+                  aria-label={t("Previous page")}
                 >
                   <ChevronLeft className="h-3 w-3" />
                 </Button>
-                <span className="text-11 text-text-tertiary">
-                  Page {String(page)} of {String(totalPages)}
+                <span className="text-11 text-text-tertiary">{t("Page ")}{String(page)}{t(" of ")}{String(totalPages)}
                 </span>
                 <Button
                   variant="outline"
                   size="icon"
                   disabled={page >= totalPages}
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  aria-label="Next page"
+                  aria-label={t("Next page")}
                 >
                   <ChevronRight className="h-3 w-3" />
                 </Button>
@@ -424,21 +414,19 @@ export function ApprovalHistoryPage() {
           <DialogHeader>
             <DialogTitle>
               {decideTarget?.action === "approve"
-                ? "Approve Request"
-                : "Reject Request"}
+                ? t("Approve Request")
+                : t("Reject Request")}
             </DialogTitle>
             <DialogDescription>
               {decideTarget?.action === "approve"
                 ? decideTarget.approvalMode === "grant"
-                  ? `Are you sure you want to approve access to "${decideTarget?.service ?? ""}"? A reusable approval grant will be created using your configured expiry.`
-                  : `Are you sure you want to approve access to "${decideTarget?.service ?? ""}"? This approval applies only to the current request.`
-                : `Are you sure you want to reject access to "${decideTarget?.service ?? ""}"?`}
+                  ? t("Are you sure you want to approve access to \"{{value}}\"? A reusable approval grant will be created using your configured expiry.", { value: decideTarget?.service ?? "" })
+                  : t("Are you sure you want to approve access to \"{{value}}\"? This approval applies only to the current request.", { value: decideTarget?.service ?? "" })
+                : t("Are you sure you want to reject access to \"{{value}}\"?", { value: decideTarget?.service ?? "" })}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDecideTarget(null)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setDecideTarget(null)}>{t("Cancel")}</Button>
             <Button
               variant={
                 decideTarget?.action === "approve" ? "default" : "destructive"
@@ -446,7 +434,7 @@ export function ApprovalHistoryPage() {
               onClick={() => void handleDecide()}
               isLoading={decideMutation.isPending}
             >
-              {decideTarget?.action === "approve" ? "Approve" : "Reject"}
+              {decideTarget?.action === "approve" ? t("Approve") : t("Reject")}
             </Button>
           </DialogFooter>
         </DialogContent>

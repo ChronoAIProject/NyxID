@@ -1,3 +1,6 @@
+import { getCalendarDateFormatter } from "@/lib/formatting-locale";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import {
   Fragment,
   useRef,
@@ -46,12 +49,6 @@ const DEFAULT_DATE_MODES = ["dates", "range"] as const;
 const MAX_CUSTOM_VALUES = 8;
 const MAX_CUSTOM_VALUE_LENGTH = 256;
 
-const FILTER_DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-  year: "numeric",
-  timeZone: "UTC",
-});
 
 export interface DataTableSearchProps<SearchKey extends string> {
   readonly fields: readonly DataTableSearchField<SearchKey>[];
@@ -74,14 +71,17 @@ export function DataTableSearch<SearchKey extends string>({
   selectedField,
   inputRef,
   ariaLabel,
-  allFieldsLabel = "All fields",
-  fieldAriaLabel = "Search field",
+  allFieldsLabel: allFieldsLabelProp,
+  fieldAriaLabel: fieldAriaLabelProp,
   maxLength = 256,
   onValueChange,
   onFieldChange,
   onApply,
   onCancel,
 }: DataTableSearchProps<SearchKey>) {
+  const { t } = useUiTranslation();
+  const allFieldsLabel = allFieldsLabelProp === undefined ? t("All fields") : allFieldsLabelProp;
+  const fieldAriaLabel = fieldAriaLabelProp === undefined ? t("Search field") : fieldAriaLabelProp;
   const controlRef = useRef<HTMLFormElement>(null);
   const [fieldSelectOpen, setFieldSelectOpen] = useState(false);
   const selectedLabel =
@@ -130,7 +130,7 @@ export function DataTableSearch<SearchKey extends string>({
         <input
           ref={inputRef}
           aria-label={ariaLabel}
-          placeholder={`Search ${selectedLabel.toLocaleLowerCase()}`}
+          placeholder={t("Search {{value}}", { value: selectedLabel.toLocaleLowerCase() })}
           value={value}
           maxLength={maxLength}
           enterKeyHint="search"
@@ -145,8 +145,8 @@ export function DataTableSearch<SearchKey extends string>({
         />
         <button
           type="button"
-          aria-label="Clear search draft"
-          title="Clear search draft"
+          aria-label={t("Clear search draft")}
+          title={t("Clear search draft")}
           disabled={!value}
           tabIndex={value ? 0 : -1}
           className="flex w-11 shrink-0 items-center justify-center border-l border-border/60 text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:invisible md:w-9"
@@ -163,11 +163,11 @@ export function DataTableSearch<SearchKey extends string>({
           >
             <SelectTrigger
               aria-label={fieldAriaLabel}
-              title={`Search in ${selectedLabel}`}
+              title={t("Search in {{selectedLabel}}", { selectedLabel: selectedLabel })}
               className="h-full w-[124px] shrink-0 rounded-none border-y-0 border-r-0 border-l border-border/60 px-2.5 focus:border-border/60 sm:w-[146px]"
             >
               <span className="min-w-0 truncate">
-                <span className="text-muted-foreground">In: </span>
+                <span className="text-muted-foreground">{t("In: ")}</span>
                 {selectedLabel}
               </span>
             </SelectTrigger>
@@ -214,12 +214,14 @@ export function DataTableFilterPopover<FilterKey extends string>({
   open,
   selectedKey,
   activeCount,
-  triggerLabel = "Filters",
+  triggerLabel: triggerLabelLocaleDefault,
   validateValues,
   onOpenChange,
   onSelectField,
   onApply,
 }: DataTableFilterPopoverProps<FilterKey>) {
+  const { t } = useUiTranslation();
+  const triggerLabel = triggerLabelLocaleDefault === undefined ? translateUi("Filters") : triggerLabelLocaleDefault;
   const selectedField =
     fields.find((field) => field.key === selectedKey) ?? fields[0];
   const selectionKey = JSON.stringify(
@@ -247,7 +249,7 @@ export function DataTableFilterPopover<FilterKey extends string>({
           disabled={fields.length === 0}
           aria-label={
             activeCount > 0
-              ? `${triggerLabel}, ${String(activeCount)} applied`
+              ? t("{{triggerLabel}}, {{value}} applied", { triggerLabel: triggerLabel, value: String(activeCount) })
               : triggerLabel
           }
         >
@@ -309,6 +311,7 @@ function DataTableFilterPanel<FilterKey extends string>({
     customSelections: DataTableFilterSelections<FilterKey>,
   ) => void;
 }) {
+  const { t } = useUiTranslation();
   const [draftSelections, setDraftSelections] = useState<
     DataTableFilterSelections<FilterKey>
   >(() => ({ ...values }));
@@ -344,7 +347,7 @@ function DataTableFilterPanel<FilterKey extends string>({
               {active && (
                 <span
                   className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-primary/15 px-1 text-10 font-semibold text-primary-text"
-                  aria-label={`${String(selectedValueCount)} selected`}
+                  aria-label={t("{{value}} selected", { value: String(selectedValueCount) })}
                 >
                   {String(selectedValueCount)}
                 </span>
@@ -411,6 +414,7 @@ function DataTableFilterEditor<FilterKey extends string>({
   readonly onCancel: () => void;
   readonly onApply: () => void;
 }) {
+  const { t } = useUiTranslation();
   if (field.value_type === "date") {
     return (
       <DataTableDateFilterEditor
@@ -444,8 +448,7 @@ function DataTableFilterEditor<FilterKey extends string>({
             </span>
           </p>
           <span className="shrink-0 text-10 text-muted-foreground">
-            {String(selectedCount)} selected
-          </span>
+            {String(selectedCount)}{t(" selected")}</span>
         </div>
       </div>
       {field.supports_custom_text === true && (
@@ -458,7 +461,7 @@ function DataTableFilterEditor<FilterKey extends string>({
       {!textOnly && (
         <div
           role="group"
-          aria-label={`${field.label} values`}
+          aria-label={t("{{label}} values", { label: field.label })}
           className="max-h-[250px] flex-1 space-y-1 overflow-y-auto p-2"
         >
           {multiple && (
@@ -495,10 +498,9 @@ function DataTableFilterEditor<FilterKey extends string>({
                   <Minus className="h-3 w-3" />
                 ) : null}
               </span>
-              <span>Select all</span>
+              <span>{t("Select all")}</span>
               <span className="ml-auto text-10 font-normal text-muted-foreground">
-                {String(field.options.length)} values
-              </span>
+                {String(field.options.length)}{t(" values")}</span>
             </button>
           )}
           {field.options.map((option) => {
@@ -574,6 +576,7 @@ function DataTableCustomTextFilter<FilterKey extends string>({
   readonly values: readonly string[];
   readonly onValuesChange: (values: readonly string[]) => void;
 }) {
+  const { t } = useUiTranslation();
   const [draft, setDraft] = useState("");
 
   const trimmed = draft.trim();
@@ -601,14 +604,12 @@ function DataTableCustomTextFilter<FilterKey extends string>({
           type="text"
           value={draft}
           maxLength={MAX_CUSTOM_VALUE_LENGTH}
-          aria-label={`Custom ${field.label} value`}
-          placeholder={`Contains…`}
+          aria-label={t("Custom {{label}} value", { label: field.label })}
+          placeholder={t("Contains…")}
           className="h-11 min-w-0 flex-1 rounded-md border border-input bg-transparent px-2.5 text-xs outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-input-focus focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:h-9"
           onChange={(event) => setDraft(event.target.value)}
         />
-        <Button type="submit" variant="outline" size="sm" disabled={!canAdd}>
-          Add
-        </Button>
+        <Button type="submit" variant="outline" size="sm" disabled={!canAdd}>{t("Add")}</Button>
       </form>
       {(values.length > 0 || full) && (
         <div className="mt-2 flex flex-wrap gap-1.5">
@@ -617,11 +618,11 @@ function DataTableCustomTextFilter<FilterKey extends string>({
               key={value}
               className="flex max-w-full items-center gap-1 rounded-md border border-primary/40 bg-primary/10 py-1 pl-2 pr-1 text-11 text-foreground"
             >
-              <span className="text-muted-foreground">contains</span>
+              <span className="text-muted-foreground">{t("contains")}</span>
               <span className="min-w-0 break-all font-medium">{value}</span>
               <button
                 type="button"
-                aria-label={`Remove custom ${field.label} value ${value}`}
+                aria-label={t("Remove custom {{label}} value {{value}}", { label: field.label, value: value })}
                 className="flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground outline-none transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
                 onClick={() =>
                   onValuesChange(values.filter((item) => item !== value))
@@ -633,8 +634,7 @@ function DataTableCustomTextFilter<FilterKey extends string>({
           ))}
           {full && (
             <span className="self-center text-10 text-muted-foreground">
-              {String(MAX_CUSTOM_VALUES)} value limit reached
-            </span>
+              {String(MAX_CUSTOM_VALUES)}{t(" value limit reached")}</span>
           )}
         </div>
       )}
@@ -660,6 +660,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
   readonly onCancel: () => void;
   readonly onApply: () => void;
 }) {
+  const { t } = useUiTranslation();
   const dateModes =
     field.date_modes && field.date_modes.length > 0
       ? field.date_modes
@@ -694,15 +695,15 @@ function DataTableDateFilterEditor<FilterKey extends string>({
           <p className="truncate text-xs font-semibold text-foreground">
             {field.label}{" "}
             <span className="font-normal text-muted-foreground">
-              {mode === "dates" ? "on any selected date" : "between"}
+              {mode === "dates" ? t("on any selected date") : t("between")}
             </span>
           </p>
           <span className="shrink-0 text-10 text-muted-foreground">
             {mode === "dates"
-              ? `${String(selectedDates.length)} selected`
+              ? t("{{value}} selected", { value: String(selectedDates.length) })
               : hasValue
-                ? "Range selected"
-                : "No range selected"}
+                ? t("Range selected")
+                : t("No range selected")}
           </span>
         </div>
       </div>
@@ -711,7 +712,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
         {dateModes.length > 1 && (
           <div
             role="group"
-            aria-label={`${field.label} date filter mode`}
+            aria-label={t("{{label}} date filter mode", { label: field.label })}
             className="grid grid-cols-2 rounded-md border border-border/80 bg-muted/20 p-0.5"
           >
             {dateModes.includes("dates") && (
@@ -726,9 +727,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
                 )}
                 onClick={() => selectMode("dates")}
               >
-                <Calendar className="h-3.5 w-3.5" aria-hidden="true" />
-                Specific dates
-              </button>
+                <Calendar className="h-3.5 w-3.5" aria-hidden="true" />{t("Specific dates")}</button>
             )}
             {dateModes.includes("range") && (
               <button
@@ -742,38 +741,34 @@ function DataTableDateFilterEditor<FilterKey extends string>({
                 )}
                 onClick={() => selectMode("range")}
               >
-                <CalendarRange className="h-3.5 w-3.5" aria-hidden="true" />
-                Date range
-              </button>
+                <CalendarRange className="h-3.5 w-3.5" aria-hidden="true" />{t("Date range")}</button>
             )}
           </div>
         )}
 
         {mode === "dates" ? (
           <div className="space-y-1.5">
-            <span className="text-11 font-medium text-muted-foreground">
-              Dates
-            </span>
+            <span className="text-11 font-medium text-muted-foreground">{t("Dates")}</span>
             <DatePicker
               mode="multiple"
               values={selectedDates}
               maxSelections={field.max_values ?? 32}
-              ariaLabel={`${field.label} on selected dates`}
-              placeholder="Select dates"
+              ariaLabel={translateUi("{{value0}} on selected dates", { value0: field.label })}
+              placeholder={t("Select dates")}
               onValuesChange={(dates) => onValuesChange(["dates", ...dates])}
             />
             {selectedDates.length > 0 && (
               <div
                 className="flex flex-wrap gap-1.5 pt-1"
                 role="group"
-                aria-label={`Selected ${field.label.toLocaleLowerCase()} dates`}
+                aria-label={t("Selected {{value}} dates", { value: field.label.toLocaleLowerCase() })}
               >
                 {selectedDates.map((date) => (
                   <button
                     key={date}
                     type="button"
                     className="flex min-h-8 items-center gap-1.5 rounded-md border border-border/80 bg-muted/25 px-2 text-11 text-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring"
-                    aria-label={`Remove selected date ${date}`}
+                    aria-label={t("Remove selected date {{date}}", { date: date })}
                     onClick={() =>
                       onValuesChange([
                         "dates",
@@ -794,27 +789,23 @@ function DataTableDateFilterEditor<FilterKey extends string>({
         ) : (
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
-              <span className="text-11 font-medium text-muted-foreground">
-                From
-              </span>
+              <span className="text-11 font-medium text-muted-foreground">{t("From")}</span>
               <DatePicker
                 value={from || null}
-                ariaLabel={`${field.label} from date`}
-                placeholder="Any date"
+                ariaLabel={translateUi("{{value0}} from date", { value0: field.label })}
+                placeholder={t("Any date")}
                 onChange={(value) =>
                   onValuesChange(["range", value ?? "", value || to ? to : ""])
                 }
               />
             </div>
             <div className="space-y-1.5">
-              <span className="text-11 font-medium text-muted-foreground">
-                To
-              </span>
+              <span className="text-11 font-medium text-muted-foreground">{t("To")}</span>
               <DatePicker
                 value={to || null}
                 minDate={from || undefined}
-                ariaLabel={`${field.label} to date`}
-                placeholder="Any date"
+                ariaLabel={translateUi("{{value0}} to date", { value0: field.label })}
+                placeholder={t("Any date")}
                 onChange={(value) =>
                   onValuesChange(["range", from, value ?? ""])
                 }
@@ -824,9 +815,7 @@ function DataTableDateFilterEditor<FilterKey extends string>({
         )}
 
         {!valid && (
-          <p role="alert" className="text-xs text-destructive">
-            The end date must be on or after the start date.
-          </p>
+          <p role="alert" className="text-xs text-destructive">{t("The end date must be on or after the start date.")}</p>
         )}
       </div>
 
@@ -854,6 +843,7 @@ function DataTableFilterActions({
   readonly onCancel: () => void;
   readonly onApply: () => void;
 }) {
+  const { t } = useUiTranslation();
   return (
     <div className="flex flex-col gap-2 border-t border-border/70 px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-h-7">
@@ -864,23 +854,17 @@ function DataTableFilterActions({
             size="sm"
             className="px-2 text-muted-foreground"
             onClick={onClear}
-          >
-            Clear all
-          </Button>
+          >{t("Clear all")}</Button>
         )}
       </div>
       <div className="flex items-center gap-2">
-        <Button type="button" variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>
+        <Button type="button" variant="ghost" onClick={onCancel}>{t("Cancel")}</Button>
         <Button
           type="button"
           variant="primary"
           disabled={disabled}
           onClick={onApply}
-        >
-          Apply filters
-        </Button>
+        >{t("Apply filters")}</Button>
       </div>
     </div>
   );
@@ -889,7 +873,7 @@ function DataTableFilterActions({
 function selectedDateLabel(value: string): string {
   const [year, month, day] = value.split("-").map(Number);
   if (!year || !month || !day) return value;
-  return FILTER_DATE_FORMATTER.format(new Date(Date.UTC(year, month - 1, day)));
+  return getCalendarDateFormatter().format(new Date(Date.UTC(year, month - 1, day)));
 }
 
 function isCalendarDate(value: string): boolean {
@@ -952,8 +936,8 @@ export function DataTableFilterChips<
   searchFields,
   searchFilters,
   filters,
-  allFieldsLabel = "All fields",
-  ariaLabel = "Applied filters",
+  allFieldsLabel: allFieldsLabelProp,
+  ariaLabel: ariaLabelLocaleDefault,
   className,
   onEditSearch,
   onRemoveSearch,
@@ -963,6 +947,9 @@ export function DataTableFilterChips<
   onRemove,
   onClear,
 }: DataTableFilterChipsProps<SearchKey, FilterKey>) {
+  const allFieldsLabel = allFieldsLabelProp === undefined ? translateUi("All fields") : allFieldsLabelProp;
+  const ariaLabel = ariaLabelLocaleDefault === undefined ? translateUi("Applied filters") : ariaLabelLocaleDefault;
+  const { t } = useUiTranslation();
   if (!search && searchFilters.length === 0 && filters.length === 0)
     return null;
 
@@ -980,20 +967,20 @@ export function DataTableFilterChips<
       {search && (
         <div
           role="group"
-          aria-label={`${allFieldsLabel} search`}
+          aria-label={t("{{allFieldsLabel}} search", { allFieldsLabel: allFieldsLabel })}
           className="flex min-h-11 max-w-full items-stretch overflow-hidden rounded-md border border-border/80 bg-muted/25 text-xs md:min-h-9"
         >
           <button
             type="button"
             className="min-w-0 px-2.5 py-1.5 text-left outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-            aria-label={`Edit ${allFieldsLabel} search: contains ${search}`}
+            aria-label={t("Edit {{allFieldsLabel}} search: contains {{search}}", { allFieldsLabel: allFieldsLabel, search: search })}
             title={search}
             onClick={onEditSearch}
           >
             <span className="font-medium text-foreground">
               {allFieldsLabel}
             </span>{" "}
-            <span className="text-muted-foreground">contains</span>{" "}
+            <span className="text-muted-foreground">{t("contains")}</span>{" "}
             <span className="break-all font-medium text-foreground">
               &quot;{visibleSearch}&quot;
             </span>
@@ -1001,8 +988,8 @@ export function DataTableFilterChips<
           <button
             type="button"
             className="flex w-11 shrink-0 items-center justify-center border-l border-border/70 text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:w-9"
-            aria-label={`Remove ${allFieldsLabel} search`}
-            title={`Remove ${allFieldsLabel} search`}
+            aria-label={t("Remove {{allFieldsLabel}} search", { allFieldsLabel: allFieldsLabel })}
+            title={t("Remove {{allFieldsLabel}} search", { allFieldsLabel: allFieldsLabel })}
             onClick={onRemoveSearch}
           >
             <X className="h-3.5 w-3.5" aria-hidden="true" />
@@ -1016,12 +1003,12 @@ export function DataTableFilterChips<
           <div
             key={searchFilter.field}
             role="group"
-            aria-label={`${label} search, matches any term`}
+            aria-label={t("{{label}} search, matches any term", { label: label })}
             className="flex min-h-11 max-w-full flex-wrap items-stretch overflow-hidden rounded-md border border-border/80 bg-muted/25 text-xs md:min-h-9"
           >
             <span className="flex items-center px-2.5 py-1.5">
               <span className="font-medium text-foreground">{label}</span>{" "}
-              <span className="ml-1 text-muted-foreground">contains</span>
+              <span className="ml-1 text-muted-foreground">{t("contains")}</span>
             </span>
             {searchFilter.values.map((value, valueIndex) => {
               const visibleValue =
@@ -1029,15 +1016,13 @@ export function DataTableFilterChips<
               return (
                 <Fragment key={value.toLocaleLowerCase()}>
                   {valueIndex > 0 && (
-                    <span className="flex items-center border-l border-border/70 px-2 text-10 font-semibold text-muted-foreground">
-                      OR
-                    </span>
+                    <span className="flex items-center border-l border-border/70 px-2 text-10 font-semibold text-muted-foreground">{t("OR")}</span>
                   )}
                   <div className="flex min-w-0 items-stretch border-l border-border/70">
                     <button
                       type="button"
                       className="min-w-0 px-2 py-1.5 text-left font-medium text-foreground outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                      aria-label={`Edit ${label} search: contains ${value}`}
+                      aria-label={t("Edit {{label}} search: contains {{value}}", { label: label, value: value })}
                       title={value}
                       onClick={() =>
                         onEditSearchValue(searchFilter.field, value)
@@ -1050,8 +1035,8 @@ export function DataTableFilterChips<
                     <button
                       type="button"
                       className="flex w-11 shrink-0 items-center justify-center text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:w-8"
-                      aria-label={`Remove ${label} search value: ${value}`}
-                      title={`Remove ${label} search value`}
+                      aria-label={t("Remove {{label}} search value: {{value}}", { label: label, value: value })}
+                      title={t("Remove {{label}} search value", { label: label })}
                       onClick={() =>
                         onRemoveSearchValue(searchFilter.field, value)
                       }
@@ -1102,7 +1087,7 @@ export function DataTableFilterChips<
               <button
                 type="button"
                 className="min-w-0 px-2.5 py-1.5 text-left outline-none transition-colors hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                aria-label={`Edit ${chipLabel}: ${resolvedOperatorLabel} ${fullValueSummary}`}
+                aria-label={t("Edit {{chipLabel}}: {{resolvedOperatorLabel}} {{fullValueSummary}}", { chipLabel: chipLabel, resolvedOperatorLabel: resolvedOperatorLabel, fullValueSummary: fullValueSummary })}
                 title={fullValueSummary}
                 onClick={() => onEdit(field.key)}
               >
@@ -1119,8 +1104,8 @@ export function DataTableFilterChips<
               <button
                 type="button"
                 className="flex w-11 shrink-0 items-center justify-center border-l border-border/70 text-muted-foreground outline-none transition-colors hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:w-9"
-                aria-label={`Remove ${chipLabel}`}
-                title={`Remove ${chipLabel}`}
+                aria-label={t("Remove {{chipLabel}}", { chipLabel: chipLabel })}
+                title={t("Remove {{chipLabel}}", { chipLabel: chipLabel })}
                 onClick={() => onRemove(field.key, custom === true)}
               >
                 <X className="h-3.5 w-3.5" aria-hidden="true" />
@@ -1135,9 +1120,7 @@ export function DataTableFilterChips<
         size="sm"
         className="h-11 px-2 text-xs text-muted-foreground md:h-9"
         onClick={onClear}
-      >
-        Clear filters
-      </Button>
+      >{t("Clear filters")}</Button>
     </div>
   );
 }

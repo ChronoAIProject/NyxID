@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { useUpdateRedirectUris } from "@/hooks/use-services";
 import { redirectUriSchema } from "@/schemas/services";
@@ -15,6 +17,7 @@ export function RedirectUriEditor({
   serviceId,
   initialUris,
 }: RedirectUriEditorProps) {
+  const { t } = useUiTranslation();
   const [uris, setUris] = useState<readonly string[]>(initialUris);
   const [newUri, setNewUri] = useState("");
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -51,9 +54,9 @@ export function RedirectUriEditor({
         serviceId,
         redirectUris: uris,
       });
-      toast.success("Redirect URIs updated");
+      toast.success(translateUi("Redirect URIs updated"));
     } catch {
-      toast.error("Failed to update redirect URIs");
+      toast.error(translateUi("Failed to update redirect URIs"));
     }
   }
 
@@ -72,14 +75,12 @@ export function RedirectUriEditor({
               onClick={() => handleRemove(index)}
             >
               <Trash2 className="h-3 w-3 text-destructive" />
-              <span className="sr-only">Remove URI</span>
+              <span className="sr-only">{t("Remove URI")}</span>
             </Button>
           </div>
         ))}
         {uris.length === 0 && (
-          <p className="text-xs text-muted-foreground">
-            No redirect URIs configured.
-          </p>
+          <p className="text-xs text-muted-foreground">{t("No redirect URIs configured.")}</p>
         )}
       </div>
 
@@ -101,7 +102,7 @@ export function RedirectUriEditor({
             className="h-8 text-12"
           />
           {validationError && (
-            <p className="text-xs text-destructive">{validationError}</p>
+            <p className="text-xs text-destructive">{translateUi(validationError)}</p>
           )}
         </div>
         <Button
@@ -109,9 +110,7 @@ export function RedirectUriEditor({
           className="h-8 shrink-0"
           onClick={handleAdd}
         >
-          <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>
-          Add
-        </Button>
+          <ButtonIcon><Plus className="h-3 w-3" /></ButtonIcon>{t("Add")}</Button>
       </div>
 
       {hasChanges && (
@@ -119,9 +118,7 @@ export function RedirectUriEditor({
           variant="primary"
           onClick={() => void handleSave()}
           isLoading={updateMutation.isPending}
-        >
-          Save Redirect URIs
-        </Button>
+        >{t("Save Redirect URIs")}</Button>
       )}
     </div>
   );

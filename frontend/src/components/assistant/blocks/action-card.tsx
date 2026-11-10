@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import {
@@ -456,6 +457,7 @@ export function ActionCard({
   onBlock,
   onResolve,
 }: ActionCardProps) {
+  const { t } = useUiTranslation();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [reauthorizeKey, setReauthorizeKey] = useState<KeyInfo | null>(null);
   const resolvingRef = useRef(false);
@@ -796,16 +798,16 @@ export function ActionCard({
               {verdict
                 ? verdict.badge
                 : unsupported
-                  ? "Unsupported"
+                  ? t("Unsupported")
                   : conflicted
-                    ? "Conflict"
+                    ? t("Conflict")
                     : blocked
-                      ? "Blocked"
+                      ? t("Blocked")
                       : awaitingAuthorization
-                        ? "Authorizing"
+                        ? t("Authorizing")
                         : busy
-                          ? "In progress"
-                          : "Action required"}
+                          ? t("In progress")
+                          : t("Action required")}
             </Badge>
           </div>
           <p className="mt-1.5 text-12 leading-relaxed text-muted-foreground">
@@ -851,9 +853,9 @@ export function ActionCard({
             >
               {busy ? <Loader2 className="animate-spin" /> : <ShieldCheck />}
               {awaitingAuthorization
-                ? "Waiting for authorization"
+                ? t("Waiting for authorization")
                 : busy
-                  ? descriptor.busyLabel
+                  ? t(descriptor.busyLabel)
                   : descriptor.cta(params)}
             </Button>
           ) : null}
@@ -864,9 +866,7 @@ export function ActionCard({
             disabled={secondaryDisabled}
             onClick={() => report("declined")}
           >
-            <X />
-            Decline
-          </Button>
+            <X />{t("Decline")}</Button>
           {blocked ? (
             <Button
               type="button"
@@ -875,13 +875,9 @@ export function ActionCard({
               disabled={secondaryDisabled}
               onClick={() => report("failed")}
             >
-              <AlertTriangle />
-              Report failure
-            </Button>
+              <AlertTriangle />{t("Report failure")}</Button>
           ) : null}
-          <span className="ml-auto text-10 text-muted-foreground">
-            Nothing is shared until you finish.
-          </span>
+          <span className="ml-auto text-10 text-muted-foreground">{t("Nothing is shared until you finish.")}</span>
         </div>
       ) : null}
 
