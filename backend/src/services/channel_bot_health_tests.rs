@@ -569,14 +569,18 @@ async fn discord_health_batch_matches_personal_org_global_and_revoked_membership
         })
         .collect();
     let loaded = discord::load(&db, &bots).await.unwrap();
-    for bot in bots {
+    for (case, bot) in bots.into_iter().enumerate() {
         // Test-only individual resolution is the existing ingress authority;
         // the production loader resolves all these owners in two batched reads.
         let expected =
             flags::personal_flag_enabled(&db, &bot.user_id, flags::DISCORD_GATEWAY_FLAG_KEY)
                 .await
                 .unwrap();
-        assert_eq!(loaded[&bot.id].code.is_some(), expected, "{}", bot.user_id);
+        assert_eq!(
+            loaded[&bot.id].code.is_some(),
+            expected,
+            "owner case #{case}"
+        );
     }
     db.drop().await.unwrap();
 }
