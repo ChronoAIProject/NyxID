@@ -4157,24 +4157,45 @@ mod tests {
     }
 }
 
-/// A content-free row for lifecycle tests, independent of the purge inventory.
-/// Each test chooses the references it expects its real source deletion to remove.
+/// A typed content-free row for lifecycle tests. Each test chooses the exact
+/// source references, which must round-trip through the production model.
 pub(crate) async fn seed_notification_purge_probe(
     db: &mongodb::Database,
     user_id: &str,
     references: Document,
 ) -> String {
+    use crate::models::assistant_notification::{
+        AssistantNotification, COLLECTION_NAME, NotificationKind, NotificationSource,
+    };
     let id = Uuid::new_v4().to_string();
     let mut source = doc! {"type":"conversation", "id":Uuid::new_v4().to_string()};
-    source.extend(references);
-    db.collection::<Document>("assistant_notifications")
-        .insert_one(doc! {
-            "_id":&id,"user_id":user_id,"kind":"agent_update","source":source,
-            "source_key":&id,"coalesced":false,"unread":true,"count":1_i64,
-            "read_at":null,"resolved_at":null,"resolution":null,"card_expires_at":null,
-            "outcome":null,"reason":null,"push":null,
-            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
-            "expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::days(30)),
+    source.extend(references.clone());
+    let source: NotificationSource = bson::from_document(source).unwrap();
+    let stored_source = bson::to_document(&source).unwrap();
+    for (key, value) in references {
+        assert_eq!(stored_source.get(&key), Some(&value), "source field {key}");
+    }
+    let now = chrono::Utc::now();
+    db.collection::<AssistantNotification>(COLLECTION_NAME)
+        .insert_one(AssistantNotification {
+            id: id.clone(),
+            user_id: user_id.into(),
+            kind: NotificationKind::AgentUpdate,
+            source,
+            source_key: id.clone(),
+            coalesced: false,
+            unread: true,
+            count: 1,
+            read_at: None,
+            resolved_at: None,
+            resolution: None,
+            card_expires_at: None,
+            outcome: None,
+            reason: None,
+            push: None,
+            created_at: now,
+            updated_at: now,
+            expires_at: now + chrono::Duration::days(30),
         })
         .await
         .unwrap();

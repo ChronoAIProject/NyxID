@@ -4981,6 +4981,24 @@ async fn notification_tool_is_private_bounded_read_only_and_allows_nyxbot_trigge
         execute_tool(&state, &guest, "nyxid__list_notifications", &json!({})).await;
     assert!(error);
     assert_eq!(refusal, acks::guest_refusal());
+    let mut collaboration = chat.clone();
+    collaboration.collaboration_thread = true;
+    assert!(
+        !crate::services::assistant_account_tools::virtual_service_for(&state.db, &collaboration)
+            .await
+            .endpoints
+            .iter()
+            .any(|tool| tool.name == "list_notifications")
+    );
+    let (refusal, error) = execute_tool(
+        &state,
+        &collaboration,
+        "nyxid__list_notifications",
+        &json!({}),
+    )
+    .await;
+    assert!(error);
+    assert_eq!(refusal["error"], "collaboration_scope");
     spawn(
         &state,
         &chat,

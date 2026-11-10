@@ -28,6 +28,8 @@ pub(crate) async fn retire_in_session(
         .delete_many({
             let mut notification_filter = doc! {"source.channel_id":channel};
             if let Some(actor) = actor {
+                // An org-id guest lane has no person-owned feed rows; only
+                // a person actor retires that person's private notifications.
                 notification_filter.insert("user_id", actor);
             }
             notification_filter

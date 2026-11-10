@@ -574,7 +574,7 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
     assert_eq!(again.status(), StatusCode::OK);
     let conflict = bind(bearer(&agent_key), binding_body(&agent_key, OWNER), "bnd_2").await;
     assert_eq!(conflict.status(), StatusCode::CONFLICT);
-    let removed = crate::test_utils::seed_notification_purge_probe(
+    let same_channel = crate::test_utils::seed_notification_purge_probe(
         &state.db,
         OWNER,
         doc! {"channel_id":&row.id},
@@ -596,7 +596,7 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
     let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert!(saved.binding_id.is_none());
     assert!(!format!("{saved:?}").contains(&agent_key));
-    crate::test_utils::assert_notification_probe(&state.db, &removed, false).await;
+    crate::test_utils::assert_notification_probe(&state.db, &same_channel, true).await;
     crate::test_utils::assert_notification_probe(&state.db, &retained, true).await;
     server.abort();
 }

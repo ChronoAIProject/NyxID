@@ -6283,11 +6283,11 @@ pub(crate) async fn delete_in_session(
             "source_deleted",
         )
         .await?;
-        // Revoke the conversation's key and ciphertext in this transaction.
         db.collection::<bson::Document>(crate::models::assistant_notification::COLLECTION_NAME)
             .delete_many(doc! {"source.conversation_id": id})
             .session(&mut *session)
             .await?;
+        // Revoke the conversation's key and ciphertext in this transaction.
         let credential = db
             .collection::<bson::Document>(
                 crate::models::assistant_agent_credential::COLLECTION_NAME,

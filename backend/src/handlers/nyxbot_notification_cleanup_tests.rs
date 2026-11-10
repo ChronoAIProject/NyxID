@@ -188,6 +188,58 @@ async fn provider_thread_delete_purges_exact_chat_and_lanes_but_retains_history(
 }
 
 #[tokio::test]
+async fn provider_thread_delete_survives_unrelated_channel_key_rotation() {
+    let (state, _, server) = Box::pin(setup("notification_thread_rotation")).await;
+    let _server = tokio_util::task::AbortOnDropHandle::new(server);
+    let (row, key) = Box::pin(channel(&state, "gateway")).await;
+    assert_eq!(
+        put_binding(
+            State(state.clone()),
+            Path("bnd_chats".into()),
+            bearer(&key),
+            Json(binding_body(&key, OWNER)),
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    ensure_partition(&state, &key, PARTITION).await;
+    let observed = load_channel(&state, OWNER, &row.id).await.unwrap();
+    let thread = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"channel_id":&row.id,"partition":PARTITION})
+        .await
+        .unwrap()
+        .unwrap();
+    let notification = seed_notification_purge_probe(
+        &state.db,
+        OWNER,
+        doc! {"channel_id":&row.id,"thread_id":&thread.id},
+    )
+    .await;
+    // The gateway authenticated before a concurrent key swap was staged.
+    // Only the binding identity governs which provider chat it may delete.
+    state.db.collection::<NyxbotChannel>(CHANNELS).update_one(
+        doc! {"_id":&row.id},
+        doc! {"$set":{"pending_agent_api_key_id":Uuid::new_v4().to_string(),"status":"pending"}},
+    ).await.unwrap();
+    crate::services::nyxbot_chat_settings_service::remove_thread(&state.db, &observed, PARTITION)
+        .await
+        .unwrap();
+    assert!(
+        state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {"_id":thread.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_notification_probe(&state.db, &notification, false).await;
+}
+
+#[tokio::test]
 async fn stale_provider_binding_cannot_purge_current_notifications() {
     let (state, _, server) = Box::pin(setup("notification_stale_binding_purge")).await;
     let _server = tokio_util::task::AbortOnDropHandle::new(server);
