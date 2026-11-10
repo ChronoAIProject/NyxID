@@ -255,6 +255,18 @@ async fn pm_f4_channel_and_event_activity_share_one_home_row_and_unlink_follows_
         .await
         .unwrap();
     settle(&f, &row, "Channel reply", None).await;
+    engine::push_events(
+        db,
+        &f.owner,
+        &home.id,
+        vec![team::event(
+            "message",
+            "Background work finished".into(),
+            None,
+        )],
+    )
+    .await
+    .unwrap();
     let row = begin(
         &f,
         &f.owner,
