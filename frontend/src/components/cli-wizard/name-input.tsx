@@ -19,6 +19,7 @@ import type { z } from "zod"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { firstError } from "@/schemas/cli-wizard"
+import { cn } from "@/lib/utils"
 
 export interface NameInputProps {
   readonly label: string
@@ -74,8 +75,8 @@ export function NameInput({
   const errorId = `${id}-error`
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <Label htmlFor={id}>{label}</Label>
+    <div className="flex min-w-0 flex-col gap-2">
+      <Label htmlFor={id} className="flex h-4 items-center text-12 leading-4 text-foreground">{label}</Label>
       <Input
         id={id}
         value={value}
@@ -87,18 +88,19 @@ export function NameInput({
         autoComplete={autoComplete}
         aria-invalid={effectiveError != null}
         aria-describedby={effectiveError ? errorId : hint ? hintId : undefined}
-        className={
+        className={cn(
+          "h-10 rounded-md border-border bg-background/30 text-13 focus-visible:border-primary",
           effectiveError != null
             ? "border-destructive focus-visible:border-destructive"
-            : undefined
-        }
+            : undefined,
+        )}
       />
       {effectiveError ? (
         <p id={errorId} className="text-xs text-destructive">
           {t(effectiveError)}
         </p>
       ) : hint ? (
-        <p id={hintId} className="text-xs text-muted-foreground">
+        <p id={hintId} className="text-xs leading-relaxed text-muted-foreground">
           {hint}
         </p>
       ) : null}

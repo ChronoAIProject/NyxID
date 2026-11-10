@@ -51,7 +51,7 @@ export function DisplayOncePanel({
           <Lock className="h-4 w-4" />
           <span className="text-12 font-medium">{t("Shown once — save it now")}</span>
         </div>
-        <h2 className="font-serif text-28 font-normal">{t(title)}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t(title)}</h2>
         <p className="text-12 text-muted-foreground">{t(description)}</p>
       </div>
 
@@ -126,7 +126,7 @@ export function RecoveryCodesPanel({
           <Lock className="h-4 w-4" />
           <span className="text-sm font-medium">{t("Shown once — save them now")}</span>
         </div>
-        <h2 className="font-serif text-28 font-normal">{t("Save your recovery codes")}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Save your recovery codes")}</h2>
         <p className="text-sm text-muted-foreground">{t("Each code is single-use and lets you sign in if you lose access to your authenticator. Store them in a password manager or print them. They are")}{" "}
           <strong>{t("not")}</strong>{t(" shown again.")}</p>
       </div>

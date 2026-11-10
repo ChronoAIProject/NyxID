@@ -19,7 +19,7 @@ export function ApiKeyRotationResult({
     return (
       <div className="flex flex-col gap-6">
         <div className="flex flex-col gap-2">
-          <h2 className="font-serif text-28 font-normal">{t("API key rotated")}</h2>
+          <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("API key rotated")}</h2>
           <p className="text-12 text-muted-foreground">{t("Key rotated. This key is managed by the NyxID assistant; the new secret is stored encrypted on the server and is never shown.")}</p>
         </div>
         <Button variant="primary" onClick={onAcknowledge} className="w-full">{t("Close")}</Button>

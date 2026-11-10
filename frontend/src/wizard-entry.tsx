@@ -428,14 +428,12 @@ export function ConfirmDispatcher({
   switch (flow) {
     case "api-key-create":
       return (
-        <div className="flex flex-col gap-4">
-          <ApiKeyCreateConfirm
-            prefill={prefill as ApiKeyCreatePrefill}
-            pairingId={pairingId}
-            onSuccess={onSuccess}
-          />
-          <CancelLink onCancel={onCancel} />
-        </div>
+        <ApiKeyCreateConfirm
+          prefill={prefill as ApiKeyCreatePrefill}
+          pairingId={pairingId}
+          onSuccess={onSuccess}
+          onCancel={onCancel}
+        />
       )
     case "api-key-rotate":
       return (
@@ -669,7 +667,7 @@ function AckingPanel({
   const { t } = useWizardTranslation();
   return (
     <div className="flex flex-col gap-4">
-      <h2 className="font-serif text-28 font-normal">{t("Service added")}</h2>
+      <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Service added")}</h2>
       <p className="text-sm text-muted-foreground">
         <code className="font-mono text-xs">{result.slug}</code>{t(" is now connected. Check your terminal for the final summary.")}</p>
       {completeError ? (
@@ -688,7 +686,7 @@ function DonePanel() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t("Done")}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Done")}</h2>
         <p className="text-sm text-muted-foreground">{t("You can close this tab and return to your terminal.")}</p>
       </div>
     </div>
@@ -700,7 +698,7 @@ function CancelledPanel() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t("Cancelled")}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Cancelled")}</h2>
         <p className="text-sm text-muted-foreground">{t("Nothing was created. You can close this tab — your CLI should already be back at the prompt.")}</p>
       </div>
     </div>
@@ -724,7 +722,7 @@ function WizardLostPanel() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t("Wizard interrupted")}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Wizard interrupted")}</h2>
         <p className="text-sm text-muted-foreground">{t("Lost contact with the ")}<code>nyxid</code>{t(" CLI. The CLI may have finished and exited successfully, or the connection was interrupted before the result reached this page.")}</p>
         <p className="mt-2 text-sm text-muted-foreground">{t("Run ")}<code>nyxid status</code>{t(" in your terminal to see whether the service was created. If it’s missing, re-run the wizard command.")}</p>
       </div>

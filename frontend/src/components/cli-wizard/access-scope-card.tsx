@@ -63,85 +63,89 @@ export function AccessScopeCard({
   return (
     <section
       aria-labelledby="access-scope-title"
-      className="flex flex-col gap-4 rounded-lg border border-border bg-muted/30 p-4"
+      className="flex flex-col gap-4 rounded-lg border border-border/60 bg-background/25 p-4"
     >
       <div className="flex flex-col gap-1">
-        <h3 id="access-scope-title" className="text-13 font-semibold">{t("Access Scope")}</h3>
-        <p className="text-xs text-muted-foreground">{t("Restrict which services and nodes this key can access via proxy.")}</p>
+        <h3 id="access-scope-title" className="text-12 font-semibold">{t("Access Scope")}</h3>
+        <p className="text-xs leading-relaxed text-muted-foreground">{t("Restrict which services and nodes this key can access via proxy.")}</p>
       </div>
 
-      <AccessGroup
-        label={t("Services")}
-        icon={<ShieldIcon />}
-        allowAll={value.allowAllServices}
-        onAllowAllChange={(allowAll) => {
-          onChange({ ...value, allowAllServices: allowAll })
-        }}
-        listLabel={t("Select allowed services:")}
-        loading={services.isLoading}
-        items={
-          services.data
-            ?.filter(
-              (s) =>
-                s.is_active &&
-                !s.auto_connected &&
-                (!ownerId ||
-                  (s.credential_source?.type === "org" &&
-                    s.credential_source.org_id === ownerId)) &&
-                (s.credential_source?.type !== "org" ||
-                  s.credential_source.allowed),
-            )
-            .map((s) => ({
-              id: s.id,
-              primary: s.label,
-              secondary: s.slug,
-              iconSlug: s.catalog_service_slug,
-            })) ?? []
-        }
-        selectedIds={value.selectedServiceIds}
-        onToggle={toggleService}
-      />
+      <div className="grid items-start gap-4 sm:grid-cols-2">
+        <div className="flex min-w-0 flex-col gap-4">
+          <AccessGroup
+            label={t("Services")}
+            icon={<ShieldIcon />}
+            allowAll={value.allowAllServices}
+            onAllowAllChange={(allowAll) => {
+              onChange({ ...value, allowAllServices: allowAll })
+            }}
+            listLabel={t("Select allowed services:")}
+            loading={services.isLoading}
+            items={
+              services.data
+                ?.filter(
+                  (s) =>
+                    s.is_active &&
+                    !s.auto_connected &&
+                    (!ownerId ||
+                      (s.credential_source?.type === "org" &&
+                        s.credential_source.org_id === ownerId)) &&
+                    (s.credential_source?.type !== "org" ||
+                      s.credential_source.allowed),
+                )
+                .map((s) => ({
+                  id: s.id,
+                  primary: s.label,
+                  secondary: s.slug,
+                  iconSlug: s.catalog_service_slug,
+                })) ?? []
+            }
+            selectedIds={value.selectedServiceIds}
+            onToggle={toggleService}
+          />
 
-      {!value.allowAllServices && (
-        <PlatformServiceScope
-          services={(services.data ?? []).filter(
-            (service) =>
-              service.is_active &&
-              (!ownerId
-                ? service.credential_source?.type !== "org"
-                : service.credential_source?.type === "org" &&
-                  service.credential_source.org_id === ownerId),
+          {!value.allowAllServices && (
+            <PlatformServiceScope
+              services={(services.data ?? []).filter(
+                (service) =>
+                  service.is_active &&
+                  (!ownerId
+                    ? service.credential_source?.type !== "org"
+                    : service.credential_source?.type === "org" &&
+                      service.credential_source.org_id === ownerId),
+              )}
+              selectedIds={[...value.selectedServiceIds]}
+              allowAll={value.allowAutoConnectedServices}
+              onAllowAllChange={(allowAutoConnectedServices) =>
+                onChange({ ...value, allowAutoConnectedServices })
+              }
+              onToggle={toggleService}
+              orgOwned={!!ownerId}
+            />
           )}
-          selectedIds={[...value.selectedServiceIds]}
-          allowAll={value.allowAutoConnectedServices}
-          onAllowAllChange={(allowAutoConnectedServices) =>
-            onChange({ ...value, allowAutoConnectedServices })
+        </div>
+        <AccessGroup
+          label={t("Nodes")}
+          icon={<ServersIcon />}
+          allowAll={value.allowAllNodes}
+          onAllowAllChange={(allowAll) => {
+            onChange({ ...value, allowAllNodes: allowAll })
+          }}
+          listLabel={t("Select allowed nodes:")}
+          loading={nodes.isLoading}
+          items={
+            nodes.data
+              ?.filter((n) => !ownerId || n.owner.id === ownerId)
+              .map((n) => ({
+                id: n.id,
+                primary: n.name,
+                secondary: n.status,
+              })) ?? []
           }
-          onToggle={toggleService}
-          orgOwned={!!ownerId}
+          selectedIds={value.selectedNodeIds}
+          onToggle={toggleNode}
         />
-      )}
-      <AccessGroup
-        label={t("Nodes")}
-        icon={<ServersIcon />}
-        allowAll={value.allowAllNodes}
-        onAllowAllChange={(allowAll) => {
-          onChange({ ...value, allowAllNodes: allowAll })
-        }}
-        listLabel={t("Select allowed nodes:")}
-        loading={nodes.isLoading}
-        items={
-          nodes.data
-            ?.filter((n) => !ownerId || n.owner.id === ownerId)
-            .map((n) => ({
-              id: n.id,
-              primary: n.name,
-              secondary: n.status,
-            })) ?? []
-        }
-        selectedIds={value.selectedNodeIds}
-        onToggle={toggleNode}
-      />
+      </div>
     </section>
   )
 }

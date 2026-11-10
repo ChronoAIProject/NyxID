@@ -280,7 +280,7 @@ export function AiKeyConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t(title)}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t(title)}</h2>
         <p className="text-12 text-muted-foreground">{t(subtitle)}</p>
       </div>
 
@@ -448,7 +448,7 @@ function ManageScopesPanel({
   if (!isOAuth || !entry.provider_config_id || entry.supports_oauth_scopes === false) {
     return (
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t("Manage permissions")}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Manage permissions")}</h2>
         <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-12">
           {entry.name}{t(" doesn't support managing scopes here — its permissions are fixed by the provider.")}</p>
       </div>
@@ -483,7 +483,7 @@ function ManageScopesPanel({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t("Manage permissions")}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Manage permissions")}</h2>
         <p className="text-12 text-muted-foreground">{t("Adjust what ")}{key.label}{t(" can do, then re-authorize at the provider. Your CLI is waiting for you to finish here.")}</p>
       </div>
 

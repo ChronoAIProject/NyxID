@@ -73,6 +73,7 @@ interface ApiKeyCreateConfirmProps {
   readonly prefill: ApiKeyCreatePrefill;
   readonly pairingId: string;
   readonly onSuccess: (result: ApiKeyCreateSuccess) => void;
+  readonly onCancel?: () => void;
 }
 
 /**
@@ -131,6 +132,7 @@ export function ApiKeyCreateConfirm({
   prefill,
   pairingId,
   onSuccess,
+  onCancel,
 }: ApiKeyCreateConfirmProps) {
   const { t } = useWizardTranslation();
   const [name, setName] = useState(prefill.name ?? "");
@@ -202,79 +204,84 @@ export function ApiKeyCreateConfirm({
   const submitDisabled = loading || !nameValid || scopes.size === 0;
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t("Create an API key")}</h2>
-        <p className="text-12 text-muted-foreground">{t("Review the details your CLI sent and confirm to mint the key.")}</p>
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-2 border-b border-border/60 pb-6">
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Create an API key")}</h2>
+        <p className="text-13 leading-relaxed text-muted-foreground">{t("Review the details your CLI sent and confirm to mint the key.")}</p>
       </div>
-      <div className="flex flex-col gap-4">
-        <NameInput
-          id="pair-api-key-name"
-          label={t("Name")}
-          schema={apiKeyNameSchema}
-          value={name}
-          onChange={setName}
-          onValidityChange={setNameValid}
-          placeholder={t("e.g. coding-agent")}
-          hint={t("A short label so you can find this key in `nyxid api-key list`.")}
-          autoFocus
-        />
-        <div className="flex flex-col gap-1.5">
-          <div className="flex items-center gap-1.5">
-            <Label htmlFor="pair-api-key-platform">{t("Platform")}</Label>
-            <TooltipProvider delayDuration={150}>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    aria-label={t("About platform tags")}
-                    className="text-muted-foreground transition-colors duration-300 hover:text-foreground"
+      <div className="flex flex-col gap-5">
+        <div className="grid gap-5 sm:grid-cols-2">
+          <NameInput
+            id="pair-api-key-name"
+            label={t("Name")}
+            schema={apiKeyNameSchema}
+            value={name}
+            onChange={setName}
+            onValidityChange={setNameValid}
+            placeholder={t("e.g. coding-agent")}
+            hint={t("A short label so you can find this key in `nyxid api-key list`.")}
+            autoFocus
+          />
+          <div className="flex min-w-0 flex-col gap-2">
+            <div className="flex h-4 items-center gap-1.5">
+              <Label htmlFor="pair-api-key-platform" className="text-12 text-foreground">{t("Platform")}</Label>
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label={t("About platform tags")}
+                      className="text-muted-foreground transition-colors duration-300 hover:text-foreground"
+                    >
+                      <Info className="h-3.5 w-3.5" />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent
+                    side="right"
+                    align="start"
+                    sideOffset={8}
+                    className="max-w-[340px] whitespace-normal px-5 py-4 text-13 leading-[1.55]"
                   >
-                    <Info className="h-3.5 w-3.5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent
-                  side="right"
-                  align="start"
-                  sideOffset={8}
-                  className="max-w-[340px] whitespace-normal px-5 py-4 text-13 leading-[1.55]"
-                >
-                  <div className="flex flex-col gap-4">
-                    <p>
-                      <span className="font-medium text-foreground">{t("Platform")}</span>{" "}{t("tags the key with the AI agent that will use it.")}</p>
-                    <p className="text-muted-foreground">{t("It controls three things: audit attribution (logs show which agent made each proxy request), per- agent rate-limit buckets, and dashboard filtering on the API Keys page.")}</p>
-                    <p className="text-muted-foreground">{t("Values are a fixed allowlist —")}{" "}
-                      <code>claude-code</code>, <code>cursor</code>,{" "}
-                      <code>codex</code>, <code>openclaw</code>,{" "}
-                      <code>generic</code>{t(". Custom strings are rejected by the backend.")}</p>
-                    <p className="text-muted-foreground">{t("Leave as ")}<code>{t("— none —")}</code>{t(" if you don't want the tag.")}</p>
-                  </div>
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
+                    <div className="flex flex-col gap-4">
+                      <p>
+                        <span className="font-medium text-foreground">{t("Platform")}</span>{" "}{t("tags the key with the AI agent that will use it.")}</p>
+                      <p className="text-muted-foreground">{t("It controls three things: audit attribution (logs show which agent made each proxy request), per- agent rate-limit buckets, and dashboard filtering on the API Keys page.")}</p>
+                      <p className="text-muted-foreground">{t("Values are a fixed allowlist —")}{" "}
+                        <code>claude-code</code>, <code>cursor</code>,{" "}
+                        <code>codex</code>, <code>openclaw</code>,{" "}
+                        <code>generic</code>{t(". Custom strings are rejected by the backend.")}</p>
+                      <p className="text-muted-foreground">{t("Leave as ")}<code>{t("— none —")}</code>{t(" if you don't want the tag.")}</p>
+                    </div>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </div>
+            <Select
+              value={platform === "" ? "__none__" : platform}
+              onValueChange={(v) => {
+                setPlatform(v === "__none__" ? "" : v);
+              }}
+            >
+              <SelectTrigger
+                id="pair-api-key-platform"
+                className="h-10 rounded-md border-border bg-background/30 text-13 focus-visible:border-primary"
+              >
+                <SelectValue placeholder={t("— none —")} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__none__">{t("— none —")}</SelectItem>
+                {PLATFORMS.map((p) => (
+                  <SelectItem key={p} value={p}>
+                    <span className="inline-flex items-center gap-2">
+                      <PlatformIcon platform={p} size="2xs" />
+                      <span>{p}</span>
+                    </span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs leading-relaxed text-muted-foreground">{t("Tags the key for audit attribution + per-agent rate limits.")}</p>
           </div>
-          <Select
-            value={platform === "" ? "__none__" : platform}
-            onValueChange={(v) => {
-              setPlatform(v === "__none__" ? "" : v);
-            }}
-          >
-            <SelectTrigger id="pair-api-key-platform">
-              <SelectValue placeholder={t("— none —")} />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__none__">{t("— none —")}</SelectItem>
-              {PLATFORMS.map((p) => (
-                <SelectItem key={p} value={p}>
-                  <span className="inline-flex items-center gap-2">
-                    <PlatformIcon platform={p} size="2xs" />
-                    <span>{p}</span>
-                  </span>
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">{t("Tags the key for audit attribution + per-agent rate limits.")}</p>
         </div>
         {(orgs.data?.length ?? 0) > 0 ? (
           <Field label={t("Owner")} htmlFor="pair-api-key-owner">
@@ -311,9 +318,20 @@ export function ApiKeyCreateConfirm({
         />
       </div>
       {error ? <ErrorLine message={error} /> : null}
-      <Button variant="primary" onClick={() => void submit()} disabled={submitDisabled}>
-        {loading ? t("Creating...") : t("Create Key")}
-      </Button>
+      <div className="flex flex-wrap items-center justify-end gap-3 border-t border-border/60 pt-5">
+        {onCancel ? (
+          <Button
+            variant="ghost"
+            onClick={onCancel}
+            className="mr-auto h-10 px-0 text-muted-foreground hover:bg-transparent hover:text-foreground"
+          >
+            {t("Cancel and return to terminal")}
+          </Button>
+        ) : null}
+        <Button variant="primary" onClick={() => void submit()} disabled={submitDisabled}>
+          {loading ? t("Creating...") : t("Create Key")}
+        </Button>
+      </div>
     </div>
   );
 }
@@ -374,7 +392,7 @@ export function ApiKeyRotateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t("Rotate API key")}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Rotate API key")}</h2>
         <p className="text-12 text-muted-foreground">{t("Rotating ")}<strong>{prefill.display_name}</strong>{t(" will issue a new key and immediately revoke the previous one.")}</p>
       </div>
       {error ? <ErrorLine message={error} /> : null}
@@ -454,7 +472,7 @@ export function NodeRegisterConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t("Generate node registration token")}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Generate node registration token")}</h2>
         <p className="text-12 text-muted-foreground">{t("Use this token with ")}<code>nyxid node register</code>{t(" to connect a new node.")}</p>
       </div>
       <NameInput
@@ -532,7 +550,7 @@ export function NodeRotateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t("Rotate node token")}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Rotate node token")}</h2>
         <p className="text-12 text-muted-foreground">{t("Rotating ")}<strong>{prefill.display_name}</strong>{t(" issues a new auth token + signing secret and revokes the previous pair.")}</p>
       </div>
       {error ? <ErrorLine message={error} /> : null}
@@ -643,7 +661,7 @@ export function ServiceAccountCreateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t("Create a service account")}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Create a service account")}</h2>
         <p className="text-sm text-muted-foreground">{t("Service accounts authenticate via the OAuth client_credentials flow. The client_secret is shown once, on the next screen.")}</p>
       </div>
       <div className="flex flex-col gap-4">
@@ -768,7 +786,7 @@ export function ServiceAccountRotateSecretConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t("Rotate service account secret")}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Rotate service account secret")}</h2>
         <p className="text-sm text-muted-foreground">{t("Rotating ")}<strong>{prefill.display_name}</strong>{t(" immediately revokes all existing access tokens issued under this service account and mints a new client_secret.")}</p>
       </div>
       {error ? <ErrorLine message={error} /> : null}
@@ -914,7 +932,7 @@ export function DeveloperAppCreateConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t("Create a developer OAuth app")}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Create a developer OAuth app")}</h2>
         <p className="text-sm text-muted-foreground">{t("Confidential client — the client_secret is shown once on the next screen. Use it to sign Sign-in-with-NyxID requests from your downstream product.")}</p>
       </div>
       <div className="flex flex-col gap-4">
@@ -1080,7 +1098,7 @@ export function DeveloperAppRotateSecretConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t("Rotate developer app secret")}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Rotate developer app secret")}</h2>
         <p className="text-sm text-muted-foreground">{t("Rotating ")}<strong>{prefill.display_name}</strong>{t(" mints a new client_secret. Update any deployments using the previous value immediately.")}</p>
       </div>
       {error ? <ErrorLine message={error} /> : null}
@@ -1211,7 +1229,7 @@ export function MfaSetupConfirm({
     return (
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-1">
-          <h2 className="font-serif text-28 font-normal">{t("Setting up MFA")}</h2>
+          <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Setting up MFA")}</h2>
           <p className="text-sm text-muted-foreground">{t("Generating a TOTP secret on the server…")}</p>
         </div>
         {error ? <ErrorLine message={error} /> : null}
@@ -1222,7 +1240,7 @@ export function MfaSetupConfirm({
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <h2 className="font-serif text-28 font-normal">{t("Add MFA to your account")}</h2>
+        <h2 className="font-sans text-24 font-semibold leading-tight tracking-tight">{t("Add MFA to your account")}</h2>
         <p className="text-sm text-muted-foreground">{t("Scan this QR with your authenticator app (1Password, Authy, Google Authenticator). Then enter the 6-digit code it shows to verify and finish enrollment.")}</p>
       </div>
 

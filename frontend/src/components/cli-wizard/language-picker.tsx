@@ -41,11 +41,11 @@ export function WizardLanguagePicker() {
     <div
       role="radiogroup"
       aria-label={t("Language")}
-      className="inline-flex shrink-0 items-center gap-0.5 rounded-xl border border-border/50 bg-muted/40 p-1"
+      className="inline-flex shrink-0 items-center gap-0.5 rounded-lg bg-muted/50 p-1"
     >
       <span
         aria-hidden="true"
-        className="flex w-6 items-center justify-center text-foreground"
+        className="mr-1 flex w-5 items-center justify-center text-muted-foreground"
       >
         <Languages className="size-4" />
       </span>
@@ -64,10 +64,10 @@ export function WizardLanguagePicker() {
             onClick={() => void i18n.changeLanguage(code)}
             onKeyDown={(event) => handleKeyDown(event, index)}
             className={cn(
-              "h-8 min-w-9 cursor-pointer rounded-lg px-2 text-12 font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+              "h-7 min-w-9 cursor-pointer rounded-md px-2 text-12 font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
               selected.code === code
-                ? "bg-card text-foreground shadow-sm ring-1 ring-border/60"
-                : "text-muted-foreground hover:bg-card/60 hover:text-foreground",
+                ? "bg-primary text-white shadow-sm"
+                : "text-muted-foreground hover:bg-overlay-strong hover:text-foreground",
             )}
           >
             {prefix}
