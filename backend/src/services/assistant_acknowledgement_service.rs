@@ -715,6 +715,7 @@ pub async fn record_auto_allowed_for_activity(
     }
     let now = Utc::now();
     let row = AssistantAcknowledgement {
+        activity_execution: None,
         automation_work: chat.automation_work.clone(),
         execution_task: super::execution_permission_dispatch::tasks::child(chat),
         connect_own: None,
@@ -835,13 +836,23 @@ pub async fn confirm_action_with(
                 "kind":"action","tool_name":tool,"arguments_digest":arguments_digest(args),
                     "invocation_id":&chat.invocation_id,"decided_by":{"$ne":"access_mode"}})
                 .await?
-                && presentation_status(&card) != "pending"
             {
-                let mut value = refusal(&card);
-                // Preserve the existing execution refusal; code/status explain
-                // why the supplied one-use authority cannot be consumed.
-                value["error"] = json!("acknowledgement_invalid");
-                return Ok(Some(value));
+                super::assistant_activity_decision::bind(
+                    db,
+                    chat,
+                    "acknowledgement",
+                    &card.id,
+                    false,
+                    None,
+                )
+                .await?;
+                if presentation_status(&card) != "pending" {
+                    let mut value = refusal(&card);
+                    // Preserve the existing execution refusal; code/status explain
+                    // why the supplied one-use authority cannot be consumed.
+                    value["error"] = json!("acknowledgement_invalid");
+                    return Ok(Some(value));
+                }
             }
             return Ok(Some(json!({
                 "error": "acknowledgement_invalid", "code":"acknowledgement_invalid", "kind": "action",
@@ -2358,6 +2369,7 @@ async fn prepare_request_candidate(
     let now = Utc::now();
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
+        activity_execution: None,
         automation_work: chat.automation_work.clone(),
         execution_task: super::execution_permission_dispatch::tasks::child(chat),
         connect_own: None,
@@ -2447,6 +2459,30 @@ async fn prepare_request_candidate(
 }
 
 async fn request_candidate_in_session(
+    db: &Database,
+    chat: &ChatAuthority,
+    candidate: &AssistantAcknowledgement,
+    origin: Option<&RequestOrigin>,
+    approval: super::approval_service::ApprovalOptions,
+    session: &mut ClientSession,
+) -> AppResult<(AssistantAcknowledgement, bool)> {
+    let result = Box::pin(request_candidate_inner(
+        db, chat, candidate, origin, approval, session,
+    ))
+    .await?;
+    super::assistant_activity_decision::bind(
+        db,
+        chat,
+        "acknowledgement",
+        &result.0.id,
+        false,
+        Some(session),
+    )
+    .await?;
+    Ok(result)
+}
+
+async fn request_candidate_inner(
     db: &Database,
     chat: &ChatAuthority,
     candidate: &AssistantAcknowledgement,
@@ -3662,8 +3698,11 @@ async fn consume_action_with_reason(
             }
             let result = db.collection::<AssistantAcknowledgement>(ACKS).update_one(
                 filter,
-                doc! {"$set": {"status": "used"}},
+                doc! {"$set": {"status": "used", "activity_execution": bson::to_bson(&super::assistant_activity_decision::execution(&chat)).expect("execution metadata")}},
             ).session(&mut *session).await?;
+            if result.modified_count == 1 {
+                super::assistant_activity_decision::bind(&db, &chat, "acknowledgement", &id, true, Some(session)).await?;
+            }
             Ok(result.modified_count == 1)
         }.await;
         mutations::transaction_result(operation)
@@ -3689,10 +3728,21 @@ pub(crate) async fn consume_action_in_session(
             "arguments_digest": arguments_digest(arguments), "status": "allowed",
             "invocation_id": &chat.invocation_id,
             "decider": "user", "decided_by": {"$eq": "user", "$ne": "access_mode"}, "expires_at": {"$gt": bson::DateTime::now()}},
-            doc! {"$set": {"status": "used"}},
+            doc! {"$set": {"status": "used", "activity_execution": bson::to_bson(&super::assistant_activity_decision::execution(chat)).expect("execution metadata")}},
         )
         .session(&mut *session)
         .await?;
+    if result.modified_count == 1 {
+        super::assistant_activity_decision::bind(
+            db,
+            chat,
+            "acknowledgement",
+            id,
+            true,
+            Some(session),
+        )
+        .await?;
+    }
     Ok(result.modified_count == 1)
 }
 

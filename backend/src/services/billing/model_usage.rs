@@ -60,7 +60,8 @@ pub fn selectors(c: &UsageContract) -> AppResult<BTreeSet<Selector>> {
         UsageFamily::Gemini => "gemini.generate.v1",
         UsageFamily::OpenMaas => "open_maas.certified.v1",
     };
-    if c.version != version
+    if (c.version != version
+        && (c.family == UsageFamily::OpenMaas || c.version != version.replace(".v1", ".v2")))
         || c.version.len() > 80
         || c.fixture_sha256.len() != 64
         || !c.fixture_sha256.bytes().all(|b| b.is_ascii_hexdigit())

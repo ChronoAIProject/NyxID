@@ -316,6 +316,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         gateway_native_activation_detail: None,
         gateway_native_activation_operation: None,
         gateway_native_delivery: None,
+        gateway_intake: None,
         gateway_bot_mentions: Default::default(),
         gateway_threads: Default::default(),
         follow_capacity_revision: 0,
@@ -3335,6 +3336,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
             gateway_native_activation_detail: None,
             gateway_native_activation_operation: None,
             gateway_native_delivery: None,
+            gateway_intake: None,
             gateway_bot_mentions: Default::default(),
             gateway_threads: Default::default(),
             follow_capacity_revision: 0,
@@ -7167,3 +7169,22 @@ async fn relay_gateway_recovery_flag_off_preserves_live_stream_without_discovery
 
 #[path = "nyxbot_execution_permission_tests.rs"]
 mod execution_permission_tests;
+
+#[test]
+fn intake_diagnostics_do_not_claim_a_delivery_failure_in_direct_responses() {
+    use crate::services::channel_bot_health::discord;
+    for code in [
+        discord::NATIVE_UNCONFIRMED,
+        discord::RELAY_STOPPED,
+        discord::RELAY_BLOCKED,
+        discord::RELAY_UNCONFIRMED,
+    ] {
+        let text = status::failure_reason(code, "gateway");
+        assert_ne!(text, "it could not be delivered");
+        assert!(!text.contains("refused"));
+    }
+    assert!(
+        status::failure_reason(discord::NATIVE_UNCONFIRMED, "gateway")
+            .contains("no authenticated native event")
+    );
+}

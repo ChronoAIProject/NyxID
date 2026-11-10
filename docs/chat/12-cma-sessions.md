@@ -6,12 +6,23 @@ conversation's header identify current CMA work. Unrelated chats and account
 inventory never establish attribution.
 
 Each compact card leads with the CMA glyph and actual task title, followed by
-one line for task and stream status. A tight shared list shows the three newest
+one line labelled **Agent:** for the overall agent status and its stream connection.
+One **Submission details** disclosure contains the **Request status** section
+and metadata for all submitted requests. It starts collapsed. Each request is
+tracked separately, so a
+newer queued request can appear alongside an older request still running. A
+tight shared list shows the three newest
 public actions; **Show all N actions** expands the bounded 30-action history.
-Source chat, supplied CMA link, pin, and minimise controls share the header.
+The **View execution** clipboard-list icon, source chat, supplied CMA link, pin, and minimise
+controls share the header. Execution access remains available while minimised.
 Each icon has a state-aware tooltip available on hover and keyboard focus.
 The compact action list and Session details use spacing without internal
 horizontal dividers.
+Motion identifies the latest reported running action while the agent is working
+or starting. Other action markers and the request rows stay static, preserving
+their reported statuses. Queued requests use a clock. The overall agent status
+provides the single busy indicator when the card is minimised or no running
+action has been reported. Reduced-motion preferences disable the spin.
 The solid **Pinned** control, filled pin icon, and unpin tooltip identify global
 monitoring. **Pin CMA session** makes that card
 available in other chats and on every other page. Assistant pages reuse the
@@ -24,7 +35,7 @@ preferences migrate; obsolete version-1 inventory pins are discarded.
 
 **Open source chat** links to the server-recorded conversation and specialist,
 including NyxBot's agent identity. **View in CMA** is available only when CMA
-supplies a valid `callback_url`. Both the inline operation card and preview card
+supplies a valid `callback_url`. Both the operation receipt and live session card
 use the same browser-link validation: absolute HTTP(S), a hostname, no userinfo,
 control characters, whitespace, backslashes, query, fragment, or cloud metadata
 endpoint. Valid supplied HTTP(S) scheme, host, port, and path are preserved
@@ -97,8 +108,20 @@ Only the exact personal default connection is supported by this observer.
 Shared-agent, group, guest, scheduled-invocation, organization-owned,
 node-routed (including catalog node bindings), platform-key, target-specific,
 and agent-credential-override paths
-remain outside automatic card discovery. They keep their existing inline
-operation behavior. Legacy receipts without the new server identity remain
+remain outside automatic session discovery. Thread operation receipts use the
+assets preview area and follow the dedicated card layout, minimise control and
+metadata disclosure independently of automatic session discovery. Unconfirmed
+submissions show recorded status without a live stream, actions or pin.
+Matching live cards retain per-request status, notices and metadata together
+inside one **Submission details** disclosure. Request rows have no nested
+disclosures. **Session details** continues to hold shared agent information.
+Their single header execution icon opens a panel focused on the newest pending
+verified request, or
+the newest verified request if none is pending. It uses the verified local Agent
+reference, never the remote session ID. Request rows and unmatched submission
+history initially show three items; older items are revealed three at a time.
+Live sessions precede submission history in the shared assets area.
+Legacy receipts without the new server identity remain
 unattributed; no migration guesses their origin. Unrelated sessions created
 outside NyxID do not appear automatically.
 

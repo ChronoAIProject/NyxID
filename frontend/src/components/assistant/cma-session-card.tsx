@@ -26,6 +26,12 @@ import {
   TooltipContent,
 } from "@/components/ui/tooltip";
 import { CmaGlyph } from "@/components/service-icons/cma";
+import {
+  CmaExecutionControl,
+  CmaOperationCard,
+  CmaSessionRequests,
+} from "./cma-operation-card";
+import type { CmaOperation } from "@/schemas/cma-operation";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { safeCmaUrl } from "@/lib/assistant/cma-url";
 import {
@@ -60,13 +66,24 @@ export function CmaSessionCards() {
 
 export function CmaSessionObserver({
   children,
+  operations = [],
 }: {
   readonly children: (cards: ReactNode) => ReactNode;
+  readonly operations?: readonly CmaOperation[];
 }) {
   const ownerId = useAuthStore((state) => state.user?.id);
   const sessions = useObservedCmaSessions();
+  const matchingSession = (operation: CmaOperation, session: CmaSessionReference) =>
+    operation.service_id === session.connection.id &&
+    operation.agent_id === session.agentId &&
+    (!operation.reason || operation.reason === "completed");
+  const [receiptLimit, setReceiptLimit] = useState(3);
+  const receipts = operations.filter(
+    (operation) =>
+      !sessions.some(({ session }) => matchingSession(operation, session)),
+  );
   return children(
-    ownerId && sessions.length ? (
+    ownerId && (sessions.length || receipts.length) ? (
       <aside
         aria-label="CMA sessions"
         className="flex min-h-0 shrink-0 flex-col gap-3"
@@ -76,8 +93,17 @@ export function CmaSessionObserver({
             key={`${observation.session.connection.id}:${observation.session.agentId}`}
             ownerId={ownerId}
             observation={observation}
+            operations={operations.filter((operation) => matchingSession(operation, observation.session))}
           />
         ))}
+        {receipts.slice(0, receiptLimit).map((operation) => (
+          <CmaOperationCard key={operation.id} operation={operation} />
+        ))}
+        {receipts.length > receiptLimit ? (
+          <Button variant="ghost" size="sm" onClick={() => setReceiptLimit((value) => value + 3)}>
+            Show older CMA submissions ({receipts.length - receiptLimit})
+          </Button>
+        ) : null}
       </aside>
     ) : null,
   );
@@ -100,6 +126,9 @@ export function FloatingCmaSessions() {
             "/assistant/machines",
             "/assistant/machines/new",
             "/assistant/machines/pair",
+            "/assistant/sandboxes",
+            "/assistant/sandboxes/$sandboxId",
+            "/assistant/cma-agents/$agentId",
           ].includes(match.routeId) &&
           match.status === "success" &&
           match.pathname.replace(/\/$/, "") ===
@@ -159,7 +188,9 @@ export function CmaSessionIndicator({
 function CmaSessionCard({
   ownerId,
   observation,
+  operations,
 }: {
+  readonly operations: readonly CmaOperation[];
   readonly ownerId: string;
   readonly observation: ObservedCmaSession;
 }) {
@@ -180,6 +211,12 @@ function CmaSessionCard({
   );
   const detailsId = `cma-session-${session.connection.id}-${session.agentId}`;
   const scrollBody = useRef<HTMLDivElement>(null);
+  const activeActionId =
+    state.status === "working" || state.status === "starting"
+      ? [...state.actions]
+          .reverse()
+          .find((action) => action.status === "running")?.id
+      : undefined;
   return (
     <section
       aria-label={`CMA session: ${state.title}`}
@@ -203,6 +240,7 @@ function CmaSessionCard({
           role="group"
           aria-label="CMA session controls"
         >
+          <CmaExecutionControl operations={operations} />
           {session.origin ? (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -304,7 +342,7 @@ function CmaSessionCard({
         </div>
       </div>
       <div ref={scrollBody} className="min-h-0 space-y-2 overflow-y-auto">
-        <SessionStatus state={state} />
+        <SessionStatus state={state} animate={collapsed || !activeActionId} />
         {collapsed && state.actions.length ? (
           <p className="truncate text-13 text-muted-foreground">
             {state.actions.at(-1)?.title}
@@ -326,7 +364,11 @@ function CmaSessionCard({
           </div>
         ) : null}
         <div id={detailsId} hidden={collapsed} className="space-y-2">
-          <SessionActivity state={state} />
+          <SessionActivity
+            state={state}
+            activeActionId={collapsed ? undefined : activeActionId}
+          />
+          <CmaSessionRequests operations={operations} scrollBody={scrollBody} visible={!collapsed} />
           <SessionDetails
             session={session}
             state={state}
@@ -426,16 +468,27 @@ function SessionDetails({
   );
 }
 
-function SessionStatus({ state }: { readonly state: CmaSessionState }) {
+function SessionStatus({
+  state,
+  animate,
+}: {
+  readonly state: CmaSessionState;
+  readonly animate: boolean;
+}) {
   const live = state.connection === "live";
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <span className="text-13 text-muted-foreground">Agent:</span>
       <span
         role="status"
+        aria-label={`CMA agent status: ${STATUS_LABELS[state.status]}`}
         className="flex items-center gap-1.5 text-13 text-foreground"
       >
-        {state.status === "working" || state.status === "starting" ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary-text" />
+        {animate && (state.status === "working" || state.status === "starting") ? (
+          <Loader2
+            aria-hidden="true"
+            className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary-text"
+          />
         ) : (
           <Circle
             className={cn(
@@ -477,7 +530,13 @@ function SessionStatus({ state }: { readonly state: CmaSessionState }) {
   );
 }
 
-function SessionActivity({ state }: { readonly state: CmaSessionState }) {
+function SessionActivity({
+  state,
+  activeActionId,
+}: {
+  readonly state: CmaSessionState;
+  readonly activeActionId?: string;
+}) {
   const [expanded, setExpanded] = useState(false);
   const actions = [...state.actions].reverse();
   const historyId = useId();
@@ -519,14 +578,21 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
                 className="flex items-start gap-1.5 py-1 text-13"
               >
                 <span className="mt-0.5 shrink-0" aria-label={action.status}>
-                  {action.status === "running" ? (
+                  {action.id === activeActionId ? (
                     <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-primary-text" />
                   ) : action.status === "completed" ? (
                     <Check className="h-3 w-3 text-success" />
                   ) : action.status === "failed" ? (
                     <X className="h-3 w-3 text-destructive" />
                   ) : (
-                    <Circle className="h-3 w-3 text-text-tertiary" />
+                    <Circle
+                      className={cn(
+                        "h-3 w-3",
+                        action.status === "running"
+                          ? "text-primary-text"
+                          : "text-text-tertiary",
+                      )}
+                    />
                   )}
                 </span>
                 <span className="min-w-0 break-words text-muted-foreground">

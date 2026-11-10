@@ -577,3 +577,6 @@ pub mod platform_model_execution;
 pub mod platform_model_service;
 
 pub(crate) mod execution_permission_channel;
+
+pub mod assistant_activity_decision;
+pub mod lark_wiki;

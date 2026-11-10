@@ -916,7 +916,7 @@ pub async fn retail_explanations(
     ttl: u64,
     billing_enabled: bool,
 ) -> AppResult<HashMap<String, Vec<super::billing::model_tariffs::Explanation>>> {
-    use super::billing::model_tariffs;
+    use super::{billing::model_tariffs, platform_model_execution::certification};
     use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as RATES};
     let ids: Vec<&str> = models
         .iter()
@@ -975,6 +975,18 @@ pub async fn retail_explanations(
         Err(crate::errors::AppError::SecurityReadinessUnavailable) => false,
         Err(error) => return Err(error),
     };
+    let contracts_ready = if tariffs
+        .iter()
+        .any(|t| certification::family_contract(&t.contract))
+    {
+        match security_readiness_service::report(db, certification::READINESS).await {
+            Ok(report) => report.ready,
+            Err(AppError::SecurityReadinessUnavailable) => false,
+            Err(error) => return Err(error),
+        }
+    } else {
+        true
+    };
     let routing_ids: Vec<_> = models
         .iter()
         .filter_map(|m| m.routing_revision_id.as_deref())
@@ -1004,11 +1016,19 @@ pub async fn retail_explanations(
                                 == crate::models::platform_model_tariff::TariffLane::PlatformKey
                     })
                     .map(|mut price| {
+                        let active_tariff = tariffs
+                            .iter()
+                            .find(|t| Some(&t.id) == price.active_tariff_id.as_ref());
+                        if !contracts_ready
+                            && active_tariff
+                                .is_some_and(|t| certification::family_contract(&t.contract))
+                        {
+                            price.available = false;
+                            price.blocking_reason = Some("model_contract_fleet_not_ready".into());
+                        }
                         if price.available
                             && price.variant.is_empty()
-                            && let Some(tariff) = tariffs
-                                .iter()
-                                .find(|t| Some(&t.id) == price.active_tariff_id.as_ref())
+                            && let Some(tariff) = active_tariff
                             && let Some(routing) = routings.iter().find(|r| {
                                 Some(&r.id) == model.routing_revision_id.as_ref()
                                     && r.model_id == model.id

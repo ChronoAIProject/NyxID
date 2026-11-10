@@ -1,3 +1,4 @@
+import { activityDecisionPresentation } from "@/lib/assistant/activity-decision";
 import { useRouter, useRouterState } from "@tanstack/react-router";
 import { ReviewCardTarget, useReviewCardNavigation } from "./review-card-target";
 import { useAccountPanel } from "@/hooks/use-account-panel";
@@ -23,6 +24,7 @@ import {
   Copy,
   MessageSquare,
   RotateCcw,
+  ShieldCheck,
   X,
 } from "lucide-react";
 import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
@@ -50,7 +52,6 @@ import {
 import type { NyxAgentAcknowledgement } from "@/schemas/assistant-nyxagent";
 import { MachineToolCard } from "./machine-tool-card";
 import { MessageCopyAction } from "./message-copy-action";
-import { CmaOperationCard } from "./cma-operation-card";
 import { MessageTime } from "./message-time";
 import { useReplyFeedback } from "@/hooks/use-assistant-feedback";
 import { ReplyFeedbackFollowUp, ReplyFeedbackVotes } from "./reply-feedback";
@@ -230,8 +231,9 @@ function activitySummary(message: ChatMessage): string {
 function ToolStatusIcon({
   status,
 }: {
-  readonly status: RuntimeToolCallInfo["status"];
+  readonly status: RuntimeToolCallInfo["status"] | "waiting";
 }) {
+  if (status === "waiting") return <ShieldCheck aria-label="Decision" className="h-3 w-3 shrink-0 text-muted-foreground" />;
   if (status === "running") return <PulseDot className="mx-[3px]" />;
   if (status === "error") {
     return (
@@ -280,7 +282,7 @@ function DecisionPill({ row }: { readonly row: NyxAgentAcknowledgement }) {
  */
 function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMessage; readonly selectedDecisionId?: string }) {
   const steps = message.steps ?? [];
-  const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine);
+  const tools = (message.toolCalls ?? []).filter((tool) => !tool.machine || tool.decision);
   const decisions = message.decisions ?? [];
   const count = steps.length + tools.length;
   const total = Math.max(count, message.activityTotal ?? 0);
@@ -299,7 +301,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
   const delivery = message.role === "assistant" ? message.channelDelivery : undefined;
   if (!count && !decisions.length && !waited && !delivery) return null;
   const failed = steps.filter((step) => step.status === "error").length
-    + tools.filter((tool) => tool.status === "error").length;
+    + tools.filter((tool) => (activityDecisionPresentation(tool.decision)?.status ?? tool.status) === "error").length;
   const onTool = new Map<string, NyxAgentAcknowledgement[]>();
   const loose: NyxAgentAcknowledgement[] = [];
   for (const row of decisions) {
@@ -307,7 +309,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
     if (tool) onTool.set(tool.id, [...(onTool.get(tool.id) ?? []), row]);
     else loose.push(row);
   }
-  const counts = countDecisions(decisions);
+  const counts = countDecisions(decisions, tools.flatMap((tool) => tool.decision ? [tool.decision] : []));
   const parts = [
     activitySummary(message),
     total ? `${String(total)} ${total === 1 ? "action" : "actions"}` : "",
@@ -374,25 +376,28 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
               ) : null}
             </div>
           ))}
-          {tools.map((tool) => (
+          {tools.map((tool) => {
+            const decision = activityDecisionPresentation(tool.decision);
+            const status = decision?.status ?? tool.status;
+            return (
             <ReviewCardTarget key={tool.id} selected={Boolean(onTool.get(tool.id)?.some((row) => row.id === selectedDecisionId))} selectionKey={selectedDecisionId}>
             <details className="text-13 text-muted-foreground">
               <summary
-                data-tool-status={tool.status}
+                data-tool-status={tool.decision?.state ?? tool.status}
                 className="flex cursor-pointer list-none flex-col gap-1 py-0.5"
               >
                 <span className="flex w-full min-w-0 items-center gap-2">
-                  <ToolStatusIcon status={tool.status} />
+                  <ToolStatusIcon status={status} />
                   <span
                     className={cn(
                       "min-w-0 flex-1 truncate",
-                      tool.status === "error" && "text-destructive",
+                      status === "error" && "text-destructive",
                     )}
                   >
-                    {describeToolActivity(tool.name || tool.id, tool.status)}
+                    {decision?.label ?? describeToolActivity(tool.name || tool.id, tool.status)}
                   </span>
                   {onTool.get(tool.id)?.map((row) => <DecisionPill key={row.id} row={row} />)}
-                  <span className={cn("flex max-w-[45%] min-w-0 shrink-0 items-center font-mono text-12", tool.status === "error" ? "text-destructive" : "text-text-tertiary")}>
+                  <span className={cn("flex max-w-[45%] min-w-0 shrink-0 items-center font-mono text-12", status === "error" ? "text-destructive" : "text-text-tertiary")}>
                     <span className="truncate">{tool.name || tool.id}</span>
                     {Number.isFinite(tool.startedAt) ? <span className="shrink-0"><ToolElapsed
                       startedAt={new Date(tool.startedAt).toISOString()}
@@ -400,7 +405,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                     /></span> : null}
                   </span>
                 </span>
-                {tool.status === "error" ? (
+                {decision ? <span className="break-words pl-5">{decision.detail}</span> : status === "error" ? (
                   <span className="break-words pl-5 text-destructive opacity-70">
                     {toolFailureCopy(tool.failure)} The assistant can continue
                     after a failed step.
@@ -414,7 +419,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
               ) : null}
             </details>
             </ReviewCardTarget>
-          ))}
+          );})}
           {loose.length ? (
             <ul aria-label="Permissions used" className="space-y-1 pt-0.5">
               {groupDecisions(loose, selectedDecisionId).map(({ row, count: times }) => (
@@ -728,6 +733,7 @@ export function ChatMessageBubble({
             <MachineToolCard
               key={tool.id}
               receipt={tool.machine!}
+              decision={tool.decision}
               conversationId={tool.conversationId}
               images={message.images}
             />
@@ -743,7 +749,6 @@ export function ChatMessageBubble({
         {capacityNote ? (
           <p role="note" className="text-14 text-foreground">{CAPACITY_ACKNOWLEDGEMENT}</p>
         ) : content ? <TextBlock text={content} streaming={streaming} /> : null}
-        {message.cmaOperations?.map((operation) => <CmaOperationCard key={operation.id} operation={operation} />)}
         {message.status === "error" && errorMessage ? (
           <div role={billing ? "alert" : undefined} className={cn("mt-2", STATUS_CARD_MAX_W, BANNER_FRAME, BANNER_DESTRUCTIVE)}>
             <div className={BANNER_ROW}>

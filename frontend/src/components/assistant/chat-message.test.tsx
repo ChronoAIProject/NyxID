@@ -1713,3 +1713,36 @@ it("never renders unrecognized memory diagnostic text", () => {
   expect(screen.getByText(/The tool reported an error/)).toBeVisible();
   expect(screen.queryByText(/untrusted secret/)).toBeNull();
 });
+
+describe("approval-gated step outcomes", () => {
+  it.each([
+    ["waiting", "Waiting for approval", "1 waiting"],
+    ["allowed", "Allowed — waiting for execution", "1 allowed"],
+    ["completed", "Completed after approval", "1 allowed"],
+    ["denied", "Declined", "1 denied"],
+    ["expired", "Approval expired", "1 expired"],
+    ["cancelled", "Cancelled", "1 cancelled"],
+    ["unavailable", "Approval outcome unavailable", "1 outcome unavailable"],
+    ["failed", "Failed after approval", "1 allowed"],
+  ])("renders %s from server evidence without treating the initial refusal as a failure", (state, label, count) => {
+    render(<ChatMessageBubble message={{ ...BASE, toolCalls: [{
+      id: "gated", name: "api-google-sheets__sheets_update_values", status: "error", startedAt: 1,
+      failure: { kind: "tool_error" }, decision: { kind: "acknowledgement", id: "card", state },
+    }] }} />);
+    const summary = screen.getByRole("button", { name: /Turn details:/ });
+    expect(summary).toHaveTextContent(count);
+    if (state === "failed") expect(summary).toHaveTextContent("1 failed");
+    else expect(summary).not.toHaveTextContent("failed");
+    fireEvent.click(summary);
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.queryByText(/The tool reported an error/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/continue after a failed step/)).not.toBeInTheDocument();
+  });
+  it("keeps a genuine failure separate from a successfully approved operation", () => {
+    render(<ChatMessageBubble message={{ ...BASE, toolCalls: [
+      { id: "a", name: "write", status: "error", startedAt: 1, decision: { kind: "approval", id: "card", state: "completed" } },
+      { id: "b", name: "broken", status: "error", startedAt: 1, failure: { kind: "tool_error" } },
+    ] }} />);
+    expect(screen.getByRole("button", { name: /Turn details:/ })).toHaveAttribute("aria-label", "Turn details: Completed, 2 actions, 1 allowed, 1 failed");
+  });
+});

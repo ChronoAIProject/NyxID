@@ -330,6 +330,8 @@ pub struct ChannelBotDiagnosticsResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelBotHealthResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discord_intake: Option<crate::services::channel_bot_health::discord::Intake>,
     pub diagnostics: ChannelBotDiagnosticsResponse,
     pub id: String,
     pub platform: String,
@@ -374,9 +376,17 @@ pub async fn admin_list(
     .await?;
     let ids: Vec<String> = bots.iter().map(|bot| bot.id.clone()).collect();
     let gateway = channel_bot_service::gateway_linked_ids(&state.db, &ids).await?;
+    let intake = crate::services::channel_bot_health::discord::load(&state.db, &bots).await?;
     Ok(Json(
         bots.iter()
-            .map(|bot| health_for(bot, gateway.contains(&bot.id), false))
+            .map(|bot| {
+                health_with_intake(
+                    bot,
+                    gateway.contains(&bot.id),
+                    false,
+                    intake.get(&bot.id).cloned(),
+                )
+            })
             .collect(),
     ))
 }
@@ -390,7 +400,7 @@ pub async fn admin_health(
     crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
     let bot = channel_bot_service::get_bot(&state.db, &bot_id).await?;
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(health_for(&bot, gateway, false)))
+    Ok(Json(health_loaded(&state.db, &bot, gateway, false).await?))
 }
 
 /// GET /api/v1/admin/channel-bots/webhook-rejections
@@ -447,15 +457,45 @@ fn diagnostics_response(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn health_for(
     bot: &crate::models::channel_bot::ChannelBot,
     gateway: bool,
     can_write: bool,
 ) -> ChannelBotHealthResponse {
-    let facts =
+    health_with_intake(bot, gateway, can_write, None)
+}
+
+async fn health_loaded(
+    db: &mongodb::Database,
+    bot: &crate::models::channel_bot::ChannelBot,
+    gateway: bool,
+    can_write: bool,
+) -> AppResult<ChannelBotHealthResponse> {
+    let mut intake =
+        crate::services::channel_bot_health::discord::load(db, std::slice::from_ref(bot)).await?;
+    Ok(health_with_intake(
+        bot,
+        gateway,
+        can_write,
+        intake.remove(&bot.id),
+    ))
+}
+
+fn health_with_intake(
+    bot: &crate::models::channel_bot::ChannelBot,
+    gateway: bool,
+    can_write: bool,
+    intake: Option<crate::services::channel_bot_health::discord::Intake>,
+) -> ChannelBotHealthResponse {
+    let mut facts =
         crate::services::channel_bot_health::HealthFacts::for_bot(bot, chrono::Utc::now(), gateway);
+    if intake.is_some() {
+        facts.discord_intake = intake;
+    }
     let recommendation = crate::services::channel_bot_health::recommend(&facts);
     ChannelBotHealthResponse {
+        discord_intake: facts.discord_intake.clone(),
         id: bot.id.clone(),
         platform: bot.platform.clone(),
         label: bot.label.clone(),
@@ -1389,7 +1429,9 @@ pub async fn health(
         .await?
         .can_write();
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(health_for(&bot, gateway, can_write)))
+    Ok(Json(
+        health_loaded(&state.db, &bot, gateway, can_write).await?,
+    ))
 }
 
 /// POST /api/v1/channel-bots/{id}/resubscribe
@@ -1426,7 +1468,9 @@ pub async fn resubscribe(
     outcome?;
     let updated = channel_bot_service::get_bot(&state.db, &bot.id).await?;
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(health_for(&updated, gateway, true)))
+    Ok(Json(
+        health_loaded(&state.db, &updated, gateway, true).await?,
+    ))
 }
 
 pub(crate) async fn resubscribe_with_adapter(
@@ -1723,6 +1767,22 @@ pub(crate) async fn verify_bot_with_adapter(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_without_loaded_intake_preserves_legacy_recommendations() {
+        let mut bot = make_telegram_bot();
+        for platform in ["telegram", "discord"] {
+            bot.platform = platform.into();
+            let unloaded = serde_json::to_value(health_for(&bot, false, true)).unwrap();
+            assert!(unloaded.get("discord_intake").is_none());
+            assert_eq!(unloaded["recommended_action"], "none");
+            assert_eq!(unloaded["recommended_action_text"], "Healthy.");
+        }
+        let gateway = serde_json::to_value(health_for(&bot, true, false)).unwrap();
+        assert!(gateway.get("discord_intake").is_none());
+        assert_eq!(gateway["recommended_action"], "gateway");
+        assert_eq!(gateway["can_write"], false);
+    }
 
     #[test]
     fn list_gateway_state_is_discord_only_and_legacy_rows_omit_it() {

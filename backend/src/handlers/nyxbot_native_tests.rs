@@ -1688,3 +1688,227 @@ async fn native_gateway_problem_code_is_bounded_persisted_surfaced_and_attempt_f
     server.abort();
     state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn discord_intake_evidence_requires_authenticated_current_binding_and_refreshes_active_bots()
+{
+    use crate::services::channel_bot_health::discord;
+    let (state, _, server) = setup("discord_native_intake_evidence").await;
+    let (row, key) = native_channel(&state).await;
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    let before = discord::load(&state.db, &[bot]).await.unwrap();
+    assert_eq!(
+        before[&row.channel_bot_id].code,
+        Some(discord::NATIVE_UNCONFIRMED)
+    );
+    let mut invalid = native_event(&row, "511", "Hello");
+    invalid["event_context"]["activity"]["source"]["bot_id"] = json!("999");
+    assert!(
+        respond(&state, &key, &invalid, "invalid-evidence")
+            .await
+            .status()
+            .is_client_error()
+    );
+    assert!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .gateway_intake
+            .is_none()
+    );
+    let response = respond(
+        &state,
+        &key,
+        &native_event(&row, "512", "Hello"),
+        "valid-evidence",
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = body_text(response).await;
+    let after = load_channel(&state, OWNER, &row.id).await.unwrap();
+    let evidence = after.gateway_intake.as_ref().unwrap();
+    assert_eq!(Some(&evidence.binding_id), after.binding_id.as_ref());
+    assert!(evidence.last_inbound_at.is_some());
+    assert!(
+        evidence.handed_over_at.is_none(),
+        "legacy hand-over time is unknown"
+    );
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        bot.diagnostics.last_inbound_source.as_deref(),
+        Some("native_discord_gateway")
+    );
+    assert!(bot.diagnostics.last_inbound_at.is_some());
+    assert!(
+        discord::load(&state.db, std::slice::from_ref(&bot))
+            .await
+            .unwrap()[&bot.id]
+            .code
+            .is_none()
+    );
+    state
+        .db
+        .collection::<NyxbotChannel>(CHANNELS)
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"binding_id":"new-binding"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        discord::load(&state.db, &[bot]).await.unwrap()[&row.channel_bot_id].code,
+        Some(discord::NATIVE_UNCONFIRMED)
+    );
+    let listing = channel_listing(&state, OWNER, false).await.unwrap();
+    assert_eq!(
+        listing["channel_agents"][0]["delivery_status"],
+        "unconfirmed"
+    );
+    assert_eq!(
+        listing["channel_agents"][0]["discord_intake"]["receiving_side"],
+        "native_gateway"
+    );
+    server.abort();
+}
+
+// A message already admitted on relay still proves authenticated native intake,
+// but produces no downstream turn. This observes the admission transaction
+// without racing a later successful provider response/delivery update.
+async fn confirmed_duplicate_intake(state: &AppState, row: &NyxbotChannel, key: &str, id: &str) {
+    use crate::services::coordination_service::{EventDedupClaimResult, EventDedupStore};
+    let scope = serde_json::to_string(&(Some(&row.channel_bot_id), bot_owner(row))).unwrap();
+    let EventDedupClaimResult::Claimed(claim) = EventDedupStore::claim(
+        &state.db,
+        "discord-inbound",
+        &scope,
+        id,
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap() else {
+        panic!("unique test message");
+    };
+    EventDedupStore::commit(&state.db, &claim, Duration::from_secs(86400))
+        .await
+        .unwrap();
+    let response = respond(state, key, &native_event(row, id, "Hello"), id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = body_text(response).await;
+}
+
+#[tokio::test]
+async fn native_intake_admission_clears_only_uncertainty_and_throttles_live_binding_evidence() {
+    let (state, calls, server) = setup("native_intake_throttling").await;
+    let (row, key) = native_channel(&state).await;
+    let rows = state.db.collection::<NyxbotChannel>(CHANNELS);
+    rows.update_one(
+        doc! {"_id":&row.id},
+        doc! {"$set":{
+            "delivery_status":"unconfirmed","delivery_error":"discord_native_intake_unconfirmed",
+        }},
+    )
+    .await
+    .unwrap();
+    confirmed_duplicate_intake(&state, &row, &key, "600").await;
+    let first = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(first.delivery_status.as_deref(), Some("unknown"));
+    assert!(first.delivery_error.is_none());
+    let first_at = first.gateway_intake.unwrap().last_inbound_at.unwrap();
+    confirmed_duplicate_intake(&state, &row, &key, "601").await;
+    let second = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(
+        second.gateway_intake.unwrap().last_inbound_at,
+        Some(first_at),
+        "recent evidence does not write again"
+    );
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    assert!(bot.diagnostics.last_inbound_at.unwrap() >= first_at);
+    assert_eq!(
+        bot.diagnostics.last_inbound_source.as_deref(),
+        Some("native_discord_gateway")
+    );
+
+    // A stale health writer's code is cleared even when evidence is fresh;
+    // clearing it uses the existing admission fence, not a forced evidence write.
+    rows.update_one(
+        doc! {"_id":&row.id},
+        doc! {"$set":{
+            "delivery_status":"unconfirmed","delivery_error":"discord_native_intake_unconfirmed",
+        }},
+    )
+    .await
+    .unwrap();
+    let listed = channel_listing(&state, OWNER, false).await.unwrap();
+    assert_eq!(listed["channel_agents"][0]["delivery_status"], "unknown");
+    assert!(listed["channel_agents"][0]["delivery_error"].is_null());
+    confirmed_duplicate_intake(&state, &row, &key, "602").await;
+    let cleared = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(cleared.delivery_status.as_deref(), Some("unknown"));
+    assert!(cleared.delivery_error.is_none());
+    assert_eq!(
+        cleared.gateway_intake.unwrap().last_inbound_at,
+        Some(first_at)
+    );
+
+    let old = Utc::now() - ChronoDuration::seconds(61);
+    rows.update_one(
+        doc! {"_id":&row.id},
+        doc! {"$set":{"gateway_intake.last_inbound_at":bson::DateTime::from_chrono(old)}},
+    )
+    .await
+    .unwrap();
+    confirmed_duplicate_intake(&state, &row, &key, "603").await;
+    let refreshed = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert!(refreshed.gateway_intake.unwrap().last_inbound_at.unwrap() > old);
+
+    rows.update_one(
+        doc! {"_id":&row.id},
+        doc! {"$set":{"gateway_intake.binding_id":"previous-binding"}},
+    )
+    .await
+    .unwrap();
+    confirmed_duplicate_intake(&state, &row, &key, "604").await;
+    let rebound = load_channel(&state, OWNER, &row.id)
+        .await
+        .unwrap()
+        .gateway_intake
+        .unwrap();
+    assert_eq!(Some(&rebound.binding_id), row.binding_id.as_ref());
+    assert!(rebound.handed_over_at.is_none());
+
+    let handover = bson::DateTime::from_chrono(Utc::now() - ChronoDuration::seconds(10));
+    rows.update_one(doc!{"_id":&row.id},doc!{"$set":{
+        "gateway_intake.handed_over_at":handover,
+        "gateway_intake.last_inbound_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::seconds(30)),
+    }}).await.unwrap();
+    confirmed_duplicate_intake(&state, &row, &key, "605").await;
+    let moved = load_channel(&state, OWNER, &row.id)
+        .await
+        .unwrap()
+        .gateway_intake
+        .unwrap();
+    assert_eq!(moved.handed_over_at, Some(handover.to_chrono()));
+    assert!(moved.last_inbound_at.unwrap() >= handover.to_chrono());
+
+    for (id, status, error) in [
+        ("606", "failing", "refused_401"),
+        ("607", "unconfirmed", "real_delivery_error"),
+    ] {
+        rows.update_one(doc!{"_id":&row.id},doc!{"$set":{"delivery_status":status,"delivery_error":error},"$unset":{"gateway_intake":""}}).await.unwrap();
+        confirmed_duplicate_intake(&state, &row, &key, id).await;
+        let failure = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert_eq!(failure.delivery_status.as_deref(), Some(status));
+        assert_eq!(failure.delivery_error.as_deref(), Some(error));
+        assert!(failure.gateway_intake.unwrap().last_inbound_at.is_some());
+        let listed = channel_listing(&state, OWNER, false).await.unwrap();
+        assert_eq!(listed["channel_agents"][0]["delivery_error"], error);
+    }
+    assert!(calls.lock().await.is_empty());
+    server.abort();
+}

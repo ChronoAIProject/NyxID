@@ -198,29 +198,54 @@ describe("NyxAgent server-backed transport", () => {
     globalThis.__nyxidAssistantHttpMock = () => json(page);
     const transport = new NyxAgentTransport();
     await transport.history(id);
-    expect(transport.session(id).messages.find((message) => message.id === "u")?.cmaOperations).toBeUndefined();
     const reply = transport.session(id).messages.find((message) => message.id === "a");
     expect(reply?.status).toBe("complete");
-    expect(reply?.cmaOperations?.[0]?.status).toBe("in_progress");
+    expect(transport.session(id).cmaOperations?.[0]?.status).toBe("in_progress");
     await transport.history(id);
     expect(transport.session(id).messages.find((message) => message.id === "a")).toBe(reply);
     // The latest page no longer contains the original reply, but the thread's
-    // operation snapshot must still settle its card on the retained older page.
+    // operation snapshot must still settle its preview card independently.
     page.messages = [];
     page.cma_operations[0] = { ...page.cma_operations[0]!, state: "delivered", reason: "completed", status: "completed" };
     await transport.history(id);
-    expect(transport.session(id).messages.find((message) => message.id === "a")?.cmaOperations?.[0]?.status).toBe("completed");
+    expect(transport.session(id).cmaOperations?.[0]?.status).toBe("completed");
+    expect(transport.session(id).messages.find((message) => message.id === "a")).toBe(reply);
     const restored = new NyxAgentTransport();
-    page.messages = history().messages;
     await restored.history(id);
-    expect(restored.session(id).messages.find((message) => message.id === "a")?.cmaOperations).toEqual(page.cma_operations);
+    expect(restored.session(id).messages).toHaveLength(0);
+    expect(restored.session(id).cmaOperations).toEqual(page.cma_operations);
     page.cma_operations = [];
     await transport.history(id);
-    expect(transport.session(id).messages.every((message) => !message.cmaOperations)).toBe(true);
+    expect(transport.session(id).cmaOperations).toEqual([]);
     const ordinary = new NyxAgentTransport();
     await ordinary.history(id);
-    expect(ordinary.session(id).messages.every((message) => !message.cmaOperations)).toBe(true);
+    expect(ordinary.session(id).cmaOperations).toEqual([]);
   });
+  it("does not let a late older page overwrite a newer CMA snapshot", async () => {
+    const page = history();
+    const pending = {
+      id: "watch-race", turn_id: "turn", kind: "cma_response" as const,
+      operation_id: "rsp-race", agent_id: "agt_test", idempotency_key: "request-race",
+      status: "in_progress", phase: null, state: "waiting", reason: null,
+      monitor_name: "NyxBot", created_at: start, checked_at: afterReset,
+    };
+    page.cma_operations = [pending];
+    let finishOlder!: (response: Response) => void;
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.includes("before_seq=")
+      ? new Promise<Response>((resolve) => { finishOlder = resolve; })
+      : json(page);
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    const older = transport.history(id, 2);
+    page.cma_operations = [{ ...pending, status: "completed", state: "delivered", reason: "completed" }];
+    await transport.history(id);
+    const oldPage = history();
+    oldPage.cma_operations = [pending];
+    finishOlder(json(oldPage));
+    await older;
+    expect(transport.session(id).cmaOperations?.[0]?.status).toBe("completed");
+  });
+
   it("keeps stopped replies visibly stopped with a cancellation code", async () => {
     globalThis.__nyxidAssistantHttpMock = () =>
       json({
@@ -1533,11 +1558,8 @@ it("tracks a failed live stream through polling and clears interruption on settl
     return json(page);
   };
   const transport = new NyxAgentTransport();
-  await transport.history(id);
-  // send refuses a known active turn, so let admission establish it first.
-  active = false;
-  await transport.history(id);
-  active = true;
+  // Let this unique turn's admission establish activity; a settled turn ID
+  // cannot be reused by a later send.
   await expect(transport.send(id, "Question", vi.fn())).rejects.toThrow(/interrupted/);
   await transport.history(id);
   expect(transport.session(id).messages.find((message) => message.status === "streaming")?.turnStatus?.interrupted).toBe(true);
@@ -2570,4 +2592,169 @@ it("keeps safe memory reasons through active polling and settled history reload"
   const reloaded = new NyxAgentTransport();
   await reloaded.history(id);
   expect(reloaded.session(id).messages.at(-1)?.toolCalls?.[0]?.failure?.reason).toBe("note_too_long");
+});
+
+it("does not report an interruption when the finally refresh proves settlement (#2316)", async () => {
+  let reads = 0;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    if (endpoint.endsWith("/turns")) return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ event: "turn.status", conversation_id: id, turn_id: "turn", status: "running", cursor: 1 })}\n\n`));
+      controller.close();
+    } }));
+    const page = history();
+    if (++reads === 1) {
+      page.messages.pop();
+      page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [] };
+    }
+    return json(page);
+  };
+  const transport = new NyxAgentTransport();
+  await expect(transport.send(id, "Question", vi.fn())).resolves.toBeUndefined();
+  expect(reads).toBe(2);
+  expect(transport.session(id).status).toBe("completed_text");
+});
+
+// The real send/history pipeline, with server snapshots advanced explicitly.
+describe("interruption reconciliation (#2316)", () => {
+  async function dropped(acknowledgements: NyxAgentHistory["acknowledgements"] = []) {
+    let page = history();
+    page.acknowledgements = acknowledgements;
+    page.messages.pop();
+    page.conversation.active_turn = { turn_id: "turn", started_at: start, activities: [], attachments: [] };
+    let posts = 0;
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+      if (endpoint.endsWith("/turns")) {
+        posts++;
+        return new Response(`data: ${JSON.stringify({ event: "turn.status", conversation_id: id, turn_id: "turn", status: "waiting", cursor: 1 })}\n\n`);
+      }
+      return json(page);
+    };
+    const transport = new NyxAgentTransport();
+    await expect(transport.send(id, "Question", vi.fn())).rejects.toThrow("interrupted");
+    expect(transport.getInterruption(id)).toContain("may still be working");
+    return { transport, set: (next: NyxAgentHistory) => { page = next; }, posts: () => posts };
+  }
+
+  it.each([null, "assistant_unavailable", "cancelled", "queue_timeout", "turn_lost"])(
+    "reconciles a delayed history/live refresh to recorded outcome %s", async (code) => {
+      const x = await dropped();
+      const page = history();
+      page.messages[1] = { ...page.messages[1]!, status: code ? "failed" : "completed", error_code: code };
+      x.set(page);
+      await x.transport.history(id);
+      const reply = x.transport.session(id).messages.find((message) => message.id === "a")!;
+      expect(reply.status).toBe(code === "cancelled" ? "stopped" : code ? "error" : "complete");
+      expect(reply.errorCode).toBe(code);
+      if (code === "turn_lost") {
+        expect(x.transport.getInterruption(id)).toContain("check which actions completed");
+        expect(x.transport.getInterruption(id)).not.toContain("may still be working");
+      } else expect(x.transport.getInterruption(id)).toBeUndefined();
+      expect(x.transport.hasUnsettledInterruption(id)).toBe(false);
+      expect(x.posts()).toBe(1);
+      // Reload has no transient interruption, and retains the server outcome.
+      const reload = new NyxAgentTransport();
+      await reload.history(id);
+      expect(reload.getInterruption(id)).toBeUndefined();
+      expect(reload.session(id).messages.find((message) => message.id === "a")?.status).toBe(reply.status);
+    },
+  );
+
+  it("retains still-active and unknown outcomes, including an unrelated success", async () => {
+    const x = await dropped();
+    await x.transport.history(id);
+    expect(x.transport.getInterruption(id)).toContain("may still be working");
+    const page = history();
+    page.messages = []; // Idle alone is not proof of this request's outcome.
+    x.set(page);
+    await x.transport.history(id);
+    expect(x.transport.getInterruption(id)).toContain("may still be working");
+    page.messages = history().messages.map((row) => ({ ...row, id: `other-${row.id}`, seq: row.seq + 10, turn_id: "other-turn" }));
+    await x.transport.history(id);
+    expect(x.transport.getInterruption(id)).toContain("may still be working");
+  });
+
+  it("clears the old stream notice even while a different turn is running", async () => {
+    const x = await dropped();
+    const page = history();
+    page.conversation.active_turn = { turn_id: "other-turn", started_at: afterReset, activities: [], attachments: [] };
+    x.set(page);
+    await x.transport.history(id);
+    expect(x.transport.isRunning(id)).toBe(true);
+    expect(x.transport.getInterruption(id)).toBeUndefined();
+    expect(x.transport.session(id).messages.some((row) => row.turnStatus?.interrupted)).toBe(false);
+  });
+
+  it.each([null, "assistant_unavailable"])("reconciles an approval continuation on another stream (%s)", async (code) => {
+    const card = nyxAgentHistorySchema.parse({ ...history(), acknowledgements: [{
+      id: "33333333-3333-4333-8333-333333333333", creation_turn_id: "turn", kind: "action", status: "pending",
+      summary: "Publish skill", service_slug: null, service_name: null, tool_name: "nyxid__draft_agent_skill",
+      created_at: start, decided_at: null, expires_at: "2099-01-01T00:00:00Z",
+    }] }).acknowledgements[0]!;
+    const x = await dropped([card]);
+    expect(x.transport.session(id).messages.some((row) => row.turnStatus?.phase === "approval")).toBe(true);
+    const page = history();
+    page.messages = [];
+    page.acknowledgements = [card];
+    x.set(page);
+    await x.transport.history(id);
+    expect(x.transport.getInterruption(id)).toContain("may still be working");
+    card.status = "allowed";
+    // An allowed receipt alone does not establish execution or settlement.
+    await x.transport.history(id);
+    expect(x.transport.getInterruption(id)).toContain("may still be working");
+    page.messages = history().messages.map((row) => ({ ...row, seq: row.seq + 10, id: `continuation-${row.id}`,
+      turn_id: "continuation", continuation_of: row.role === "user" ? card.id : undefined,
+      status: row.role === "assistant" && code ? "failed" : "completed", error_code: row.role === "assistant" ? code : null }));
+    await x.transport.history(id);
+    expect(x.transport.getInterruption(id)).toBeUndefined();
+    expect(x.transport.session(id).messages.find((row) => row.id === "continuation-a")?.errorCode).toBe(code);
+    expect(x.posts()).toBe(1);
+  });
+
+  it("does not treat Stop acceptance as settlement; clears only at the cancelled reply", async () => {
+    const x = await dropped();
+    await x.transport.stop(id);
+    expect(x.transport.getInterruption(id)).toContain("may still be working");
+    const page = history();
+    page.messages[1] = { ...page.messages[1]!, status: "failed", error_code: "cancelled" };
+    x.set(page);
+    await x.transport.history(id);
+    expect(x.transport.getInterruption(id)).toBeUndefined();
+    expect(x.transport.session(id).status).toBe("stopped");
+  });
+});
+
+
+it("keeps a validated terminal event authoritative when trailing SSE is malformed and history is unavailable (#2316)", async () => {
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    if (!endpoint.endsWith("/turns")) throw new Error("History unavailable");
+    return new Response([
+      { event: "turn.status", conversation_id: id, turn_id: "turn", status: "running", cursor: 1 },
+      { event: "turn.completed", turn_id: "turn", status: "completed", error: null, cursor: 2 },
+    ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: invalid trailing payload\n\n");
+  };
+  const transport = new NyxAgentTransport();
+  await expect(transport.send(id, "Question", vi.fn())).resolves.toBeUndefined();
+  expect(transport.getInterruption(id)).toBeUndefined();
+});
+
+
+it("cannot identify an interrupted send from another turn's checkpoint (#2316)", async () => {
+  let reads = 0;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+    // Admitted, but no turn.status identifying this request was received.
+    if (endpoint.endsWith("/turns")) return new Response("");
+    const page = history();
+    page.messages = page.messages.map((row) => ({ ...row, turn_id: "other" }));
+    if (++reads === 1) {
+      page.messages.pop();
+      page.conversation.active_turn = { turn_id: "other", started_at: start, activities: [], attachments: [],
+        reply: { message_id: "a", block_id: "text", text: "Different reply", cursor: 2 } };
+    }
+    return json(page);
+  };
+  const transport = new NyxAgentTransport();
+  await expect(transport.send(id, "Question", vi.fn())).rejects.toThrow("interrupted");
+  expect(reads).toBe(2);
+  expect(transport.getInterruption(id)).toContain("may still be working");
 });

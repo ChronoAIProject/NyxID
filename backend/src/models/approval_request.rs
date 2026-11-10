@@ -108,6 +108,10 @@ pub struct ExactServiceApprovalBinding {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity_execution: Option<super::assistant_conversation::ActivityExecution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_proposal: Option<super::execution_proposal::ExecutionProposal>,
     #[serde(default)]
     pub assistant_group: Option<GroupApprovalBinding>,
@@ -268,6 +272,8 @@ mod tests {
 
     fn make_approval_request() -> ApprovalRequest {
         ApprovalRequest {
+            activity_outcome: None,
+            activity_execution: None,
             execution_proposal: None,
             assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),

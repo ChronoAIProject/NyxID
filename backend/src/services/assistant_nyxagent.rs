@@ -5417,7 +5417,7 @@ pub async fn read_attachment_for_caller(
 pub const MAX_TURN_ACTIVITIES: i64 = 40;
 pub const MAX_ACTIVITY_LABEL_CHARS: usize = 120;
 
-fn append_activity(entry: bson::Document) -> Vec<bson::Document> {
+pub(crate) fn append_activity(entry: bson::Document) -> Vec<bson::Document> {
     let external =
         super::assistant_checking_notice::requires_check(entry.get_str("label").unwrap_or("tool"));
     vec![doc! {"$set": {
@@ -6050,8 +6050,8 @@ pub async fn activity_finished_for_turn(
     ok: bool,
     failure: Option<crate::models::assistant_conversation::ToolFailure>,
 ) -> AppResult<()> {
-    db.collection::<AssistantConversation>(CONVERSATIONS)
-        .update_one(
+    let recorded = db.collection::<bson::Document>(CONVERSATIONS)
+        .find_one_and_update(
             doc! {
                 "_id": conversation_id,
                 "user_id": user_id,
@@ -6068,7 +6068,51 @@ pub async fn activity_finished_for_turn(
                             "failure":{"$literal":failure.map(|v| bson::to_bson(&v).expect("tool failure")).unwrap_or(bson::Bson::Null)}}]},"$$a"]}}},
             }}],
         )
+        .projection(doc! {"active_turn.stop_requested":1,"active_turn.activities.id":1,"active_turn.activities.decision":1,"active_turn.activities.machine":1})
+        .return_document(mongodb::options::ReturnDocument::After)
         .await?;
+    if let Some(recorded) = recorded {
+        let activity = recorded
+            .get_document("active_turn")
+            .ok()
+            .and_then(|turn| turn.get_array("activities").ok())
+            .and_then(|a| {
+                a.iter()
+                    .filter_map(bson::Bson::as_document)
+                    .find(|a| a.get_str("id").ok() == Some(activity_id))
+            });
+        let decision = activity
+            .and_then(|a| a.get("decision"))
+            .cloned()
+            .and_then(|v| bson::from_bson(v).ok());
+        let machine = activity
+            .and_then(|a| a.get("machine"))
+            .cloned()
+            .and_then(|v| bson::from_bson(v).ok());
+        use super::assistant_activity_decision::Completion;
+        let completion = if ok {
+            Completion::Succeeded
+        } else if recorded
+            .get_document("active_turn")
+            .ok()
+            .and_then(|t| t.get_bool("stop_requested").ok())
+            .unwrap_or(false)
+        {
+            Completion::Cancelled
+        } else {
+            Completion::Failed
+        };
+        super::assistant_activity_decision::finished(
+            db,
+            conversation_id,
+            turn_id,
+            activity_id,
+            decision.as_ref(),
+            completion,
+            machine.as_ref(),
+        )
+        .await?;
+    }
     if !ok {
         // A failure after node execution (for example, attachment storage) can
         // leave an unfinished receipt. Preserve specific outcomes and Stop.

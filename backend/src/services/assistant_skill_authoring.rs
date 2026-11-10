@@ -415,6 +415,15 @@ pub async fn create(
     if let Some(card) = &reservation.card
         && !automatic
     {
+        super::assistant_activity_decision::bind(
+            &state.db,
+            chat,
+            "acknowledgement",
+            &card.id,
+            false,
+            None,
+        )
+        .await?;
         return Ok(reused_result(
             state,
             card,
@@ -460,6 +469,17 @@ pub async fn create(
         return publish_automatically(state, chat, &agent, id, &binding, reader).await;
     }
     let card = claims::finalize(state, &reservation, &binding, chat.approval_options()).await?;
+    // A recovered draft can retain a different review conversation. Link this
+    // caller's activity, never an unrelated turn now running in the source chat.
+    super::assistant_activity_decision::bind(
+        &state.db,
+        chat,
+        "acknowledgement",
+        &card.id,
+        false,
+        None,
+    )
+    .await?;
     Ok(reused_result(state, &card, id, &agent.id))
 }
 

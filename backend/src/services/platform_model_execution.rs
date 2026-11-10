@@ -2,6 +2,7 @@
 //! gateway; there is no generic proxy target or client-selected route.
 pub(crate) mod adapters;
 pub(crate) mod certification;
+mod contract_usage;
 pub(crate) mod images;
 mod stream;
 mod token;
@@ -92,6 +93,10 @@ impl Plan {
             ttl,
         )
         .map_err(billing::model_tariffs::unavailable)?;
+        if certification::family_contract(&tariff.tariff().contract) {
+            crate::services::security_readiness_service::require(db, certification::READINESS)
+                .await?;
+        }
         let mut routes: Vec<_> = routing
             .routes
             .into_iter()
@@ -273,6 +278,10 @@ pub(crate) async fn dispatch(
     plan: &Plan,
     request: &Request,
 ) -> AppResult<Accepted> {
+    if certification::family_contract(&plan.tariff.tariff().contract) {
+        crate::services::security_readiness_service::require(ctx.db, certification::READINESS)
+            .await?;
+    }
     let deadline = Instant::now() + DEADLINE;
     if request.has_images() {
         crate::services::security_readiness_service::require(ctx.db, images::READINESS).await?;
@@ -472,7 +481,9 @@ pub(crate) async fn dispatch(
                     )
                     .unwrap_or(Duration::from_secs(1));
                     let zero = bounded_body(response, 16_384).await.is_ok_and(|body| {
-                        adapters::zero_consumption(prepared.native, status, &body)
+                        (!certification::family_contract(&plan.tariff.tariff().contract)
+                            || contract_usage::parse(&body).is_ok())
+                            && adapters::zero_consumption(prepared.native, status, &body)
                     });
                     if !zero {
                         pending(ctx.db, &id, "uncertified_provider_refusal").await?;
@@ -644,7 +655,7 @@ pub(crate) async fn consume(
         .billing_request_id
         .clone();
     let maximum = plan.tariff.tariff().bounds.max_response_bytes as usize;
-    let mut decoder = stream::Decoder::new(native);
+    let mut decoder = stream::Decoder::new(native).with_contract(&plan.tariff.tariff().contract);
     let mut buffer = Zeroizing::new(Vec::new());
     let mut size = 0usize;
     let mut clean = false;
@@ -698,16 +709,27 @@ pub(crate) async fn consume(
         decoder.finish(clean, &ctx.request_id)
     } else if result.is_ok() {
         (|| {
-            let body: Value =
-                serde_json::from_slice(&buffer).map_err(|_| adapters::invalid_response())?;
+            let body: Value = if certification::family_contract(&plan.tariff.tariff().contract) {
+                contract_usage::parse(&buffer)?
+            } else {
+                serde_json::from_slice(&buffer).map_err(|_| adapters::invalid_response())?
+            };
+            if certification::family_contract(&plan.tariff.tariff().contract) {
+                contract_usage::final_response(native, &body)?;
+            }
             let usage = if native == adapters::Native::Gemini {
                 &body["usageMetadata"]
             } else {
                 &body["usage"]
             };
             Ok((
-                adapters::output(native, &body, &ctx.request_id),
-                adapters::evidence(native, usage)?,
+                adapters::output_contract(
+                    native,
+                    &body,
+                    &ctx.request_id,
+                    &plan.tariff.tariff().contract,
+                ),
+                contract_usage::evidence(native, usage, &plan.tariff.tariff().contract)?,
             ))
         })()
     } else {
@@ -741,7 +763,13 @@ pub(crate) async fn consume(
         Ok(v) => v,
         Err(error) => {
             pending(ctx.db, &id, "invalid_usage_contract").await?;
-            return Err(error);
+            return Err(
+                if certification::family_contract(&plan.tariff.tariff().contract) {
+                    adapters::invalid_response()
+                } else {
+                    error
+                },
+            );
         }
     };
     ctx.billing

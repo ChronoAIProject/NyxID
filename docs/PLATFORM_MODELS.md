@@ -441,8 +441,10 @@ not settlement, and never reuses a code.
 A contract fixes the adapter version, a 64-hex certified `fixture_sha256`, family,
 `tokens`, `cache_read`, `cache_write_ttls`, `split_reasoning`, input/output modality
 splits, explicit Gemini `bill_tool_input`, `images`, and a distinct `requests` fee.
-Versions are `openai.responses.v1`, `anthropic.messages.v1`, `gemini.generate.v1`,
-and `open_maas.certified.v1`. Open MaaS has no generic OpenAI-shaped wire parser:
+Historical versions are `openai.responses.v1`, `anthropic.messages.v1`,
+`gemini.generate.v1`, and `open_maas.certified.v1`. The family contracts below add
+`openai.responses.v2`, `anthropic.messages.v2`, and `gemini.generate.v2`; open MaaS
+remains on its exact v1 mapping. Open MaaS has no generic OpenAI-shaped wire parser:
 its adapter must certify the mapping to integer evidence. Certification and
 stream-event accumulation are enforced by the serving adapters below.
 
@@ -612,7 +614,8 @@ The gateway reserves the namespace before ordinary provider-name inference.
 Stateless text and function tools, one candidate and at most one model
 invocation per attempt are enabled. PR 3b adds the separately certified image
 subset described below. `stream: true` returns Chat SSE. Native
-caller protocols, uncertified images, audio, hosted tools, cache creation, provider state,
+caller protocols, uncertified images, audio, hosted tools, client cache-creation
+directives, provider state,
 continuations and arbitrary passthrough fields are refused, not silently removed.
 The registry may describe future capabilities; that does not enable an adapter.
 Direct OpenAI Responses requires an output bound of at least 16; smaller bounds
@@ -638,7 +641,7 @@ The transport mappings are:
 | Vertex Google | `POST /v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent` (stream: `streamGenerateContent?alt=sse`) | `usageMetadata`; separate candidate/reasoning output |
 | Vertex Claude | Same publisher path with `anthropic`, `rawPredict` / `streamRawPredict` | Messages usage, separate cache counters/TTLs; body `anthropic_version=vertex-2023-10-16` and no `model` field |
 | Vertex Open MaaS | `/v1/projects/{project}/locations/{location}/endpoints/openapi/chat/completions` | Certified `openai/gpt-oss-120b-maas` mapping only; aggregate prompt/completion counts |
-| Direct OpenAI | `https://api.openai.com/v1/responses`, `store=false` | Responses usage including cached input and reasoning subset |
+| Direct OpenAI | `https://api.openai.com/v1/responses`, `store=false` | Responses usage including cached input, cache-write TTLs and reasoning subset, as certified by the tariff contract |
 | Direct Anthropic | `https://api.anthropic.com/v1/messages` | Same Messages usage contract as Vertex Claude |
 
 Regional Vertex authorities are `{location}-aiplatform.googleapis.com`; global
@@ -649,7 +652,7 @@ The `gpt-oss-120b-maas` native ID is an exact reviewed equivalent of public
 `max_tokens` bound and final SSE usage are used without assuming OpenAI-only
 options or cache/reasoning counters. Other MaaS models need reviewed fixture
 certification before they can execute.
-Each tariff's `fixture_sha256` must equal the SHA256 of its checked-in fixture in
+Each tariff's `fixture_sha256` must equal a certified digest of its checked-in fixture in
 `backend/src/services/platform_model_execution/fixtures/`. Admins must certify the
 real model's native context/output limits; admission reserves the entire declared
 native context, never a byte-to-token guess. The explicit output bound is sent
@@ -730,8 +733,9 @@ are unchanged. This image certification alone does not enable assistant calls:
 those additionally require the PR 5 turn binding, attachment authority and paired
 runtime gate below.
 
-The closed certification lookup binds an exact native model, transport,
-accounting version and immutable fixture digest. The initial cohort is:
+Historical v1 certification binds an exact native model, transport,
+accounting version and immutable fixture digest. These original tariffs remain
+valid with their unchanged digests. The initial cohort was:
 
 | Native model | Transport | Image accounting |
 | --- | --- | --- |
@@ -741,7 +745,7 @@ accounting version and immutable fixture digest. The initial cohort is:
 | `gpt-oss-120b-maas` | Vertex MaaS | Text only; images refused |
 
 No registry metadata alone certifies an adapter. Unknown models or transports
-fail closed. Existing text fixture files and hashes are unchanged; historical
+under historical v1 digests fail closed. New family contracts are described below. Existing text fixture files and hashes are unchanged; historical
 text tariffs retain their economic identity. New image tariffs use the SHA-256
 of the corresponding `*-images-v1.json` fixture. Claude uses the SHA-256 of the
 **concatenated bytes of `claude-vertex-images-v1.json` followed by
@@ -914,3 +918,130 @@ then readiness and per-person flag activation. Disable the flag to stop new
 platform execution; retained legacy histories and legacy model selections remain
 readable. Drain platform turns and replace saved platform selections before
 returning old workers: old replicas cannot execute the new `nyxid/` contract.
+
+## Current models through versioned API contracts (#2274 follow-up)
+
+Certification is an API/accounting contract, not a release calendar. New
+contracts support admin-configured native names within Gemini generateContent on
+Vertex, Anthropic Messages on direct and Vertex, and direct OpenAI Responses.
+The same-model rule remains unchanged: every route must serve the public
+`nyxid/<real-model-name>`, allowing only the existing dated spelling equivalence.
+No provider discovery, credentials, tariffs or prices are seeded. The examples
+below are documentation, not a compiled model allowlist. A future model using the
+same certified contract needs admin configuration, not a NyxID code release.
+
+### Explicit model verification and rollout
+
+An admin must verify each model's native context/output bounds, protocol,
+text/image/function subset, endpoint availability, and complete retail tariff.
+Use the existing immutable `source` field with this exact prefix:
+
+```text
+contract-attested-v1:nyxid/gpt-6-astra <verification reference>
+```
+
+The reference must be nonempty. Saving this is an explicit admin attestation for
+that public model; it is not an automated provider canary. All configured routes
+must satisfy the contract. Reverify route/limit edits and create a new tariff
+revision for changed prices, usage contracts or bounds. The existing CAS, audit,
+readiness and first-party admin checks apply. No new persisted field is added,
+including to `deny_unknown_fields` structures.
+
+Use `openai.responses.v2`, `anthropic.messages.v2`, or `gemini.generate.v2` with
+the SHA-256 of the corresponding `responses-contract-v2.json`,
+`claude-contract-v2.json`, or `gemini-contract-v2.json` in
+`backend/src/services/platform_model_execution/fixtures/`. Each bundle binds the
+family, adapter version, supported transports, synthetic usage and image wire
+fixtures. Claude's bundle binds direct and Vertex transports together, permitting
+same-model fallback. Historical text/image files and hashes are unchanged and
+retain their exact-name restrictions; attaching an old digest to a new name
+cannot opt into the new contracts. Open MaaS still requires the exact reviewed
+`openai/gpt-oss-120b-maas` mapping and remains text-only.
+
+New-contract authoring and execution require
+`inference:platform-model-contracts-v1` in addition to the existing default-off
+flag, entitlements and readiness. Deploy every API/worker replica and drain old
+workers before authoring/activating these contracts. Old replicas reject the new
+version/digest before executing, including when its native name was previously
+supported. New workers check readiness before credential materialization or
+funding, and on dispatch; the assistant uses that same planner/executor. Admin
+readiness includes the new capability for models with new active/pending tariffs;
+public discovery omits executable prices/image limits when that fleet gate is
+unready. Reads and disabling remain available. No environment variable is added.
+
+### Current native ID examples
+
+Checked **2026-11-10**, using only official documentation. Availability and access
+can vary by account and location. Native names are admin inputs, and names alone
+do not certify every advertised feature of a model.
+
+| Family | Native model IDs | Transport and source |
+| --- | --- | --- |
+| Gemini | `gemini-4-argon`, `gemini-3.8-flash`, `gemini-3.5-flash-lite` | Vertex `generateContent` / `streamGenerateContent`: [Argon](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/4-argon), [Flash](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-8-flash), [Flash-Lite](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-5-flash-lite) |
+| Claude | `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5` | Direct Messages: [model ID table](https://platform.claude.com/docs/en/models/overview) |
+| Claude | `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`; `claude-mythos-5-2` has limited availability | Vertex `rawPredict` / `streamRawPredict`: [Google-managed model IDs](https://platform.claude.com/docs/en/build-with-claude/claude-models-on-google-cloud/google-managed). Use the supported global endpoint for newer models; the current adapter does not implement Google's new `us`/`eu` multi-region authorities. |
+| OpenAI | `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-luna` | Direct Responses: [model catalog](https://developers.openai.com/api/docs/models), [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra), [Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol), [Terra](https://developers.openai.com/api/docs/models/gpt-6.1-terra), [Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) |
+
+Google's documentation now calls the hosting product Gemini Enterprise Agent
+Platform; the configured Vertex API endpoints remain `aiplatform.googleapis.com`.
+Image/audio/video generation, Live/Realtime, embeddings and specialized hosted
+agent/tool endpoints are outside this stateless contract, even if listed in a
+provider's current model catalog.
+
+### Evidence, pricing and known limitations
+
+New contracts reject duplicate JSON keys (including escaped spellings) and
+validate closed usage objects, nested counters, TTL maps and modality arrays,
+including intermediate stream snapshots and zero-consumption refusal envelopes. An unknown field or
+class is rejected even when zero. Missing final evidence, missing priced
+counters, fractional/negative/overflowing values or inconsistent totals retain
+the forwarded obligation as `model_usage_pending`; recovery never redispatches,
+releases an uncertain hold or invents a free class. Existing component admission,
+allowance/grant/wallet funding, tax, ledger, Lago residue and reconciliation stay
+in use. There is no legacy/base rate fallback. A zero aggregate cache-write
+counter can prove zero for its nonnegative TTL partitions; nonzero writes need
+the exact configured TTL breakdown.
+
+- **OpenAI Responses:** the current [Responses usage schema](https://developers.openai.com/api/reference/resources/responses/methods/create)
+  retains inclusive input/output, cached input and reasoning subsets, and adds
+  cache-write counts. [Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
+  documents separately billed writes on GPT-5.6 and later: disjoint
+  `ttl_30m_tokens` and `ttl_12h_tokens`. Configure both existing `CacheWrite`
+  selectors when using these classes. Input 12,000, cached 4,000, writes 7,000
+  (3,000 + 4,000) means ordinary input 1,000. Unknown cache lifetimes or missing
+  nonzero partitions remain pending. Reasoning is a subset of output, priced
+  once in aggregate or with the existing exact split. Native image-input tokens
+  remain aggregate input/cache; this contract does not infer image counters.
+- **Claude direct/Vertex:** [Messages](https://platform.claude.com/docs/en/api/messages/create)
+  and [prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+  retain separate ordinary input, cache reads and five-minute/one-hour writes.
+  [Thinking usage](https://platform.claude.com/docs/en/build-with-claude/thinking-steering-and-cost)
+  now exposes `output_tokens_details.thinking_tokens` as an inclusive observability
+  subset, bounded by output; pricing remains aggregate output. Image input is
+  aggregate. Standard speed/tier and known inference geography are metadata;
+  fast/priority service and paid hosted web-search/fetch counts are not certified.
+- **Gemini:** [UsageMetadata](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1/GenerateContentResponse)
+  still defines total = prompt + candidates + thoughts + tool-use prompt tokens.
+  Thoughts remain separately reported output, priced once aggregate or split.
+  Exact image pricing requires complete prompt/cache modality partitions and
+  their intersection. Tool input is charged in ordinary input only when
+  `bill_tool_input` is enabled; positive tool input under a contract without that
+  selector remains pending. Audio/video/new modalities are not accepted. Missing
+  zero-looking counters are not guessed. Final stream usage must occur at or
+  after the terminal candidate, not just on an earlier partial snapshot. A
+  usage-only final frame may have no candidates or an empty array; additional
+  candidate output after a finish signal, contradictory terminal frames,
+  regressing sequence numbers and incomplete SSE tails retain the hold.
+
+Current Claude thinking blocks and Gemini text-part signatures are private and
+may be omitted from public text output without changing aggregate billing.
+**Signed tool continuations remain a gap:** [Gemini thought signatures](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking/thought-signatures)
+can be mandatory for function-call continuation; Claude thinking plus tool calls
+also needs a separately reviewed state bridge. NyxID refuses those outputs rather
+than fabricating state or silently dropping a required signature. Valid final
+usage still settles; without final evidence the hold remains pending. Admins
+must not advertise those continuation capabilities as verified by this contract.
+Provider-hosted tools (including Responses `tool_usage`), new TTLs, fast/priority
+pricing, audio/video/generated-image classes, variant-specific prices and native
+continuation state require further adapters/contracts. Unsupported client request
+features refuse before dispatch; unexpected usage after send remains held.

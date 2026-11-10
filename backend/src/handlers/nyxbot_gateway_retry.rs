@@ -12,11 +12,7 @@ pub(super) fn fallback_reason(row: &NyxbotChannel) -> Option<String> {
     if matches!(code, "relay_ready" | "relay_draining") {
         return None;
     }
-    let status = if row.status == "active" && row.delivery_status.as_deref() != Some("failing") {
-        "Working on NyxID relay."
-    } else {
-        "NyxID relay selected; check channel health for delivery status."
-    };
+    let status = "NyxID relay selected; check channel health for delivery status.";
     Some(format!(
         "{status} Native gateway activation did not complete: {}.",
         row.gateway_native_activation_detail

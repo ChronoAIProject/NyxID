@@ -805,6 +805,9 @@ callback; explicit null or invalid values clear it. History never constructs a
 link from an agent ID or catalog homepage. Old producers and old stored rows
 without a callback show status without a link. Rendering history reads only
 stored metadata, without credentials, catalog lookups, or calls to CMA.
+Each history operation also includes its `service_id`, so the browser can
+replace a receipt with the live assets-column card only for the exact same
+connection and agent. Older responses without this field retain their receipt.
 
 The callback is a browser link, not a webhook or polling target. It must be at
 most 2,048 UTF-8 bytes and contain no userinfo, query, fragment, literal
@@ -839,7 +842,7 @@ response without registering a CMA watch. Card metadata allows only bounded
 identifiers, validated browser links, and known status/phase values; history
 excludes encrypted results. CMA watch metadata has a 30-day TTL; result encryption
 and the four-hour payload deadline remain the same as other watches. The
-[frontend contract](chat/05-frontend-ui.md#cma-delegation-cards) describes card
+[frontend contract](chat/05-frontend-ui.md#cma-submission-cards) describes card
 placement and refresh behavior.
 
 
@@ -884,3 +887,61 @@ selection matches exact `UserService` IDs.
 External MCP clients keep the legacy connection response contract. See
 [the engine contract](chat/08-nyxagent-engine.md#protected-org-connections-and-hosted-personal-setup)
 for bounds, owner checks, failures, and readiness-gated personal intent locks.
+
+## Lark/Feishu wiki document links
+
+The four Lark/Feishu catalog services expose read-only `wiki_get_node`
+(`GET /open-apis/wiki/v2/spaces/get_node?token=...`). For a normal
+`https://<tenant>/wiki/<node-token>` link, pass the node token, then inspect
+`data.node.obj_type` and `obj_token`. On the **same selected connection**, read
+`docx` through `docx_raw_content(document_id=obj_token)`, or `bitable` through
+`bitable_tables_list(app_token=obj_token)` followed by existing record reads.
+Shortcuts already return the underlying object's identity. The overlays have
+no reader for `sheet`, legacy `doc`, `mindnote`, `file` or `slides`; the model
+must report `lark_wiki_unsupported_type`, not invent content or try docx.
+
+This is an explicit two-operation workflow, not an input adapter. Direct docx
+requests and responses are unchanged; `/mcp/config` publishes the raw lookup
+query schema. Startup sync adds the operation for `api-lark`, `api-lark-bot`,
+`api-feishu` and `api-feishu-bot` without deleting other endpoints. Older
+binaries do not add the operation; shared stored catalogs may let them list it
+as an ordinary GET after a new replica syncs it. Only new binaries provide the
+additional wiki result guidance. No new persisted field or enum is required.
+
+User OAuth and tenant credentials both need `wiki:wiki:readonly` (or the broader
+`wiki:wiki`). Feishu also documents `wiki:node:read`. The token-only operation
+uses the common Lark/Feishu contract; Feishu's optional reverse-lookup `obj_type`
+parameter is intentionally omitted. Docx reading additionally needs
+`docx:document:readonly` (or `docx:document`). Enable required scopes in the
+selected service application's Developer Console → Permissions & Scopes,
+publish the app and obtain administrator approval; user OAuth may require fresh
+consent. NyxBot can include the needed permission in the existing
+`nyx__connect_service` `scopes` array when producing a hosted OAuth link.
+Scopes do not grant document ACLs: the connected user or tenant app
+must have node/document access. Channel bot identity/access is independent.
+
+Wiki results distinguish `lark_scope_missing` (99991672),
+`lark_document_acl_denied` (131006), `lark_wiki_node_not_found` (131005),
+unsupported types, malformed results and other lookup failures. A docx resolution
+also supplies conditional guidance for docx missing-scope (99991672), ACL
+(1770032) and deleted/missing-document (1770002/1770003) codes; the subsequent
+docx response itself keeps its existing bytes. Diagnostics
+contain closed codes, numeric provider codes and setup links, not provider
+messages, URLs, titles or tokens. Supported results retain node metadata for
+the authorized caller. Server HTTP lookup disables redirects; model-visible response collection
+is capped at 256 KiB (including node results). It never fetches the pasted URL.
+
+Owner discovery explains a missing service connection and directs NyxBot to
+`nyx__connect_service` for a real hosted link; discovery itself creates no link
+or grant. Specialists receive their existing AssistantPage Grants link and
+must have the exact connection and both operations granted. Guests receive no
+owner setup/inventory diagnostic. Existing per-service guest levels, operation
+and input scopes, live grants, approvals and provider ACLs apply independently
+to each request. A URL or successful node lookup grants no further access.
+Never recommend public link sharing as a workaround.
+
+Official references (read 2026-11-10):
+- [Lark node lookup](https://open.larksuite.com/document/server-docs/docs/wiki-v2/space-node/get_node)
+- [Feishu node lookup](https://open.feishu.cn/document/server-docs/docs/wiki-v2/space-node/get_node)
+- [Docx raw content](https://open.larksuite.com/document/server-docs/docs/docs/docx-v1/document/raw_content)
+- [Feishu scope setup and publishing](https://open.feishu.cn/document/faq/trouble-shooting/how-to-fix-the-99991672-error)

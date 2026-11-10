@@ -201,6 +201,7 @@ pub(crate) async fn resume_turn(
         let mut independent_request = None;
         let mut independent_card = None;
         let mut private_result = None;
+        let mut activity_outcome = None;
         let (state_name, text, code) = match outcome {
             Ok(response) if sent => {
                 let status = response.status();
@@ -213,6 +214,7 @@ pub(crate) async fn resume_turn(
                         };
                         let result=format!("Operation finished (HTTP {}).\n{}",status.as_u16(),text.chars().take(16_384).collect::<String>());
                         private_result=Some(result.clone());
+                        activity_outcome = Some(if status.is_success() { "completed" } else { "failed" });
                         ("completed",if row.group_id.is_some() || row.collaboration.is_some(){format!("Operation finished (HTTP {}). The private result is available on the requester's permission card.",status.as_u16())}else{result},None)
                     },
                     _=>("unknown","The response was incomplete or unavailable. The operation will not be sent again.".into(),Some("response_unavailable")),
@@ -278,7 +280,7 @@ pub(crate) async fn resume_turn(
                 format!("{}:result", aad(id)).as_bytes(),
             )
             .await?;
-        let mut update = doc! {"$set":{"execution_proposal.v1.state":state_name,"execution_proposal.v1.failure_code":code,"execution_proposal.v1.result":binary(result),"execution_proposal.v1.independent_request_id":independent_request,"execution_proposal.v1.independent_card_id":independent_card}};
+        let mut update = doc! {"$set":{"activity_outcome":activity_outcome,"execution_proposal.v1.state":state_name,"execution_proposal.v1.failure_code":code,"execution_proposal.v1.result":binary(result),"execution_proposal.v1.independent_request_id":independent_request,"execution_proposal.v1.independent_card_id":independent_card}};
         if state_name != "waiting" {
             update.insert("$unset", doc! {"execution_proposal.v1.payload":""});
         }
