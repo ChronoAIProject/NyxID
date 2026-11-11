@@ -12093,8 +12093,8 @@ mod tests {
         let db = connect_test_database("mcp_connect_scopes").await.unwrap();
         let now = mongodb::bson::DateTime::now();
         let provider: ProviderConfig = mongodb::bson::from_document(doc! {
-            "_id": uuid::Uuid::new_v4().to_string(), "slug": "scope-provider",
-            "name": "Scope Provider", "provider_type": "oauth2", "is_active": true,
+            "_id": uuid::Uuid::new_v4().to_string(), "slug": "github",
+            "name": "GitHub", "provider_type": "oauth2", "is_active": true,
             "created_by": "test", "created_at": now, "updated_at": now,
         })
         .unwrap();
@@ -12111,7 +12111,7 @@ mod tests {
             .unwrap();
         let actor = uuid::Uuid::new_v4().to_string();
         let scopes = parse_connect_scopes(Some(&serde_json::json!(
-            "public_repo, read:org public_repo"
+            "public_repo, read:org read:project project public_repo"
         )))
         .unwrap();
         let result = connect_service(
@@ -12131,7 +12131,7 @@ mod tests {
         assert_eq!(result["status"], "pending_connection");
         assert_eq!(
             result["scopes"],
-            serde_json::json!(["public_repo", "read:org"])
+            serde_json::json!(["public_repo", "read:org", "read:project", "project"])
         );
         let view = connect_link_service::get_for_actor(
             &db,
@@ -12140,7 +12140,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(view.link.scopes, ["public_repo", "read:org"]);
+        assert_eq!(
+            view.link.scopes,
+            ["public_repo", "read:org", "read:project", "project"]
+        );
         let error = connect_service(
             &db,
             &test_encryption_keys(),

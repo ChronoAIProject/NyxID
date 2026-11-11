@@ -120,7 +120,8 @@ pub struct WizardPrefill {
     /// Declarative desired scope set for manage-scopes mode (`--set`). When
     /// present, the wizard pre-seeds the picker with exactly these scopes
     /// instead of the connection's current grant, so an AI agent can drive the
-    /// whole change from one CLI command (NyxID#917 follow-up).
+    /// whole change from one CLI command (NyxID#917 follow-up). Providers
+    /// with unsupported removal retain known grants in addition to this set.
     pub scope_override: Option<Vec<String>>,
 }
 
