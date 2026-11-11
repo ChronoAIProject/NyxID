@@ -1257,7 +1257,8 @@ async fn catalog_preview_adds_the_outline_and_author_only_when_asked() {
     let verified = preview(&registry, ID, "1.0").await.unwrap();
     // The plain preview (flag off) is unchanged: no outline, no author.
     let plain = json!(verified);
-    let keys: Vec<_> = plain.as_object().unwrap().keys().cloned().collect();
+    let mut keys: Vec<_> = plain.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
     assert_eq!(keys, ["description", "reference", "size_bytes"]);
 
     let person = catalog_preview(&verified, Some(PublisherKind::Person));
@@ -1305,30 +1306,30 @@ async fn the_publisher_kind_comes_from_nyxid_accounts() {
     let db = &f.state.db;
     db.collection::<mongodb::bson::Document>(crate::models::user::COLLECTION_NAME)
         .insert_many([
-            mongodb::bson::doc! {"_id": "org-account", "user_type": "org"},
-            mongodb::bson::doc! {"_id": "person-account", "user_type": "person"},
-            mongodb::bson::doc! {"_id": "legacy-account"},
+            mongodb::bson::doc! {"_id": "org-publisher", "user_type": "org"},
+            mongodb::bson::doc! {"_id": "person-publisher", "user_type": "person"},
+            mongodb::bson::doc! {"_id": "legacy-publisher"},
         ])
         .await
         .unwrap();
     db.collection::<mongodb::bson::Document>(crate::models::service_account::COLLECTION_NAME)
-        .insert_one(mongodb::bson::doc! {"_id": "platform-account", "name": "Skills"})
+        .insert_one(mongodb::bson::doc! {"_id": "platform-publisher", "name": "Skills"})
         .await
         .unwrap();
     let skill = "## Overview\nOne result.\n\n## Approach\n1. **Prepare.** I get ready.\n";
-    for (account, expected) in [
-        ("org-account", Some(PublisherKind::Organization)),
-        ("person-account", Some(PublisherKind::Person)),
-        ("legacy-account", Some(PublisherKind::Person)),
-        ("platform-account", Some(PublisherKind::ServiceAccount)),
-        ("unknown-account", None),
+    for (case, expected) in [
+        ("org-publisher", Some(PublisherKind::Organization)),
+        ("person-publisher", Some(PublisherKind::Person)),
+        ("legacy-publisher", Some(PublisherKind::Person)),
+        ("platform-publisher", Some(PublisherKind::ServiceAccount)),
+        ("unknown-publisher", None),
     ] {
         let registry = Registry {
-            meta: json!({"createdBy": account, "createdByDisplayName": "Publisher"}),
+            meta: json!({"createdBy": case, "createdByDisplayName": "Publisher"}),
             ..outline_registry(skill)
         };
         let verified = preview(&registry, ID, "1.0").await.unwrap();
-        assert_eq!(publisher_kind(db, &verified).await, expected, "{account}");
+        assert_eq!(publisher_kind(db, &verified).await, expected, "{case}");
     }
     // Without a publisher there is nothing to look up.
     let anonymous = preview(&outline_registry(skill), ID, "1.0").await.unwrap();
