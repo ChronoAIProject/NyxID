@@ -200,10 +200,14 @@ async fn mismatched_ids(db: &Database, connections: &[UserService]) -> AppResult
         .filter_map(|row| {
             let endpoint = endpoints.get(&row.endpoint_id)?;
             let catalog = catalogs.get(row.catalog_service_id.as_deref()?)?;
-            (linked(row, endpoint, catalog)
+            if linked(row, endpoint, catalog)
                 && (endpoint.url != catalog.base_url
-                    || endpoint.openapi_spec_url != catalog.openapi_spec_url))
-                .then(|| row.id.clone())
+                    || endpoint.openapi_spec_url != catalog.openapi_spec_url)
+            {
+                Some(row.id.clone())
+            } else {
+                None
+            }
         })
         .collect())
 }

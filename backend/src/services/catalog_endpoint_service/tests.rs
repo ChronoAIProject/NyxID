@@ -383,7 +383,7 @@ async fn admin_catalog_update_propagates_target_and_inherited_spec() {
         serde_json::json!({"base_url":server.uri(),"openapi_spec_url":spec}),
     )
     .unwrap();
-    update_service_inner(
+    let response = update_service_inner(
         test_app_state(f.db.clone()),
         test_auth_user(&f.owner),
         crate::telemetry::TelemetryContext::default(),
@@ -392,6 +392,7 @@ async fn admin_catalog_update_propagates_target_and_inherited_spec() {
     )
     .await
     .unwrap();
+    assert_eq!(response.0.base_url, server.uri());
     let endpoint = f.wait_for_target(&server.uri(), &spec).await;
     assert_eq!(endpoint.url, server.uri());
     assert_eq!(endpoint.openapi_spec_url.as_deref(), Some(spec.as_str()));
