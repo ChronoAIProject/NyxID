@@ -11991,5 +11991,10 @@
   "Model not active": "模型未处于活动状态",
   "Model disabled": "模型已停用",
   "Explicit deny": "明确拒绝",
-  "No entitlement": "没有访问授权"
+  "No entitlement": "没有访问授权",
+  "Instructions: {{instructions}}; persona: {{persona}}; memory notes: {{memoryNotes}}; skills: {{skills}}; service grants: {{serviceGrants}}; account read: {{accountRead}}.": "说明：{{instructions}}；角色设定：{{persona}}；记忆笔记：{{memoryNotes}}；技能：{{skills}}；服务授权：{{serviceGrants}}；账户读取：{{accountRead}}。",
+  "present": "已提供",
+  "Agent configuration has not been checked.": "尚未检查智能体配置。",
+  "These facts do not confirm complete business information or a successful customer test. Opening access is your choice. During model setup, customer requests wait briefly or receive a safe setup failure.": "这些信息无法确认业务信息是否完整，也无法确认客户测试是否成功。是否开放访问由你决定。在设置模型期间，客户请求会短暂等待，或收到安全的设置失败提示。",
+  "Customer readiness is unavailable. Refresh to check before relying on replies.": "暂时无法获取客户就绪状态。请先刷新检查，再依赖机器人回复。"
 }
