@@ -269,6 +269,10 @@ export function toolFailureCopy(
   failure: { kind: string; status?: number | null } | null | undefined,
 ): string {
   switch (failure?.kind) {
+    case "retry_duplicate_action":
+      return "Already done in the previous attempt; skipped this time.";
+    case "resource_unavailable":
+      return "A resource needed for this step is unavailable.";
     case "service_status":
       return failure.status == null
         ? "The service returned an error. No HTTP status is available."

@@ -1746,3 +1746,17 @@ describe("approval-gated step outcomes", () => {
     expect(screen.getByRole("button", { name: /Turn details:/ })).toHaveAttribute("aria-label", "Turn details: Completed, 2 actions, 1 allowed, 1 failed");
   });
 });
+
+it.each([
+  ["service_status", "The service returned an error. No HTTP status is available."],
+  ["tool_error", "The tool reported an error."],
+  ["refused", "NyxID refused this call."],
+  ["internal", "NyxID could not complete this call."],
+  ["resource_unavailable", "A resource needed for this step is unavailable."],
+  ["future_kind", "This step did not complete. No additional error details are available."],
+])("2345 retains per-step error presentation for %s", (kind, copy) => {
+  render(<ChatMessageBubble message={{ ...BASE, status: "complete", toolCalls: [{ id: "error", name: "tool", status: "error", startedAt: 1, failure: { kind } }] }} />);
+  fireEvent.click(screen.getByRole("button", { name: /action/ }));
+  expect(screen.getByLabelText("Failed")).toBeVisible();
+  expect(screen.getByText(`${copy} The assistant can continue after a failed step.`)).toBeVisible();
+});

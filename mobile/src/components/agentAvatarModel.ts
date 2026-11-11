@@ -61,7 +61,7 @@ export const AGENT_AVATAR_SIZES = {
 export type AgentIdentity = {
   readonly id: string;
   readonly name: string;
-  readonly kind: "nyxbot" | "specialist";
+  readonly kind: "nyxbot" | "specialist" | "unknown";
   readonly display_name?: string | null;
 };
 

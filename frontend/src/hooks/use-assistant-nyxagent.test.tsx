@@ -814,3 +814,16 @@ it("the page and the sidebar refresh the thread list once per agents change", as
   expect(lists()).toBe(before + 1);
   unmount();
 });
+
+it("2345 malformed history is friendly and refresh clears the query error", async () => {
+  const goodMessages = page.messages;
+  page.messages = [{ text: "private" }] as unknown as NyxAgentHistory["messages"];
+  const { result } = renderHook(() => useNyxAgentAssistantChat({
+    selectedConversationId: id, onConversationAdopted: vi.fn(), threadsAgentId: NYXBOT,
+  }), { wrapper });
+  await waitFor(() => expect(result.current.error).toBe("Conversation history could not be loaded. Please try again."));
+  page.messages = goodMessages;
+  await act(() => result.current.refreshHistory());
+  await waitFor(() => expect(result.current.error).toBeUndefined());
+  expect(result.current.conversation?.id).toBe(id);
+});

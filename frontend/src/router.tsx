@@ -202,7 +202,7 @@ const loginRoute = createRoute({
   getParentRoute: () => authLayout,
   validateSearch: (
     search: Record<string, unknown>,
-  ): { return_to?: string; code?: string } => ({
+  ): { return_to?: string; code?: string; enable_email?: true } => ({
     ...(typeof search.return_to === "string"
       ? { return_to: search.return_to }
       : {}),
@@ -210,6 +210,9 @@ const loginRoute = createRoute({
     search.code.length > 0 &&
     search.code.length <= 64
       ? { code: search.code }
+      : {}),
+    ...(search.enable_email === true || search.enable_email === "true"
+      ? { enable_email: true as const }
       : {}),
   }),
   component: LoginPage,

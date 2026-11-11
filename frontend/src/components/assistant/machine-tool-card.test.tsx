@@ -235,3 +235,9 @@ it("labels separated receipts without claiming shared sessions or full isolation
   expect(screen.queryByText(/Shared workspace and browser/)).not.toBeInTheDocument();
   expect(screen.queryByText(/isolated/i)).not.toBeInTheDocument();
 });
+
+it("2345 unknown machine context stays neutral", () => {
+  render(<MachineToolCard receipt={{ ...receipt, context_mode: "unknown", status: "unknown" }} />);
+  expect(screen.getByText(/Workspace details unavailable/)).toBeVisible();
+  expect(screen.queryByText(/Shared workspace and browser/)).toBeNull();
+});
