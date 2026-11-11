@@ -22,6 +22,8 @@ const state = vi.hoisted(() => ({
   streaming: false,
   interruption: undefined as string | undefined,
   destroyed: false,
+  historyError: undefined as string | undefined,
+  refreshHistory: vi.fn(async () => undefined),
   mode: "nyxmode" as NyxAgentAccessMode,
   override: null as NyxAgentAccessMode | null,
   staleCard: false,
@@ -75,8 +77,9 @@ vi.mock("@/hooks/use-assistant-nyxagent", () => ({ useNyxAgentAssistantChat: () 
   session: { title: "Thread", messages: state.staleCard ? [{ id: `nyxagent-acknowledgement:${staleCard.id}`, role: "system", content: staleCard.summary }]
     : state.search.c ? [{ id: "one", role: "assistant", content: "Hello" }] : [] },
   interruption: state.interruption,
+  error: state.historyError,
   isStreaming: state.streaming, waiting: [], acknowledgements: state.staleCard ? [{ ...staleCard, status: state.expiredCard ? "expired" : staleCard.status }] : [], approvals: [], conversations: [], threadsLoaded: false,
-  send: state.send, stop: vi.fn(), refreshHistory: vi.fn(), deleteConversation: vi.fn(),
+  send: state.send, stop: vi.fn(), refreshHistory: state.refreshHistory, deleteConversation: vi.fn(),
 }) }));
 vi.mock("@/lib/assistant/nyxagent-transport", () => ({ nyxAgentTransport: {
   getConversation: (id?: string) => id && state.agentLoaded ? conversation : undefined,
@@ -125,6 +128,8 @@ beforeEach(() => {
   state.search = {};
   state.streaming = false;
   state.destroyed = false;
+  state.historyError = undefined;
+  state.refreshHistory.mockClear();
   state.mode = "nyxmode";
   state.override = null;
   state.staleCard = false;
@@ -389,4 +394,42 @@ it("retains a genuine rejected-send error after a refresh (#2316)", async () => 
   fireEvent.click(screen.getByRole("button", { name: "Send message" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Service is unavailable");
   expect(screen.getByRole("textbox")).toHaveValue("Question");
+});
+
+it("2345 history error offers refresh without making an authorized composer read-only", async () => {
+  state.search = { c: conversation.id };
+  state.historyError = "Conversation history could not be loaded. Please try again.";
+  mount();
+  expect(screen.getByRole("alert")).toHaveTextContent(state.historyError);
+  expect(screen.getByRole("alert")).not.toHaveTextContent("invalid_value");
+  fireEvent.click(screen.getByRole("button", { name: "Refresh history" }));
+  expect(state.refreshHistory).toHaveBeenCalledOnce();
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "Continue" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  await waitFor(() => expect(state.send).toHaveBeenCalledOnce());
+});
+
+it("2345 history error does not override server read-only permission", () => {
+  state.search = { c: conversation.id };
+  state.historyError = "Conversation history could not be loaded. Please try again.";
+  state.destroyed = true;
+  mount();
+  expect(screen.getByRole("textbox")).toBeDisabled();
+});
+
+it("2345 a running turn keeps its working state and history errors do not lock the settled composer", () => {
+  state.search = { c: conversation.id };
+  state.historyError = "Conversation history could not be loaded. Please try again.";
+  state.streaming = true;
+  const client = new QueryClient();
+  const view = render(<QueryClientProvider client={client}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  expect(screen.getByRole("textbox")).toHaveAttribute("placeholder", "Assistant is working...");
+  expect(screen.getByRole("textbox")).not.toHaveAttribute("placeholder", "This conversation is read-only.");
+  state.streaming = false;
+  view.rerender(<QueryClientProvider client={client}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  const composer = screen.getByRole("textbox");
+  expect(composer).not.toBeDisabled();
+  fireEvent.change(composer, { target: { value: "Next question" } });
+  expect(composer).toHaveValue("Next question");
+  expect(state.send).not.toHaveBeenCalled();
 });

@@ -1341,6 +1341,7 @@ function NyxAgentThreadPage() {
           {/* Failures sit with the composer, where the next attempt starts. */}
           <AssistantErrorNotice
             docked
+            onRetry={selectedId && chat.error ? () => void chat.refreshHistory() : undefined}
             message={connectionDown && dockedError?.startsWith("Connection interrupted") ? undefined : dockedError}
           />
           {selectedAgent?.share_role && selectedId ? <div className="mx-auto max-h-64 max-w-3xl overflow-y-auto px-4"><SharedConsentCards agentId={selectedAgent.id} conversationId={selectedId} /></div> : null}
@@ -1410,7 +1411,7 @@ function NyxAgentThreadPage() {
             }}
             active={chat.isStreaming}
             sending={chat.isStreaming}
-            disabled={Boolean(selectedId && chat.error) || destroyed}
+            disabled={destroyed}
             ownerUserId={user?.id ?? null}
             draftKey={
               selectedId

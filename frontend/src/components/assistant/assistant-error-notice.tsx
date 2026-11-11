@@ -12,9 +12,11 @@ import { X } from "lucide-react";
 export function AssistantErrorNotice({
   message,
   docked = false,
+  onRetry,
 }: {
   readonly message?: string;
   readonly docked?: boolean;
+  readonly onRetry?: () => void;
 }) {
   useUiTranslation();
   const [dismissed, setDismissed] = useState<string>();
@@ -35,6 +37,7 @@ export function AssistantErrorNotice({
           className="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/5 py-2.5 pl-4 pr-2 text-14 text-destructive"
         >
           <p className="min-w-0 flex-1 whitespace-pre-line break-words py-0.5">{translateUi(message)}</p>
+          {onRetry ? <button type="button" onClick={onRetry} className="shrink-0 rounded px-2 py-0.5 underline">{translateUi("Refresh history")}</button> : null}
           <button data-icon-button=""
             type="button"
             aria-label={translateUi("Dismiss")}

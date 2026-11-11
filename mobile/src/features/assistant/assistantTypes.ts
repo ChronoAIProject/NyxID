@@ -1,3 +1,4 @@
+import { historyEnum, isolateHistoryItems } from "./assistantHistoryCompat";
 import { z } from "zod";
 
 export const conversationIdSchema = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
@@ -5,12 +6,12 @@ export const activitySchema = z.object({
   decision: z.object({ kind: z.string(), id: z.string(), state: z.string() }).nullish(),
   id: z.string(),
   label: z.string(),
-  status: z.enum(["running", "completed", "error"]),
+  status: historyEnum(["running", "completed", "error"]),
   started_at: z.string(),
   ended_at: z.string().nullish(),
   failure: z
     .object({
-      kind: z.enum(["service_status", "tool_error", "refused", "internal"]),
+      kind: z.string(),
       status: z.number().int().nullish(),
     })
     .nullish(),
@@ -18,7 +19,7 @@ export const activitySchema = z.object({
     .object({
       node_id: z.string(),
       machine_name: z.string().nullish(),
-      context_mode: z.enum(["shared_legacy", "separated"]).nullish(),
+      context_mode: historyEnum(["shared_legacy", "separated"]).nullish(),
       action: z.string(),
       status: z.string(),
       error_code: z.number().nullish(),
@@ -91,13 +92,13 @@ export const conversationSchema = z.object({
     .nullable(),
   context_reset_reason: z.string().nullish(),
   context_reset_at: z.string().nullish(),
-  role: z.enum(["orchestrator", "subagent"]).default("orchestrator"),
+  role: historyEnum(["orchestrator", "subagent"]).default("orchestrator"),
   agent: z
     .object({
       id: z.string(),
       name: z.string(),
       display_name: z.string().nullish(),
-      kind: z.enum(["nyxbot", "specialist"]),
+      kind: historyEnum(["nyxbot", "specialist"]),
       destroyed: z.boolean().default(false),
     })
     .nullish(),
@@ -116,7 +117,7 @@ export const conversationSchema = z.object({
     .nullish(),
 });
 export const recoverySchema = z.object({
-  status: z.enum(["available", "review"]),
+  status: historyEnum(["available", "review"]),
   reason: z.string(),
   text: z.string().nullable(),
   attachments: z.array(z.string()),
@@ -141,7 +142,7 @@ const turnMetadataSchema = z.object({
     .nullish(),
 });
 export const feedbackSchema = z.object({
-  vote: z.enum(["up", "down"]),
+  vote: historyEnum(["up", "down"]),
   comment: z.string().nullish(),
   updated_at: z.string().optional(),
 });
@@ -150,7 +151,7 @@ export const messageSchema = z.object({
   id: z.string(),
   seq: z.number().int().positive(),
   turn_id: z.string(),
-  role: z.enum(["user", "assistant", "orchestrator", "event"]),
+  role: historyEnum(["user", "assistant", "orchestrator", "event"]),
   origin: z.string().nullish(),
   automation: z
     .object({
@@ -160,7 +161,7 @@ export const messageSchema = z.object({
     })
     .nullish(),
   text: z.string(),
-  status: z.enum(["completed", "failed"]),
+  status: historyEnum(["completed", "failed"]),
   error_code: z.string().nullable(),
   created_at: z.string(),
   activities: z.array(activitySchema).default([]),
@@ -249,7 +250,7 @@ export const acknowledgementSchema = z.object({
 export const cmaOperationSchema = z.object({
   id: z.string(),
   turn_id: z.string(),
-  kind: z.enum(["cma_provisioning", "cma_response", "cma_agent"]),
+  kind: z.string(),
   operation_id: z.string().nullable(),
   agent_id: z.string().nullable(),
   idempotency_key: z.string().nullable(),
@@ -262,25 +263,23 @@ export const cmaOperationSchema = z.object({
   checked_at: z.string().nullable(),
 });
 export type CmaOperation = z.infer<typeof cmaOperationSchema>;
-export const historySchema = z.object({
+const historyApprovalSchema = z.object({
+  id: z.string(),
+  service_name: z.string(),
+  summary: z.string(),
+  expires_at: z.string(),
+  service_slug: z.string().optional(),
+  approval_mode: z.enum(["per_request", "grant"]).optional(),
+  agent_key_prefix: z.string().optional(),
+  created_at: z.string().optional(),
+});
+const historyBodySchema = z.object({
+  unsupported_history_items: z.number().int().positive().optional(),
   cma_operations: z.array(cmaOperationSchema).optional(),
   conversation: conversationSchema,
   messages: z.array(messageSchema),
   acknowledgements: z.array(acknowledgementSchema).default([]),
-  approvals: z
-    .array(
-      z.object({
-        id: z.string(),
-        service_name: z.string(),
-        summary: z.string(),
-        expires_at: z.string(),
-        service_slug: z.string().optional(),
-        approval_mode: z.enum(["per_request", "grant"]).optional(),
-        agent_key_prefix: z.string().optional(),
-        created_at: z.string().optional(),
-      }),
-    )
-    .default([]),
+  approvals: z.array(historyApprovalSchema).default([]),
   waiting: z
     .array(
       z.object({
@@ -294,6 +293,13 @@ export const historySchema = z.object({
     .default([]),
   before_seq: z.number().int().positive().nullable(),
 });
+export const historySchema = z.preprocess(
+  (value) => isolateHistoryItems(value, {
+    acknowledgements: acknowledgementSchema,
+    approvals: historyApprovalSchema,
+  }),
+  historyBodySchema,
+);
 export const indexSchema = z.object({
   conversations: z.array(conversationSchema),
   next_cursor: z.string().nullable(),

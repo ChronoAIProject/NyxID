@@ -111,6 +111,7 @@ async fn erase_thread(
         m::assistant_message::COLLECTION_NAME,
         m::assistant_attachment::COLLECTION_NAME,
         m::assistant_resource::COLLECTION_NAME,
+        m::assistant_tool_result::COLLECTION_NAME,
         m::async_service_operation::COLLECTION_NAME,
         super::super::assistant_service_execution::COLLECTION,
         m::nyxbot_image_delivery::COLLECTION_NAME,

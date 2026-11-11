@@ -878,6 +878,40 @@ mod tests {
     }
 
     #[test]
+    fn github_projects_reads_are_typed_for_oauth_and_pat_catalogs() {
+        for slug in ["api-github", "api-github-pat"] {
+            let spec = spec_for_slug(slug).unwrap();
+            for prefix in ["/orgs/{org}", "/users/{username}"] {
+                for suffix in [
+                    "",
+                    "/{project_number}",
+                    "/{project_number}/fields",
+                    "/{project_number}/items",
+                ] {
+                    let path = format!("{prefix}/projectsV2{suffix}");
+                    let methods = spec["paths"][&path].as_object().unwrap();
+                    assert_eq!(methods.len(), 1, "Projects overlay is read-only");
+                    let op = &methods["get"];
+                    assert_eq!(op["x-aevatar-tool"]["readOnly"], true);
+                    assert_eq!(op["x-aevatar-tool"]["destructive"], false);
+                    assert!(
+                        op["parameters"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|p| p["in"] == "path" && p["required"] == true)
+                    );
+                    if !suffix.is_empty() {
+                        assert!(op["parameters"].as_array().unwrap().iter().any(|p| {
+                            p["name"] == "project_number" && p["schema"]["type"] == "integer"
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn every_embedded_spec_parses_as_openapi_with_operations() {
         for key in PARSED_SPECS.keys() {
             let spec = spec_for_key(key).expect("registered spec");
