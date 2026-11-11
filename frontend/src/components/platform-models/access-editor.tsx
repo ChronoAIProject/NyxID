@@ -140,7 +140,7 @@ export function AccessEditor({
                   className="flex flex-wrap items-center justify-between gap-2 py-3"
                 >
                   <span className="type-body break-all">
-                    {titleCase(rule.effect)} · {titleCase(rule.subject_kind)} ·{" "}
+                    {translateUi(titleCase(rule.effect))} · {translateUi(rule.subject_kind === "org" ? "Organization" : titleCase(rule.subject_kind))} ·{" "}
                     {rule.subject_id}
                   </span>
                   {!readOnly && (
@@ -256,8 +256,8 @@ export function AccessEditor({
         <SaveError error={explanation.error} />
         {explanation.data && (
           <dl className="grid gap-2 type-body">
-            <div>{translateUi("Policy: ")}{titleCase(explanation.data.policy_reason)}</div>
-            <div>{translateUi("Model: ")}{titleCase(explanation.data.model_reason)}</div>
+            <div>{translateUi("Policy: ")}{translateUi(titleCase(explanation.data.policy_reason))}</div>
+            <div>{translateUi("Model: ")}{translateUi(titleCase(explanation.data.model_reason))}</div>
             <div>{translateUi("Feature: ")}{explanation.data.flag_enabled ? translateUi("On") : translateUi("Off")}</div>
             <div>{translateUi("Can execute: ")}{explanation.data.executable ? translateUi("Yes") : translateUi("No")}</div>
           </dl>

@@ -1,4 +1,7 @@
-//! Admin-only private configuration and an allowlisted public metadata view.
+mod contracts;
+pub use contracts::certified_contracts;
+pub mod credentials;
+// Admin-only private configuration and an allowlisted public metadata view.
 use axum::{
     Json,
     extract::{Path, Query, State},

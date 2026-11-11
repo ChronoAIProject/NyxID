@@ -43,6 +43,8 @@ impl Fixture {
             .args(args)
             .args(["--base-url", &self.server.uri(), "--access-token", token])
             .args(["--profile", &self.profile, "--output", format])
+            .env("NYXID_TEST_MODEL_CREDENTIAL", "fixture-only-model-secret")
+            .env_remove("NYXID_TEST_MISSING_CREDENTIAL")
             .env("NYXID_NO_UPDATE_CHECK", "1")
             .env("NYXID_SKIP_SKILL_SELF_HEAL", "1")
             .env("NYXID_TELEMETRY", "off")
@@ -819,3 +821,9 @@ async fn admin_agent_key_cannot_read_or_mutate_models() {
     }
     assert!(f.server.received_requests().await.unwrap().is_empty());
 }
+
+#[path = "platform_models/credentials.rs"]
+mod credentials;
+
+#[path = "platform_models/contracts.rs"]
+mod contracts;

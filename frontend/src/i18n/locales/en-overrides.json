@@ -60,5 +60,10 @@
   "Issued credits to {{count}} owners; {{pending}} pending activation_one": "Issued credits to {{count}} owner; {{pending}} pending activation",
   "Issued credits to {{count}} owners; {{pending}} pending activation_other": "Issued credits to {{count}} owners; {{pending}} pending activation",
   "Issued credits to {{count}} owners_one": "Issued credits to {{count}} owner",
-  "Issued credits to {{count}} owners_other": "Issued credits to {{count}} owners"
+  "Issued credits to {{count}} owners_other": "Issued credits to {{count}} owners",
+  "Openai": "OpenAI",
+  "Byok": "BYOK",
+  "Openai chat": "OpenAI Chat",
+  "Openai responses": "OpenAI Responses",
+  "Anthropic messages": "Anthropic Messages"
 }

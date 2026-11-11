@@ -90,7 +90,7 @@ export function EditErrors() {
   const message = firstNestedErrorMessage(errors);
   return message ? (
     <p role="alert" className="type-validation-error text-destructive">
-      {message}
+      {translateUi(message)}
     </p>
   ) : null;
 }

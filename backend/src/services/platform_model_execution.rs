@@ -5,7 +5,7 @@ pub(crate) mod certification;
 mod contract_usage;
 pub(crate) mod images;
 mod stream;
-mod token;
+pub(crate) mod token;
 
 use crate::{
     crypto::aes::EncryptionKeys,

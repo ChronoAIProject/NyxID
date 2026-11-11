@@ -1,5 +1,11 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
+import { useState } from "react";
+import {
+  useModelCredentials,
+  offeringPath,
+} from "@/hooks/use-model-credentials";
+import { credentialSchema } from "@/schemas/model-credentials";
 import { titleCase } from "@/schemas/platform-models";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Button } from "@/components/ui/button";
@@ -43,14 +49,62 @@ export function ModelFormEditor({
     mode: "onChange",
   });
   const change = usePlatformModelChange();
+  const offerings = useModelCredentials(true);
+  const [automatic, setAutomatic] = useState(!model);
+  const [createdDraft, setCreatedDraft] = useState<AdminModel>();
+  const [createdOffering, setCreatedOffering] = useState<string>();
+  const [uncertain, setUncertain] = useState(false);
   async function save(values: ModelForm) {
     try {
-      const result = await change.mutateAsync({
-        path: model ? adminModelPath(model.id) : "/admin/platform-models",
-        method: model ? "put" : "post",
-        body: modelPayload(values, model?.revision),
-      });
-      onSaved?.(adminModelSchema.parse(result));
+      if (model) {
+        const result = await change.mutateAsync({
+          path: adminModelPath(model.id),
+          body: modelPayload(values, model.revision),
+        });
+        onSaved?.(adminModelSchema.parse(result));
+        return;
+      }
+      // Persist each completed step in component state. Retry a failed link only;
+      // never create a second billing identity or model after a known success.
+      let draft = createdDraft;
+      if (!draft) {
+        setUncertain(true);
+        draft = adminModelSchema.parse(
+          await change.mutateAsync({
+            path: "/admin/platform-models",
+            method: "post",
+            body: modelPayload(values),
+          }),
+        );
+        setCreatedDraft(draft);
+        setUncertain(false);
+      }
+      let offering = createdOffering || values.billing_service_id;
+      if (automatic && !createdOffering) {
+        setUncertain(true);
+        const identity = credentialSchema.parse(
+          await change.mutateAsync({
+            path: offeringPath,
+            method: "post",
+            body: { name: values.display_name },
+          }),
+        );
+        offering = identity.id;
+        setCreatedOffering(offering);
+        setUncertain(false);
+      }
+      if (offering) {
+        draft = adminModelSchema.parse(
+          await change.mutateAsync({
+            path: adminModelPath(draft.id),
+            body: {
+              ...modelPayload(values, draft.revision),
+              billing_service_id: offering,
+            },
+          }),
+        );
+      }
+      onSaved?.(draft);
     } catch {
       /* shown below */
     }
@@ -63,8 +117,8 @@ export function ModelFormEditor({
             <Field title={translateUi("Public model ID")}>
               <Input
                 {...form.register("public_id")}
-                readOnly={!!model}
-                placeholder={translateUi("nyxid/gemini-3-pro")}
+                readOnly={!!model || !!createdDraft}
+                placeholder="nyxid/gemini-3-pro"
               />
             </Field>
             <Field title={translateUi("Display name")}>
@@ -73,11 +127,11 @@ export function ModelFormEditor({
             <Field title={translateUi("Family")}>
               <NativeSelect
                 {...form.register("family")}
-                disabled={!!model || readOnly}
+                disabled={!!model || !!createdDraft || readOnly}
               >
                 {["gemini", "claude", "openai", "open_model"].map((value) => (
                   <option key={value} value={value}>
-                    {titleCase(value)}
+                    {translateUi(titleCase(value))}
                   </option>
                 ))}
               </NativeSelect>
@@ -87,7 +141,7 @@ export function ModelFormEditor({
                 <NativeSelect {...form.register("lifecycle")}>
                   {["draft", "active", "retired"].map((value) => (
                     <option key={value} value={value}>
-                      {titleCase(value)}
+                      {translateUi(titleCase(value))}
                     </option>
                   ))}
                 </NativeSelect>
@@ -123,7 +177,7 @@ export function ModelFormEditor({
           ).map(([field, label, options]) => (
             <fieldset key={field} className="space-y-2">
               <Label asChild>
-                <legend>{label}</legend>
+                <legend>{translateUi(label)}</legend>
               </Label>
               <div className="flex flex-wrap gap-4">
                 {options.map((option) => (
@@ -139,7 +193,7 @@ export function ModelFormEditor({
                         )
                       }
                     />
-                    {titleCase(option)}
+                    {translateUi(titleCase(option))}
                   </Label>
                 ))}
               </div>
@@ -156,7 +210,7 @@ export function ModelFormEditor({
           <div className="grid gap-4 sm:grid-cols-3">
             {(["streaming", "tools", "structured_output"] as const).map(
               (key) => (
-                <Field key={key} title={titleCase(key)}>
+                <Field key={key} title={translateUi(titleCase(key))}>
                   <NativeSelect {...form.register(key)}>
                     <option value="unknown">{translateUi("Not specified")}</option>
                     <option value="yes">{translateUi("Supported")}</option>
@@ -166,14 +220,56 @@ export function ModelFormEditor({
               ),
             )}
           </div>
+          {!model && (
+            <Label className="flex items-center gap-2">
+              <Checkbox
+                checked={automatic}
+                disabled={!!createdDraft}
+                onCheckedChange={(value) => setAutomatic(value === true)}
+              />
+              {translateUi("Create billing identity automatically")}
+            </Label>
+          )}
+          {(model || !automatic) && (
+            <Field title={translateUi("Billing identity")}>
+              <NativeSelect {...form.register("billing_service_id")}>
+                <option value="">{translateUi("No billing identity")}</option>
+                {form.watch("billing_service_id") &&
+                  !offerings.data?.pages.some((page) =>
+                    page.records.some(
+                      (r) => r.id === form.watch("billing_service_id"),
+                    ),
+                  ) && (
+                    <option value={form.watch("billing_service_id")}>
+                      {translateUi("Current offering (load inventory to inspect)")}
+                    </option>
+                  )}
+                {offerings.data?.pages.flatMap((page) =>
+                  page.records.map((record) => (
+                    <option
+                      key={record.id}
+                      value={record.id}
+                      disabled={!record.enabled}
+                    >
+                      {record.name}
+                      {!record.enabled ? translateUi(" (disabled)") : ""}
+                    </option>
+                  )),
+                )}
+              </NativeSelect>
+            </Field>
+          )}
+          {offerings.hasNextPage && (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => void offerings.fetchNextPage()}
+            >
+              {translateUi("Load more billing identities")}
+            </Button>
+          )}
           {model && (
             <>
-              <Field title={translateUi("Logical billing service ID")}>
-                <Input
-                  {...form.register("billing_service_id")}
-                  placeholder={translateUi("Model-offering service UUID")}
-                />
-              </Field>
               <Label className="flex items-center gap-2">
                 <Checkbox
                   checked={form.watch("enabled")}
@@ -186,6 +282,20 @@ export function ModelFormEditor({
             </>
           )}
         </fieldset>
+        <SaveError error={offerings.error} />
+        {createdDraft && !change.isPending && (change.error || uncertain) && (
+          <p className="type-secondary">
+            {translateUi("The disabled draft {{model}} already exists.", { model: createdDraft.public_id })}
+            {createdOffering
+              ? translateUi(" Its billing identity was also created. Retry to link it, or open the draft and select the existing identity.")
+              : translateUi(" Open the draft to finish setup if you leave this form.")}
+          </p>
+        )}
+        {uncertain && !change.isPending && (
+          <p role="alert" className="type-secondary">
+            {translateUi("The create response was not confirmed. Reload the model and billing-identity inventories before creating anything again. An unlinked identity is safe to keep and select later.")}
+          </p>
+        )}
         <SaveError error={change.error} reload={reload} />
         <EditErrors />
         {!readOnly && (
@@ -203,6 +313,7 @@ export function ModelFormEditor({
               variant="primary"
               disabled={
                 change.isPending ||
+                uncertain ||
                 !form.formState.isValid ||
                 (!!model && !form.formState.isDirty)
               }

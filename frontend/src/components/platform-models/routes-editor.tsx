@@ -1,5 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
+import { useModelCredentials } from "@/hooks/use-model-credentials";
+import { credentialKinds } from "@/schemas/model-credentials";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { routeSchema, type AdminModel } from "@/schemas/platform-models";
@@ -33,6 +35,8 @@ export function RoutesEditor({
     mode: "onChange",
   });
   const change = usePlatformModelChange();
+  const credentials = useModelCredentials();
+  const choices = credentials.data?.pages.flatMap((p) => p.records) ?? [];
   const routes = form.watch("routes");
   function set(index: number, patch: Partial<Route>) {
     form.setValue(
@@ -55,7 +59,9 @@ export function RoutesEditor({
           }
         })}
       >
-        <p className="type-body text-muted-foreground">{translateUi("Private routing configuration. Users see only the public model and retail prices. Every route must serve the same model. Credentials are managed in the service catalog; opening this page sends no provider request.")}</p>
+        <p className="type-body text-muted-foreground">
+          {translateUi("Private routing configuration. Users see only the public model and retail prices. Every route must serve the same model. Credentials are managed in Platform Models → Provider credentials; opening this page sends no provider request.")}
+        </p>
         <fieldset disabled={readOnly || change.isPending} className="space-y-4">
           {routes.map((route, i) => (
             <div
@@ -115,12 +121,31 @@ export function RoutesEditor({
               </Field>
               <div className="grid gap-4 sm:grid-cols-2">
                 <Field title={translateUi("Credential catalog-service ID")}>
-                  <Input
+                  <NativeSelect
                     value={route.credential_service_id}
                     onChange={(e) =>
                       set(i, { credential_service_id: e.target.value })
                     }
-                  />
+                  >
+                    <option value="">{translateUi("Choose a provider credential")}</option>
+                    {route.credential_service_id &&
+                      !choices.some(
+                        (c) => c.id === route.credential_service_id,
+                      ) && (
+                        <option value={route.credential_service_id} disabled>
+                          {translateUi("Current credential (load inventory to inspect)")}
+                        </option>
+                      )}
+                    {choices.map((c) => (
+                      <option key={c.id} value={c.id} disabled={!c.enabled}>
+                        {c.name} —{" "}
+                        {c.kind
+                          ? translateUi(credentialKinds[c.kind])
+                          : translateUi("Legacy provider credential")}
+                        {!c.enabled ? translateUi(" (disabled)") : ""}
+                      </option>
+                    ))}
+                  </NativeSelect>
                 </Field>
                 <Field title={translateUi("Native model")}>
                   <Input
@@ -275,6 +300,16 @@ export function RoutesEditor({
             >{translateUi("Add private route")}</Button>
           )}
         </fieldset>
+        <SaveError error={credentials.error} />
+        {credentials.hasNextPage && (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => void credentials.fetchNextPage()}
+          >
+            {translateUi("Load more credentials")}
+          </Button>
+        )}
         <SaveError error={change.error} reload={reload} />
         <EditErrors />
         {!readOnly && (

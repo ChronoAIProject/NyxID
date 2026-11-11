@@ -402,5 +402,17 @@
   "Failed to deny the request": "Failed to deny the request",
   "Failed to approve request": "Failed to approve request",
   "Failed to reject request": "Failed to reject request",
-  "Failed to disconnect node": "Failed to disconnect node"
+  "Failed to disconnect node": "Failed to disconnect node",
+  "Choose a .json key file of at most 64 KiB.": "Choose a .json key file of at most 64 KiB.",
+  "Could not read the selected key file.": "Could not read the selected key file.",
+  "Enter a credential of at most 64 KiB.": "Enter a credential of at most 64 KiB.",
+  "Enter a valid provider API key.": "Enter a valid provider API key.",
+  "Choose a Google Cloud service_account JSON key with the standard Google endpoints and required fields. External-account credentials are not supported.": "Choose a Google Cloud service_account JSON key with the standard Google endpoints and required fields. External-account credentials are not supported.",
+  "The credential changed or an enabled route still references it. Reload the inventory before trying again.": "The credential changed or an enabled route still references it. Reload the inventory before trying again.",
+  "Could not save the credential. Check the input and reload the inventory before retrying; the save may already have completed.": "Could not save the credential. Check the input and reload the inventory before retrying; the save may already have completed.",
+  "Platform models are read-only.": "Platform models are read-only.",
+  "Confirm your verification before creating a revision": "Confirm your verification before creating a revision",
+  "Enter a verification reference": "Enter a verification reference",
+  "Verification source must be at most 1000 UTF-8 bytes with no control characters": "Verification source must be at most 1000 UTF-8 bytes with no control characters",
+  "Platform models are read-only for this account.": "Platform models are read-only for this account."
 }

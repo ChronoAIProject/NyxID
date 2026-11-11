@@ -1,5 +1,6 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
+import { ProviderCredentials } from "@/components/platform-models/credentials";
 import { titleCase } from "@/schemas/platform-models";
 import { PublicPreview } from "@/components/platform-models/public-preview";
 import { useBreadcrumbLabel } from "@/components/layout/breadcrumb-context";
@@ -43,6 +44,7 @@ export function AdminPlatformModelsPage() {
       {readOnly && (
         <p className="type-secondary text-muted-foreground">{translateUi("Read-only. Editing requires an administrator with Platform Models enabled.")}</p>
       )}
+      <ProviderCredentials readOnly={readOnly} />
       {!readOnly && !creating && (
         <Button variant="primary" onClick={() => setCreating(true)}>{translateUi("Create model")}</Button>
       )}
@@ -81,7 +83,7 @@ export function AdminPlatformModelsPage() {
                   </p>
                 </div>
                 <div className="type-secondary text-muted-foreground">
-                  {titleCase(model.lifecycle)} ·{" "}
+                  {translateUi(titleCase(model.lifecycle))} ·{" "}
                   {model.enabled ? translateUi("Enabled") : translateUi("Disabled")}{translateUi(" · Revision")}{" "}
                   {model.revision}
                 </div>
@@ -130,7 +132,7 @@ export function AdminPlatformModelDetailPage() {
         <p className="type-body">
           {model.execution_ready
             ? translateUi("Execution ready")
-            : translateUi("Execution unavailable: {{value1}}", { value1: titleCase(model.blocking_reason) })}
+            : translateUi("Execution unavailable: {{value1}}", { value1: translateUi(titleCase(model.blocking_reason)) })}
         </p>
         <p className="type-secondary text-muted-foreground">{translateUi("Required fleet readiness: ")}{model.required_readiness.join(", ")}{translateUi(". Feature access does not override model readiness or entitlements. ")}</p>
       </div>
