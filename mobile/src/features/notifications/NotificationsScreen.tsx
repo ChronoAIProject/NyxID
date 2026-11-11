@@ -11,20 +11,27 @@ import {
   AtSign,
   Bot,
   CalendarClock,
-  CircleAlert,
+  AlertTriangle,
+  CircleCheck,
   CircleHelp,
   MessageSquare,
+  Bell,
+  UserRound,
   type LucideIcon,
 } from "lucide-react-native";
 import type { WorkspaceScreenProps } from "../../app/navigationTypes";
-import { useOpenWorkspaceChat, useWorkspaceBack } from "../../app/WorkspaceHeader";
+import {
+  useOpenWorkspaceChat,
+  useWorkspaceBack,
+} from "../../app/WorkspaceHeader";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
+import { AgentAvatar, AgentAvatarStack } from "../../components/AgentAvatar";
+import { ServiceIcon } from "../../components/ServiceIcon";
 import { SegmentControl } from "../../components/SegmentControl";
 import { SkeletonRows } from "../../components/Skeleton";
 import {
   SettingsGroup,
   SettingsRow,
-  useSettingsHeaderAction,
 } from "../../components/settings/SettingsList";
 import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
 import { usePullRefresh } from "../../hooks/usePullRefresh";
@@ -47,6 +54,9 @@ import {
   notificationTarget,
   notificationTime,
   notificationTitle,
+  notificationSentence,
+  notificationFilterCount,
+  notificationPlatformSlug,
   notificationTone,
   type NotificationTone,
 } from "./notificationPresentation";
@@ -60,8 +70,8 @@ import {
 } from "./useNotifications";
 
 const KIND_ICON: Record<NotificationKind, LucideIcon> = {
-  automation_result: CalendarClock,
-  automation_problem: CircleAlert,
+  automation_result: CircleCheck,
+  automation_problem: AlertTriangle,
   needs_decision: CircleHelp,
   agent_update: Bot,
   chat_update: MessageSquare,
@@ -121,10 +131,10 @@ function toneColors(colors: ThemeColors, tone: NotificationTone) {
       return colors.warningTone;
     case "danger":
       return colors.dangerTone;
-    case "info":
-      return colors.infoTone;
+    case "success":
+      return colors.successTone;
     default:
-      return colors.primaryTone;
+      return { bg: colors.cardSoft, text: colors.textMuted, border: colors.border };
   }
 }
 
@@ -161,6 +171,21 @@ export function NotificationRow({
   const tone = notificationTone(item.kind);
   const palette = toneColors(colors, tone);
   const Icon = KIND_ICON[item.kind];
+  const sentence = notificationSentence(item);
+  const agents = (item.participants ?? [])
+    .filter((actor) => actor.type === "agent" && actor.id)
+    .map((actor) => ({
+      id: actor.id!,
+      name: actor.name,
+      display_name: actor.display_name,
+      kind: actor.kind ?? ("unknown" as const),
+    }));
+  const Fallback =
+    item.actor?.type === "automation"
+      ? CalendarClock
+      : item.actor?.type === "person"
+        ? UserRound
+        : Bell;
   const pending = notificationPending(item);
   const count = notificationCountLabel(item.count);
   const time = notificationTime(item.updated_at, now);
@@ -173,27 +198,81 @@ export function NotificationRow({
       testID={`notification-${item.id}`}
       style={({ pressed }) => [
         styles.row,
-        { backgroundColor: pressed ? colors.navActive : !item.read ? colors.cardSoft : "transparent" },
+        {
+          backgroundColor: pressed
+            ? colors.navActive
+            : !item.read
+              ? colors.cardSoft
+              : "transparent",
+        },
       ]}
     >
-      <View style={[styles.iconTile, { backgroundColor: palette.bg }]}>
-        <Icon size={18} color={palette.text} />
+      <View
+        testID={`notification-avatar-${agents.length ? "crew" : (item.actor?.type ?? "system")}`}
+        style={styles.avatar}
+      >
+        {agents.length ? (
+          <AgentAvatarStack agents={agents} size="lg" surface={colors.bg} />
+        ) : item.actor?.type === "agent" ? (
+          <AgentAvatar
+            agent={{
+              id: item.actor.id ?? item.source.agent_id ?? item.actor.name,
+              name: item.actor.name,
+              display_name: item.actor.display_name,
+              kind: item.actor.kind ?? "unknown",
+            }}
+            size="lg"
+          />
+        ) : (
+          <View
+            style={[styles.iconTile, { backgroundColor: colors.navActive }]}
+          >
+            <Fallback size={18} color={colors.textMuted} />
+          </View>
+        )}
+        <View
+          testID={`notification-badge-${item.kind}`}
+          style={[
+            styles.kindBadge,
+            { backgroundColor: colors.bg, borderColor: colors.bg },
+          ]}
+        >
+          {item.kind === "chat_update" && item.platform ? (
+            <ServiceIcon
+              slug={notificationPlatformSlug(item.platform)}
+              size="2xs"
+            />
+          ) : (
+            <Icon testID={`notification-kind-icon-${item.kind}`} size={12} color={palette.text} />
+          )}
+        </View>
       </View>
       <View style={styles.body}>
         <View style={styles.titleLine}>
           <Text
-            numberOfLines={1}
+            numberOfLines={3}
             style={[
               styles.title,
               { color: colors.textPrimary },
               !item.read && styles.titleUnread,
             ]}
           >
-            {notificationTitle(item)}
+            {item.actor ? (
+              <>
+                <Text style={styles.emphasis}>{sentence.actor}</Text>
+                {sentence.action ? ` ${sentence.action}` : ""}
+                {sentence.target ? (
+                  <>
+                    {" "}
+                    <Text style={styles.emphasis}>{sentence.target}</Text>
+                  </>
+                ) : null}
+                {sentence.platform ? ` ${sentence.platform}` : ""}
+              </>
+            ) : (
+              notificationTitle(item)
+            )}
           </Text>
-          {time ? (
-            <Text style={[styles.time, { color: colors.textMuted }]}>{time}</Text>
-          ) : null}
         </View>
         {item.preview ? (
           <Text
@@ -203,18 +282,46 @@ export function NotificationRow({
             {item.preview}
           </Text>
         ) : null}
+        <View style={styles.metaLine}>
+          {item.source.label ? (
+            <View
+              style={[styles.sourceChip, { backgroundColor: colors.navActive }]}
+            >
+              <Text
+                numberOfLines={1}
+                style={[styles.time, { color: colors.textSecondary }]}
+              >
+                {item.source.label}
+              </Text>
+            </View>
+          ) : null}
+          {time ? (
+            <Text style={[styles.time, { color: colors.textMuted }]}>
+              {time}
+            </Text>
+          ) : null}
+        </View>
         {count || pending ? (
           <View style={styles.metaLine}>
             {count ? (
-              <Chip label={count} tone="default" colors={colors} styles={styles} />
+              <Chip
+                label={count}
+                tone="default"
+                colors={colors}
+                styles={styles}
+              />
             ) : null}
             {pending ? (
-              <Chip label="Needs you" tone="warning" colors={colors} styles={styles} />
+              <Chip
+                label="Needs you"
+                tone="warning"
+                colors={colors}
+                styles={styles}
+              />
             ) : null}
           </View>
         ) : null}
       </View>
-
     </Pressable>
   );
 }
@@ -274,12 +381,7 @@ export function NotificationsScreen({
   const markAll = useCallback(() => {
     if (asOf) markRead.mutate({ all: true, before: asOf });
   }, [asOf, markRead.mutate]);
-  useSettingsHeaderAction(navigation, {
-    label: "Mark all notifications as read",
-    enabled: enabled && unread > 0 && !!asOf && !markRead.isPending,
-    busy: markRead.isPending,
-    onPress: markAll,
-  });
+
   const open = useCallback(
     (item: AssistantNotification) => {
       if (!item.read) markRead.mutate({ ids: [item.id] });
@@ -319,9 +421,7 @@ export function NotificationsScreen({
   const segments = NOTIFICATION_FILTERS.map((value) => ({
     id: value,
     label: NOTIFICATION_FILTER_LABELS[value],
-    ...(value === "needs_you" && summary.data?.needs_decision_count
-      ? { count: summary.data.needs_decision_count }
-      : {}),
+    count: notificationFilterCount(summary.data, value),
   }));
   const loadMore = () => {
     if (feed.hasNextPage && !feed.isFetchingNextPage) void feed.fetchNextPage();
@@ -332,7 +432,9 @@ export function NotificationsScreen({
       <Notice message="Notifications are not available for this account yet." />
     );
   } else if (feed.isPending) {
-    empty = <SkeletonRows rows={4} accessibilityLabel="Loading notifications" />;
+    empty = (
+      <SkeletonRows rows={4} accessibilityLabel="Loading notifications" />
+    );
   } else if (feed.isError) {
     empty = (
       <>
@@ -391,7 +493,9 @@ export function NotificationsScreen({
           <NotificationRow item={item} now={now} onPress={open} />
         )}
         ItemSeparatorComponent={() => (
-          <View style={[styles.separator, { backgroundColor: colors.borderSoft }]} />
+          <View
+            style={[styles.separator, { backgroundColor: colors.borderSoft }]}
+          />
         )}
         ListEmptyComponent={empty}
         ListFooterComponent={
@@ -418,6 +522,33 @@ export function NotificationsScreen({
         contentContainerStyle={styles.listContent}
         keyboardShouldPersistTaps="handled"
       />
+      <View style={[styles.readFooter, { borderTopColor: colors.borderSoft }]}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Mark all notifications as read"
+          accessibilityState={{
+            disabled: !enabled || unread === 0 || !asOf || markRead.isPending,
+          }}
+          disabled={!enabled || unread === 0 || !asOf || markRead.isPending}
+          onPress={markAll}
+          testID="notifications-mark-all"
+          style={styles.footer}
+        >
+          <Text
+            style={[
+              styles.footerLabel,
+              {
+                color:
+                  enabled && unread > 0 && asOf && !markRead.isPending
+                    ? colors.primary
+                    : colors.textMuted,
+              },
+            ]}
+          >
+            Mark all notifications as read
+          </Text>
+        </Pressable>
+      </View>
     </WorkspacePage>
   );
 }
@@ -439,9 +570,34 @@ function createStyles(colors: ThemeColors) {
     iconTile: {
       width: 36,
       height: 36,
-      borderRadius: radius.md,
+      borderRadius: radius.full,
       alignItems: "center",
       justifyContent: "center",
+    },
+    avatar: { position: "relative", flexShrink: 0, marginTop: 2 },
+    kindBadge: {
+      position: "absolute",
+      bottom: -3,
+      right: -3,
+      width: 18,
+      height: 18,
+      borderRadius: 9,
+      borderWidth: 2,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    emphasis: { fontFamily: fonts.bodySemi, fontWeight: "600" },
+    sourceChip: {
+      maxWidth: "75%",
+      paddingHorizontal: 6,
+      paddingVertical: 2,
+      borderRadius: radius.sm,
+    },
+    readFooter: { borderTopWidth: StyleSheet.hairlineWidth },
+    footerLabel: {
+      ...typeScale.caption,
+      fontFamily: fonts.bodySemi,
+      textAlign: "center",
     },
     body: { flex: 1, minWidth: 0, gap: 2 },
     titleLine: {
@@ -474,6 +630,10 @@ function createStyles(colors: ThemeColors) {
       gap: spacing.xs,
     },
     emptyTitle: { ...typeScale.title, textAlign: "center" },
-    emptyText: { ...typeScale.body, textAlign: "center", color: colors.textMuted },
+    emptyText: {
+      ...typeScale.body,
+      textAlign: "center",
+      color: colors.textMuted,
+    },
   });
 }

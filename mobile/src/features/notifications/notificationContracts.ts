@@ -46,12 +46,28 @@ export const notificationSourceSchema = z.object({
 });
 export type NotificationSource = z.infer<typeof notificationSourceSchema>;
 
+/** Identity resolved after the source's live access checks. Older servers omit it. */
+export const notificationActorSchema = z.object({
+  type: z.enum(["agent", "automation", "person", "system"]),
+  id: z.string().nullable().optional(),
+  name: z.string(),
+  display_name: z.string().nullable().optional(),
+  kind: z.enum(["nyxbot", "specialist"]).nullable().optional(),
+});
+export type NotificationActor = z.infer<typeof notificationActorSchema>;
+
 /** One feed row. Previews are server-rendered, single line, bounded text. */
 export const notificationSchema = z.object({
   id: z.string().min(1),
   kind: notificationKindSchema,
   count: z.number().int().min(0).default(1),
   source: notificationSourceSchema,
+  actor: notificationActorSchema.optional(),
+  platform: z.string().nullable().optional(),
+  participants: notificationActorSchema.array().max(3).optional(),
+  /** Stable terminal codes; action wording belongs to the client. */
+  outcome: z.string().nullable().optional(),
+  reason: z.string().nullable().optional(),
   title: z.string().default(""),
   preview: z.string().default(""),
   url: z.string().nullable().default(null),
@@ -85,6 +101,10 @@ export const notificationSourceCountSchema = z.object({
   unread: z.number().int().min(0),
 });
 export const notificationSummarySchema = z.object({
+  /** Same live visibility rules as unread_count; one count per feed row. */
+  by_kind: z
+    .partialRecord(notificationKindSchema, z.number().int().nonnegative())
+    .optional(),
   unread_count: z.number().int().min(0).default(0),
   needs_decision_count: z.number().int().min(0).default(0),
   /** Bounded (200 entries); `by_source_truncated` says more sources exist. */

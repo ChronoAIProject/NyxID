@@ -12083,5 +12083,17 @@
   "Skipped": "Skipped",
   "Some activity or confirmation details are unavailable in this app version. Refresh history or update the app.": "Some activity or confirmation details are unavailable in this app version. Refresh history or update the app.",
   "Status unavailable": "Status unavailable",
-  "Workspace details unavailable": "Workspace details unavailable"
+  "Workspace details unavailable": "Workspace details unavailable",
+  "closed a decision": "closed a decision",
+  "closed a decision in": "closed a decision in",
+  "could not deliver its result": "could not deliver its result",
+  "could not finish in": "could not finish in",
+  "finished": "finished",
+  "mentioned you in": "mentioned you in",
+  "needs your decision in": "needs your decision in",
+  "on {{platform}}": "on {{platform}}",
+  "replied in": "replied in",
+  "reported back in": "reported back in",
+  "was paused": "was paused",
+  "was skipped": "was skipped"
 }

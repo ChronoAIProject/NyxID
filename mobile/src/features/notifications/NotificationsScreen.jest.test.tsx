@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react-native";
-import { NotificationsScreen } from "./NotificationsScreen";
+import { NotificationsScreen, NotificationRow } from "./NotificationsScreen";
 import { notificationSchema } from "./notificationContracts";
+import { lightColors } from "../../theme/mobileTheme";
 
 const MOCK_C = `nyxa-${"a".repeat(32)}`;
 const MOCK_AGENT = "7c0f6a8e-2b2e-4a1a-9f1f-0d2c5a6b7c8d";
@@ -11,7 +12,6 @@ const mockFilters: string[] = [];
 const mockFetched: string[] = [];
 let mockUnreadCount = 1;
 let mockHasNextPage = true;
-let mockHeader: { label: string; enabled: boolean; onPress: () => void } | undefined;
 const mockRows = [
   notificationSchema.parse({
     id: "n1",
@@ -68,9 +68,6 @@ jest.mock("../../components/settings/SettingsList", () => {
   return {
     SettingsGroup: ({ children }: { children: React.ReactNode }) => React.createElement(View, null, children),
     SettingsRow: ({ label }: { label: string }) => React.createElement(Text, null, label),
-    useSettingsHeaderAction: (_navigation: unknown, value: typeof mockHeader) => {
-      mockHeader = value;
-    },
   };
 });
 jest.mock("./useNotifications", () => ({
@@ -110,7 +107,6 @@ describe("NotificationsScreen", () => {
     mockFetched.length = 0;
     mockUnreadCount = 1;
     mockHasNextPage = true;
-    mockHeader = undefined;
     (navigation as { push: jest.Mock }).push.mockClear();
   });
 
@@ -143,9 +139,9 @@ describe("NotificationsScreen", () => {
 
   it("marks everything read behind the server fence and switches mockFilters", async () => {
     await render(<NotificationsScreen navigation={navigation} route={{ key: "r", name: "Notifications", params: undefined }} />);
-    expect(mockHeader?.label).toBe("Mark all notifications as read");
-    expect(mockHeader?.enabled).toBe(true);
-    mockHeader!.onPress();
+    const footer = screen.getByRole("button", { name: "Mark all notifications as read" });
+    expect(footer).toBeEnabled();
+    await fireEvent.press(footer);
     expect(mockReads).toEqual([{ all: true, before: MOCK_AS_OF }]);
     await fireEvent.press(screen.getByRole("tab", { name: /Needs you/ }));
     expect(mockFilters.at(-1)).toBe("needs_you");
@@ -156,20 +152,50 @@ describe("NotificationsScreen", () => {
     await render(<NotificationsScreen navigation={navigation} route={{ key: "r", name: "Notifications", params: undefined }} />);
     await fireEvent.press(screen.getByRole("tab", { name: "Automations" }));
     expect(screen.getByText("No automation results yet.")).toBeTruthy();
-    expect(mockHeader).toMatchObject({
-      label: "Mark all notifications as read",
-      enabled: true,
-    });
-    mockHeader!.onPress();
+    const footer = screen.getByRole("button", { name: "Mark all notifications as read" });
+    expect(footer).toBeEnabled();
+    await fireEvent.press(footer);
     expect(mockReads).toEqual([{ all: true, before: MOCK_AS_OF }]);
   });
 
   it("disables the global read action when the summary has no unread notifications", async () => {
     mockUnreadCount = 0;
     await render(<NotificationsScreen navigation={navigation} route={{ key: "r", name: "Notifications", params: undefined }} />);
-    expect(mockHeader).toMatchObject({
-      label: "Mark all notifications as read",
-      enabled: false,
-    });
+    expect(screen.getByRole("button", { name: "Mark all notifications as read" })).toBeDisabled();
   });
+});
+
+
+it.each([
+  ["automation_result", "Morning digest finished", "automation"],
+  ["automation_problem", "Morning digest failed", "automation"],
+  ["needs_decision", "Researcher needs your decision in Launch plan", "agent"],
+  ["agent_update", "Researcher reported back in Launch plan", "agent"],
+  ["chat_update", "Researcher replied in Launch plan on Lark", "agent"],
+  ["group_mention", "Researcher mentioned you in Launch plan", "crew"],
+])("renders the %s source avatar, badge and sentence", async (kind, sentence, avatar) => {
+  const agent = { type: "agent", id: "researcher", name: "Researcher", kind: "specialist" };
+  const item = notificationSchema.parse({ id: "source-row", kind, actor: avatar === "automation" ? { type: "automation", name: "Morning digest" } : agent,
+    participants: avatar === "crew" ? [agent] : [], platform: "lark",
+    source: { type: avatar === "crew" ? "collaboration_group" : "conversation", id: MOCK_C, label: "Launch plan" },
+    count: 3, preview: "The release checklist is ready.", created_at: MOCK_AS_OF, updated_at: MOCK_AS_OF });
+  await render(<NotificationRow item={item} now={Date.parse(MOCK_AS_OF)} onPress={() => {}} />);
+  expect(screen.getByTestId(`notification-avatar-${avatar}`)).toBeTruthy();
+  expect(screen.getByTestId(`notification-badge-${kind}`)).toBeTruthy();
+  const badge = {
+    automation_result: lightColors.successTone.text,
+    automation_problem: lightColors.dangerTone.text,
+    needs_decision: lightColors.warningTone.text,
+    agent_update: lightColors.textMuted,
+    group_mention: lightColors.textMuted,
+  } as const;
+  if (kind in badge) {
+    const [icon] = screen.getByTestId(`notification-badge-${kind}`).queryAll(
+      (node) => node.props["data-testid"] === `notification-kind-icon-${kind}`,
+    );
+    expect(icon?.props.stroke).toBe(badge[kind as keyof typeof badge]);
+  }
+  expect(screen.getByTestId("notification-source-row").props.accessibilityLabel).toContain(sentence);
+  expect(screen.getByText("3 new")).toBeTruthy();
+  expect(screen.queryByTestId("notification-unread-dot")).toBeNull();
 });

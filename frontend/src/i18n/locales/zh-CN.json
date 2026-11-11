@@ -12083,5 +12083,17 @@
   "Skipped": "已跳过",
   "Some activity or confirmation details are unavailable in this app version. Refresh history or update the app.": "此应用版本无法显示部分操作或确认信息。请刷新对话记录或更新应用。",
   "Status unavailable": "状态不可用",
-  "Workspace details unavailable": "工作区详细信息不可用"
+  "Workspace details unavailable": "工作区详细信息不可用",
+  "closed a decision": "已处理决策",
+  "closed a decision in": "已处理决策，位于",
+  "could not deliver its result": "未能送达结果",
+  "could not finish in": "未能完成回复，位于",
+  "finished": "已完成",
+  "mentioned you in": "提到了你，位于",
+  "needs your decision in": "需要你做出决策，位于",
+  "on {{platform}}": "通过 {{platform}}",
+  "replied in": "已回复，位于",
+  "reported back in": "已汇报，位于",
+  "was paused": "已暂停",
+  "was skipped": "已跳过"
 }

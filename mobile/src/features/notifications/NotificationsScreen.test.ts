@@ -41,7 +41,6 @@ function setup(options: {
   const pushed: unknown[] = [];
   const filters: NotificationFilter[] = [];
   const fetched: string[] = [];
-  let header: { label: string; enabled: boolean; busy: boolean; onPress: () => void } | undefined;
   const h = hookHarness<E>({
     "react/jsx-runtime": {
       Fragment: "Fragment",
@@ -62,14 +61,13 @@ function setup(options: {
       useWorkspaceBack: () => {},
     },
     "../../components/DynamicTypeText": { DynamicTypeText: "Text" },
+    "../../components/AgentAvatar": { AgentAvatar: "AgentAvatar", AgentAvatarStack: "AgentAvatarStack" },
+    "../../components/ServiceIcon": { ServiceIcon: "ServiceIcon" },
     "../../components/SegmentControl": { SegmentControl: "SegmentControl" },
     "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
     "../../components/settings/SettingsList": {
       SettingsGroup: "SettingsGroup",
       SettingsRow: "SettingsRow",
-      useSettingsHeaderAction: (_navigation: unknown, value: typeof header) => {
-        header = value;
-      },
     },
     "../../components/workspace/WorkspaceUI": { Notice: "Notice", WorkspacePage: "WorkspacePage" },
     "../../hooks/usePullRefresh": {
@@ -118,7 +116,7 @@ function setup(options: {
   const all = () => nodes(h.value());
   const list = () => all().find((n) => n.type === "FlatList")!;
   const renderedRows = () => (list().props.data as any[]).map((item) => expand(list().props.renderItem({ item })));
-  return { h, module, all, list, renderedRows, reads, opened, pushed, filters, fetched, header: () => header! };
+  return { h, module, all, list, renderedRows, reads, opened, pushed, filters, fetched, footer: () => { const button = all().find((n) => n.props.testID === "notifications-mark-all")!; return { label: button.props.accessibilityLabel, enabled: !button.props.disabled, onPress: button.props.onPress }; } };
 }
 
 test("rows show title, preview, counts and unread state; tapping marks read and opens the thread", () => {
@@ -211,7 +209,7 @@ test("mark all read uses the server fence, filters re-query by kind and the end 
     hasNextPage: true,
     summary: { unread_count: 1, needs_decision_count: 2, by_source: [], by_source_truncated: false },
   });
-  const header = x.header();
+  const header = x.footer();
   assert.equal(header.label, "Mark all notifications as read");
   assert.equal(header.enabled, true);
   header.onPress();
@@ -231,7 +229,7 @@ test("mark all read uses the server fence, filters re-query by kind and the end 
   assert.deepEqual(x.fetched, ["needs_you", "needs_you"]);
   x.h.unmount();
   const none = setup({ pages: [{ as_of: AS_OF, next_cursor: null, items: [] }], summary: { unread_count: 0, needs_decision_count: 0, by_source: [], by_source_truncated: false } });
-  assert.equal(none.header().enabled, false, "nothing to mark");
+  assert.equal(none.footer().enabled, false, "nothing to mark");
   assert.ok(nodes(none.list().props.ListEmptyComponent).some((n) => n.type === "Text" && n.props.children === "You're all caught up."));
   assert.deepEqual(none.fetched, [], "an exhausted feed asks for nothing more");
   none.h.unmount();
@@ -310,4 +308,46 @@ test("an empty page with a cursor keeps paging on its own, stops on a repeated c
   assert.equal(hops.module.nextEmptyPageHop("c2", ["c1"]), true);
   assert.equal(hops.module.nextEmptyPageHop(null, []), false);
   hops.h.unmount();
+});
+
+test("each notification kind renders the source avatar, corner badge and client-owned sentence", () => {
+  const actor = { type: "agent", id: "researcher", name: "researcher", display_name: "Researcher", kind: "specialist" };
+  const cases = [
+    ["automation_result", "Morning digest finished", "automation"],
+    ["automation_problem", "Morning digest failed", "automation"],
+    ["needs_decision", "Researcher needs your decision in Launch plan", "agent"],
+    ["agent_update", "Researcher reported back in Launch plan", "agent"],
+    ["chat_update", "Researcher replied in Launch plan on Lark", "agent"],
+    ["group_mention", "Researcher mentioned you in Launch plan", "crew"],
+  ] as const;
+  const x = setup({ pages: [{ as_of: AS_OF, next_cursor: null, items: cases.map(([kind, , avatar], i) => row(`source-${i}`, {
+    kind, count: 3, preview: "The release checklist is ready.", platform: "lark",
+    actor: avatar === "automation" ? { type: "automation", name: "Morning digest", id: T } : actor,
+    participants: avatar === "crew" ? [actor, { ...actor, id: "writer", name: "Writer" }] : [],
+    source: { type: avatar === "crew" ? "collaboration_group" : avatar === "automation" ? "trigger" : "conversation", id: C, label: "Launch plan", ...(avatar === "crew" ? { group_id: G } : {}) },
+  })) }] });
+  x.renderedRows().forEach((rendered, i) => {
+    const [kind, sentence, avatar] = cases[i]!;
+    const all = nodes(rendered);
+    assert.ok(rendered.props.accessibilityLabel.startsWith(sentence));
+    assert.ok(all.some((n) => n.props.testID === `notification-avatar-${avatar}`));
+    assert.ok(all.some((n) => n.props.testID === `notification-badge-${kind}`));
+    assert.ok(all.some((n) => n.type === "Text" && n.props.children === "3 new"));
+    assert.equal(all.some((n) => n.props.testID === "notification-unread-dot"), false);
+    if (kind === "automation_result") assert.ok(all.some((n) => n.type === "CircleCheck"));
+    if (kind === "automation_problem") assert.ok(all.some((n) => n.type === "AlertTriangle"));
+    if (avatar === "agent") assert.ok(all.some((n) => n.type === "AgentAvatar" && n.props.size === "lg" && n.props.agent.id === "researcher"));
+    if (avatar === "crew") assert.ok(all.some((n) => n.type === "AgentAvatarStack" && n.props.agents.length === 2));
+    if (kind === "chat_update") assert.ok(all.some((n) => n.type === "ServiceIcon" && n.props.slug === "api-lark"));
+  });
+  x.h.unmount();
+});
+
+test("all filters use per-kind unread counts and the global read action lives after the list", () => {
+  const x = setup({ pages: [{ as_of: AS_OF, next_cursor: null, items: [] }], summary: { unread_count: 21, needs_decision_count: 3, by_source: [], by_kind: { automation_result: 2, automation_problem: 4, needs_decision: 3, agent_update: 5, chat_update: 6, group_mention: 1 } } });
+  const segments = x.all().find((n) => n.type === "SegmentControl")!;
+  assert.deepEqual(JSON.parse(JSON.stringify(segments.props.segments.map((s: any) => s.count))), [21, 3, 6, 12]);
+  const all = x.all();
+  assert.ok(all.findIndex((n) => n.props.testID === "notifications-mark-all") > all.findIndex((n) => n.type === "FlatList"));
+  x.h.unmount();
 });

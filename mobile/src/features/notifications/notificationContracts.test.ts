@@ -107,3 +107,14 @@ test("filters map to closed kind subsets and Needs you hides resolved cards", ()
   assert.ok(notificationFilterKeeps("all", { kind: "needs_decision", resolved: true }));
   assert.ok(!notificationFilterKeeps("chats", { kind: "automation_result", resolved: false }));
 });
+
+test("actor, platform, bounded crew identities and per-kind counts survive contract parsing", () => {
+  const actor = { type: "agent", id: "researcher", name: "Researcher", kind: "specialist", display_name: "Researcher" };
+  const page = notificationPageSchema.parse({ items: [{ ...item, actor, participants: [actor], platform: "lark", outcome: "failed", reason: "result_delivery_failed" }], as_of: "2026-11-10T08:06:00Z" });
+  assert.equal(page.items[0]!.actor?.kind, "specialist");
+  assert.equal(page.items[0]!.participants?.length, 1);
+  assert.equal(page.items[0]!.platform, "lark");
+  assert.equal(page.items[0]!.reason, "result_delivery_failed");
+  assert.equal(notificationSummarySchema.parse({ by_kind: { chat_update: 7 } }).by_kind?.chat_update, 7);
+  assert.equal(notificationPageSchema.parse({ items: [{ ...item, participants: [actor, actor, actor, actor] }], as_of: "2026-11-10T08:06:00Z" }).items.length, 0);
+});

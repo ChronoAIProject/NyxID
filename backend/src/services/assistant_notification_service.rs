@@ -13,7 +13,7 @@
 //! push state only. Previews are computed at list time from the referenced
 //! source after live ownership checks; rows whose source is gone are purged.
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{Mutex, OnceLock},
     time::Instant,
 };
@@ -1446,11 +1446,38 @@ pub struct SourceDto {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct NotificationActor {
+    #[serde(rename = "type")]
+    pub actor_type: &'static str,
+    pub id: Option<String>,
+    pub name: String,
+    pub display_name: Option<String>,
+    pub kind: Option<String>,
+}
+
+impl NotificationActor {
+    fn system() -> Self {
+        Self {
+            actor_type: "system",
+            id: None,
+            name: "NyxID".into(),
+            display_name: None,
+            kind: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct NotificationItem {
     pub id: String,
     pub kind: &'static str,
     pub count: i64,
     pub source: SourceDto,
+    pub actor: NotificationActor,
+    pub platform: Option<String>,
+    pub participants: Vec<NotificationActor>,
+    pub outcome: Option<String>,
+    pub reason: Option<String>,
     pub title: String,
     pub preview: String,
     pub url: String,
@@ -1844,7 +1871,8 @@ async fn load_lookups(
                 db,
                 GROUP_MESSAGES,
                 doc! {"_id": {"$in": ids(&group_message_ids)}},
-                doc! {"_id": 1, "text": 1, "role": 1, "group_id": 1, "agent_id": 1},
+                doc! {"_id": 1, "text": 1, "role": 1, "group_id": 1, "agent_id": 1,
+                "author_user_id": 1, "author_display_name": 1},
             )
             .await?,
         )
@@ -1862,6 +1890,20 @@ async fn load_lookups(
             .await?,
         )
     };
+    // Resolve crew avatars in the same agent batch as the speaking actors.
+    for group in groups.values() {
+        agent_ids.extend(group.member_agent_ids.iter().cloned());
+    }
+    for message in group_messages.values() {
+        if let Ok(id) = message.get_str("agent_id") {
+            agent_ids.insert(id.to_owned());
+        }
+    }
+    for conversation in conversations.values() {
+        if let Ok(id) = conversation.get_str("agent_id") {
+            agent_ids.insert(id.to_owned());
+        }
+    }
     let agents = if agent_ids.is_empty() {
         HashMap::new()
     } else {
@@ -2132,6 +2174,11 @@ fn item(
             trigger_id: row.source.trigger_id.clone(),
             agent_id: row.source.agent_id.clone(),
         },
+        actor: NotificationActor::system(),
+        platform: None,
+        participants: Vec::new(),
+        outcome: row.outcome.clone(),
+        reason: row.reason.clone(),
         title,
         preview,
         url,
@@ -2190,7 +2237,7 @@ fn ready(item: NotificationItem) -> Built {
     }
 }
 
-fn build(
+fn build_source(
     user_id: &str,
     frontend: &str,
     row: &AssistantNotification,
@@ -2550,6 +2597,122 @@ fn build(
     }
 }
 
+fn agent_identity(lookups: &Lookups, id: &str) -> Option<NotificationActor> {
+    let agent = lookups.agents.get(id)?;
+    if agent
+        .get("destroyed_at")
+        .is_some_and(|value| !matches!(value, bson::Bson::Null))
+    {
+        return None;
+    }
+    let kind = agent
+        .get_str("kind")
+        .ok()
+        .filter(|kind| matches!(*kind, "nyxbot" | "specialist"))?;
+    Some(NotificationActor {
+        actor_type: "agent",
+        id: Some(id.to_owned()),
+        name: label(agent.get_str("name").unwrap_or("Agent"), 80),
+        display_name: agent
+            .get_str("display_name")
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| label(name, 80)),
+        kind: Some(kind.to_owned()),
+    })
+}
+
+/// Enrich only a visible DTO; no identity or platform escapes the source ACL.
+fn build(
+    user_id: &str,
+    frontend: &str,
+    row: &AssistantNotification,
+    lookups: &Lookups,
+    now: DateTime<Utc>,
+) -> Built {
+    let mut built = build_source(user_id, frontend, row, lookups, now);
+    if let Built::Item { item, .. } = &mut built {
+        let source = &row.source;
+        let conversation = source
+            .conversation_id
+            .as_ref()
+            .and_then(|id| lookups.conversations.get(id));
+        let group = source
+            .group_id
+            .as_ref()
+            .and_then(|id| lookups.groups.get(id));
+        item.platform = source
+            .channel_id
+            .as_ref()
+            .and_then(|id| lookups.channels.get(id))
+            .and_then(|channel| channel.get_str("platform").ok())
+            .or_else(|| {
+                conversation
+                    .and_then(|thread| thread.get_document("platform_thread").ok())
+                    .and_then(|platform| platform.get_str("platform").ok())
+            })
+            .map(str::to_owned);
+        if let Some(group) = group {
+            item.source.label = label(&group.name, 80);
+            item.participants = group
+                .member_agent_ids
+                .iter()
+                .filter_map(|id| agent_identity(lookups, id))
+                .take(3)
+                .collect();
+        } else if source.channel_id.is_none()
+            && let Some(title) = conversation
+                .and_then(|thread| thread.get_str("title").ok())
+                .filter(|title| !title.trim().is_empty())
+        {
+            item.source.label = label(title, 80);
+        }
+        item.actor = if matches!(
+            row.kind,
+            NotificationKind::AutomationResult | NotificationKind::AutomationProblem
+        ) {
+            NotificationActor {
+                actor_type: "automation",
+                id: source.trigger_id.clone(),
+                name: item.title.clone(),
+                display_name: None,
+                kind: None,
+            }
+        } else {
+            let message = source
+                .message_id
+                .as_ref()
+                .and_then(|id| lookups.group_messages.get(id))
+                .filter(|message| message.get_str("group_id").ok() == source.group_id.as_deref());
+            let agent_id = source
+                .agent_id
+                .as_deref()
+                .or_else(|| message.and_then(|message| message.get_str("agent_id").ok()))
+                .or_else(|| conversation.and_then(|thread| thread.get_str("agent_id").ok()));
+            agent_id
+                .and_then(|id| agent_identity(lookups, id))
+                .unwrap_or_else(|| {
+                    // Human mentions use the already-authorized public transcript's author.
+                    if agent_id.is_none()
+                        && let Some(message) = message
+                        && message.get_str("role").ok() == Some("user")
+                        && let Ok(name) = message.get_str("author_display_name")
+                    {
+                        return NotificationActor {
+                            actor_type: "person",
+                            id: message.get_str("author_user_id").ok().map(str::to_owned),
+                            name: label(name, 80),
+                            display_name: None,
+                            kind: None,
+                        };
+                    }
+                    NotificationActor::system()
+                })
+        };
+    }
+    built
+}
+
 /// Build DTOs for `rows` (already selected for `user_id`), purging rows whose
 /// source is gone and hiding rows the person can no longer see.
 pub async fn resolve_items(
@@ -2616,6 +2779,7 @@ pub struct SourceUnread {
 pub struct Summary {
     pub unread_count: i64,
     pub needs_decision_count: i64,
+    pub by_kind: BTreeMap<String, i64>,
     pub by_source: Vec<SourceUnread>,
     pub by_source_truncated: bool,
 }
@@ -2847,6 +3011,7 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
         ]}]}}},
         doc! {"$match": {"visible": true}},
         doc! {"$facet": {
+            "by_kind": [{"$group": {"_id": "$kind", "unread": {"$sum": 1}}}],
             "totals": [{"$group": {
                 "_id": bson::Bson::Null,
                 "unread": {"$sum": 1},
@@ -2869,6 +3034,10 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
 /// the person can still see, unseen pending decisions, and a bounded
 /// per-source breakdown for sidebar dots.
 pub async fn summary(db: &Database, user_id: &str) -> AppResult<Summary> {
+    let mut by_kind: BTreeMap<String, i64> = NotificationKind::ALL
+        .into_iter()
+        .map(|kind| (kind.as_str().to_owned(), 0))
+        .collect();
     let now = bson_date(Utc::now());
     let mut cursor = db
         .collection::<Document>(COLLECTION_NAME)
@@ -2878,6 +3047,7 @@ pub async fn summary(db: &Database, user_id: &str) -> AppResult<Summary> {
         return Ok(Summary {
             unread_count: 0,
             needs_decision_count: 0,
+            by_kind,
             by_source: Vec::new(),
             by_source_truncated: false,
         });
@@ -2887,6 +3057,15 @@ pub async fn summary(db: &Database, user_id: &str) -> AppResult<Summary> {
         .ok()
         .and_then(|rows| rows.first())
         .and_then(bson::Bson::as_document);
+    if let Ok(counts) = result.get_array("by_kind") {
+        for entry in counts.iter().filter_map(bson::Bson::as_document) {
+            if let Ok(kind) = entry.get_str("_id")
+                && let Some(count) = by_kind.get_mut(kind)
+            {
+                *count = count_of(entry, "unread");
+            }
+        }
+    }
     let mut by_source: Vec<SourceUnread> = result
         .get_array("by_source")
         .ok()
@@ -2910,6 +3089,7 @@ pub async fn summary(db: &Database, user_id: &str) -> AppResult<Summary> {
     Ok(Summary {
         unread_count: totals.map_or(0, |doc| count_of(doc, "unread")),
         needs_decision_count: totals.map_or(0, |doc| count_of(doc, "needs_decision")),
+        by_kind,
         by_source,
         by_source_truncated,
     })

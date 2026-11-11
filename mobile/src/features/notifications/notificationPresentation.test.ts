@@ -12,6 +12,7 @@ import {
   notificationMarkers,
   notificationTarget,
   notificationTime,
+  notificationSentence,
   notificationTitle,
   unreadForSource,
 } from "./notificationPresentation";
@@ -193,4 +194,12 @@ test("push data yields only closed kinds and notification ids", () => {
   assert.equal(notificationIdFromPushData({ notification_id: " n1 " }), "n1");
   assert.equal(notificationIdFromPushData({ notificationId: "n2" }), "n2");
   assert.equal(notificationIdFromPushData({ request_id: "r" }), null);
+});
+
+test("automation sub-cases have client-owned action phrases and missing agents use system identity", () => {
+  const make = (extra: Record<string, unknown>) => notificationSchema.parse({ id: "wording", kind: "automation_problem", source: { type: "trigger", id: "trigger", label: "Launch" }, actor: { type: "automation", name: "Digest" }, created_at: "2026-11-10T08:00:00Z", updated_at: "2026-11-10T08:05:00Z", ...extra });
+  for (const [extra, action] of [[{ outcome: "paused" }, "was paused"], [{ outcome: "skipped", reason: "queue_full" }, "was skipped"], [{ outcome: "failed", reason: "result_delivery_failed" }, "could not deliver its result"]] as const) {
+    assert.equal(notificationSentence(make(extra)).text, `Digest ${action}`);
+  }
+  assert.equal(notificationSentence(make({ kind: "agent_update", actor: { type: "system", name: "NyxID" } })).text, "NyxID replied in Launch");
 });

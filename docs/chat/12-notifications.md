@@ -146,8 +146,19 @@ List query parameters are `cursor`, `limit` (1–50), `unread_only` (default fal
 or timed-out cards are excluded, matching the summary's unread count.
 The **Needs you** filter sends `kind=needs_decision&pending_only=true`, which
 includes seen pending cards and excludes resolved cards. **All** retains resolved
-decisions as history. Ordering is descending
-`updated_at`, then `_id`. The response is:
+decisions as history. Ordering is descending `updated_at`, then `_id`.
+
+Each item also includes a live `actor` identity (`agent`, `automation`, `person`,
+or `system`), the channel `platform` when present, and up to three live agent
+`participants` for a crew. These use the existing batched lookups after source
+ACL checks; missing or destroyed agents use the system identity. `outcome` and
+`reason` are stable codes for client-owned action wording. The summary's
+`by_kind` contains unread row counts for all six kinds, using the same visibility
+filter and single aggregate as the total. Clients tolerate these additive fields
+being absent during rollout. Rows reuse the sidebar's agent and stacked crew
+avatars, with a small kind badge; mark-all stays in the feed footer.
+
+The list response is:
 
 ```json
 {
@@ -165,6 +176,17 @@ decisions as history. Ordering is descending
       "trigger_id": null,
       "agent_id": "uuid"
     },
+    "actor": {
+      "type": "agent",
+      "id": "uuid",
+      "name": "researcher",
+      "display_name": "Researcher",
+      "kind": "specialist"
+    },
+    "platform": null,
+    "participants": [],
+    "outcome": null,
+    "reason": null,
     "title": "Research",
     "preview": "The report is ready.",
     "url": "https://nyx.example/assistant?c=nyxa-thread",
@@ -189,6 +211,14 @@ Summary uses one aggregate with a bounded source breakdown and returns:
 {
   "unread_count": 4,
   "needs_decision_count": 1,
+  "by_kind": {
+    "automation_result": 1,
+    "automation_problem": 0,
+    "needs_decision": 1,
+    "agent_update": 2,
+    "chat_update": 0,
+    "group_mention": 0
+  },
   "by_source": [{
     "source_type": "conversation",
     "id": "nyxa-thread",

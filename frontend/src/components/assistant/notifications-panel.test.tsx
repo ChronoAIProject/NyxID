@@ -36,7 +36,7 @@ function row(id: string, extra: Record<string, unknown> = {}) {
 const requests: { endpoint: string; method: string; body?: unknown }[] = [];
 let pages: Record<string, { items: Record<string, unknown>[]; next_cursor: string | null; as_of: string }>;
 let listStatus = 200;
-let summary: { unread_count: number; needs_decision_count: number; by_source: Record<string, unknown>[] };
+let summary: { unread_count: number; needs_decision_count: number; by_source: Record<string, unknown>[]; by_kind?: Record<string, number> };
 /** The fake server remembers what was marked read, as the real one does. */
 const readIds = new Set<string>();
 
@@ -133,18 +133,17 @@ describe("NotificationsPanel", () => {
     await screen.findByRole("list", { name: "Notifications" });
     const chips = screen.getByRole("tablist", { name: "Filter notifications" });
     const tabs = within(chips).getAllByRole("tab");
-    expect(tabs.map((tab) => tab.textContent)).toEqual(["All", "Needs you", "Automations", "Chats"]);
+    expect(tabs.map((tab) => tab.getAttribute("aria-label"))).toEqual(["All", "Needs you", "Automations", "Chats"]);
     expect(chips).toHaveClass("flex-nowrap", "overflow-x-auto");
     expect(chips).not.toHaveClass("flex-wrap");
     for (const tab of tabs) expect(tab).toHaveClass("whitespace-nowrap", "shrink-0");
 
     const markAll = screen.getByRole("button", { name: "Mark all notifications as read" });
-    const controls = markAll.parentElement;
-    expect(controls).toHaveClass("flex-col", "items-stretch");
-    expect(controls).toContainElement(chips);
-    expect(chips).not.toContainElement(markAll);
-    expect(markAll).toHaveClass("self-start");
-    expect(chips.parentElement?.nextElementSibling).toBe(markAll);
+    const footer = markAll.closest("footer");
+    expect(footer).toHaveClass("shrink-0", "border-t");
+    expect(footer).not.toContainElement(chips);
+    expect(footer?.previousElementSibling).toHaveClass("overflow-y-auto");
+
   });
 
   it("changes the filter in the URL (history replaced) and asks the server for that kind subset", async () => {
@@ -152,7 +151,7 @@ describe("NotificationsPanel", () => {
     renderPanel();
     await screen.findByRole("list", { name: "Notifications" });
     const chips = screen.getByRole("tablist", { name: "Filter notifications" });
-    expect(within(chips).getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["All", "Needs you", "Automations", "Chats"]);
+    expect(within(chips).getAllByRole("tab").map((tab) => tab.getAttribute("aria-label"))).toEqual(["All", "Needs you", "Automations", "Chats"]);
     await user.click(within(chips).getByRole("tab", { name: "Needs you" }));
     expect(mocks.update).toHaveBeenCalledWith({ panelTab: "needs_you" }, "replace");
     cleanup();
@@ -338,4 +337,14 @@ describe("NotificationsPanel", () => {
     await act(async () => { await user.keyboard("{Escape}"); });
     expect(onClose).toHaveBeenCalled();
   });
+});
+
+
+it("shows summary unread counts on all four filters", async () => {
+  summary = { unread_count: 21, needs_decision_count: 3, by_source: [], by_kind: { automation_result: 2, automation_problem: 4, needs_decision: 3, agent_update: 5, chat_update: 6, group_mention: 1 } };
+  renderPanel();
+  await waitFor(() => expect(document.querySelector('[data-filter-count="all"]')).toHaveTextContent("21"));
+  expect(document.querySelector('[data-filter-count="needs_you"]')).toHaveTextContent("3");
+  expect(document.querySelector('[data-filter-count="automations"]')).toHaveTextContent("6");
+  expect(document.querySelector('[data-filter-count="chats"]')).toHaveTextContent("12");
 });

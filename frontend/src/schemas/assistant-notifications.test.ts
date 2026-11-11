@@ -87,3 +87,14 @@ describe("filters and settings", () => {
     expect(notificationSettingsSchema.parse({ push: { chat_update: true } }).push.chat_update).toBe(true);
   });
 });
+
+it("preserves live identities, platform and per-kind counts while bounding crew participants", () => {
+  const actor = { type: "agent", id: "researcher", name: "Researcher", display_name: "Researcher", kind: "specialist" };
+  const page = notificationListSchema.parse({ items: [{ ...row, actor, platform: "lark", participants: [actor], outcome: "failed", reason: "result_delivery_failed" }], as_of: row.created_at });
+  expect(page.items[0]?.actor).toEqual(actor);
+  expect(page.items[0]?.platform).toBe("lark");
+  expect(page.items[0]?.participants).toEqual([actor]);
+  expect(page.items[0]?.reason).toBe("result_delivery_failed");
+  expect(notificationSummarySchema.parse({ by_kind: { chat_update: 7 } }).by_kind?.chat_update).toBe(7);
+  expect(notificationListSchema.parse({ items: [{ ...row, participants: [actor, actor, actor, actor] }], as_of: row.created_at }).items).toEqual([]);
+});

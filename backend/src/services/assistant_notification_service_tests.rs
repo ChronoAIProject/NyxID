@@ -780,6 +780,12 @@ async fn org_guest_lane_notifies_the_route_admin_from_the_public_transcript_only
     let listed = list(&f.state, &admin, &page(10)).await.unwrap();
     assert_eq!(listed.items.len(), 1);
     assert_eq!(listed.items[0].preview, "public reply");
+    assert_eq!(listed.items[0].actor.actor_type, "agent");
+    assert_eq!(
+        listed.items[0].actor.id.as_deref(),
+        Some(researcher.id.as_str())
+    );
+    assert_eq!(listed.items[0].platform.as_deref(), Some("telegram"));
     assert!(!listed.items[0].preview.contains("private"));
     assert!(listed.items[0].url.contains("details=channels"));
     assert!(listed.items[0].url.contains(&researcher.id));
@@ -801,6 +807,63 @@ async fn org_guest_lane_notifies_the_route_admin_from_the_public_transcript_only
             .is_empty()
     );
     assert_eq!(rows_of(&f, &admin).await.len(), 1);
+    // The member lane belongs to its participant, not the channel's admin.
+    db.collection(MEMBERSHIPS)
+        .insert_one(test_membership(&org, &f.owner, OrgRole::Member, None))
+        .await
+        .unwrap();
+    let member_thread = seed_conversation(&f, &f.owner, "Member launch room").await;
+    db.collection::<Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &member_thread},
+            doc! {"$set": {"agent_owner_id": &org}},
+        )
+        .await
+        .unwrap();
+    let member_row = seeded(
+        &f.owner,
+        NotificationKind::ChatUpdate,
+        NotificationSource {
+            source_type: SourceType::ChannelChat,
+            id: thread.clone(),
+            thread_id: Some(thread.clone()),
+            channel_id: Some(channel.clone()),
+            conversation_id: Some(member_thread),
+            agent_id: Some(researcher.id.clone()),
+            message_id: Some(reply),
+            lane: Some(LANE_ORG_MEMBER.into()),
+            ..Default::default()
+        },
+    );
+    insert_row(&f, &member_row).await;
+    let listed = list(&f.state, &f.owner, &page(10)).await.unwrap();
+    assert_eq!(listed.items.len(), 1);
+    assert_eq!(
+        listed.items[0].actor.id.as_deref(),
+        Some(researcher.id.as_str())
+    );
+    assert_eq!(listed.items[0].platform.as_deref(), Some("telegram"));
+    assert_eq!(listed.items[0].preview, "public reply");
+    let counts = summary(db, &f.owner).await.unwrap();
+    assert_eq!(counts.by_kind["chat_update"], 1);
+    db.collection::<Document>(MEMBERSHIPS)
+        .update_many(
+            doc! {"org_user_id": &org, "member_user_id": &f.owner},
+            doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        list(&f.state, &f.owner, &page(10))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert_eq!(
+        summary(db, &f.owner).await.unwrap().by_kind["chat_update"],
+        0
+    );
 }
 
 /// Run the settlement producer for a turn whose origin is stamped in memory
@@ -906,6 +969,8 @@ async fn linked_platform_chat_replies_notify_the_owner_while_the_binding_is_live
     let listed = list(&f.state, &f.owner, &page(10)).await.unwrap();
     assert_eq!(listed.items.len(), 1);
     assert_eq!(listed.items[0].title, "Telegram · NyxBot");
+    assert_eq!(listed.items[0].actor.kind.as_deref(), Some("nyxbot"));
+    assert_eq!(listed.items[0].platform.as_deref(), Some("telegram"));
     assert_eq!(listed.items[0].preview, "Here you go");
     assert_eq!(listed.items[0].source.source_type, "channel_chat");
     assert!(listed.items[0].url.contains(&format!("c={}", home.id)));
@@ -2876,6 +2941,13 @@ async fn a_mixed_page_reads_each_referenced_collection_once() {
         .collect();
     assert!(previews.contains(&"Summarised."));
     assert!(previews.contains(&"Report sent."));
+    let automation = listed
+        .items
+        .iter()
+        .find(|item| item.kind == "automation_result")
+        .unwrap();
+    assert_eq!(automation.actor.actor_type, "automation");
+    assert_eq!(automation.actor.name, "Nightly");
     let finds = finds.lock().unwrap();
     assert_eq!(
         finds
@@ -3803,3 +3875,126 @@ async fn owner_home_thread_rows_follow_the_bot_the_owner_wrote_from_last() {
 
 #[path = "assistant_notification_pm_tests.rs"]
 mod pm_review;
+
+#[tokio::test]
+async fn notification_identities_use_live_agents_and_bound_crew_avatars() {
+    let f = fixture("notif_identity").await;
+    let db = &f.state.db;
+    set_flag(&f, true).await;
+    let mut agents = Vec::new();
+    for name in ["researcher", "writer", "reviewer", "planner"] {
+        agents.push(specialist(&f, name).await);
+    }
+    db.collection::<Document>(AGENTS)
+        .update_one(
+            doc! {"_id": &agents[0].id},
+            doc! {"$set": {"display_name": "Researcher"}},
+        )
+        .await
+        .unwrap();
+    let thread = seed_conversation(&f, &f.owner, "Launch plan").await;
+    db.collection::<Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id": &thread},
+            doc! {"$set": {"agent_id": &agents[0].id}},
+        )
+        .await
+        .unwrap();
+    let private = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&thread),
+    );
+    insert_row(&f, &private).await;
+    let group = groups::create(
+        db,
+        &f.owner,
+        "Launch crew",
+        &agents
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect::<Vec<_>>(),
+        "user",
+    )
+    .await
+    .unwrap();
+    groups::append(
+        db,
+        &f.owner,
+        &group.id,
+        "notice",
+        Some(&agents[0]),
+        "Research is ready.",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let listed = list(&f.state, &f.owner, &page(10)).await.unwrap();
+    let direct = listed
+        .items
+        .iter()
+        .find(|item| item.id == private.id)
+        .unwrap();
+    assert_eq!(direct.actor.actor_type, "agent");
+    assert_eq!(direct.actor.id.as_deref(), Some(agents[0].id.as_str()));
+    assert_eq!(direct.actor.kind.as_deref(), Some("specialist"));
+    assert_eq!(direct.actor.display_name.as_deref(), Some("Researcher"));
+    assert_eq!(direct.source.label, "Launch plan");
+    let crew = listed
+        .items
+        .iter()
+        .find(|item| item.source.group_id.as_deref() == Some(&group.id))
+        .unwrap();
+    assert_eq!(crew.source.label, "Launch crew");
+    assert_eq!(crew.participants.len(), 3);
+    assert_eq!(
+        crew.participants[0].id.as_deref(),
+        Some(agents[0].id.as_str())
+    );
+    let counts = summary(db, &f.owner).await.unwrap();
+    assert_eq!(counts.by_kind.len(), 6);
+    assert_eq!(counts.by_kind["agent_update"], 2);
+    assert_eq!(counts.by_kind.values().sum::<i64>(), counts.unread_count);
+    // Retained history can outlive an agent. Never reconstruct identity from
+    // stale notification references or a destroyed agent's old display name.
+    db.collection::<Document>(AGENTS)
+        .update_one(
+            doc! {"_id": &agents[0].id},
+            doc! {"$set": {"destroyed_at": bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    let listed = list(&f.state, &f.owner, &page(10)).await.unwrap();
+    assert!(
+        listed
+            .items
+            .iter()
+            .all(|item| item.actor.actor_type == "system" && item.actor.id.is_none())
+    );
+    let crew = listed
+        .items
+        .iter()
+        .find(|item| item.source.group_id.is_some())
+        .unwrap();
+    assert_eq!(crew.participants.len(), 3);
+    assert!(
+        crew.participants
+            .iter()
+            .all(|actor| actor.id.as_deref() != Some(agents[0].id.as_str()))
+    );
+    // A public human mention uses only the authorized transcript author.
+    let mention_id = Uuid::new_v4().to_string();
+    db.collection::<Document>(GROUP_MESSAGES).insert_one(doc! {"_id": &mention_id, "group_id": &group.id, "seq": 99_i64, "role": "user", "text": "@you please review", "author_user_id": &f.owner, "author_display_name": "Morgan"}).await.unwrap();
+    db.collection::<Document>(COLLECTION_NAME).update_one(doc! {"_id": &crew.id}, doc! {"$set": {"kind": "group_mention", "source.agent_id": bson::Bson::Null, "source.message_id": &mention_id}}).await.unwrap();
+    let listed = list(&f.state, &f.owner, &page(10)).await.unwrap();
+    let mention = listed
+        .items
+        .iter()
+        .find(|item| item.kind == "group_mention")
+        .unwrap();
+    assert_eq!(mention.actor.actor_type, "person");
+    assert_eq!(mention.actor.name, "Morgan");
+    let counts = summary(db, &f.owner).await.unwrap();
+    assert_eq!(counts.by_kind["group_mention"], 1);
+    assert_eq!(counts.by_kind["agent_update"], 1);
+}
