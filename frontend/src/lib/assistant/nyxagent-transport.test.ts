@@ -2419,7 +2419,7 @@ describe("Nyxbot native error telemetry", () => {
     "reports HTTP %s once with the server trace and no private text", async (status, code) => {
       const trace = "76dd13d5-e7cf-4c63-a33b-26036d2a495d";
       globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => endpoint.endsWith("/turns")
-        ? new Response(JSON.stringify({ error_code: 1000, message: "private server diagnostic" }), {
+        ? new Response(JSON.stringify({ error: status === 403 ? "forbidden" : "internal_error", error_code: 1000, message: "private server diagnostic" }), {
             status, headers: { "X-NyxID-Trace-Id": trace },
           })
         : json(history());
@@ -2757,4 +2757,18 @@ it("cannot identify an interrupted send from another turn's checkpoint (#2316)",
   await expect(transport.send(id, "Question", vi.fn())).rejects.toThrow("interrupted");
   expect(reads).toBe(2);
   expect(transport.getInterruption(id)).toContain("may still be working");
+});
+
+
+it("preserves an acknowledgement 409 message, code and details without deciding the card", async () => {
+  const body = { error: "conflict", error_code: 1004, message: "Conflict: Request expired", details: { acknowledgement_id: "card-2275", status: "expired" } };
+  const requests: unknown[] = [];
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+    requests.push({ endpoint, method: init.method });
+    return json(body, 409);
+  };
+  await expect(new NyxAgentTransport().decide(id, "card-2275", "allow")).rejects.toMatchObject({
+    status: 409, message: body.message, errorCode: body.error_code, errorResponse: body,
+  });
+  expect(requests).toEqual([{ endpoint: `/assistant/nyxagent/conversations/${id}/acknowledgements/card-2275`, method: "POST" }]);
 });
