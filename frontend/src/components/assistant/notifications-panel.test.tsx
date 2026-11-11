@@ -128,6 +128,25 @@ describe("NotificationsPanel", () => {
     expect(rows[2]).toHaveTextContent("Morning digest");
   });
 
+  it("keeps the four filters on one scrollable line and mark-all on its own line", async () => {
+    renderPanel();
+    await screen.findByRole("list", { name: "Notifications" });
+    const chips = screen.getByRole("tablist", { name: "Filter notifications" });
+    const tabs = within(chips).getAllByRole("tab");
+    expect(tabs.map((tab) => tab.textContent)).toEqual(["All", "Needs you", "Automations", "Chats"]);
+    expect(chips).toHaveClass("flex-nowrap", "overflow-x-auto");
+    expect(chips).not.toHaveClass("flex-wrap");
+    for (const tab of tabs) expect(tab).toHaveClass("whitespace-nowrap", "shrink-0");
+
+    const markAll = screen.getByRole("button", { name: "Mark all notifications as read" });
+    const controls = markAll.parentElement;
+    expect(controls).toHaveClass("flex-col", "items-stretch");
+    expect(controls).toContainElement(chips);
+    expect(chips).not.toContainElement(markAll);
+    expect(markAll).toHaveClass("self-start");
+    expect(chips.parentElement?.nextElementSibling).toBe(markAll);
+  });
+
   it("changes the filter in the URL (history replaced) and asks the server for that kind subset", async () => {
     const user = userEvent.setup();
     renderPanel();

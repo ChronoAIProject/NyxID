@@ -215,11 +215,11 @@ export function NotificationsPanel({
             Automation results and updates from your chats while you were away.
           </SheetDescription>
         </SheetHeader>
-        <div className="flex shrink-0 flex-wrap items-center gap-2 px-5 pt-3">
-          <SegmentedControl value={filter} onValueChange={selectFilter} className="min-w-0 flex-1">
-            <SegmentedControlList aria-label="Filter notifications">
+        <div className="flex shrink-0 flex-col items-stretch gap-2 px-5 pt-3">
+          <SegmentedControl value={filter} onValueChange={selectFilter} className="min-w-0">
+            <SegmentedControlList aria-label="Filter notifications" className="flex-nowrap overflow-x-auto">
               {NOTIFICATION_FILTERS.map((value) => (
-                <SegmentedControlTrigger key={value} value={value}>
+                <SegmentedControlTrigger key={value} value={value} className="whitespace-nowrap">
                   {NOTIFICATION_FILTER_LABEL[value]}
                 </SegmentedControlTrigger>
               ))}
@@ -229,6 +229,7 @@ export function NotificationsPanel({
             type="button"
             variant="ghost"
             size="sm"
+            className="self-start"
             onClick={markAll}
             disabled={!asOf || (summary.data?.unread_count ?? 0) === 0 || markRead.isPending}
           >
