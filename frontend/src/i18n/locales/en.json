@@ -11991,5 +11991,10 @@
   "Model not active": "Model not active",
   "Model disabled": "Model disabled",
   "Explicit deny": "Explicit deny",
-  "No entitlement": "No entitlement"
+  "No entitlement": "No entitlement",
+  "Instructions: {{instructions}}; persona: {{persona}}; memory notes: {{memoryNotes}}; skills: {{skills}}; service grants: {{serviceGrants}}; account read: {{accountRead}}.": "Instructions: {{instructions}}; persona: {{persona}}; memory notes: {{memoryNotes}}; skills: {{skills}}; service grants: {{serviceGrants}}; account read: {{accountRead}}.",
+  "Agent configuration has not been checked.": "Agent configuration has not been checked.",
+  "These facts do not confirm complete business information or a successful customer test. Opening access is your choice. During model setup, customer requests wait briefly or receive a safe setup failure.": "These facts do not confirm complete business information or a successful customer test. Opening access is your choice. During model setup, customer requests wait briefly or receive a safe setup failure.",
+  "Customer readiness is unavailable. Refresh to check before relying on replies.": "Customer readiness is unavailable. Refresh to check before relying on replies.",
+  "present": "present"
 }
