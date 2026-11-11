@@ -1,3 +1,4 @@
+import { ComposerDictationFrame } from "../assistant/ComposerDictation";
 import {
   ChatComposerDock,
   ChatIconButton as Icon,
@@ -63,10 +64,7 @@ import { chatBubbleColors } from "../../theme/chatAppearance";
 import { fonts } from "../../theme/designTokens";
 import { AssistantPendingUploads } from "../assistant/AssistantPendingUploads";
 import { type AssistantMentionOption } from "../assistant/AssistantMentionInput";
-import {
-  ChatComposerFrame,
-  ComposerSubmitButton,
-} from "../assistant/ChatComposer";
+import { ComposerSubmitButton } from "../assistant/ChatComposer";
 import {
   resolveAttachmentMentions,
   stripAttachmentMention,
@@ -979,7 +977,7 @@ function GroupChat({
               }
             />
           ) : (
-            <ChatComposerFrame>
+            <ComposerDictationFrame dictation={dictation}>
               <OverflowScrollView
                 fadeColor={colors.composerBg}
                 horizontal
@@ -1126,7 +1124,7 @@ function GroupChat({
                   </ChatComposerToolbar>
                 )}
               />
-            </ChatComposerFrame>
+            </ComposerDictationFrame>
           )}
           {[...resolvedDraft].length > 32768 && (
             <Label style={[styles.small, { color: colors.danger }]}>

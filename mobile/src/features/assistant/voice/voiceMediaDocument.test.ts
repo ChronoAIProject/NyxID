@@ -758,6 +758,29 @@ test("insecure contexts fail before acquiring the microphone", async () => {
   );
 });
 
+for (const protocol of ["openai_live", "xai_realtime"]) {
+  test(`${protocol} preserves full output volume while holding and releasing the microphone`, async () => {
+    const e = engine();
+    e.command({ type: "prepare", protocol, generation: 1, requestId: 1 });
+    await settle();
+    for (const pressed of [true, false]) {
+      e.command({ type: "hold", pressed, generation: 1 });
+      await settle();
+      assert.equal(e.audio.volume, 1);
+    }
+    e.command({ type: "speaker", muted: true, generation: 1 });
+    e.command({ type: "hold", pressed: true, generation: 1 });
+    await settle();
+    assert.equal(e.audio.muted, true);
+    assert.equal(e.audio.volume, 1);
+    e.command({ type: "speaker", muted: false, generation: 1 });
+    await settle();
+    assert.equal(e.audio.muted, false);
+    assert.equal(e.audio.volume, 1);
+    e.command({ type: "close", generation: 1 });
+  });
+}
+
 test("known WebKit mock microphones reject both voice transports before any peer or offer", async () => {
   const reason =
     "A test microphone is active. Select a real microphone and try again.";

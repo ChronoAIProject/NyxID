@@ -20,6 +20,7 @@ test("Settings is a menu: grouped icon rows with chevrons open sub-pages and hol
     ["Usage & credits", "UsageCredits"],
     ["Notifications", "NotificationSettings"],
     ["Display", "DisplaySettings"],
+    ["Language", "LanguageSettings"],
     ["Privacy", "PrivacySettings"],
     ["Terms of Service", "TermsOfService"],
     ["Privacy Policy", "PrivacyPolicy"],

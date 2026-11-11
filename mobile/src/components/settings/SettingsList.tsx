@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ReactElement, ReactNode, Ref } from "react";
 import {
@@ -193,6 +194,7 @@ export function SettingsRow({
   accessibilityLabel?: string;
   valueTone?: "default" | "danger";
 }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const [rowWidth, setRowWidth] = useState<number>();
   const stacked = useSettingsStacked(rowWidth);
@@ -341,7 +343,8 @@ export function SettingsRow({
         accessibilityLabel ?? [label, badge, value].filter(Boolean).join(", ")
       }
       accessibilityHint={
-        accessibilityHint ?? (chevron ? `Opens ${label}` : undefined)
+        accessibilityHint ??
+        (chevron ? t("Opens {{label}}", { label }) : undefined)
       }
       accessibilityState={{ disabled, ...accessibilityState }}
       disabled={disabled}
@@ -447,8 +450,10 @@ export function usePopupMenu<Value extends string>({
   onChange: (value: Value) => void;
   disabled?: boolean;
 }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
-  const { width: windowWidth, height } = useWindowDimensions();
+  const { width: windowWidth, height, fontScale = 1 } = useWindowDimensions();
+  const menuWidth = Math.min(340, windowWidth - 32);
   const anchor = useRef<View>(null);
   const placementGeneration = useRef(0);
   const mounted = useRef(false);
@@ -474,7 +479,11 @@ export function usePopupMenu<Value extends string>({
     if (disabled) return;
     const generation = ++placementGeneration.current;
     const estimate =
-      options.reduce((sum, option) => sum + (option.detail ? 68 : 48), 0) + 8;
+      options.reduce(
+        (sum, option) =>
+          sum + (option.detail ? 92 : 56) * Math.max(1, fontScale),
+        0,
+      ) + 8;
     // Align with the trigger's nearer edge so the menu stays on screen.
     const place = (
       y: number,
@@ -508,7 +517,7 @@ export function usePopupMenu<Value extends string>({
         y,
         triggerHeight,
         x + triggerWidth / 2 < windowWidth / 2
-          ? { left: Math.max(8, Math.min(x, windowWidth - MENU_MIN_WIDTH - 8)) }
+          ? { left: Math.max(8, Math.min(x, windowWidth - menuWidth - 8)) }
           : { right: Math.max(8, windowWidth - (x + triggerWidth) + 8) },
       ),
     );
@@ -526,7 +535,7 @@ export function usePopupMenu<Value extends string>({
     >
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="Close menu"
+        accessibilityLabel={t("Close menu")}
         style={styles.menuBackdrop}
         onPress={close}
       />
@@ -541,6 +550,9 @@ export function usePopupMenu<Value extends string>({
               left: menu.left,
               right: menu.right,
               maxHeight: menu.maxHeight,
+              width: menuWidth,
+              minWidth: Math.min(MENU_MIN_WIDTH, menuWidth),
+              maxWidth: menuWidth,
               backgroundColor: colors.menuFill,
               borderColor: colors.borderSoft,
               shadowColor: "#000",
@@ -637,6 +649,7 @@ export function SettingsMenuRow<Value extends string>({
   onChange: (value: Value) => void;
   disabled?: boolean;
 }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const menu = usePopupMenu({ options, value, onChange, disabled });
   const current = options.find((option) => option.value === value);
@@ -648,7 +661,9 @@ export function SettingsMenuRow<Value extends string>({
         detail={detail}
         value={current?.label ?? value}
         disabled={disabled}
-        accessibilityHint={`Opens a menu to choose ${label.toLowerCase()}`}
+        accessibilityHint={t("Opens a menu to choose {{label}}", {
+          label: label.toLowerCase(),
+        })}
         accessory={
           <ChevronsUpDown
             size={15}
@@ -675,6 +690,8 @@ export function useSettingsHeaderAction(
     onPress,
   }: { label?: string; enabled: boolean; busy?: boolean; onPress: () => void },
 ) {
+  const { t } = useAppLanguage();
+  label = t(label);
   const { colors } = useTheme();
   useLayoutEffect(() => {
     navigation.setOptions({

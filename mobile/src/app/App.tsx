@@ -1,3 +1,4 @@
+import { LanguageProvider } from "../i18n/LanguageProvider";
 import "react-native-gesture-handler";
 import { useForegroundNotificationToast } from "./useForegroundNotificationToast";
 import { useNotificationNavigation } from "./useNotificationNavigation";
@@ -327,10 +328,11 @@ export default function App() {
     };
   }, []);
 
-  const { toast: pushToast, toastKey: pushToastKey } = useForegroundNotificationToast(
-    openChallengeFromNotification,
-    openNotification,
-  );
+  const { toast: pushToast, toastKey: pushToastKey } =
+    useForegroundNotificationToast(
+      openChallengeFromNotification,
+      openNotification,
+    );
 
   useEffect(() => {
     const onPushSyncSignal = (signal: PushSyncSignal | null) => {
@@ -388,26 +390,28 @@ export default function App() {
         <SafeAreaProvider>
           <QueryClientProvider client={queryClient}>
             <ThemeProvider>
-              <ChatLayoutProvider>
-                <MobileConsentProvider>
-                  <AuthSessionProvider>
-                    <ThemedAppShell
-                      navigationRef={navigationRef}
-                      currentRouteName={currentRouteName}
-                      setCurrentRouteName={setCurrentRouteName}
-                      flushPendingNotificationNavigation={
-                        flushPendingNotificationNavigation
-                      }
-                      onNavigationGuardChange={onNavigationGuardChange}
-                      navigationBlocked={
-                        criticalNavigationGuards.current.size > 0
-                      }
-                      pushToast={pushToast}
-                      pushToastKey={pushToastKey}
-                    />
-                  </AuthSessionProvider>
-                </MobileConsentProvider>
-              </ChatLayoutProvider>
+              <LanguageProvider>
+                <ChatLayoutProvider>
+                  <MobileConsentProvider>
+                    <AuthSessionProvider>
+                      <ThemedAppShell
+                        navigationRef={navigationRef}
+                        currentRouteName={currentRouteName}
+                        setCurrentRouteName={setCurrentRouteName}
+                        flushPendingNotificationNavigation={
+                          flushPendingNotificationNavigation
+                        }
+                        onNavigationGuardChange={onNavigationGuardChange}
+                        navigationBlocked={
+                          criticalNavigationGuards.current.size > 0
+                        }
+                        pushToast={pushToast}
+                        pushToastKey={pushToastKey}
+                      />
+                    </AuthSessionProvider>
+                  </MobileConsentProvider>
+                </ChatLayoutProvider>
+              </LanguageProvider>
             </ThemeProvider>
           </QueryClientProvider>
         </SafeAreaProvider>

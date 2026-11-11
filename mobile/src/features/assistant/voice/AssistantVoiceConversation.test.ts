@@ -1305,11 +1305,14 @@ test("automatic mode has no hold button and the call shows no in-call pickers", 
   f.harness.unmount();
 });
 
-test("before a call the screen names the saved voice and mode, set in Settings", () => {
+test("call startup shows its mode and status without extra greeting or settings guidance", () => {
   const f = setup();
-  assert.match(f.text(), /Cedar voice/);
+  assert.doesNotMatch(
+    f.text(),
+    /Hey, what can I do for you today|Settings › Voice/,
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(f.starts()[0]?.[1])), saved);
   assert.match(f.text(), /Hands-free/);
-  assert.match(f.text(), /Settings › Voice/);
   assert.match(f.text(), /Connecting/);
   assert.equal(f.aura().phase, "resting");
   f.harness.unmount();
@@ -3098,3 +3101,144 @@ test("a restart rejected by the hook's final guards shows a retry message instea
   );
   f.harness.unmount();
 });
+
+for (const viewport of [
+  { width: 375, height: 812, fontScale: 1 },
+  { width: 834, height: 1194, fontScale: 1 },
+  { width: 375, height: 812, fontScale: 2.5 },
+]) {
+  test(`voice panel fits its content through startup, listening and live captions at ${viewport.width}pt/${viewport.fontScale}`, () => {
+    const f = setup({ viewport });
+    const height = () =>
+      f.all().find((node) => node.props.testID === "voice-expanded-panel")!
+        .props.style.height;
+    const measureBody = (height: number) => {
+      f.all()
+        .find((node) => node.props.testID === "voice-panel-content")!
+        .props.onLayout({ nativeEvent: { layout: { height } } });
+      f.harness.flush();
+    };
+    const initial = height();
+    assert.equal(
+      initial,
+      244,
+      "only header, equalizer, gaps and controls reserve space",
+    );
+    assert.doesNotMatch(
+      f.text(),
+      /Hey, what can I do for you today|Change in Settings/,
+    );
+    f.voice.starting = true;
+    f.harness.render();
+    assert.equal(height(), initial);
+    f.voice.starting = false;
+    f.voice.connected = true;
+    f.voice.snapshot = structuredClone(snapshot);
+    f.harness.render();
+    assert.equal(height(), initial);
+    f.voice.snapshot.captions = [
+      {
+        id: "live",
+        speaker: "user",
+        text: "A longer spoken request expands the voice surface only as needed",
+        sealed: false,
+        complete: false,
+      },
+    ];
+    f.harness.render();
+    measureBody(160);
+    assert.equal(height(), initial + 94);
+    f.voice.snapshot.captions = [];
+    f.harness.render();
+    measureBody(66);
+    assert.equal(height(), initial);
+    f.harness.unmount();
+  });
+}
+
+for (const reducedMotion of [false, true]) {
+  test(`voice content grows before scrolling, animates its expansion, and shrinks after dismissal with Reduce Motion ${reducedMotion}`, () => {
+    const f = setup({ active: true, reducedMotion });
+    const panel = () =>
+      f.all().find((node) => node.props.testID === "voice-expanded-panel")!;
+    const scroll = () =>
+      f.all().find((node) => node.props.testID === "voice-panel-scroll")!;
+    const content = () =>
+      f.all().find((node) => node.props.testID === "voice-panel-content")!;
+    const measure = (height: number) => {
+      content().props.onLayout({ nativeEvent: { layout: { height } } });
+      f.harness.flush();
+    };
+    assert.equal(panel().props.style.height, 244);
+    assert.equal(scroll().props.scrollEnabled, false);
+    f.layoutAnimations.length = 0;
+    f.voice.error = "Voice connection lost";
+    f.harness.render();
+    measure(240);
+    assert.equal(panel().props.style.height, 418);
+    assert.equal(scroll().props.scrollEnabled, false);
+    assert.equal(scroll().props.bounces, false);
+    assert.equal(f.layoutAnimations.length, reducedMotion ? 0 : 1);
+    if (!reducedMotion)
+      assert.equal(
+        (f.layoutAnimations[0] as { duration: number }).duration,
+        220,
+      );
+    f.voice.error = undefined;
+    f.harness.render();
+    measure(66);
+    assert.equal(panel().props.style.height, 244);
+    assert.equal(scroll().props.scrollEnabled, false);
+    assert.equal(f.layoutAnimations.length, reducedMotion ? 0 : 2);
+    f.harness.unmount();
+  });
+}
+
+for (const viewport of [
+  { width: 375, height: 667, fontScale: 1 },
+  { width: 402, height: 874, fontScale: 1 },
+  { width: 402, height: 874, fontScale: 2.5 },
+  { width: 320, height: 568, fontScale: 1 },
+]) {
+  test(`voice only scrolls after reaching 60% of the ${viewport.height}pt screen at text scale ${viewport.fontScale}`, () => {
+    const f = setup({ active: true, viewport, preferencesOpen: true });
+    const panel = () =>
+      f.all().find((node) => node.props.testID === "voice-expanded-panel")!;
+    const scroll = () =>
+      f.all().find((node) => node.props.testID === "voice-panel-scroll")!;
+    const measure = (id: string, height: number) => {
+      f.all()
+        .find((node) => node.props.testID === id)!
+        .props.onLayout({
+          nativeEvent: { layout: { height } },
+        });
+      f.harness.flush();
+    };
+    // Simulate native text wrapping, rather than guessing a fixed notice height.
+    measure("voice-panel-header", 80);
+    measure("voice-panel-controls", 86);
+    const cap =
+      Math.min(viewport.height * 0.6, viewport.height - 47 - 34 - 60 - 96) - 24;
+    const bodyAtCap = cap - 80 - 86 - 20;
+    measure("voice-panel-content", Math.floor(bodyAtCap));
+    assert.equal(scroll().props.scrollEnabled, false);
+    measure("voice-panel-content", Math.ceil(bodyAtCap) + 100);
+    assert.equal(panel().props.style.height, cap);
+    assert.equal(scroll().props.scrollEnabled, true);
+    assert.equal(scroll().props.showsVerticalScrollIndicator, true);
+    const descendants = elements(scroll());
+    for (const id of ["voice-panel-header", "voice-panel-controls"])
+      assert.equal(
+        descendants.some((node) => node.props.testID === id),
+        false,
+      );
+    assert.equal(
+      f.all().filter((node) => node.type === "ScrollView").length,
+      1,
+      "preferences, captions and tasks share one scroll area",
+    );
+    measure("voice-panel-content", Math.max(0, Math.floor(bodyAtCap) - 20));
+    assert.equal(scroll().props.scrollEnabled, false);
+    f.harness.unmount();
+  });
+}

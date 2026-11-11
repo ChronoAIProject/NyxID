@@ -69,6 +69,11 @@ export interface AssistantVoiceApi {
     conversationId: string,
     signal?: AbortSignal,
   ): Promise<unknown>;
+  status?(
+    conversationId: string,
+    sessionId: string,
+    signal?: AbortSignal,
+  ): Promise<unknown>;
   control(
     conversationId: string,
     sessionId: string,
@@ -561,12 +566,12 @@ export class AssistantVoiceClient {
     this.applyInput(
       Boolean(
         !this.closed &&
-        this.started &&
-        this.ready &&
-        this.socket?.readyState === 1 &&
-        !this.inputBlocked(this.session) &&
-        !this.controlPending &&
-        (this.preferences?.input_mode === "automatic" || this.held),
+          this.started &&
+          this.ready &&
+          this.socket?.readyState === 1 &&
+          !this.inputBlocked(this.session) &&
+          !this.controlPending &&
+          (this.preferences?.input_mode === "automatic" || this.held),
       ),
     );
   }
@@ -804,6 +809,37 @@ export class AssistantVoiceClient {
       }
       return true;
     };
+    let readingStatus = false;
+    const readStatus = async () => {
+      if (
+        !accepting ||
+        terminalAccepted ||
+        readingStatus ||
+        !this.options.api.status
+      )
+        return;
+      readingStatus = true;
+      try {
+        const next = voiceSessionSchema.parse(
+          await this.options.api.status(
+            this.options.conversationId,
+            session.id,
+            controller.signal,
+          ),
+        );
+        accept(next);
+      } catch {
+        // The control socket or the next bounded read can still confirm End.
+      } finally {
+        readingStatus = false;
+      }
+    };
+    // The native view/control stream can disappear before its terminal snapshot.
+    // Observe the exact call during the drain instead of waiting out seven seconds.
+    const statusPoll =
+      drain && this.options.api.status
+        ? this.clock.setInterval(() => void readStatus(), 500)
+        : undefined;
     if (drain)
       this.onDrainSnapshot = (snapshot) => {
         accept(snapshot.session, snapshot);
@@ -830,6 +866,7 @@ export class AssistantVoiceClient {
           ),
         );
         accept(next);
+        if (drain && !terminalAccepted) void readStatus();
       } catch {
         // Retain the verified identity. A draining control socket can still
         // prove termination after a lost or invalid HTTP response.
@@ -841,6 +878,7 @@ export class AssistantVoiceClient {
     accepting = false;
     this.onDrainSnapshot = undefined;
     this.clock.clearTimeout(deadline);
+    if (statusPoll !== undefined) this.clock.clearInterval(statusPoll);
     controller.abort();
     if (drain) this.dispose();
     this.options.onConflict?.(

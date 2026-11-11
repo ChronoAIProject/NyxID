@@ -103,6 +103,7 @@ function setup(entryPoint: "first_run" | "home" = "first_run") {
       Label: "Label",
     },
     "./onboardingContracts": contracts,
+    "./NextStepConnect": { NextStepConnect: "Connect" },
     "./OnboardingReplay": { OnboardingReplay: "Replay" },
   });
   h.mock(

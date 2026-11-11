@@ -249,6 +249,7 @@ function setup(
       }),
     },
     "react-native": {
+      useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
       ...Object.fromEntries(
         [
           "ActivityIndicator",

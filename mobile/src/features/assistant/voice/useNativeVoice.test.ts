@@ -2248,3 +2248,32 @@ for (const cancel of ["end", "background"] as const) {
     assert.equal(e.harness.flush().connected, false);
   });
 }
+
+test("an unchanged saved preference avoids a redundant settings write before connecting", async (context) => {
+  const e = setup(context);
+  await e.harness.value().start(preferences, "openai_live", { ...preferences });
+  assert.equal(e.counts().optionCalls, 1, "availability is still revalidated");
+  assert.equal(e.counts().savedCalls, 0);
+  assert.equal(e.counts().permissionCalls, 1);
+  assert.equal(e.clients.length, 1);
+});
+
+test("changed preferences still save before acquiring a microphone", async (context) => {
+  const e = setup(context);
+  await e.harness
+    .value()
+    .start(preferences, "openai_live", { ...preferences, voice: "cedar" });
+  assert.equal(e.counts().savedCalls, 1);
+  assert.equal(e.clients.length, 1);
+});
+
+test("a loaded chat voice choice avoids repeating options and unchanged preference requests", async (context) => {
+  const e = setup(context);
+  await e.harness
+    .value()
+    .start(preferences, "openai_live", preferences, e.available as any);
+  assert.equal(e.counts().optionCalls, 0);
+  assert.equal(e.counts().savedCalls, 0);
+  assert.equal(e.counts().permissionCalls, 1);
+  assert.equal(e.clients.length, 1);
+});

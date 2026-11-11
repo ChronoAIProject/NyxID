@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ActivityIndicator,
   Keyboard,
@@ -6,6 +7,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from "react-native";
 import { Check, Mic, Square, X } from "lucide-react-native";
@@ -16,6 +18,26 @@ import { formatElapsed } from "./voice/dictationLevel";
 import type { ComposerDictationState } from "./useComposerDictation";
 
 import { DictationWaveform } from "./DictationWaveform";
+import { composerInputMinHeight } from "./composerGeometry";
+import { ChatComposerFrame } from "./ChatComposer";
+import { useComposerHeight } from "../display/ChatLayoutContext";
+
+export function ComposerDictationFrame({
+  dictation,
+  children,
+}: {
+  dictation: ComposerDictationState;
+  children: ReactNode;
+}) {
+  return (
+    <>
+      <ComposerDictationNotice dictation={dictation} />
+      <ChatComposerFrame bounce={!dictation.active}>
+        {children}
+      </ChatComposerFrame>
+    </>
+  );
+}
 
 export function ComposerDictationButton({
   dictation,
@@ -24,6 +46,7 @@ export function ComposerDictationButton({
   dictation: ComposerDictationState;
   disabled?: boolean;
 }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const held = useRef(false);
   const busy =
@@ -34,9 +57,11 @@ export function ComposerDictationButton({
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={
-        dictation.recording ? "Stop dictation" : "Dictate message"
+        dictation.recording ? t("Stop dictation") : t("Dictate message")
       }
-      accessibilityHint="Writes what you say into your message. Nothing is sent until you tap Send."
+      accessibilityHint={t(
+        "Writes what you say into your message. Nothing is sent until you tap Send.",
+      )}
       accessibilityState={{ disabled: !!disabled || busy, busy }}
       disabled={disabled || busy}
       onLongPress={() => {
@@ -77,12 +102,7 @@ export function ComposerDictationButton({
   );
 }
 
-/**
- * While dictation runs it lives inside the composer: the words appear above a
- * streaming waveform that takes the place of the message field, with Discard
- * and Finish. Finishing adds the words to the draft; nothing is sent. Idle
- * errors stay a compact notice above the still-usable text field.
- */
+/** Dictated words grow like typed text, above the retained bottom toolbar. */
 export function ComposerDictationReview({
   dictation,
   draft = "",
@@ -92,6 +112,16 @@ export function ComposerDictationReview({
 }) {
   if (dictation.active)
     return <DictationInline dictation={dictation} draft={draft} />;
+  return null;
+}
+
+/** Render beside the composer frame so errors never resize its input or toolbar. */
+export function ComposerDictationNotice({
+  dictation,
+}: {
+  dictation: ComposerDictationState;
+}) {
+  const { t } = useAppLanguage();
   if (!dictation.error) return null;
   return (
     <View style={styles.notice}>
@@ -101,15 +131,15 @@ export function ComposerDictationReview({
       <View style={styles.noticeActions}>
         {dictation.permissionDenied && (
           <ActionButton
-            label="Open Settings"
+            label={t("Open Settings")}
             compact
             variant="secondary"
             onPress={dictation.openSettings}
           />
         )}
         <ActionButton
-          label="Dismiss"
-          accessibilityLabel="Dismiss dictation message"
+          label={t("Dismiss")}
+          accessibilityLabel={t("Dismiss dictation message")}
           compact
           variant="secondary"
           onPress={dictation.discard}
@@ -126,7 +156,11 @@ function DictationInline({
   dictation: ComposerDictationState;
   draft: string;
 }) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
+  const { fontScale } = useWindowDimensions();
+  const minHeight = composerInputMinHeight(fontScale);
+  const maxHeight = Math.max(minHeight, useComposerHeight());
   const scroller = useRef<ScrollView>(null);
   const { phase } = dictation;
   const [startedAt, setStartedAt] = useState<number>();
@@ -148,78 +182,44 @@ function DictationInline({
         ? "Starting…"
         : undefined;
   return (
-    <View style={styles.inline}>
-      {before || spoken ? (
-        <ScrollView
-          ref={scroller}
-          style={styles.inlineText}
-          contentContainerStyle={styles.inlineTextContent}
-          // The newest words stay in view while speaking.
-          onContentSizeChange={() =>
-            scroller.current?.scrollToEnd?.({ animated: true })
-          }
-        >
-          <Text
-            accessibilityLiveRegion="polite"
-            style={[styles.inlineBody, { color: colors.textPrimary }]}
-          >
-            {before ? (
-              <Text style={{ color: colors.textSecondary }}>
-                {before}
-                {spoken ? " " : ""}
-              </Text>
-            ) : null}
-            {dictation.final}
-            {dictation.interim ? (
-              <Text style={{ color: colors.textTertiary }}>
-                {dictation.final ? " " : ""}
-                {dictation.interim}
-              </Text>
-            ) : null}
-          </Text>
-        </ScrollView>
-      ) : null}
-      {dictation.error ? (
-        <Label
+    <View testID="dictation-inline">
+      <ScrollView
+        ref={scroller}
+        style={[styles.inlineText, { minHeight, maxHeight }]}
+        contentContainerStyle={styles.inlineTextContent}
+        // The newest words stay in view while speaking.
+        onContentSizeChange={() =>
+          scroller.current?.scrollToEnd?.({ animated: true })
+        }
+      >
+        <Text
           accessibilityLiveRegion="polite"
-          style={[styles.inlineError, { color: colors.danger }]}
+          style={[styles.inlineBody, { color: colors.textPrimary }]}
         >
-          {dictation.error}
-        </Label>
-      ) : null}
-      {/* The waveform takes the message line; the toolbar keeps its place. */}
-      <View style={styles.inlineWaveRow}>
-        <View style={styles.inlineMeter}>
-          {capturing ? (
-            <DictationWaveform
-              subscribe={dictation.subscribeLevel}
-              height={22}
-            />
-          ) : (
-            <View style={styles.inlineStatus}>
-              <ActivityIndicator size="small" color={colors.textSecondary} />
-              <Text
-                accessibilityLiveRegion="polite"
-                style={[styles.status, { color: colors.textSecondary }]}
-              >
-                {status}
-              </Text>
-            </View>
-          )}
-        </View>
-        {startedAt !== undefined ? (
-          <Text
-            accessibilityLabel={`Recorded ${formatElapsed(now - startedAt)}`}
-            style={[styles.elapsed, { color: colors.textTertiary }]}
-          >
-            {formatElapsed(now - startedAt)}
-          </Text>
-        ) : null}
-      </View>
+          {!before && !spoken ? (
+            <Text style={{ color: colors.textTertiary }}>
+              {t("Speak to dictate…")}
+            </Text>
+          ) : null}
+          {before ? (
+            <Text style={{ color: colors.textSecondary }}>
+              {before}
+              {spoken ? " " : ""}
+            </Text>
+          ) : null}
+          {dictation.final}
+          {dictation.interim ? (
+            <Text style={{ color: colors.textTertiary }}>
+              {dictation.final ? " " : ""}
+              {dictation.interim}
+            </Text>
+          ) : null}
+        </Text>
+      </ScrollView>
       <View style={styles.inlineRow}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Discard dictation"
+          accessibilityLabel={t("Discard dictation")}
           onPress={dictation.discard}
           style={styles.target}
         >
@@ -237,11 +237,39 @@ function DictationInline({
             </View>
           )}
         </Pressable>
-        <View style={styles.inlineSpacer} />
+        <View style={styles.inlineWaveRow}>
+          <View style={styles.inlineMeter}>
+            {capturing ? (
+              <DictationWaveform
+                subscribe={dictation.subscribeLevel}
+                height={22}
+              />
+            ) : (
+              <View style={styles.inlineStatus}>
+                <ActivityIndicator size="small" color={colors.textSecondary} />
+                <Text
+                  numberOfLines={1}
+                  accessibilityLiveRegion="polite"
+                  style={[styles.status, { color: colors.textSecondary }]}
+                >
+                  {status}
+                </Text>
+              </View>
+            )}
+          </View>
+          <Text
+            accessibilityLabel={`Recorded ${formatElapsed(startedAt === undefined ? 0 : now - startedAt)}`}
+            style={[styles.elapsed, { color: colors.textTertiary }]}
+          >
+            {formatElapsed(startedAt === undefined ? 0 : now - startedAt)}
+          </Text>
+        </View>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Finish dictation"
-          accessibilityHint="Adds the words to your message. Nothing is sent until you tap Send."
+          accessibilityLabel={t("Finish dictation")}
+          accessibilityHint={t(
+            "Adds the words to your message. Nothing is sent until you tap Send.",
+          )}
           accessibilityState={{
             disabled: phase !== "listening",
             busy: phase === "stopping",
@@ -287,20 +315,23 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   notice: { paddingHorizontal: 12, paddingTop: 8, gap: 6 },
-  inline: { gap: 2 },
-  inlineText: { maxHeight: 120 },
-  inlineTextContent: { paddingHorizontal: 12, paddingTop: 12 },
+  inlineText: { flexGrow: 0, flexShrink: 1 },
+  inlineTextContent: {
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 10,
+  },
   inlineBody: { fontFamily: fonts.bodyRegular, fontSize: 14, lineHeight: 20 },
-  inlineError: { paddingHorizontal: 12, fontSize: 13 },
   inlineWaveRow: {
+    flex: 1,
+    minWidth: 0,
     flexDirection: "row",
     alignItems: "center",
     minHeight: 44,
-    paddingHorizontal: 12,
+    paddingHorizontal: 8,
     gap: 8,
   },
-  inlineRow: { flexDirection: "row", alignItems: "flex-end", minHeight: 44 },
-  inlineSpacer: { flex: 1 },
+  inlineRow: { flexDirection: "row", alignItems: "center", height: 44 },
   inlineMeter: { flex: 1, minWidth: 0, justifyContent: "center" },
   inlineStatus: { flexDirection: "row", alignItems: "center", gap: 8 },
   inlineCircle: {

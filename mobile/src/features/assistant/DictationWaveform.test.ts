@@ -39,14 +39,14 @@ test("the shared waveform follows bounded native samples, resizes and stays stil
     listener(2);
   }
   h.flush();
-  assert.deepEqual(heights(), [3, 12.5, 22]);
+  assert.deepEqual(heights(), [2, 12, 22]);
   h.value().props.onLayout({ nativeEvent: { layout: { width: 10 } } });
   h.flush();
-  assert.deepEqual(heights(), [12.5, 22]);
+  assert.deepEqual(heights(), [12, 22]);
   reduced = true;
   h.render();
   assert.equal(listeners.size, 0);
-  assert.deepEqual(heights(), [3, 3]);
+  assert.deepEqual(heights(), [2, 2]);
   reduced = false;
   h.render();
   assert.equal(listeners.size, 1);

@@ -13,6 +13,7 @@ import { voiceSessionSchema } from "./voiceContracts";
 import { withVoiceRequestDeadline } from "./voiceRequestDeadline";
 import type {
   VoicePreferences,
+  VoiceOption,
   VoiceProtocol,
   VoiceSession,
   VoiceSnapshot,
@@ -293,7 +294,7 @@ export function useNativeVoice(
         conflictChecks.current++;
         void checkConflict(false);
       }
-    }, 1000);
+    }, 500);
     return () => clearTimeout(timer);
   }, [
     conflict,
@@ -306,7 +307,12 @@ export function useNativeVoice(
     snapshot,
   ]);
 
-  async function start(preferences: VoicePreferences, protocol: VoiceProtocol) {
+  async function start(
+    preferences: VoicePreferences,
+    protocol: VoiceProtocol,
+    savedPreferences?: VoicePreferences | null,
+    selectedOption?: VoiceOption,
+  ) {
     // A new explicit attempt can wait for the old client's bounded teardown.
     // Recheck all chat/account guards after that asynchronous boundary.
     if (!sameScope()) return false;
@@ -348,7 +354,11 @@ export function useNativeVoice(
     setSnapshot(null);
     setSpeakerMuted(false);
     try {
-      const options = await environment.api.options(thread, controller.signal);
+      // The call surface has already loaded this chat's choices. Reuse that
+      // selection; POST admission still resolves live credentials and authority.
+      const options = selectedOption
+        ? { options: [selectedOption] }
+        : await environment.api.options(thread, controller.signal);
       if (!valid()) return;
       const selected = options.options.find(
         (option) =>
@@ -363,7 +373,13 @@ export function useNativeVoice(
           selected?.unavailable_reason ??
             "This voice source is no longer available.",
         );
-      await environment.api.savePreferences(preferences, controller.signal);
+      if (
+        !savedPreferences ||
+        (Object.keys(preferences) as (keyof VoicePreferences)[]).some(
+          (key) => preferences[key] !== savedPreferences[key],
+        )
+      )
+        await environment.api.savePreferences(preferences, controller.signal);
       if (!valid()) return;
       permissionAttempt.current = generation;
       let permission;

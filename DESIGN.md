@@ -1014,13 +1014,17 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   opens a sheet or window: a tap or long press dictates at once, iOS asks for
   microphone and speech recognition access itself the first time, and the
   language is chosen in Settings › Voice (Dictation for accounts without live
-  voice). While it runs it stays inside the composer pill: the existing draft (secondary) and the recognized words
-  (interim words in tertiary) appear at the field's 14/20pt above a streaming
-  waveform line that takes the place of the placeholder (3pt bars, one per
-  ~90ms native volume sample, silent samples as dots), between an outlined
-  Discard circle and a filled Finish circle, with a mono timer. Finish adds
-  the words to the draft, where they are edited and sent like typed text.
-  Idle errors stay a compact notice above the field. The jump-to-latest arrow
+  voice). While it runs its text area grows with dictated words just like typing,
+  using the same minimum height and configured maximum; longer text scrolls
+  inside the field (user clarification 2026-11-11):
+  the existing draft (secondary) and recognized words (interim words in tertiary)
+  scroll within the field's 14/20pt text area. The streaming waveform (2pt bars,
+  one per ~90ms native volume sample, silent samples as dots) and mono timer
+  occupy the bottom toolbar between the outlined Discard circle and filled
+  Finish circle. Permission, startup, capture and stopping retain the same toolbar.
+  Finish adds the words to the draft for editing and explicit Send. Dictation
+  errors and their Settings/Dismiss actions sit outside, above the composer pill
+  (user decision 2026-11-11). The jump-to-latest arrow
   dips 6pt and springs back as the transcript scrolls to the newest message
   (immediate under Reduce Motion). Chat pages
   use an edge-to-edge transcript viewport within the system safe area, so its
@@ -1053,7 +1057,7 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   with the effective agent override shown read-only. Chat and agent settings use
   the server default without a native selector or per-turn override. Voice automatically uses an available server default, without a source selector. This is the user's deliberate native scope (2026-10-28).
   Voice, conversation mode and completion notices are chosen in Settings › Voice;
-  the call screen has no voice/source pickers. Voice composers never show pricing or tariffs, including connection, idle, minimized and help-popover states (user decision 2026-11-06, superseding V1). Pricing belongs in Settings › Voice. Hold to talk and Hands-free remain selectable through the compact header radio toggle: phone and radio glyphs, inactive icon only, active icon plus a one-line label, and 44pt minimum targets. Mode changes animate the header width, switching instantly under Reduce Motion. The status/timer has its own full-width line, with elapsed time protected from status truncation. At accessibility text sizes the agent name moves below the top control row; the selected mode label fits within the remaining width. xAI shows only the forced Hold to talk option and cannot switch modes. Changes still save the existing voice preference (user decision 2026-11-06, U11). Hold to talk keeps a press-and-hold microphone, release-to-send instruction and halo in both expanded and minimized layouts; tapping the minimized row opens the mode switch. Resizing releases an existing hold without changing modes.
+  the call screen has no voice/source pickers. The Voice menu selects the next-call voice without playable samples (user decision 2026-11-12). Voice composers never show pricing or tariffs, including connection, idle, minimized and help-popover states (user decision 2026-11-06, superseding V1). Pricing belongs in Settings › Voice. Hold to talk and Hands-free remain selectable through the compact header radio toggle: phone and radio glyphs, inactive icon only, active icon plus a wrapping label, and 44pt minimum targets. Mode changes animate the header width, switching instantly under Reduce Motion. The status/timer has its own full-width line, with elapsed time protected from status truncation. At accessibility text sizes the agent name moves below the top control row; the selected mode label fits within the remaining width. xAI shows only the forced Hold to talk option and cannot switch modes. Changes still save the existing voice preference (user decision 2026-11-06, U11). Hold to talk keeps a press-and-hold microphone, release-to-send instruction and halo in both expanded and minimized layouts; tapping the minimized row opens the mode switch. Resizing releases an existing hold without changing modes.
 - Native Automations is display-only: configured tasks, source/schedule, target,
   confirmation policy, read-only status and paged run history with exact thread
   links. It issues GET requests only. Creation, changes and execution belong to
@@ -1126,9 +1130,19 @@ links, stays on screen and usable during the call. The voice composer uses the
 composer frame wrapped in an animated pastel aura (soft blush and mint glows
 and a thin gradient edge) that brightens and swells with the agent's voice,
 follows yours while listening and breathes while thinking (still under Reduce
-Motion). Expanded voice is content-sized, with no reserved caption height or text-entry row (user decision 2026-11-06). It scrolls only when its content reaches the current window cap, reserving space for the transcript on phones, iPad and split windows. Its header shows the agent name, status and call
+Motion). Expanded voice fits the measured header, equalizer and controls, with
+no fixed minimum height or extra startup greeting (user clarification 2026-11-12).
+Text sizes affect height through actual native layout. It grows to fit notices,
+preferences, live words and task details until the whole card reaches about 60% of the current window
+height, bounded by usable space. Only overflowing content at that limit scrolls;
+there is one shared content scroller and no nested task scroller. The header and
+microphone/control row stay outside it. Necessary growth and shrink animate over
+220ms, immediately under Reduce Motion (user clarification 2026-11-11). The private
+call equalizer uses a compact 64pt stage with 2pt bars, centered in the available speech
+space. Its amplitude still reflects measured audio; silence is a still line.
+Explicit minimize/expand and window resizing still adapt the surface. Its header shows the agent name, status and call
 timer, with the mode toggle and a 44pt “?” help control. Speaker mute sits beside the microphone controls. The compact anchored help popover explains the selected listening mode and echo/headphones guidance, has explicit close, outside-tap and accessibility escape dismissal, and contains secondary “Resume audio”. The media bridge exposes playback watermarks and loudness but no recoverable blocked/stalled signal: silence alone cannot distinguish a stalled player from a silent agent, so recovery stays in help (user decision 2026-11-06, U10). Only
-unsealed user speech appears prominently in the voice panel, at 18/26pt in primary ink. Agent captions do not share this space. Sent speech, completed replies, task receipts and approval cards belong in the transcript (user decision 2026-11-06). While the call has agent tasks, one collapsed 44pt task chip (“1 task in progress”, “Needs your OK”) sits under the live words; tapping it lists each task’s outcome with request text behind Details, “Review in chat” for approvals and “Stop task” for queued or running work. It is the only mobile control that can cancel a voice task, so the #2321 fold keeps it; outcomes and cards still land in the transcript (fold decision 2026-11-10, pending review). Tapping the
+unsealed user speech appears prominently in the voice panel, at 16/22pt in primary ink. Agent captions do not share this space. Sent speech, completed replies, task receipts and approval cards belong in the transcript (user decision 2026-11-06). While the call has agent tasks, one collapsed 44pt task chip (“1 task in progress”, “Needs your OK”) sits under the live words; tapping it lists each task’s outcome with request text behind Details, “Review in chat” for approvals and “Stop task” for queued or running work. It is the only mobile control that can cancel a voice task, so the #2321 fold keeps it; outcomes and cards still land in the transcript (fold decision 2026-11-10, pending review). Tapping the
 voice entry starts the connection immediately using the saved voice and mode.
 The timer shows “-” until connected, then counts from 00:00 in both modes.
 Private voice requires both the verified active control snapshot and provider
@@ -1140,7 +1154,10 @@ open; settings/options refreshes apply on the next opening, and Apply still
 checks the live account, chat, source and available choice. Normal app
 backgrounding ends local voice quietly. On reopening, bounded read-only
 checks verify retained active or unknown call metadata before showing it as a
-continuing blocker. Closing and unverified calls are distinct from a verified
+continuing blocker. During a local End, bounded exact-session status reads also
+observe closure without relying solely on the control stream. A fresh call
+reuses the chat's loaded voice option and skips a settings write when the saved
+preferences match; server admission still validates live authority and credentials. Closing and unverified calls are distinct from a verified
 active call; only one live call per person is allowed, and a verified terminal
 or empty account slot permits a fresh explicit start. Checking never ends
 another call or reconnects the microphone. When a person enters voice while
@@ -1158,7 +1175,7 @@ lifts a soft halo (still under Reduce Motion).
 
 Touching or scrolling the transcript minimizes voice to a single composer row.
 The minimized expand control has a minimum 44×44pt touch target in both modes.
-Voice is speech-only in both sizes: there is no typing field or text-send control (user decision 2026-11-06). Only tapping the minimized row expands it, without replacing the media engine or ending the session. Ending voice restores the normal composer with its existing draft intact. The minimized row uses the normal composer’s 4pt frame insets and single-line content height (one text line with 12/10pt field padding and its 44pt toolbar; crew includes its 36pt-or-text-scaled recipient strip and 6pt gap), with waveform, a mono timer and a 44pt End target centered vertically. Live words use one readable line in the expand target. Compact Hold to talk puts live words/timer above its instruction, waveform and 44pt microphone/End controls, within the same normal-composer height. Empty iOS composers use a one-line visual placeholder and expose its full prompt as an accessibility hint, so a wrapped placeholder cannot enlarge the field at accessibility text sizes. The same 3pt-bar dictation waveform appears in ordinary dictation and both private/crew voice sizes, driven by native mic levels and private playback levels. Reduce Motion shows a still dotted line and keeps the aura still. Closing voice or leaving
+Voice is speech-only in both sizes: there is no typing field or text-send control (user decision 2026-11-06). Only tapping the minimized row expands it, without replacing the media engine or ending the session. Ending voice restores the normal composer with its existing draft intact. The minimized row uses the normal composer’s 4pt frame insets and single-line content height (one text line with 12/10pt field padding and its 44pt toolbar; crew includes its 36pt-or-text-scaled recipient strip and 6pt gap), with waveform, a mono timer and a 44pt End target centered vertically. Live words use one readable line in the expand target. Compact Hold to talk puts live words/timer above its instruction, waveform and 44pt microphone/End controls, within the same normal-composer height. Empty iOS composers use a one-line visual placeholder and expose its full prompt as an accessibility hint, so a wrapped placeholder cannot enlarge the field at accessibility text sizes. Ordinary dictation and compact/private/crew controls retain the compact 2pt-bar waveform; the expanded private call uses the larger equalizer. Both derive from native mic levels and private playback levels. Reduce Motion shows a still dotted line and keeps the aura still. Closing voice or leaving
 the chat ends audio; accepted agent tasks keep running. The aura is decorative
 and hidden from VoiceOver (see the 2026-11-04 decision).
 

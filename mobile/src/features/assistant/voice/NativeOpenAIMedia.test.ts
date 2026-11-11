@@ -273,7 +273,7 @@ test("readiness requires exactly the bounded session.started event and fires onc
   }
 });
 
-test("native playback supports hold attenuation, speaker mute and late remote tracks", async () => {
+test("native playback stays at full volume while held and respects speaker mute on late tracks", async () => {
   const h = harness();
   try {
     await h.start();
@@ -281,7 +281,7 @@ test("native playback supports hold attenuation, speaker mute and late remote tr
     h.media.hold(true);
     h.createdPeer().dispatch("track", { track: remote });
     assert.equal(remote.enabled, true);
-    assert.deepEqual(remote.volumes, [0.25]);
+    assert.deepEqual(remote.volumes, [1]);
     h.media.muteSpeaker(true);
     assert.equal(remote.enabled, false);
     assert.equal(remote.volumes.at(-1), 0);
@@ -289,7 +289,7 @@ test("native playback supports hold attenuation, speaker mute and late remote tr
     h.createdPeer().dispatch("track", { track: another });
     assert.equal(another.enabled, false);
     h.media.muteSpeaker(false);
-    assert.equal(another.volumes.at(-1), 0.25);
+    assert.equal(another.volumes.at(-1), 1);
     h.media.hold(false);
     await h.media.resume();
     assert.equal(remote.volumes.at(-1), 1);

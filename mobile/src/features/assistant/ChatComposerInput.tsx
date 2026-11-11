@@ -21,7 +21,12 @@ export function ChatComposerInput({
       <View
         style={
           dictation.active
-            ? { height: 0, overflow: "hidden", opacity: 0 }
+            ? {
+                position: "absolute",
+                height: 0,
+                overflow: "hidden",
+                opacity: 0,
+              }
             : undefined
         }
         accessibilityElementsHidden={dictation.active}

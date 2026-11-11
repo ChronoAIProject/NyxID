@@ -1428,7 +1428,7 @@ for (const protocol of ["openai_live", "xai_realtime"] as const) {
       assert.equal(
         e.media.holds.at(-1),
         false,
-        "input revocation restores output ducking too",
+        "input revocation also releases the held output state",
       );
       assert.equal(
         e.client.hold(true),
@@ -1469,7 +1469,7 @@ for (const protocol of ["openai_live", "xai_realtime"] as const) {
   });
 }
 
-test("diagnostic failures release a held microphone and output ducking before closing", async () => {
+test("diagnostic failures release a held microphone and hold state before closing", async () => {
   const e = setup();
   await e.open("xai_realtime");
   e.client.hold(true);
@@ -1766,4 +1766,57 @@ test("late rejected POST recovery is bounded and settles pendingStart as unknown
   assert.deepEqual(e.errors, []);
   assert.deepEqual(e.controls, []);
   assert.equal(e.starts.length, 1);
+});
+
+test("End observes the exact call without waiting for a missing control snapshot", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  const reads: string[][] = [];
+  e.api.status = async (thread, id) => {
+    reads.push([thread, id]);
+    return session({
+      state: "closed",
+      end_requested: true,
+      control_revision: 2,
+    });
+  };
+  e.responses.control = async () =>
+    session({ state: "closing", end_requested: true, control_revision: 1 });
+  await e.client.end();
+  assert.deepEqual(reads, [[conversationId, sessionId]]);
+  assert.equal(e.client.pendingEnd, undefined);
+  assert.equal(e.media.closed, 1);
+  assert.equal(e.socket.closed, 1);
+  assert.equal(e.clock.intervals.size, 0);
+  assert.equal(e.clock.timeouts.size, 0);
+});
+
+test("End polling ignores a foreign terminal call and never overlaps status reads", async () => {
+  const e = setup();
+  await e.open();
+  const pending = deferred<unknown>();
+  let reads = 0;
+  e.api.status = async () => {
+    reads++;
+    return pending.promise;
+  };
+  e.responses.control = async () =>
+    session({ state: "closing", end_requested: true, control_revision: 2 });
+  const ending = e.client.end();
+  await Promise.resolve();
+  await Promise.resolve();
+  e.clock.tick();
+  e.clock.tick();
+  assert.equal(reads, 1);
+  pending.resolve(
+    session({ id: requestId, state: "closed", control_revision: 3 }),
+  );
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(e.client.pendingEnd?.id, sessionId);
+  e.clock.expire();
+  await ending;
+  assert.equal(e.client.pendingEnd?.id, sessionId);
+  assert.equal(e.media.closed, 1);
+  assert.equal(e.clock.intervals.size, 0);
 });

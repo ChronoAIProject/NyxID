@@ -112,6 +112,7 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
       ]),
     ),
     "react-native": {
+      useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
       Platform: { OS: "ios" },
       AppState: {
         get currentState() {
@@ -170,6 +171,8 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
       X: "X",
     },
     "./DictationWaveform": { DictationWaveform: "DictationWaveform" },
+    "./ChatComposer": { ChatComposerFrame: "ChatComposerFrame" },
+    "../display/ChatLayoutContext": { useComposerHeight: () => 120 },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "../../theme/designTokens": { fonts: {} },
     "../../components/workspace/WorkspaceUI": {
@@ -227,9 +230,14 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
     permission,
     feedback: () => {
       const ui = hookHarness<Element | null>(mocks);
-      const review = ui.load(
+      const components = ui.load(
         fileURLToPath(new URL("./ComposerDictation.tsx", import.meta.url)),
-      ).ComposerDictationReview as typeof ComposerDictationReview;
+      );
+      const review = (
+        h.value().dictation.active
+          ? components.ComposerDictationReview
+          : components.ComposerDictationNotice
+      ) as typeof ComposerDictationReview;
       ui.mount(() => expand(review({ dictation: h.value().dictation })));
       const nodes = elements(ui.value());
       ui.unmount();

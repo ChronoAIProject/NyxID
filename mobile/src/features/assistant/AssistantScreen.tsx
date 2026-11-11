@@ -111,7 +111,8 @@ import { isReported } from "../../lib/api/replyReportTransport";
 import { AssistantMessageFooter } from "./AssistantMessageFooter";
 import { AssistantAttachmentView } from "./AssistantAttachmentView";
 import { AssistantPendingUploads } from "./AssistantPendingUploads";
-import { ChatComposerFrame, ComposerSubmitButton } from "./ChatComposer";
+import { ComposerSubmitButton } from "./ChatComposer";
+import { ComposerDictationFrame } from "./ComposerDictation";
 import { AssistantMentionInput } from "./AssistantMentionInput";
 import { useAssistantUploads } from "./useAssistantUploads";
 import { appendDictation, useComposerDictation } from "./useComposerDictation";
@@ -1582,7 +1583,7 @@ export function AssistantScreen({
             }}
           />
         ) : (
-          <ChatComposerFrame>
+          <ComposerDictationFrame dictation={dictation}>
             {guidance.canSteer ? (
               <Label muted style={styles.composerHint}>
                 Still replying. What you send now steers this reply; Stop ends
@@ -1747,7 +1748,7 @@ export function AssistantScreen({
                   : "Keep the message under 32,768 characters."}
               </Label>
             ) : null}
-          </ChatComposerFrame>
+          </ComposerDictationFrame>
         )}
       </ChatComposerDock>
 

@@ -1,3 +1,4 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { Alert } from "react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { SheetScreenProps } from "../../app/navigationTypes";
@@ -26,6 +27,7 @@ export function SessionDetailScreen({
   navigation,
   route,
 }: SheetScreenProps<"SessionDetail">) {
+  const { t } = useAppLanguage();
   const { isConnected } = useNetworkStatus();
   const { signOut } = useAuthSession();
   const client = useQueryClient();
@@ -33,7 +35,9 @@ export function SessionDetailScreen({
     queryKey: ["account", "sessions"],
     queryFn: ({ signal }) => accountApi.listSessions(signal),
   });
-  const session = sessions.data?.find((row) => row.id === route.params.sessionId);
+  const session = sessions.data?.find(
+    (row) => row.id === route.params.sessionId,
+  );
   const revoke = useMutation({
     mutationFn: (id: string) => accountApi.revokeSession(id),
     onSuccess: async () => {
@@ -54,10 +58,10 @@ export function SessionDetailScreen({
             rows={4}
             icon={false}
             detail={false}
-            accessibilityLabel="Loading session"
+            accessibilityLabel={t("Loading session")}
           />
         ) : (
-          <Notice message="This session has already ended." />
+          <Notice message={t("This session has already ended.")} />
         )}
       </SettingsPage>
     );
@@ -69,24 +73,29 @@ export function SessionDetailScreen({
       ) : null}
       <SettingsGroup
         inset={false}
-        footer="Network details come from NyxID's session records."
+        footer={t("Network details come from NyxID's session records.")}
       >
         <SettingsRow
-          label="Device"
+          label={t("Device")}
           value={sessionDeviceLabel(session.user_agent)}
         />
-        {current ? <SettingsRow label="Status" value="This session" /> : null}
+        {current ? (
+          <SettingsRow label={t("Status")} value="This session" />
+        ) : null}
         <SettingsRow
-          label="Signed in"
+          label={t("Signed in")}
           value={formatSessionDate(session.created_at)}
         />
         <SettingsRow
-          label="Expires"
+          label={t("Expires")}
           value={formatSessionDate(session.expires_at)}
         />
-        <SettingsRow label="Network" value={session.ip_address || "Unavailable"} />
+        <SettingsRow
+          label={t("Network")}
+          value={session.ip_address || "Unavailable"}
+        />
       </SettingsGroup>
-      <SettingsGroup inset={false} title="Client">
+      <SettingsGroup inset={false} title={t("Client")}>
         <SettingsRow
           label={session.user_agent || "Device details unavailable"}
         />
@@ -97,10 +106,10 @@ export function SessionDetailScreen({
           destructive
           label={
             revoke.isPending
-              ? "Signing out…"
+              ? t("Signing out…")
               : current
-                ? "Sign Out on This Device"
-                : "Sign Out This Session"
+                ? t("Sign Out on This Device")
+                : t("Sign Out This Session")
           }
           disabled={!isConnected || revoke.isPending}
           onPress={() =>

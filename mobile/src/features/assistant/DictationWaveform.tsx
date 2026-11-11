@@ -6,21 +6,25 @@ import { useTheme } from "../../theme/ThemeContext";
 export type LevelSubscription = (
   listener: (level: number) => void,
 ) => () => void;
-const BAR_PITCH = 5;
-
 /** Shared native level line: newest sample trails, silence is a row of dots. */
 export function DictationWaveform({
   subscribe,
   height = 22,
+  barWidth = 2,
+  barGap = 3,
+  minimumHeight = 2,
 }: {
   subscribe: LevelSubscription;
   height?: number;
+  barWidth?: number;
+  barGap?: number;
+  minimumHeight?: number;
 }) {
   const { colors } = useTheme();
   const reducedMotion = useReducedMotion();
   const [width, setWidth] = useState(0);
   const [levels, setLevels] = useState<number[]>([]);
-  const count = Math.max(0, Math.floor(width / BAR_PITCH));
+  const count = Math.max(0, Math.floor((width + barGap) / (barWidth + barGap)));
   const capacity = useRef(count);
   capacity.current = count;
   useEffect(() => {
@@ -45,7 +49,7 @@ export function DictationWaveform({
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
       onLayout={(event) => setWidth(event.nativeEvent.layout.width)}
-      style={[styles.wave, { height }]}
+      style={[styles.wave, { height, gap: barGap }]}
     >
       {bars.map((level, index) => (
         <View
@@ -53,7 +57,9 @@ export function DictationWaveform({
           style={[
             styles.bar,
             {
-              height: 3 + level * (height - 3),
+              width: barWidth,
+              borderRadius: barWidth / 2,
+              height: minimumHeight + level * (height - minimumHeight),
               backgroundColor: colors.textSecondary,
             },
           ]}
@@ -68,8 +74,7 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "flex-end",
-    gap: BAR_PITCH - 3,
     overflow: "hidden",
   },
-  bar: { width: 3, borderRadius: 1.5 },
+  bar: { width: 2, borderRadius: 1 },
 });

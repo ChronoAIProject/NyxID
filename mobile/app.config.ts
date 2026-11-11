@@ -91,6 +91,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       intentFilters: androidIntentFilters,
     },
     plugins: [
+      "./plugins/withVoiceAudio",
       ["expo-screen-orientation", { initialOrientation: "PORTRAIT_UP" }],
       [
         "expo-image-picker",

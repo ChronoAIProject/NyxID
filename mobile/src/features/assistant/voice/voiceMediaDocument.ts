@@ -522,7 +522,7 @@ export const VOICE_MEDIA_ENGINE = String.raw`
           if (!peer || typeof message.sdp !== 'string' || message.sdp.length > 131072) throw new Error('sdp');
           await peer.setRemoteDescription({ type: 'answer', sdp: message.sdp }); break;
         case 'input': input(message.enabled === true); break;
-        case 'hold': if (audio) audio.volume = message.pressed ? 0.25 : 1; break;
+        case 'hold': break;
         case 'speaker': speakerMuted = message.muted === true; if (audio) audio.muted = speakerMuted; break;
         case 'resume': {
           const target = audio, localContext = context, localMeter = meterContext;

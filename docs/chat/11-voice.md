@@ -792,7 +792,7 @@ sequenceDiagram
     V->>X: Scheduled short progress/context at safe speech boundary
     X-->>B: Progress audio
     U->>B: Talk while output/work continues
-    B->>B: Duck/pause output on candidate speech, retain bounded tail
+    B->>B: Keep output volume unchanged while checking candidate speech
     B->>V: New input audio; no automatic cancel
     V->>X: Commit for transcription while manual output is active
     X-->>V: Confirmed real user transcript
@@ -982,14 +982,15 @@ audio transport only if these measurements require it; that is additional scope.
 
 ### Grok false barge-in gate
 
-Default `server_vad` can stop generation before NyxID verifies speech. Ducking
+Default `server_vad` can stop generation before NyxID verifies speech. Detecting
 only in the browser cannot undo that. The intended protected path is
 `turn_detection: {"type": null}` with local VAD/endpointing and NyxID-controlled response
 creation/cancellation:
 
-1. While output plays, a candidate voiced input ducks output by roughly 12 dB
-   (or pauses with a bounded retained tail). Never cancel a response or task from
-   a VAD event alone.
+1. Keep output at full application gain while checking candidate speech,
+   including while the push-to-talk button is held. Explicit speaker mute still
+   silences output. Any future automatic volume reduction requires a linked QA
+   ticket. Never cancel a response or task from a VAD event alone.
 2. Continue capture/transcription. Commit a candidate utterance in manual mode;
    wait for a real input transcript. Combine voiced duration, output-reference
    correlation and transcript evidence; identical speaker leakage, cough/noise
@@ -997,7 +998,7 @@ creation/cancellation:
    sufficient because echo can itself produce real words.
 3. A meaningful user interruption cancels provider output, flushes stale queued
    audio and truncates the provider conversation to the actual played position.
-   A rejected candidate restores output promptly. No task state changes unless
+   A rejected candidate leaves playback unchanged. No task state changes unless
    the input explicitly requested Stop/correction/new work.
 4. Contract-test that Grok manual mode can transcribe committed input while an
    assistant response is generating without auto-cancelling it. If unsupported,
@@ -1436,7 +1437,7 @@ browser/device class and network condition using timestamps/counts only.
 | Activity -> UI / spoken progress | <=500 ms UI p95; first useful spoken progress around 2 s | Event receipt, UI render, coalesced output start |
 | Durable result -> announced | <=1 s p50, <=2 s p95 at next conversational pause | Commit, append, first result audio; queue while user speaks separately |
 | Grok relay overhead | 40–150 ms network estimate + 20–60 ms loopback; provider transcript gating adds unverified delay | Compare regional direct timing in lab, relay queue and player timestamps |
-| Candidate barge-in -> duck / verified interrupt | <=100 ms duck, <=500 ms verified interruption target | Candidate speech, real input confirmation, playback stop |
+| Candidate barge-in -> verified interrupt | <=500 ms verified interruption target | Candidate speech, real input confirmation, playback stop; output volume stays unchanged |
 | Explicit Stop -> cancellation requested | <=500 ms p95 server request; existing worker polls at 250 ms | Durable Stop, upstream drop, terminal settlement separately |
 
 At 24 kHz PCM16 mono, each uncompressed direction is 48 KB/s; bidirectional
@@ -1540,7 +1541,7 @@ still require real-session measurements; fixtures do not establish those times.
 | Org membership/grant/scope revoked mid-call | Live recheck rejects next action/delivery, Stop affected work, close provider audio and clear pending secret challenges; no personal fallback. Pre-admitted effects may already have completed. |
 | Thread key rotation/revocation, agent destroyed, account logout | Stop new delegation, expire challenges; normal key/binding recovery rules. End session on identity loss; no cross-actor late events in UI. |
 | Duplicate provider call/result or delayed old event | Deduplicate persistent request/window IDs; ignore old generation/version, no double work, charge, continuation or notification. |
-| False speech / echo | Duck then recover, no backend Stop from VAD; require explicit real input. Offer click/PTT/headphones. |
+| False speech / echo | Keep playback unchanged, no backend Stop from VAD; require explicit real input. Offer click/PTT/headphones. |
 | Voice ends with task/card pending | Accepted work and card stay in the thread; normal expiry applies. Result notification uses a deduped receipt and user's preferences. Never auto-confirm or silently re-open mic. |
 
 Each failed startup boundary emits one structured warning and one metadata-only
@@ -2050,3 +2051,15 @@ independent silent-input controls observed spurious input captions, partial
 presentation and wrong-language speech with JSON while paired plain-text
 controls preserved the caller's language and findings. This is a tested
 mitigation, not a guarantee against every provider transcription anomaly.
+
+### Native iOS playback routing
+
+The iOS app configures `RTCAudioSessionConfiguration.webRTC()` at startup, before
+React Native creates the WebRTC audio device. It inserts `defaultToSpeaker` into
+the existing category options, retaining WebRTC's voice-processing mode and
+Bluetooth routing. Without this default, `playAndRecord` + `voiceChat` can select
+the quiet receiver on a physical iPhone. Setting the WebRTC default also covers
+audio-unit reactivation; a temporary AVAudioSession override alone can be reset
+by the next call. Connected headphones remain system-selected. App gain remains
+1.0 unless the person explicitly mutes playback. The Expo `withVoiceAudio` plugin
+preserves this setup when native files are regenerated.

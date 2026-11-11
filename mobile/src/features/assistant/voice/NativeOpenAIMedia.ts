@@ -87,7 +87,6 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
   private timer?: ReturnType<typeof setInterval>;
   private statsPending = false;
   private inputEnabled = false;
-  private held = false;
   private speakerMuted = false;
   private providerReady = false;
   private telemetry = { playback_ms: 0, playback_audible: false };
@@ -190,7 +189,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
     const generation = ++this.generation;
     this.diagnostics = [];
     this.inputEnabled = false;
-    this.held = this.speakerMuted = this.providerReady = false;
+    this.speakerMuted = this.providerReady = false;
     const aborted = () => {
       if (this.alive(generation)) this.close();
     };
@@ -359,7 +358,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
     try {
       for (const track of this.remoteTracks) {
         track.enabled = !this.speakerMuted;
-        track._setVolume(this.speakerMuted ? 0 : this.held ? 0.25 : 1);
+        track._setVolume(this.speakerMuted ? 0 : 1);
       }
       if (this.speakerMuted) this.telemetry.playback_audible = false;
     } catch {
@@ -369,9 +368,8 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
     }
   }
 
-  hold(pressed: boolean): void {
+  hold(_pressed: boolean): void {
     if (this.closed) return;
-    this.held = pressed;
     this.applySpeaker();
   }
 
@@ -549,11 +547,7 @@ export class NativeOpenAIMedia implements VoiceMediaAdapter {
     this.peer = undefined;
     if (this.stream) this.releaseStream(this.stream);
     this.stream = undefined;
-    this.inputEnabled =
-      this.held =
-      this.speakerMuted =
-      this.providerReady =
-        false;
+    this.inputEnabled = this.speakerMuted = this.providerReady = false;
     this.telemetry = { playback_ms: 0, playback_audible: false };
     this.emit({ type: "level", input: 0, output: 0 });
   }

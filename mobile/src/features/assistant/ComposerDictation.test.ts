@@ -44,6 +44,8 @@ function setup({ introSeen = true, granted = false } = {}) {
     "../../lib/accessibility/useReducedMotion": {
       useReducedMotion: () => false,
     },
+    "./ChatComposer": { ChatComposerFrame: "ChatComposerFrame" },
+    "../display/ChatLayoutContext": { useComposerHeight: () => 120 },
     "react/jsx-runtime": {
       ...Object.fromEntries(
         ["jsx", "jsxs"].map((key) => [
@@ -97,6 +99,7 @@ function setup({ introSeen = true, granted = false } = {}) {
       },
     },
     "react-native": {
+      useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
       ActivityIndicator: "ActivityIndicator",
       Keyboard: { dismiss: () => events.push("keyboard") },
       Modal: "Modal",
@@ -149,6 +152,9 @@ function setup({ introSeen = true, granted = false } = {}) {
       dictation: ComposerDictationState;
       disabled?: boolean;
     }) => Element;
+    ComposerDictationNotice: (props: {
+      dictation: ComposerDictationState;
+    }) => Element | null;
     ComposerDictationReview: (props: {
       dictation: ComposerDictationState;
       draft?: string;
@@ -233,7 +239,7 @@ test("idle dictation adds no blank space; an idle error is a compact dismissible
   x.dictation.error = "Allow microphone access in Settings to dictate.";
   x.dictation.permissionDenied = true;
   const tree = all(
-    render(x.ComposerDictationReview({ dictation: x.dictation })) as Element,
+    render(x.ComposerDictationNotice({ dictation: x.dictation })) as Element,
   );
   const buttons = tree.filter((node) => node.type === "ActionButton");
   assert.deepEqual(
@@ -304,7 +310,7 @@ test("with nothing said yet the waveform takes the field's place; an existing dr
   );
   assert.equal(
     empty.some((node) => node.type === "ScrollView"),
-    false,
+    true,
   );
   x.dictation.final = "and a window seat";
   x.dictation.text = "and a window seat";
@@ -392,7 +398,7 @@ test("the meter draws native volume levels as bars and stops listening when capt
   const heights = all(wave())
     .filter((node) => node.type === "View" && node !== wave())
     .map((node) => node.props.style[1].height);
-  assert.deepEqual(heights, [3, 3 + 0.5 * 19, 3 + 19]);
+  assert.deepEqual(heights, [2, 2 + 0.5 * 20, 2 + 20]);
   x.h.unmount();
   assert.equal(x.levelListeners.size, 0, "unsubscribed on unmount");
 });
@@ -415,4 +421,59 @@ test("the first tap dictates in the composer at once; no intro sheet or window o
     ["keyboard", "start"],
     "push-to-talk starts at once",
   );
+});
+
+test("dictation grows within the typing height limit and keeps the meter between Discard and Finish", () => {
+  const x = setup();
+  x.dictation.active = true;
+  for (const phase of [
+    "permission",
+    "connecting",
+    "listening",
+    "stopping",
+  ] as const) {
+    x.dictation.phase = phase;
+    const tree = render(
+      x.ComposerDictationReview({ dictation: x.dictation }),
+    ) as Element;
+    assert.equal(
+      tree.props.style,
+      undefined,
+      "content controls the composer height",
+    );
+    const textArea = all(tree).find((node) => node.type === "ScrollView")!;
+    assert.equal(textArea.props.style[0].flexGrow, 0);
+    assert.deepEqual(
+      { ...textArea.props.style[1] },
+      { minHeight: 44, maxHeight: 120 },
+    );
+    const row = all(tree).find(
+      (node) =>
+        node.type === "View" &&
+        [node.props.children]
+          .flat()
+          .some(
+            (child: any) =>
+              child?.props?.accessibilityLabel === "Discard dictation",
+          ),
+    )!;
+    const children = [row.props.children].flat().filter(Boolean);
+    assert.equal(children.length, 3);
+    assert.equal(children[0].props.accessibilityLabel, "Discard dictation");
+    assert.equal(children[2].props.accessibilityLabel, "Finish dictation");
+    assert.ok(
+      all(children[1]).some(
+        (node) => node.type === "Text" || node.type === "ActivityIndicator",
+      ),
+    );
+  }
+  x.dictation.error = "Microphone unavailable";
+  const review = render(
+    x.ComposerDictationReview({ dictation: x.dictation }),
+  ) as Element;
+  assert.equal(
+    JSON.stringify(review).includes("Microphone unavailable"),
+    false,
+  );
+  assert.ok(x.ComposerDictationNotice({ dictation: x.dictation }));
 });

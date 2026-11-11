@@ -18,7 +18,7 @@ import {
 import { composerVoiceMinHeight } from "../composerGeometry";
 import { VoiceComposerAura } from "./VoiceComposerAura";
 
-/** Content grows only as needed, within the current phone/tablet window. */
+/** Leave transcript space while bounding voice to the current phone/tablet window. */
 export function useVoiceComposerHeight() {
   const { height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -306,7 +306,12 @@ const styles = StyleSheet.create({
   frame: { gap: 10, paddingHorizontal: 12, paddingTop: 12, paddingBottom: 10 },
   compactFrame: { paddingHorizontal: 4, paddingVertical: 4 },
   header: { gap: 2, minHeight: 36, paddingLeft: 4 },
-  headerTop: { flexDirection: "row", alignItems: "center", gap: 8 },
+  headerTop: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    minHeight: 50,
+  },
   statusRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   headerText: { flex: 1, minWidth: 0 },
   title: { fontFamily: fonts.bodySemi, fontSize: 15, lineHeight: 20 },
