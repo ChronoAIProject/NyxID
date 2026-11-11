@@ -1140,3 +1140,72 @@ async fn channel_typing_stops_on_first_platform_error_or_live_refusal() {
         assert_eq!(f.gateway.received_requests().await.unwrap().len(), 1);
     }
 }
+
+#[tokio::test]
+async fn telegram_partial_failure_notifies_saved_thread_once_without_restarting_execution() {
+    let f = fixture("telegram_failure_notice").await;
+    let inbound = Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<bson::Document>(EVENTS)
+        .update_one(
+            doc! {"_id":&f.event.id},
+            doc! {"$set":{"relay_message_id":&inbound}},
+        )
+        .await
+        .unwrap();
+    let receipt = Uuid::new_v4().to_string();
+    let receipts = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::channel_reply_delivery::COLLECTION_NAME);
+    receipts.insert_one(doc!{"_id":&receipt,"complete":false,"parts":[{"status":"accepted"},{"status":"failed"},{"status":"not_attempted"}]}).await.unwrap();
+    for _ in 0..2 {
+        crate::services::channel_reply_notice::failed(
+            &f.state.db,
+            &receipt,
+            &f.channel.channel_bot_id,
+            &inbound,
+        )
+        .await
+        .unwrap();
+    }
+    let messages = f
+        .state
+        .db
+        .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME);
+    assert_eq!(
+        messages
+            .count_documents(doc! {"conversation_id":&f.event.conversation_id,"role":"event"})
+            .await
+            .unwrap(),
+        1
+    );
+    let notice = messages
+        .find_one(doc! {"conversation_id":&f.event.conversation_id,"role":"event"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(notice.text.contains("1 of 3 parts were confirmed"));
+    assert!(notice.text.contains("Later parts were not sent"));
+    assert!(!notice.text.contains("can't parse entities"));
+    // A foreign bot cannot choose this owner's thread through an inbound ID.
+    let foreign = Uuid::new_v4().to_string();
+    receipts
+        .insert_one(doc! {"_id":&foreign,"complete":false,"parts":[{"status":"uncertain"}]})
+        .await
+        .unwrap();
+    crate::services::channel_reply_notice::failed(&f.state.db, &foreign, "foreign-bot", &inbound)
+        .await
+        .unwrap();
+    assert_eq!(
+        messages
+            .count_documents(doc! {"conversation_id":&f.event.conversation_id,"role":"event"})
+            .await
+            .unwrap(),
+        1
+    );
+    // Reporting a transport failure leaves the send/stream barrier intact.
+    assert_eq!(status(&f).await, "waiting");
+    f.state.db.drop().await.unwrap();
+}

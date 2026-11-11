@@ -88,16 +88,32 @@ impl TextLimit {
     /// entire platform budget must be split at a Unicode scalar boundary.
     /// Concatenating all parts always recovers the input, including whitespace.
     pub fn chunks(self, text: &str) -> impl Iterator<Item = &str> {
-        self.chunks_inner(text, true)
+        self.chunks_inner(text, true, 0)
     }
 
     /// Display text has no Markdown escape pairs until the renderer adds them.
     /// A reduced planning budget still retains at least one complete scalar.
     pub fn display_chunks(self, text: &str) -> impl Iterator<Item = &str> {
-        self.chunks_inner(text, false)
+        self.chunks_inner(text, false, 0)
     }
 
-    fn chunks_inner(self, text: &str, keep_escapes: bool) -> impl Iterator<Item = &str> {
+    /// Ignore a preferred whitespace boundary before a fitting entity ends.
+    /// Uses the same scalar/budget splitter as ordinary display text.
+    pub fn display_prefix(self, text: &str, minimum: usize) -> &str {
+        if minimum == 0 {
+            return self.display_chunks(text).next().unwrap_or_default();
+        }
+        self.chunks_inner(text, false, minimum)
+            .next()
+            .unwrap_or_default()
+    }
+
+    fn chunks_inner(
+        self,
+        text: &str,
+        keep_escapes: bool,
+        minimum: usize,
+    ) -> impl Iterator<Item = &str> {
         let mut rest = text;
         std::iter::from_fn(move || {
             if rest.is_empty() {
@@ -118,7 +134,7 @@ impl TextLimit {
             }
             if end < rest.len() {
                 let prefix = &rest[..end];
-                end = prefix
+                let preferred = prefix
                     .rfind("\n\n")
                     .map(|index| index + 2)
                     .or_else(|| prefix.rfind('\n').map(|index| index + 1))
@@ -130,6 +146,9 @@ impl TextLimit {
                             .map(|(index, ch)| index + ch.len_utf8())
                     })
                     .unwrap_or(end);
+                if self.measure(&prefix[..preferred]) >= minimum {
+                    end = preferred;
+                }
                 // A backslash and the escaped scalar are one rendering atom.
                 // An even run ends in an escaped backslash and is safe to cut.
                 if keep_escapes

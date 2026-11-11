@@ -114,6 +114,12 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
       )}
       <Row label={translateUi("Last reply sent")} value={when(d.last_outbound_at)} />
       {outbound && <Row label={translateUi("Last reply error")} value={outbound} />}
+      {d.last_outbound_notice?.reason === "telegram_formatting_fallback" && (
+        <Row
+          label={translateUi("Formatting notice")}
+          value={translateUi("Telegram rejected formatting at {{time}}. NyxID attempted the same text without styling; see the delivery result for confirmation.", { time: when(d.last_outbound_notice.at) })}
+        />
+      )}
       {webhook && <Row label={translateUi("Last webhook error")} value={webhook} />}
       {d.subscription_state && (
         <Row

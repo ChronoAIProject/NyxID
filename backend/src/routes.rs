@@ -2255,6 +2255,24 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/reply/update", post(handlers::channel_relay::update_reply))
         .route(
+            "/reply/commonmark",
+            post(handlers::channel_relay_request::commonmark_reply).layer(DefaultBodyLimit::max(
+                crate::services::channel_reply_delivery::MAX_REPLY_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/thread-reply/commonmark",
+            post(handlers::channel_relay_request::commonmark_thread_reply).layer(
+                DefaultBodyLimit::max(
+                    crate::services::channel_reply_delivery::MAX_REPLY_REQUEST_BYTES,
+                ),
+            ),
+        )
+        .route(
+            "/reply/update/commonmark",
+            post(handlers::channel_relay_request::commonmark_update),
+        )
+        .route(
             "/messages/{conversation_id}",
             get(handlers::channel_relay::list_messages),
         )

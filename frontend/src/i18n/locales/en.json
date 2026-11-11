@@ -11742,5 +11742,7 @@
   "Back to skill": "Back to skill",
   "Choose provider": "Choose provider",
   "View": "View",
-  "Attach": "Attach"
+  "Attach": "Attach",
+  "Formatting notice": "Formatting notice",
+  "Telegram rejected formatting at {{time}}. NyxID attempted the same text without styling; see the delivery result for confirmation.": "Telegram rejected formatting at {{time}}. NyxID attempted the same text without styling; see the delivery result for confirmation."
 }

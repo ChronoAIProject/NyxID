@@ -71,6 +71,25 @@ function renderCard() {
 beforeEach(() => vi.clearAllMocks());
 
 describe("ChannelBotHealthCard", () => {
+  it("shows a formatting fallback without claiming that delivery succeeded", async () => {
+    const result = health({ platform: "telegram" });
+    mockGet.mockResolvedValue({
+      ...result,
+      diagnostics: {
+        ...result.diagnostics,
+        last_outbound_notice: {
+          code: "10005",
+          reason: "telegram_formatting_fallback",
+          at: "2026-11-10T09:00:00Z",
+        },
+      },
+    });
+    renderCard();
+    expect(await screen.findByText("Formatting notice")).toBeInTheDocument();
+    expect(screen.getByText(/attempted the same text without styling; see the delivery result for confirmation/)).toBeInTheDocument();
+    expect(screen.getByText(/rate_limited at/)).toBeInTheDocument();
+  });
+
   it("renders the diagnostics from /health with formatted times and errors", async () => {
     mockGet.mockResolvedValue(health());
     renderCard();

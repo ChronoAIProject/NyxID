@@ -9032,5 +9032,7 @@
   "View": "檢視",
   "e.g. media.write": "例如 media.write",
   "e.g. repo,read:org": "例如 repo,read:org",
-  "{{value1}} bot": "{{value1}} 機器人"
+  "{{value1}} bot": "{{value1}} 機器人",
+  "Formatting notice": "格式提示",
+  "Telegram rejected formatting at {{time}}. NyxID attempted the same text without styling; see the delivery result for confirmation.": "Telegram 於 {{time}} 拒絕了訊息格式。NyxID 已嘗試傳送不含樣式的相同文字；請查看傳遞結果以確認是否成功。"
 }

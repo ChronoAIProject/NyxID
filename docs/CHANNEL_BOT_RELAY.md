@@ -2722,6 +2722,25 @@ services and an org-paid daily budget. Groups/topics share public transcript
 context while execution keys remain isolated per actor. See
 [the NyxBot contract](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).
 
+### Telegram CommonMark opt-in
+
+For original, unescaped assistant Markdown, use `POST /reply/commonmark`,
+`/thread-reply/commonmark`, or `/reply/update/commonmark` under
+`/api/v1/channel-relay`. Bodies and authentication match the original routes.
+These distinct routes fail closed on old replicas. They opt into
+`metadata.text_format: "commonmark"` internally; that metadata form is also
+available to callers targeting a known upgraded replica. Do not combine it with
+`parse_mode` or `entities`. Send text before Markdown escaping or fragmentation;
+NyxID parses once and applies its shared platform budgets. Interactive metadata
+cannot be duplicated across multipart text; send long text separately.
+
+Opted-in Telegram sends and edits use explicit entities. Unopted legacy callers
+retain their text/default syntax, including this base's historical ignored
+metadata.parse_mode (Markdown default); ordinary sends already accept entities. Formatting fallback
+applies to explicit display text/entities only, never by guessing how to undo
+an external caller's Markdown. See [Telegram formatting](TELEGRAM_NEW.md#assistant-markdown-and-formatting-refusals-2317--2310)
+for receipts, definitive-refusal fallback, owner notices and rollout requirements.
+
 
 ### Discord intake health and failed hand-overs (#2328, #2323)
 
