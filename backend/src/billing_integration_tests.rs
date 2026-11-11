@@ -1702,8 +1702,11 @@ async fn exercise_credential_verification_route(state: &crate::AppState, app: &R
             "/api/v1/keys",
             &token,
             Body::from(
-                serde_json::json!({"service_slug":catalog.slug,
-            "credential":"verification-billing-fixture"})
+                serde_json::json!({
+                    "service_slug": catalog.slug,
+                    "label": "Billing verification fixture",
+                    "credential": "verification-billing-fixture",
+                })
                 .to_string(),
             ),
         ),
