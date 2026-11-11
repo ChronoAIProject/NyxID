@@ -885,3 +885,41 @@ async fn family_contract_readiness_gates_authoring_and_both_admin_and_public_rea
     );
     state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn contracts_are_readable_flag_off_by_admin_operator_only_and_match_validator() {
+    let (state, admin, operator, person) = setup().await;
+    for auth in [admin.clone(), operator] {
+        let Json(rows) = certified_contracts(State(state.clone()), auth)
+            .await
+            .unwrap();
+        let rows = serde_json::to_value(rows).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 3);
+        for (row, definition) in
+            rows.as_array().unwrap().iter().zip(
+                crate::services::platform_model_execution::certification::contracts::DEFINITIONS,
+            )
+        {
+            assert_eq!(row["fixture_sha256"], definition.digest());
+            let contract = serde_json::from_value(row["default_contract"].clone()).unwrap();
+            assert!(definition.accepts(&contract));
+            let fixture: serde_json::Value = serde_json::from_str(definition.fixture).unwrap();
+            assert_eq!(row["transports"], fixture["transports"]);
+        }
+    }
+    assert!(
+        certified_contracts(State(state.clone()), person)
+            .await
+            .is_err()
+    );
+    for method in [AuthMethod::ApiKey, AuthMethod::Delegated] {
+        let mut external = admin.clone();
+        external.auth_method = method;
+        assert!(
+            certified_contracts(State(state.clone()), external)
+                .await
+                .is_err()
+        );
+    }
+    state.db.drop().await.unwrap();
+}

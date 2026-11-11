@@ -1,4 +1,6 @@
 //! Public model discovery and human-only, revision-fenced administration.
+mod contracts;
+pub mod credentials;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
@@ -50,6 +52,21 @@ pub struct SetArgs {
 }
 #[derive(Subcommand)]
 pub enum AdminModelCommands {
+    /// Certified accounting contracts and allowed options
+    Contracts {
+        #[command(subcommand)]
+        command: contracts::ContractCommands,
+    },
+    /// Private provider credentials for model routes
+    Credentials {
+        #[command(subcommand)]
+        command: credentials::CredentialCommands,
+    },
+    /// Model billing identities without credentials
+    Offering {
+        #[command(subcommand)]
+        command: credentials::OfferingCommands,
+    },
     List(PageArgs),
     Show(ModelArgs),
     /// Create a disabled draft from a public-contract JSON file
@@ -106,7 +123,7 @@ pub enum AccessCommands {
 pub enum PriceCommands {
     List(ModelArgs),
     /// Create a pending tariff from certified contract/bounds/components JSON
-    Create(SetArgs),
+    Create(contracts::PriceCreateArgs),
     /// Publish all complete pending revisions via existing billing resync
     Publish(ModelArgs),
     Resync(ModelArgs),
@@ -365,6 +382,9 @@ async fn write(args: SetArgs, suffix: &str, post: bool) -> Result<(Value, AuthAr
 }
 pub async fn run_admin(command: AdminModelCommands) -> Result<()> {
     let (value, auth) = match command {
+        AdminModelCommands::Contracts { command } => return contracts::run(command).await,
+        AdminModelCommands::Credentials { command } => return credentials::run(command).await,
+        AdminModelCommands::Offering { command } => return credentials::offering(command).await,
         AdminModelCommands::List(args) => {
             let mut api = support::human_api(&args.auth).await?;
             (
@@ -445,7 +465,7 @@ pub async fn run_admin(command: AdminModelCommands) -> Result<()> {
         },
         AdminModelCommands::Prices { command } => match command {
             PriceCommands::List(args) => get(args, "/tariffs").await?,
-            PriceCommands::Create(args) => write(args, "/tariffs", true).await?,
+            PriceCommands::Create(args) => contracts::create(args).await?,
             PriceCommands::Publish(args) | PriceCommands::Resync(args) => {
                 billing(args, true).await?
             }
