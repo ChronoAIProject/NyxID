@@ -169,6 +169,7 @@ pub(crate) async fn team_pool_limit(state: &AppState, owner: &str) -> u32 {
 
 fn event_turn(conversation_id: &str) -> TurnStart {
     TurnStart {
+        title_language: None,
         automation_work: None,
         automation_parent: None,
         execution_enrollment: false,
@@ -1010,6 +1011,7 @@ pub(crate) async fn assign(
         state,
         owner,
         TurnStart {
+            title_language: None,
             automation_work: None,
             automation_parent: execution_parent
                 .and_then(crate::services::trigger_schedule::direct::parent),

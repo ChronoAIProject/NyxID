@@ -690,6 +690,8 @@ pub enum OwnerInstructionSource {
 
 #[derive(Clone)]
 pub struct TurnStart {
+    /// Validated first-party UI language; not forwarded to NyxAgent.
+    pub title_language: Option<String>,
     pub(crate) automation_work: Option<crate::models::trigger_run::AutomationWork>,
     pub(crate) automation_parent: Option<super::trigger_schedule::direct::Parent>,
     /// Copied from a verified person's already-loaded enrollment. Not a client field.
@@ -868,6 +870,7 @@ impl From<&TurnStart> for TurnStart {
 impl From<&TurnRequest> for TurnStart {
     fn from(request: &TurnRequest) -> Self {
         Self {
+            title_language: None,
             automation_work: None,
             automation_parent: None,
             execution_enrollment: false,
@@ -2231,6 +2234,7 @@ pub(crate) async fn begin_owner_turn_in_session(
             .ok_or_else(not_found)?
     } else {
         AssistantConversation {
+            title_language: None,
             automation_v2: false,
             artifact_head: None,
             collaboration: None,
@@ -2310,6 +2314,10 @@ pub(crate) async fn begin_owner_turn_in_session(
         && start.channel.is_none()
     {
         row.title = super::assistant_title_service::provisional(&start.text);
+        row.title_language = start
+            .title_language
+            .as_deref()
+            .and_then(super::assistant_title_service::language);
     }
     if start.group_request_id.is_some() {
         row.group_request_id = start.group_request_id.clone();

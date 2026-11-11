@@ -1,4 +1,5 @@
 import { settledInterruptedTurn } from "./interrupted-turn";
+import { assistantTitleLanguage } from "@/lib/assistant/title-language";
 import { formatCapacityWait } from "./capacity-wait";
 import { ApiError } from "@/lib/api-client";
 import { AssistantHttpError, assistantHttp, assistantJson } from "@/lib/assistant/assistant-http";
@@ -1002,7 +1003,7 @@ export class NyxAgentTransport {
             ...(options.acknowledgementId ? { acknowledgement_id: options.acknowledgementId } : {}),
             ...(options.attachmentIds?.length ? { attachment_ids: options.attachmentIds } : {}),
           },
-          headers: { Accept: "text/event-stream" },
+          headers: { Accept: "text/event-stream", "Accept-Language": assistantTitleLanguage() },
           signal: controller.signal,
           creditsDenial: {
             key: `assistant:nyxagent:${key}:${userMessageId}`,

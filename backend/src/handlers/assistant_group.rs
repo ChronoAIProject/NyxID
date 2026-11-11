@@ -379,6 +379,7 @@ async fn run_member_with_work(
         return Ok(());
     }
     let start = TurnStart {
+        title_language: None,
         automation_work: work.clone(),
         automation_parent: None,
         execution_enrollment: false,
