@@ -3279,3 +3279,32 @@ async fn discord_repair_does_not_touch_adopted_or_fresh_attempts_or_missing_rele
         state.db.drop().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn provider_refused_setup_never_overwrites_reserved_binding_with_missing_or_wrong_identity() {
+    let (state, row, _, _gateway, upstream) = fixture("provider_refusal_reserved_binding").await;
+    let reserved = reserve(&state, &row).await;
+    let expected = format!(
+        "bnd_{}",
+        Uuid::parse_str(reserved.record_id.as_deref().unwrap())
+            .unwrap()
+            .simple()
+    );
+    assert_eq!(reserved.binding_id, expected);
+    let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(saved.binding_id.as_deref(), Some(expected.as_str()));
+    let mut valid = remote(&reserved, 1);
+    valid["endpoints"] =
+        json!({"nyxid_callback_url":format!("{}/callbacks/test", reserved.gateway_base_url)});
+    assert!(release::validate_create(&reserved, &valid).is_ok());
+    for binding in [Value::Null, json!("bnd_other")] {
+        let mut invalid = valid.clone();
+        invalid["provider"]["binding_id"] = binding;
+        assert!(release::validate_create(&reserved, &invalid).is_err());
+    }
+    let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(saved.binding_id.as_deref(), Some(expected.as_str()));
+    assert_eq!(saved.status, "pending");
+    upstream.abort();
+    state.db.drop().await.unwrap();
+}
