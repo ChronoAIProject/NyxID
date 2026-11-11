@@ -88,6 +88,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: PoolCommands,
     },
+    /// Inspect optional secondary evidence for a failed service invocation
+    Monitoring {
+        #[command(subcommand)]
+        command: MonitoringCommands,
+    },
     /// Manage inbound event triggers
     Trigger {
         #[command(subcommand)]
@@ -232,6 +237,17 @@ pub enum Commands {
     },
     /// Show CLI version and project links
     Info,
+}
+
+#[derive(Subcommand)]
+pub enum MonitoringCommands {
+    /// Redeem a short-lived diagnostic handle from a failed invocation
+    Diagnose {
+        /// Opaque handle returned by NyxID with the original failure
+        handle: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 #[derive(Args, Clone)]

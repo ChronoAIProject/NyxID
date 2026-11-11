@@ -1,3 +1,4 @@
+import { retryAgentRead, agentReadRetryDelay } from "../../lib/api/agentReadRetry";
 import { AgentAvatar, AgentAvatarStack } from "../../components/AgentAvatar";
 import { useEffect, useRef, useState, type PropsWithChildren } from "react";
 import {
@@ -72,7 +73,8 @@ export function NyxBotHome({
     // Re-enabling a stale roster syncs immediately; polling only fills gaps.
     staleTime: 0,
     refetchInterval: active ? 30_000 : false,
-    retry: false,
+    retry: (count, error) => available() && retryAgentRead(count, error),
+    retryDelay: agentReadRetryDelay,
   });
   const crews = useQuery({
     queryKey: [...groupKeys(epoch), "list"],

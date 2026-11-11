@@ -133,7 +133,7 @@ it("preselects NyxBot, offers live agents only, and creates the group", async ()
 it("shows the server's refusal", async () => {
   const user = userEvent.setup();
   respond = () =>
-    new Response(JSON.stringify({ message: "researcher was destroyed" }), { status: 409 });
+    new Response(JSON.stringify({ error: "conflict", message: "researcher was destroyed" }), { status: 409 });
   render(
     <QueryClientProvider client={client}>
       <NewGroupDialog agents={AGENTS} onClose={vi.fn()} onCreated={vi.fn()} />

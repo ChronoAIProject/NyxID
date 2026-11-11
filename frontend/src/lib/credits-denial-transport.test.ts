@@ -106,3 +106,14 @@ describe("shouldRetryQuery", () => {
     expect(shouldRetryQuery(3, new Error("boom"))).toBe(false);
   });
 });
+
+
+it.each([undefined, null])("apiClient retains a numeric-only credits denial (%s) for presentation and retry policy", async (error) => {
+  const body = { error, error_code: 11300, message: "Insufficient credits", details: { owner: "self" } };
+  vi.stubGlobal("fetch", vi.fn(async () => response(402, body)));
+  const failure = await apiClient("/channel-relay/send", { method: "POST", creditsDenial: optIn }).catch((caught: unknown) => caught);
+  expect(failure).toBeInstanceOf(ApiError);
+  expect(failure).toMatchObject({ message: body.message, errorCode: 11300, errorResponse: { details: body.details } });
+  expect(useCreditsDenialStore.getState().current).toMatchObject(optIn);
+  expect(shouldRetryQuery(0, failure)).toBe(false);
+});

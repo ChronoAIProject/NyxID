@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { appI18n } from "@/i18n/instance";
+import { apiErrorBody } from "./api-error";
 import { ApiError } from "./api-client";
 import { translateErrorMessage } from "./error-messages";
 
@@ -74,4 +75,18 @@ it("honors an explicit language without mutating the shared preference", async (
     "Token expired",
   );
   expect(appI18n.language).toBe("en");
+});
+
+
+it.each([0, 503, 429, 401, 400])("translates HTTP %s fallback copy in both Chinese catalogs without changing the error", async (status) => {
+  const body = apiErrorBody(null, status);
+  const error = new ApiError(status, body);
+  for (const language of ["zh-CN", "zh-TW"]) {
+    await appI18n.changeLanguage(language);
+    const displayed = translateErrorMessage(error.message);
+    expect(displayed).not.toBe(body.message);
+    expect(displayed).toMatch(/[\u3400-\u9fff]/);
+    expect(error.message).toBe(body.message);
+    expect(error.status).toBe(status);
+  }
 });
