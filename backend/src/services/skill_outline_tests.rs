@@ -342,39 +342,6 @@ fn tools_gain_outline_options_only_when_extended() {
 }
 
 #[test]
-fn repository_example_skills_follow_the_template() {
-    let combined = include_str!("../../../skills/research-to-github-issue/SKILL.md");
-    let outline = parse(combined, &closure()).expect("combined example outline");
-    assert_eq!(outline.steps.len(), 4);
-    assert_eq!(
-        outline.steps[1].uses.as_ref().map(|pin| pin.name.as_str()),
-        Some("firecrawl-via-nyxid")
-    );
-    assert_eq!(
-        outline.steps[3].uses.as_ref().map(|pin| pin.name.as_str()),
-        Some("github-via-nyxid")
-    );
-    for smaller in [
-        include_str!("../../../skills/firecrawl-via-nyxid/SKILL.md"),
-        include_str!("../../../skills/github-via-nyxid/SKILL.md"),
-    ] {
-        let outline = parse(smaller, &[]).expect("smaller example outline");
-        assert!(RECOMMENDED_STEPS.contains(&outline.steps.len()));
-        assert!(outline.needs.is_some() && outline.produces.is_some());
-    }
-    // The canonical example's Overview and Approach respect the recommendations.
-    let body = combined.split("\n---\n").nth(1).unwrap();
-    assert!(
-        template_warnings(
-            &body
-                .replace("   Uses: firecrawl-via-nyxid\n", "")
-                .replace("   Uses: github-via-nyxid\n", "")
-        )
-        .is_empty()
-    );
-}
-
-#[test]
 fn fence_examples_never_become_the_outline() {
     let closure = closure();
     let fake = "## Overview\nFAKE example.\n\n## Approach\n1. **Fake.** Inside an example.\n";

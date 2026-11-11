@@ -1,35 +1,13 @@
 ---
 name: firecrawl-via-nyxid
 description: Teach an aevatar agent to run Firecrawl web-research/agent jobs through NyxID (submit, poll, then read the result).
-version: "1.3"
+version: "1.2"
 metadata:
   category: plain
   tag: [firecrawl, web-scraping, web-research, nyxid, aevatar]
 ---
 
 # Firecrawl via NyxID
-
-## Overview
-I read web pages or research a topic for you through your Firecrawl connection
-in NyxID, and bring back clean text with the sources.
-
-It suits reading public pages, searching the web and longer research jobs. It
-is not for pages behind a login.
-
-You need Firecrawl connected in NyxID. Nothing is changed on any website; each
-request uses Firecrawl credits.
-
-## Approach
-1. **Check the connection.** I confirm Firecrawl is connected in NyxID.
-2. **Choose the method.** I pick a quick scrape or search for a few pages, or a research job for a broader question.
-3. **Run it.** I submit the request and, for a research job, check back until the result is ready.
-4. **Report the findings.** I summarise what I found, with links to the sources.
-
-## Needs and produces
-Needs: a Firecrawl connection in NyxID.
-Produces: page text or research findings, with source links.
-
-## Details
 
 This skill teaches an aevatar agent how to drive **Firecrawl** through **NyxID**. NyxID brokers Firecrawl as a connected service and injects the user's Firecrawl API key automatically, so the agent never handles the raw `fc-...` key.
 

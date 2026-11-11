@@ -98,7 +98,11 @@ function Transcript({ scene, entries }: { readonly scene: Scene; readonly entrie
   const sms = find("sms-send-twilio");
   const voice = find("voice-agent-telnyx");
   if (!desk?.outline || !sms?.outline || !voice?.outline) {
-    return <p className="type-body text-destructive">The report is missing the example skills.</p>;
+    return (
+      <p className="type-body text-destructive">
+        This scripted chat needs phone-front-desk-sg, sms-send-twilio and voice-agent-telnyx in the report.
+      </p>
+    );
   }
   const ask = (
     <User>

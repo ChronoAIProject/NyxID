@@ -53,9 +53,8 @@ Needs: Firecrawl, GitHub (write to issues).
 Produces: one GitHub issue link.
 ```
 
-A starter file is in [`skills/TEMPLATE.md`](../skills/TEMPLATE.md), and
-[`skills/research-to-github-issue`](../skills/research-to-github-issue/SKILL.md)
-is a complete combined example.
+Skills live in Ornn, not in this repository; published examples are listed
+under [Capability skills and skillsets](#capability-skills-and-skillsets).
 
 ## Limits
 
@@ -184,11 +183,34 @@ Write reusable skills at three levels, none of them tied to a business:
   follows this template: the Overview says which use case the skillset is for,
   and each Approach step's `Uses` names a member.
 
-Business facts live in a separate facts pack. NyxBot pins skills only today;
-presenting a skillset as one skill (its master prompt as `SKILL.md`, its members
-as the dependencies) is proposed for a later part of #2331. See
-[the examples](skill-templates/README.md), which also explain how to check
-templates and preview their cards locally.
+Business facts live in a separate facts pack. Reference examples are published
+in Ornn by the **NyxBot Skills** platform account rather than kept in this
+repository: capability skills such as `sms-send-twilio`, `records-notion` and
+`voice-agent-telnyx`, behaviour and workflow skills such as
+`caller-details-readback` and `booking-with-availability`, and the
+`phone-front-desk-sg` skillset. NyxBot pins skills only today; presenting a
+skillset as one skill (its master prompt as `SKILL.md`, its members as the
+dependencies) is proposed for a later part of #2331.
+
+To check templates locally, run the ignored `validate_skill_template_dir` test
+on a folder of `<name>/SKILL.md` (or `<name>/SKILLSET.md`) packages. It parses
+each with the real reader and writes the exact `preview_agent_skill` results to
+`NYX_SKILL_TEMPLATE_REPORT`:
+
+```bash
+NYX_SKILL_TEMPLATE_DIR=/path/to/skills \
+NYX_SKILL_TEMPLATE_REPORT=frontend/src/dev/skill-template-report.local.json \
+RUST_MIN_STACK=8388608 \
+cargo test -p nyxid --bin nyxid-server validate_skill_template_dir -- --ignored --nocapture
+```
+
+With the frontend dev server running, `/skill-template-preview.html` shows each
+skill's card next to its tool results, for any folder.
+`/skill-chat-preview.html` is a scripted mock NyxBot chat built around the
+`phone-front-desk-sg` example, so it needs that skillset and its
+`sms-send-twilio` and `voice-agent-telnyx` members in the folder. The report is
+git-ignored and only these dev pages load it; they are not production build
+entries.
 
 ## Rollout
 
