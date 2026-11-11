@@ -39,6 +39,10 @@ The copy describes the current AI workspace. Language support is limited to supp
 
 ## Upload screenshots
 
+Match the destination field before choosing a file. **Search Results Asset** is a separate landscape artwork field. Its uploader lists 1920 × 1280, 3840 × 2560, and 5244 × 2950 as supported sizes. Upload `screenshots/search-results/search-results-1920x1280.png` from the Desktop pack to that field. Higher-resolution alternatives are in `screenshots/search-results/alternatives/`. Choose one asset.
+
+Use the portrait iPhone files below in **App Previews and Screenshots**, under the matching iPhone display slot. They do not match the separate Search Results Asset field.
+
 The Desktop pack contains `screenshots/iphone/app-store/` with the numbered marketing images. Upload them in filename order. The images use real iPhone captures with a branded frame and caption. `screenshots/iphone/raw/` preserves the original 1206 × 2622 captures.
 
 Use the corresponding 13-inch iPad assets for the iPad screenshot slot. This binary supports iPad, so an iPad screenshot is required even if the primary marketing targets iPhone. Read `screenshots/README.md` in the Desktop pack for the capture provenance, dimensions, and upload order.
