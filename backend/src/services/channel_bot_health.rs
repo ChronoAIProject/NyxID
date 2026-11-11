@@ -71,6 +71,9 @@ pub fn failure_code(error: &AppError) -> &'static str {
     use crate::services::channel_adapters::x::{X_FORBIDDEN_ACCESS, X_FORBIDDEN_SCOPES};
     match error {
         AppError::ChannelPlatformError(message) => {
+            if message == super::telegram_formatting::REJECTED {
+                return "telegram_text_rejected";
+            }
             if message.contains(X_FORBIDDEN_SCOPES) {
                 return codes::SCOPES_MISSING;
             }
@@ -227,6 +230,10 @@ fn for_code(code: &str, facts: &HealthFacts<'_>, outbound: bool) -> Option<Recom
         codes::PROVIDER_UNAVAILABLE => advice(
             "verify",
             format!("{name} is unavailable. NyxID retries automatically; select Verify once it recovers."),
+        ),
+        "telegram_text_rejected" => advice(
+            "contact_admin",
+            "Telegram rejected a reply part. The reply is incomplete; later parts were not sent. Read the saved answer in NyxID and ask an administrator to inspect the delivery receipt before requesting another send.".into(),
         ),
         codes::RECIPIENT_UNREACHABLE if outbound => advice(
             "none",
@@ -499,6 +506,7 @@ pub async fn setup_evidence(
         "last_authenticated_inbound_source": d.last_inbound_source,
         "last_outbound_attempt_at": d.last_outbound_at.map(|t| t.to_rfc3339()),
         "last_outbound_error": d.last_outbound_error.as_ref().map(|e| json!({"code": e.code, "reason": e.reason, "at": e.at.to_rfc3339()})),
+        "last_outbound_notice": d.last_outbound_notice.as_ref().map(|e| json!({"code": e.code, "reason": e.reason, "at": e.at.to_rfc3339()})),
         "failure_reason": d.failure_reason,
         "recommended_action": action.action, "recommended_action_text": action.text,
         "automatic_reply": "not_verified",

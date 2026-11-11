@@ -68,3 +68,60 @@ pub async fn thread_reply(
     ))
     .await
 }
+
+/// Distinct routes fail closed on old replicas instead of ignoring an opt-in.
+pub fn mark_commonmark(body: &mut channel_relay::AsyncReplyBody) -> crate::errors::AppResult<()> {
+    let metadata = body.metadata.get_or_insert_with(|| serde_json::json!({}));
+    let object = metadata
+        .as_object_mut()
+        .ok_or_else(|| AppError::ValidationError("metadata must be an object".into()))?;
+    if object.contains_key("entities") || object.contains_key("parse_mode") {
+        return Err(AppError::ValidationError(
+            "CommonMark cannot be combined with parse_mode or entities".into(),
+        ));
+    }
+    object.insert("text_format".into(), "commonmark".into());
+    Ok(())
+}
+
+pub async fn commonmark_reply(
+    state: State<AppState>,
+    headers: HeaderMap,
+    auth: OptionalAuthUser,
+    ReplyJson(mut body): ReplyJson,
+) -> crate::errors::AppResult<Json<AsyncReplyResponse>> {
+    mark_commonmark(&mut body.reply)?;
+    Box::pin(channel_relay::async_reply(state, headers, auth, Json(body))).await
+}
+
+pub async fn commonmark_thread_reply(
+    state: State<AppState>,
+    headers: HeaderMap,
+    auth: OptionalAuthUser,
+    ReplyJson(mut body): ReplyJson,
+) -> crate::errors::AppResult<Json<AsyncReplyResponse>> {
+    mark_commonmark(&mut body.reply)?;
+    Box::pin(channel_relay::async_thread_reply(
+        state,
+        headers,
+        auth,
+        Json(body),
+    ))
+    .await
+}
+
+pub async fn commonmark_update(
+    state: State<AppState>,
+    headers: HeaderMap,
+    auth: OptionalAuthUser,
+    Json(mut body): Json<channel_relay::UpdateReplyRequest>,
+) -> crate::errors::AppResult<Json<channel_relay::UpdateReplyResponse>> {
+    mark_commonmark(&mut body.reply)?;
+    Box::pin(channel_relay::update_reply(
+        state,
+        headers,
+        auth,
+        Json(body),
+    ))
+    .await
+}

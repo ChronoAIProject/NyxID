@@ -59,6 +59,8 @@ pub struct ChannelBotDiagnostics {
     pub last_outbound_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub last_outbound_error: Option<ChannelBotError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_outbound_notice: Option<ChannelBotError>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub last_webhook_at: Option<DateTime<Utc>>,
     #[serde(default)]

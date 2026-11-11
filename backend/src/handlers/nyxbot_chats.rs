@@ -2313,7 +2313,14 @@ async fn send_post_planned_impl(
             }
             journal::PartClaim::Send(attempt) => attempt,
         };
-        match send_post_one(state, target, part, fence).await {
+        match crate::services::telegram_formatting::scope(
+            &state.db,
+            journal::formatting_receipt(&delivery, index, &attempt),
+            Some(&target.bot.id),
+            send_post_one(state, target, part, fence),
+        )
+        .await
+        {
             Ok(sent) if sent.platform_message_id.is_some() => {
                 journal::finish(
                     &state.db,

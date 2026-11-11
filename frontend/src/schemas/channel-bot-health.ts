@@ -37,6 +37,7 @@ export const channelBotDiagnosticsSchema = z.object({
   last_inbound_source: z.string().nullable(),
   last_outbound_at: z.string().nullable(),
   last_outbound_error: errorSchema.nullable(),
+  last_outbound_notice: errorSchema.nullish(),
   last_webhook_at: z.string().nullable(),
   last_webhook_error: errorSchema.nullable(),
   subscription_state: z
