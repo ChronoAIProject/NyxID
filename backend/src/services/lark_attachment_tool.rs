@@ -16,6 +16,8 @@ pub const COMPOSITE_PATH: &str =
 pub const FIELDS_OPERATION: &str = "bitable_fields_list";
 pub const CREATE_OPERATION: &str = "bitable_record_create";
 const MARK: &str = "x-nyxid-attachment-input";
+pub(crate) mod eligibility;
+use eligibility::Reason;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -49,9 +51,7 @@ pub struct ManagedOperation {
 }
 
 pub fn refused() -> AppError {
-    AppError::Forbidden(
-        "Attachment uploads require a trusted catalog operation in a live owner chat".into(),
-    )
+    Reason::UntrustedContract.error()
 }
 
 /// The managed route is an internal invocation identity, never a provider path.
@@ -59,7 +59,7 @@ pub(crate) fn refuse_reserved_path(path: &str) -> AppResult<()> {
     let path = path.strip_prefix('/').unwrap_or(path);
     let path = path.strip_prefix("open-apis/").unwrap_or(path);
     if path.starts_with("nyxid/managed/bitable/") {
-        return Err(refused());
+        return Err(Reason::LiveExecutionRequired.error());
     }
     Ok(())
 }
@@ -294,16 +294,25 @@ pub async fn filter_discovery(
     {
         return Ok(());
     }
-    let enabled = writes_enabled(db, chat).await?;
+    let enabled = match eligibility::require_chat(db, chat).await {
+        Ok(()) => true,
+        Err(error) if eligibility::is_refusal(&error) => false,
+        Err(error) => return Err(error),
+    };
     for service in services {
-        service.endpoints.retain(|endpoint| {
-            !is_attachment_operation(endpoint)
-                || (enabled
-                    && matches!(
-                        endpoint.attachment_input,
-                        Some(Projection::Stored(_) | Projection::Managed(_))
-                    ))
-        });
+        let mut retained = Vec::new();
+        for endpoint in std::mem::take(&mut service.endpoints) {
+            if !is_attachment_operation(&endpoint) {
+                retained.push(endpoint);
+            } else if enabled {
+                match eligibility::require_operation(db, service, &endpoint).await {
+                    Ok(_) => retained.push(endpoint),
+                    Err(error) if eligibility::is_refusal(&error) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        service.endpoints = retained;
     }
     Ok(())
 }
@@ -316,20 +325,22 @@ pub async fn materialize(
     endpoint: &McpToolEndpoint,
     args: &Value,
 ) -> AppResult<Materialized> {
-    if !matches!(endpoint.attachment_input, Some(Projection::Stored(_)))
-        || endpoint.async_operation.is_some()
-        || !writes_enabled(db, chat).await?
-    {
-        return Err(refused());
+    eligibility::require_eligible(db, chat, service, endpoint).await?;
+    if !matches!(endpoint.attachment_input, Some(Projection::Stored(_))) {
+        return Err(Reason::UntrustedContract.error());
     }
-    let chat = chat.ok_or_else(refused)?;
-    validate_contract(db, service, endpoint).await?;
-    let id = args["attachment_id"].as_str().ok_or_else(refused)?;
+    let chat = chat.ok_or_else(|| Reason::NotLive.error())?;
+    let id = args["attachment_id"].as_str().ok_or_else(|| {
+        AppError::BadRequest(
+            "attachment_write_attachment_id_required: Supply an attachment_id from this owner chat"
+                .into(),
+        )
+    })?;
     let attachment = uploads::for_egress(db, chat, id).await?;
     let size = usize::try_from(attachment.size())
         .ok()
         .filter(|n| *n > 0 && *n <= super::attachment_extraction::MAX_BYTES)
-        .ok_or_else(refused)?;
+        .ok_or_else(|| AppError::BadRequest("attachment_write_invalid_attachment_size: Choose a nonempty attachment within upload limits".into()))?;
     let fields = multipart::fields(args, attachment.label(), size)?;
     let reservation = byte_budget::reserve(size).await?;
     let bytes = uploads::egress_bytes(db, keys, chat, &attachment).await?;
@@ -355,10 +366,7 @@ pub async fn validate_binding(
     endpoint: &McpToolEndpoint,
     binding: &Binding,
 ) -> AppResult<()> {
-    if !writes_enabled(db, Some(&binding.chat)).await? {
-        return Err(refused());
-    }
-    validate_contract(db, service, endpoint).await?;
+    eligibility::require_eligible(db, Some(&binding.chat), service, endpoint).await?;
     uploads::for_egress(db, &binding.chat, &binding.attachment_id).await?;
     Ok(())
 }
@@ -377,13 +385,13 @@ pub(super) async fn validate_contract(
         McpToolSource::Platform {
             downstream_service_id,
         } => downstream_service_id,
-        _ => return Err(refused()),
+        _ => return Err(Reason::ConnectionRequired.error()),
     };
     let catalog = db
         .collection::<DownstreamService>(downstream_service::COLLECTION_NAME)
         .find_one(doc! {"_id":catalog_id,"is_active":true})
         .await?
-        .ok_or_else(refused)?;
+        .ok_or_else(|| Reason::CatalogUnavailable.error())?;
     if let McpToolSource::UserManaged {
         user_service_id, ..
     } = &service.source
@@ -394,37 +402,50 @@ pub(super) async fn validate_contract(
         )
         .find_one(doc! {"_id":user_service_id,"is_active":true,"catalog_service_id":catalog_id})
         .await?
-        .ok_or_else(refused)?;
+        .ok_or_else(|| Reason::ConnectionUnavailable.error())?;
         let mounted = super::service_history::collection::<user_endpoint::UserEndpoint>(
             db,
             user_endpoint::COLLECTION_NAME,
         )
         .find_one(doc! {"_id":&instance.endpoint_id})
         .await?
-        .ok_or_else(refused)?;
+        .ok_or_else(|| Reason::ConnectionUnavailable.error())?;
         if mounted.openapi_spec_url.is_some() {
-            return Err(refused());
+            return Err(Reason::SpecOverride.error());
         }
     }
     let row = db
         .collection::<service_endpoint::ServiceEndpoint>(service_endpoint::COLLECTION_NAME)
-        .find_one(doc! {"_id":&endpoint.endpoint_id,"service_id":catalog_id,"is_active":true})
+        .find_one(doc! {"_id":&endpoint.endpoint_id,"service_id":catalog_id})
         .await?
-        .ok_or_else(refused)?;
-    if row.publication != service_endpoint::PublicationState::Published {
-        return Err(refused());
+        .ok_or_else(|| Reason::MissingOperation.error())?;
+    if !row.is_active || row.publication != service_endpoint::PublicationState::Published {
+        return Err(Reason::NotPublished.error());
+    }
+    if row.operation_generation <= 0 {
+        return Err(Reason::InvalidGeneration.error());
+    }
+    if service
+        .durable_endpoint_metadata
+        .get(&row.id)
+        .is_some_and(|metadata| metadata.operation_generation != row.operation_generation)
+    {
+        return Err(Reason::GenerationChanged.error());
     }
     let mut loaded = super::mcp_service::service_endpoints_to_mcp(&[&row])
         .pop()
-        .ok_or_else(refused)?;
+        .ok_or_else(|| Reason::UntrustedContract.error())?;
     loaded.attachment_input = stored_projection(Some(&catalog), &loaded);
     if !matches!(
         loaded.attachment_input,
         Some(Projection::Stored(_) | Projection::Im(_))
-    ) || super::mcp_service::endpoint_contract_digest(&loaded)
+    ) {
+        return Err(Reason::UntrustedContract.error());
+    }
+    if super::mcp_service::endpoint_contract_digest(&loaded)
         != super::mcp_service::endpoint_contract_digest(endpoint)
     {
-        return Err(refused());
+        return Err(Reason::ContractChanged.error());
     }
     Ok(())
 }

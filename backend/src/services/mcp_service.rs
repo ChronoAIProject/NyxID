@@ -4381,7 +4381,13 @@ pub fn prepare_proxy_tool_call(
             Some(super::lark_attachment_tool::Projection::ImRefused)
         )
     {
-        return Err(super::lark_attachment_tool::refused());
+        return Err(
+            if super::lark_attachment_tool::is_attachment_operation(endpoint) {
+                super::lark_attachment_tool::eligibility::Reason::LiveExecutionRequired.error()
+            } else {
+                super::lark_attachment_tool::refused()
+            },
+        );
     }
     prepare_proxy_tool_call_inner(service, endpoint, args)
 }
@@ -4508,17 +4514,23 @@ pub fn prepare_chat_proxy_tool_call<'a>(
         if !super::lark_attachment_tool::is_attachment_operation(endpoint) {
             return prepare_proxy_tool_call(service, endpoint, args);
         }
+        if endpoint.async_operation.is_some() {
+            return Err(super::lark_attachment_tool::eligibility::Reason::AsyncUnsupported.error());
+        }
         if matches!(
             endpoint.attachment_input,
             Some(super::lark_attachment_tool::Projection::Managed(_))
         ) {
             let mut prepared = prepare_proxy_tool_call_inner(service, endpoint, args)?;
-            let chat = chat.ok_or_else(super::lark_attachment_tool::refused)?;
+            let chat = chat
+                .ok_or_else(|| super::lark_attachment_tool::eligibility::Reason::NotLive.error())?;
             let key = db
                 .collection::<crate::models::api_key::ApiKey>("api_keys")
                 .find_one(doc! {"_id":&chat.api_key_id,"is_active":true})
                 .await?
-                .ok_or_else(super::lark_attachment_tool::refused)?;
+                .ok_or_else(|| {
+                    super::lark_attachment_tool::eligibility::Reason::KeyIneligible.error()
+                })?;
             let body: serde_json::Value =
                 serde_json::from_slice(prepared.body.as_deref().unwrap_or_default())
                     .map_err(|_| super::lark_attachment_tool::refused())?;
@@ -6070,26 +6082,30 @@ async fn execute_tool_resolved_inner(
     if super::lark_attachment_tool::is_attachment_operation(endpoint)
         && prepared.managed_base.is_none()
     {
-        let binding = prepared
-            .attachment_binding
-            .as_ref()
-            .ok_or_else(super::lark_attachment_tool::refused)?;
-        if !super::lark_attachment_tool::binding_matches(binding, user_id, exec_ctx.api_key_id)
-            || prepared.async_submission.is_some()
-            || prepared.async_continuation.is_some()
-        {
-            return Err(super::lark_attachment_tool::refused());
+        let binding = prepared.attachment_binding.as_ref().ok_or_else(|| {
+            super::lark_attachment_tool::eligibility::Reason::LiveExecutionRequired.error()
+        })?;
+        if !super::lark_attachment_tool::binding_matches(binding, user_id, exec_ctx.api_key_id) {
+            return Err(super::lark_attachment_tool::eligibility::Reason::BindingChanged.error());
+        }
+        if prepared.async_submission.is_some() || prepared.async_continuation.is_some() {
+            return Err(super::lark_attachment_tool::eligibility::Reason::AsyncUnsupported.error());
         }
         super::lark_attachment_tool::validate_binding(db, service, endpoint, binding).await?;
     }
-    if let Some(base) = &prepared.managed_base
-        && (base.chat.user_id != user_id
+    if let Some(base) = &prepared.managed_base {
+        use super::lark_attachment_tool::eligibility::Reason;
+        if base.chat.user_id != user_id
             || exec_ctx.api_key_id != Some(base.chat.api_key_id.as_str())
-            || prepared.async_submission.is_some()
-            || prepared.async_continuation.is_some()
-            || node_route.is_some())
-    {
-        return Err(super::lark_attachment_tool::refused());
+        {
+            return Err(Reason::BindingChanged.error());
+        }
+        if prepared.async_submission.is_some() || prepared.async_continuation.is_some() {
+            return Err(Reason::AsyncUnsupported.error());
+        }
+        if node_route.is_some() {
+            return Err(Reason::HostedRequired.error());
+        }
     }
     super::org_agent_service::authorize_service_with_access(
         db,
@@ -6709,7 +6725,7 @@ async fn execute_tool_resolved_inner(
 
         if let Some(base)=managed_base.as_ref() {
             return box_mcp_forwarding(|| async move {
-            let admission=assistant_admission.as_ref().ok_or_else(super::lark_attachment_tool::refused)?;
+            let admission=assistant_admission.as_ref().ok_or_else(|| super::lark_attachment_tool::eligibility::Reason::NotLive.error())?;
             let guard=super::assistant_service_execution::LarkManagedGuard::new(db,encryption_keys,admission,
                 &target,service,endpoint,base,&path,body.as_deref().unwrap_or_default())?;
             guard.revalidate().await?;
