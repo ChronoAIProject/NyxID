@@ -369,19 +369,20 @@ pub(super) async fn record_chat_with_relay(
             "platform_chat_id": &facts.chat_id, "partition": {"$ne": partition}})
             .await?;
     }
-    crate::services::nyxbot_chat_settings_service::upsert_thread::<NyxbotThread>(
-        &state.db,
-        row,
-        doc! {"channel_id": &row.id, "partition": partition},
-        crate::services::nyxbot_chat_settings_service::record_update(
-            row,
-            facts.kind == "private" && facts.thread_id.is_none(),
-            set,
-            now,
+    threads
+        .find_one_and_update(
+            doc! {"channel_id": &row.id, "partition": partition},
+            crate::services::nyxbot_chat_settings_service::record_update(
+                row,
+                facts.kind == "private" && facts.thread_id.is_none(),
+                set,
+                now,
+            ),
         )
-        .into(),
-    )
-    .await
+        .upsert(true)
+        .return_document(mongodb::options::ReturnDocument::After)
+        .await?
+        .ok_or_else(|| AppError::Internal("Channel chat unavailable".into()))
 }
 
 /// A private chat's name: "You" for the owner, else the sender's name (never

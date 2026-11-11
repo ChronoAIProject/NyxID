@@ -52,55 +52,6 @@ pub(crate) fn record_update(
     ]
 }
 
-/// Existing chats keep one atomic update with no shared channel write. A new
-/// provider chat must write its live channel in the same transaction as its
-/// insert: retirement's older snapshot must retry and include the new thread.
-pub(crate) async fn upsert_thread<T>(
-    db: &Database,
-    channel: &NyxbotChannel,
-    filter: Document,
-    update: mongodb::options::UpdateModifications,
-) -> AppResult<T>
-where
-    T: serde::de::DeserializeOwned + Send + Sync + 'static,
-{
-    use mongodb::options::ReturnDocument;
-    if let Some(existing) = db
-        .collection::<T>(THREADS)
-        .find_one_and_update(filter.clone(), update.clone())
-        .return_document(ReturnDocument::After)
-        .await?
-    {
-        return Ok(existing);
-    }
-    let context = (db.clone(), channel.clone(), filter, update);
-    super::transaction_service::run_db_only(db, &context, |tx, (db, channel, filter, update)| {
-        Box::pin(async move {
-            let live = db
-                .collection::<Document>(CHANNELS)
-                .find_one_and_update(
-                    doc! {"_id": &channel.id, "user_id": &channel.user_id,
-                    "binding_id": &channel.binding_id, "status": {"$in": ["pending", "active"]}},
-                    doc! {"$inc": {"chat_admission_generation": 1_i64}},
-                )
-                .projection(doc! {"_id": 1})
-                .session(&mut *tx)
-                .await?;
-            if live.is_none() {
-                return Err(AppError::Conflict("Channel binding changed".into()));
-            }
-            db.collection::<T>(THREADS)
-                .find_one_and_update(filter.clone(), update.clone())
-                .upsert(true)
-                .return_document(ReturnDocument::After)
-                .session(&mut *tx)
-                .await?
-                .ok_or_else(|| AppError::Internal("Channel chat unavailable".into()))
-        })
-    })
-    .await
-}
-
 #[derive(Clone, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AccessSettings {
@@ -244,7 +195,7 @@ pub(crate) async fn remove_binding(
             "_id":&row.id,"binding_id":binding,"route_api_key_id":&row.route_api_key_id,
             "transport":&row.transport,"status":&row.status,"agent_api_key_id":&row.agent_api_key_id,
             "pending_agent_api_key_id":&row.pending_agent_api_key_id,
-        },doc! {"$inc":{"execution_policy_revision":1_i64},"$unset":{"binding_id":""},
+        },doc! {"$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64},"$unset":{"binding_id":""},
             "$set":{"gateway_no_progress":false,"updated_at":bson::DateTime::now()}}).session(&mut *tx).await?;
         if changed.matched_count!=1 {return Ok(false)}
         Ok(true)
@@ -264,8 +215,8 @@ pub(crate) async fn remove_thread(
     super::transaction_service::run_db_only(db, &context, |tx, (db, row, partition)| {
         Box::pin(async move {
             // Validate the binding at this transaction's snapshot. A later
-            // rebind is not fenced here; the exact thread deletion below
-            // fences settlement for this provider chat.
+            // rebind increments the channel epoch, invalidating raced notification
+            // snapshots. The exact thread deletion below fences this chat.
             if db
                 .collection::<Document>(CHANNELS)
                 .find_one(doc! {

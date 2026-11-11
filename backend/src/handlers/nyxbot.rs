@@ -768,6 +768,7 @@ async fn connect_inner(
         agent_key_raw = Some(Zeroizing::new(agent.full_key));
     }
     let row = NyxbotChannel {
+        notification_epoch: 0,
         execution_policy_revision: 0,
         org_specialist: org_binding.clone(),
         gateway_source: None,
@@ -1259,7 +1260,7 @@ async fn connect_gateway(
             .await?;
     let db = &state.db;
     if db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&row.id,"status":"pending","gateway_setup_release_id":&release.id},
-        doc! {"$inc":{"execution_policy_revision":1_i64},"$set":{"gateway_channel_id":&channel_id,"gateway_record_id":record_id,"gateway_version":version,"binding_id":&release.binding_id,"gateway_no_progress":false}})
+        doc! {"$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64},"$set":{"gateway_channel_id":&channel_id,"gateway_record_id":record_id,"gateway_version":version,"binding_id":&release.binding_id,"gateway_no_progress":false}})
         .await.map_err(|_|"storage_unavailable")?.matched_count!=1 {return Err("channel_changed");}
     if key_service::update_api_key_scope_with_scope_authorization(
         db,
@@ -1700,7 +1701,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         .update_one(
             doc! {"_id": &row.id, "status": "active", "transport": "direct",
             "route_api_key_id": &row.route_api_key_id, "pending_agent_api_key_id": null, "pending_route_api_key_id": null},
-            doc! {"$inc":{"execution_policy_revision":1_i64},"$set": {"pending_agent_api_key_id": &agent.id,
+            doc! {"$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64},"$set": {"pending_agent_api_key_id": &agent.id,
             "pending_route_api_key_id": &route_key.id, "gateway_no_progress": false,
             "gateway_source":bson::to_bson(&source).map_err(|_|"storage_unavailable")?,
             "gateway_native_phase":source.as_ref().map(|_|"preparing"),"gateway_native_activation_detail":bson::Bson::Null,"gateway_native_activation_operation":bson::Bson::Null},
@@ -3425,11 +3426,13 @@ async fn thread_conversation(
 ) -> AppResult<(NyxbotThread, String)> {
     let now = bson::DateTime::now();
     let threads = state.db.collection::<NyxbotThread>(THREADS);
-    crate::services::nyxbot_chat_settings_service::upsert_thread::<bson::Document>(
-        &state.db, row,
-        doc! {"channel_id": &row.id, "partition": partition},
-        doc! {"$setOnInsert": crate::services::nyxbot_chat_settings_service::placeholder(row, now), "$set": {"updated_at": now}}.into(),
-    ).await?;
+    threads
+        .update_one(
+            doc! {"channel_id": &row.id, "partition": partition},
+            doc! {"$setOnInsert": crate::services::nyxbot_chat_settings_service::placeholder(row, now), "$set": {"updated_at": now}},
+        )
+        .upsert(true)
+        .await?;
     let reserved = format!("nyxa-{}", Uuid::new_v4().simple());
     let thread = threads
         .find_one_and_update(
@@ -4419,7 +4422,10 @@ pub async fn put_binding(
                 }
                 let mut update = doc! {"$set": set};
                 if row.binding_id.as_deref() != Some(binding_id.as_str()) {
-                    update.insert("$inc", doc! {"execution_policy_revision":1_i64});
+                    update.insert(
+                        "$inc",
+                        doc! {"execution_policy_revision":1_i64,"notification_epoch":1_i64},
+                    );
                 }
                 update
             },
@@ -4584,13 +4590,17 @@ pub async fn put_conversation(
         return problem(StatusCode::NOT_FOUND, "binding_not_found");
     }
     let now = bson::DateTime::now();
-    match crate::services::nyxbot_chat_settings_service::upsert_thread::<bson::Document>(
-        &state.db, &row,
-        doc! {"channel_id": &row.id, "partition": &conversation_id},
-        doc! {"$setOnInsert": crate::services::nyxbot_chat_settings_service::placeholder(&row, now), "$set": {"updated_at": now}}.into(),
-    ).await {
+    match state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .update_one(
+            doc! {"channel_id": &row.id, "partition": &conversation_id},
+            doc! {"$setOnInsert": crate::services::nyxbot_chat_settings_service::placeholder(&row, now), "$set": {"updated_at": now}},
+        )
+        .upsert(true)
+        .await
+    {
         Ok(_) => Json(json!({})).into_response(),
-        Err(AppError::Conflict(_)) => problem(StatusCode::NOT_FOUND, "binding_not_found"),
         Err(_) => problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
     }
 }
@@ -4871,8 +4881,10 @@ async fn custom_event_thread(
     destination: &NyxbotThread,
 ) -> AppResult<NyxbotThread> {
     let now = bson::DateTime::now();
-    let upsert = crate::services::nyxbot_chat_settings_service::upsert_thread::<bson::Document>(
-            &state.db, channel,
+    let upsert = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .update_one(
             doc! {"channel_id": &channel.id, "user_id": &channel.user_id, "partition": partition},
             doc! {
                 "$setOnInsert": {"_id": Uuid::new_v4().to_string(), "created_at": now,
@@ -4886,8 +4898,9 @@ async fn custom_event_thread(
                     "last_message_id": &destination.last_message_id,
                     "last_relay_message_id": &destination.last_relay_message_id},
                 "$set": {"updated_at": now}
-            }.into(),
+            },
         )
+        .upsert(true)
         .await;
     upsert?;
     let result = state

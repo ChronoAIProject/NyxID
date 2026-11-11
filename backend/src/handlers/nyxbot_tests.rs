@@ -311,6 +311,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let agent = key(state, "agent").await;
     let now = Utc::now();
     let row = NyxbotChannel {
+        notification_epoch: 0,
         execution_policy_revision: 0,
         org_specialist: None,
         gateway_source: None,
@@ -569,9 +570,21 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
             .iter()
             .any(|refusal| refusal["field"] == "model")
     );
+    let bound_epoch = load_channel(&state, OWNER, &row.id)
+        .await
+        .unwrap()
+        .notification_epoch;
+    assert_eq!(bound_epoch, row.notification_epoch + 1);
     // Re-binding the same ID is idempotent; another ID conflicts.
     let again = bind(bearer(&agent_key), binding_body(&agent_key, OWNER), "bnd_1").await;
     assert_eq!(again.status(), StatusCode::OK);
+    assert_eq!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .notification_epoch,
+        bound_epoch
+    );
     let conflict = bind(bearer(&agent_key), binding_body(&agent_key, OWNER), "bnd_2").await;
     assert_eq!(conflict.status(), StatusCode::CONFLICT);
     let same_channel = crate::test_utils::seed_notification_purge_probe(
@@ -595,6 +608,7 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
     assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
     let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert!(saved.binding_id.is_none());
+    assert_eq!(saved.notification_epoch, bound_epoch + 1);
     assert!(!format!("{saved:?}").contains(&agent_key));
     crate::test_utils::assert_notification_probe(&state.db, &same_channel, true).await;
     crate::test_utils::assert_notification_probe(&state.db, &retained, true).await;
@@ -3344,6 +3358,7 @@ fn telegram_mentions_and_replies_to_the_bot_are_recognised() {
     let mut row: NyxbotChannel = {
         let now = Utc::now();
         NyxbotChannel {
+            notification_epoch: 0,
             execution_policy_revision: 0,
             org_specialist: None,
             gateway_source: None,

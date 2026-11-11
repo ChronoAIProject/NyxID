@@ -348,6 +348,9 @@ async fn pm_f6_list_and_summary_share_the_same_live_visibility_matrix() {
         "inactive_org",
         "collaboration_removed",
         "retired_channel",
+        "stale_channel_epoch",
+        "stale_channel_binding",
+        "current_channel_stamp",
         "unlinked_platform",
         "deleted_trigger",
         "deleted_run",
@@ -366,7 +369,7 @@ async fn pm_f6_list_and_summary_share_the_same_live_visibility_matrix() {
         let mut kind = NotificationKind::AgentUpdate;
         let expected = matches!(
             case,
-            "personal" | "org" | "pending_card" | "org_guest_admin"
+            "personal" | "org" | "pending_card" | "org_guest_admin" | "current_channel_stamp"
         );
         if matches!(
             case,
@@ -428,12 +431,19 @@ async fn pm_f6_list_and_summary_share_the_same_live_visibility_matrix() {
                 ..Default::default()
             };
         }
-        if case == "retired_channel" {
+        if matches!(
+            case,
+            "retired_channel"
+                | "stale_channel_epoch"
+                | "stale_channel_binding"
+                | "current_channel_stamp"
+        ) {
             let (channel, thread) = seed_channel(&f, &f.owner, None).await;
             db.collection::<Document>(CHANNELS)
                 .update_one(
                     doc! {"_id": &channel},
-                    doc! {"$set": {"status": "disconnected"}},
+                    doc! {"$set": {"status": if case == "retired_channel" {"disconnected"} else {"active"},
+                        "notification_epoch": 7_i64, "binding_id": "bnd_current"}},
                 )
                 .await
                 .unwrap();
@@ -441,6 +451,15 @@ async fn pm_f6_list_and_summary_share_the_same_live_visibility_matrix() {
             source.source_type = SourceType::ChannelChat;
             source.channel_id = Some(channel);
             source.thread_id = Some(thread);
+            source.channel_epoch = if case == "stale_channel_epoch" { 6 } else { 7 };
+            source.channel_binding_id = Some(
+                if case == "stale_channel_binding" {
+                    "bnd_previous"
+                } else {
+                    "bnd_current"
+                }
+                .into(),
+            );
         }
         if case == "unlinked_platform" {
             let binding = Uuid::new_v4().to_string();
@@ -602,13 +621,20 @@ async fn pm_f2_delivery_concurrency_is_bounded_even_for_one_person() {
     }
 }
 
-#[tokio::test]
-async fn pm_f3_unlink_invalidates_a_stale_settlement_snapshot() {
+async fn stale_channel_snapshot_is_rejected(change: &str) {
     use crate::models::{nyxbot_channel::NyxbotChannel, nyxbot_gateway_release::ReleaseReason};
-    let f = fixture("pm_f3_unlink_snapshot").await;
+    let f = fixture(&format!("pm_g1_{change}_snapshot")).await;
     let db = &f.state.db;
     set_flag(&f, true).await;
+    push_prefs(&f, &f.owner, all_push()).await;
     let (channel, _) = seed_channel(&f, &f.owner, None).await;
+    db.collection::<Document>(CHANNELS)
+        .update_one(
+            doc! {"_id": &channel},
+            doc! {"$set": {"binding_id": "bnd_original"}},
+        )
+        .await
+        .unwrap();
     let mut input = start(None, "First external question", TurnOrigin::Channel);
     input.channel = Some(channel_origin(&channel));
     input.guest = true;
@@ -624,46 +650,157 @@ async fn pm_f3_unlink_invalidates_a_stale_settlement_snapshot() {
         .delete_many(doc! {})
         .await
         .unwrap();
-    input.conversation_id = Some(first.id.clone());
+    // A different provider chat begins settlement from the channel's old snapshot.
+    let thread = Uuid::new_v4().to_string();
+    db.collection::<Document>(CHANNEL_THREADS)
+        .insert_one(doc! {
+            "_id": &thread, "channel_id": &channel, "user_id": &f.owner,
+            "partition": "chat-2", "kind": "private", "title": "Second chat",
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+    input.channel.as_mut().unwrap().partition = "chat-2".into();
     let late = begin(&f, &f.owner, &input).await;
     let turn = late.active_turn.as_ref().unwrap();
     message.id = Uuid::new_v4().to_string();
+    message.conversation_id = late.id.clone();
     message.turn_id = turn.turn_id.clone();
-    let mut tx = db.client().start_session().await.unwrap();
-    tx.start_transaction().await.unwrap();
-    // Establish the old source snapshot before real unlink commits.
-    db.collection::<Document>(CHANNELS)
-        .find_one(doc! {"_id": &channel})
-        .session(&mut tx)
-        .await
-        .unwrap()
-        .unwrap();
     let connection = db
         .collection::<NyxbotChannel>(CHANNELS)
         .find_one(doc! {"_id": &channel})
         .await
         .unwrap()
         .unwrap();
-    crate::services::nyxbot_gateway_release_service::retire_connection(
-        &f.state,
-        &connection,
-        ReleaseReason::Disconnect,
-        "disconnected",
-        None,
-    )
-    .await
-    .unwrap();
-    let error = record_turn_settled_in_session(db, &mut tx, &late, turn, &message)
+    let mut tx = db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    db.collection::<Document>(CHANNELS)
+        .find_one(doc! {"_id": &channel})
+        .session(&mut tx)
         .await
-        .expect_err("a stale snapshot must conflict on the per-chat fence");
-    assert!(
-        matches!(error, AppError::DatabaseError(error) if error.contains_label("TransientTransactionError"))
+        .unwrap()
+        .unwrap();
+    if change == "retire" {
+        crate::services::nyxbot_gateway_release_service::retire_connection(
+            &f.state,
+            &connection,
+            ReleaseReason::Disconnect,
+            "disconnected",
+            None,
+        )
+        .await
+        .unwrap();
+    } else {
+        assert!(
+            crate::services::nyxbot_chat_settings_service::remove_binding(
+                db,
+                &connection,
+                "bnd_original"
+            )
+            .await
+            .unwrap()
+        );
+        // Reattach with a successor ID or the same ID (ABA): the epoch must
+        // reject the old snapshot even when binding equality alone cannot.
+        db.collection::<Document>(CHANNELS).update_one(doc! {"_id": &channel},
+            doc! {"$set": {"binding_id": if change == "aba" {"bnd_original"} else {"bnd_successor"}}})
+            .await.unwrap();
+    }
+    // No channel write is needed: committing this stale row is safe because
+    // every reader checks its stamped epoch/binding against the live channel.
+    record_turn_settled_in_session(db, &mut tx, &late, turn, &message)
+        .await
+        .unwrap();
+    tx.commit_transaction().await.unwrap();
+    let stale = rows_of(&f, &f.owner).await;
+    assert_eq!(stale.len(), 1);
+    assert_eq!(stale[0].source.channel_epoch, 0);
+    assert_eq!(
+        stale[0].source.channel_binding_id.as_deref(),
+        Some("bnd_original")
     );
-    tx.abort_transaction().await.unwrap();
-    // The actual settlement retries against the retired channel and still
-    // saves its durable reply without recreating a feed row.
-    settle(&f, &late, "Late answer is saved", None).await;
+    assert_eq!(summary(db, &f.owner).await.unwrap().unread_count, 0);
+    assert!(
+        list(&f.state, &f.owner, &page(50))
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        rows_of(&f, &f.owner).await.is_empty(),
+        "list must purge the stale row"
+    );
+    insert_row(&f, &stale[0]).await;
+    let sent: Sent = Default::default();
+    sweep_capturing(&f, &sent, || Ok(automation::Outcome::Accepted)).await;
+    assert!(
+        sent.lock().unwrap().is_empty(),
+        "a stale channel stamp must never push"
+    );
     assert!(rows_of(&f, &f.owner).await.is_empty());
+}
+
+#[tokio::test]
+async fn pm_g1_retirement_racing_another_chats_settlement_rejects_the_stale_stamp() {
+    stale_channel_snapshot_is_rejected("retire").await;
+}
+
+#[tokio::test]
+async fn pm_g1_rebind_racing_settlement_rejects_stale_binding_and_aba_epoch() {
+    stale_channel_snapshot_is_rejected("rebind").await;
+    stale_channel_snapshot_is_rejected("aba").await;
+}
+
+#[tokio::test]
+async fn pm_g2_timeout_and_error_release_the_lease_without_clearing_a_successor() {
+    let f = fixture("pm_g2_lease_cleanup").await;
+    let db = &f.state.db;
+    let entered = std::sync::atomic::AtomicBool::new(false);
+    let result = with_worker_lease(db, std::time::Duration::from_secs(1), async {
+        entered.store(true, Ordering::SeqCst);
+        std::future::pending::<AppResult<()>>().await
+    })
+    .await;
+    assert!(
+        entered.load(Ordering::SeqCst),
+        "the timeout must interrupt acquired work"
+    );
+    assert!(result.is_err());
+    assert!(
+        acquire_worker(db, "next-after-timeout").await.unwrap(),
+        "another worker must acquire immediately"
+    );
+    db.collection::<Document>(PUSH_WORKER_STATE)
+        .delete_one(doc! {"_id": "push"})
+        .await
+        .unwrap();
+    let result = with_worker_lease(db, std::time::Duration::from_secs(5), async {
+        Err(AppError::Internal("injected work failure".into()))
+    })
+    .await;
+    assert!(result.is_err());
+    assert!(acquire_worker(db, "next-after-error").await.unwrap());
+    db.collection::<Document>(PUSH_WORKER_STATE)
+        .delete_one(doc! {"_id": "push"})
+        .await
+        .unwrap();
+    let result = with_worker_lease(db, std::time::Duration::from_secs(5), async {
+        db.collection::<Document>(PUSH_WORKER_STATE)
+            .update_one(doc! {"_id": "push"}, doc! {"$set": {"token": "successor"}})
+            .await
+            .unwrap();
+        Err(AppError::Internal("lost lease".into()))
+    })
+    .await;
+    assert!(result.is_err());
+    let successor = db
+        .collection::<Document>(PUSH_WORKER_STATE)
+        .find_one(doc! {"_id": "push"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(successor.get_str("token").unwrap(), "successor");
 }
 
 #[tokio::test]

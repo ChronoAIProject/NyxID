@@ -590,8 +590,9 @@ async fn create_notification_chat(
 }
 
 #[tokio::test]
-async fn notification_new_chats_invalidate_old_retirement_snapshots_on_every_creation_path() {
-    let (state, _, server) = Box::pin(setup("notification_new_chat_fence")).await;
+async fn notification_new_chats_use_atomic_upserts_without_channel_writes_or_transactions() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    let (mut state, _, server) = Box::pin(setup("notification_new_chat_no_fanout")).await;
     let _server = tokio_util::task::AbortOnDropHandle::new(server);
     let (connection, key) = Box::pin(channel(&state, "gateway")).await;
     assert_eq!(
@@ -599,7 +600,7 @@ async fn notification_new_chats_invalidate_old_retirement_snapshots_on_every_cre
             State(state.clone()),
             Path("bnd_chats".into()),
             bearer(&key),
-            Json(binding_body(&key, OWNER)),
+            Json(binding_body(&key, OWNER))
         )
         .await
         .status(),
@@ -610,63 +611,82 @@ async fn notification_new_chats_invalidate_old_retirement_snapshots_on_every_cre
         .await
         .unwrap()
         .0;
-    let channels = state.db.collection::<bson::Document>(CHANNELS);
-    let mut probes = Vec::new();
-    for path in 0..4 {
-        let mut retirement = state.db.client().start_session().await.unwrap();
-        retirement.start_transaction().await.unwrap();
-        channels
-            .find_one(doc! {"_id": &connection.id})
-            .session(&mut retirement)
+    assert!(
+        !crate::services::assistant_notification_service::enabled(&state.db, OWNER)
             .await
             .unwrap()
+    );
+    // Monitor the same test-owned database without repeating setup or touching
+    // any other session's databases on the shared replica set.
+    let commands = Arc::new(std::sync::Mutex::new(Vec::<bson::Document>::new()));
+    let captured = commands.clone();
+    let mut options =
+        mongodb::options::ClientOptions::parse(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
+            .await
             .unwrap();
+    options.command_event_handler = Some(EventHandler::callback(move |event| {
+        if let CommandEvent::Started(event) = event {
+            captured.lock().unwrap().push(event.command);
+        }
+    }));
+    state.db = mongodb::Client::with_options(options)
+        .unwrap()
+        .database(state.db.name());
+    let channels = state.db.collection::<bson::Document>(CHANNELS);
+    let before = channels
+        .find_one(doc! {"_id": &connection.id})
+        .await
+        .unwrap()
+        .unwrap();
+    commands.lock().unwrap().clear();
+    for path in 0..4 {
         let partition = format!("conv_{}", Uuid::new_v4().simple());
         let thread =
             create_notification_chat(&state, &connection, &key, &partition, &destination, path)
                 .await;
-        let after_create = channels
-            .find_one(doc! {"_id": &connection.id})
-            .await
-            .unwrap()
-            .unwrap();
-        let generation = after_create.get_i64("chat_admission_generation").unwrap();
         let repeated =
             create_notification_chat(&state, &connection, &key, &partition, &destination, path)
                 .await;
         assert_eq!(repeated.id, thread.id);
-        let after_repeat = channels
-            .find_one(doc! {"_id": &connection.id})
-            .await
-            .unwrap()
-            .unwrap();
         assert_eq!(
-            after_repeat.get_i64("chat_admission_generation").unwrap(),
-            generation,
-            "existing chat path {path} must not write its shared channel"
+            channels
+                .find_one(doc! {"_id": &connection.id})
+                .await
+                .unwrap()
+                .unwrap(),
+            before,
+            "creation path {path} must leave the shared channel unchanged"
         );
-        probes.push(
-            seed_notification_purge_probe(
-                &state.db,
-                OWNER,
-                doc! {"channel_id": &connection.id, "thread_id": &thread.id},
-            )
-            .await,
-        );
-        let error = channels
-            .update_one(
-                doc! {"_id": &connection.id},
-                doc! {"$set": {"status": "disconnected"}},
-            )
-            .session(&mut retirement)
-            .await
-            .expect_err("new chat creation must invalidate the retirement's older snapshot");
-        assert!(
-            error.contains_label("TransientTransactionError"),
-            "path {path}: {error}"
-        );
-        retirement.abort_transaction().await.unwrap();
     }
+    let observed = commands.lock().unwrap().clone();
+    assert!(!observed.is_empty());
+    for command in observed {
+        assert!(
+            !command.contains_key("autocommit") && !command.contains_key("startTransaction"),
+            "chat admission must not start a transaction: {command:?}"
+        );
+        assert_ne!(command.get_str("update").ok(), Some(CHANNELS));
+        assert_ne!(command.get_str("findAndModify").ok(), Some(CHANNELS));
+    }
+    // Retirement must be independent of retained chat count. All plain chat
+    // documents, including existing notification fences, stay byte-identical.
+    let threads = state.db.collection::<bson::Document>(THREADS);
+    let now = bson::DateTime::now();
+    threads.insert_many((0..1000).map(|index| doc! {
+        "_id": Uuid::new_v4().to_string(), "channel_id": &connection.id,
+        "user_id": OWNER, "partition": format!("retained-{index}"), "title": "Retained",
+        "kind": "private", "notification_fence": i64::from(index), "created_at": now, "updated_at": now,
+    })).await.unwrap();
+    let before: Vec<_> = threads
+        .find(doc! {"channel_id": &connection.id})
+        .sort(doc! {"_id": 1})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    let probe =
+        seed_notification_purge_probe(&state.db, OWNER, doc! {"channel_id": &connection.id}).await;
     releases::retire_connection(
         &state,
         &connection,
@@ -676,62 +696,24 @@ async fn notification_new_chats_invalidate_old_retirement_snapshots_on_every_cre
     )
     .await
     .unwrap();
-    for probe in probes {
-        assert_notification_probe(&state.db, &probe, false).await;
-    }
-    let before = state
-        .db
-        .collection::<NyxbotThread>(THREADS)
-        .count_documents(doc! {"channel_id": &connection.id})
+    let after: Vec<_> = threads
+        .find(doc! {"channel_id": &connection.id})
+        .sort(doc! {"_id": 1})
+        .await
+        .unwrap()
+        .try_collect()
         .await
         .unwrap();
-    assert!(
-        thread_conversation(&state, &connection, "after-retirement")
-            .await
-            .is_err()
-    );
-    assert!(
-        custom_event_thread(&state, &connection, "custom-after-retirement", &destination)
-            .await
-            .is_err()
-    );
-    assert!(
-        chats::record_chat(
-            &state,
-            &connection,
-            "inbound-after-retirement",
-            &chats::ChatFacts {
-                kind: "private",
-                chat_id: "inbound-after-retirement".into(),
-                thread_id: None,
-                owner: false,
-                title: None,
-            },
-            None,
-        )
-        .await
-        .is_err()
-    );
-    assert_ne!(
-        put_conversation(
-            State(state.clone()),
-            Path((
-                "bnd_chats".into(),
-                format!("conv_{}", Uuid::new_v4().simple())
-            )),
-            bearer(&key),
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
     assert_eq!(
-        state
-            .db
-            .collection::<NyxbotThread>(THREADS)
-            .count_documents(doc! {"channel_id": &connection.id})
+        before, after,
+        "retirement must not fan notification writes out over chats"
+    );
+    assert_notification_probe(&state.db, &probe, false).await;
+    assert!(
+        load_channel(&state, OWNER, &connection.id)
             .await
-            .unwrap(),
-        before
+            .unwrap()
+            .notification_epoch
+            > connection.notification_epoch
     );
 }

@@ -95,33 +95,35 @@ Source deletion also removes rows in the existing cleanup paths: conversations,
 personal/organization/collaboration groups, hidden member threads, agent
 destruction and purge, channel retirement and thread deletion, trigger deletion,
 and personal erasure. A channel producer writes only its provider chat's
-`nyxbot_threads` row and then reads the live channel. `retire_connection` writes
-every affected thread in its transaction before purging, and exact-chat removal
-deletes that same thread row; either ordering forces a concurrent settlement to
-retry. All new provider-chat paths (inbound recording, fallback conversation reservations,
-gateway PUT and custom-event threads) insert under a live channel write in a
-short transaction. A chat created concurrently with retirement therefore enters
-the retirement's retry snapshot or is refused after retirement; it cannot evade
-the per-thread fence by appearing after the old snapshot. Updating an existing
-chat adds no channel write. Other channel status changes may retain hidden rows
-for later repair. Unrelated chats never write the channel merely to fence
-notification settlement. Run
-producers similarly fence their own run. Trigger deletion fences only pending,
-started and waiting runs before purging: terminal runs cannot re-enter
-`finish_update`, and the pause producer already writes its trigger in the same
-transaction. Retained terminal history adds no fence writes.
+`nyxbot_threads` row, then projection-reads the live channel and stamps the
+notification with its `notification_epoch` and `binding_id`. Exact-chat removal
+deletes that same thread row, forcing concurrent settlement to retry. Retirement,
+relinking and provider binding changes increment the epoch in a channel write
+that the lifecycle operation already performs. Retirement still purges by
+`source.channel_id`; it adds no notification writes to retained threads.
 
-Channel retirement still writes one document per retained provider chat; trigger
-deletion writes one per non-terminal run. Neither set has a fixed count cap.
-These indexed operations share the existing source cleanup transaction and its
-MongoDB transaction lifetime (normally 60 seconds); a large set can abort the
-whole retirement and require a retry, with no partially committed purge. There
-is no notification write shared by independent live chats or runs. Notification
-cleanup uses the source reference rather
-than assuming the source owner and recipient are the same person.
-Detaching a provider binding retains the logical channel and its readable
-histories, so it retains their notification rows. Disconnecting the channel or
-deleting its provider chat removes the corresponding rows.
+A settlement racing a retirement or rebind can commit its old snapshot. List
+and push preparation purge a row whose epoch or binding differs from the current
+channel; summary excludes it using the same joined fields. Default epoch zero
+and an absent binding preserve unstamped rows on legacy channels that also
+have no provider binding.
+Binding transitions invalidate prior feed notifications, including after a
+same-ID reattachment; saved conversations and card histories remain readable.
+A status-only failure with an unchanged stamp hides rows until repair.
+Channel-bound card creation makes one projection read to obtain the stamp.
+
+All four ordinary new-chat paths retain their original atomic upserts: inbound
+recording, fallback conversation reservations, gateway conversation PUT and
+custom-event threads add no transaction or shared channel write, including when
+notifications are off. Independent chats never write the channel to fence
+notification settlement. Run producers similarly fence their own run. Trigger
+deletion fences only pending, started and waiting runs before purging: terminal
+runs cannot re-enter `finish_update`, and the pause producer already writes its
+trigger in the same transaction. Retained terminal history adds no fence writes.
+Notification cleanup uses the source reference rather than assuming the source
+owner and recipient are the same person. Exact-chat deletion purges that chat's
+rows; provider detachment preserves durable chat/card history while invalidating
+notifications from the old binding.
 
 ## HTTP contract
 
@@ -316,8 +318,10 @@ remaining sweep time. Rows not started by the deadline stay pending; claims
 returned before a call release their reservations. A 30-second hard worker
 deadline bounds database/preparation stalls as well. An interrupted in-flight
 claim or provider call remains ambiguous and follows the existing `unknown`
-recovery rule; it is never replayed automatically. A crashed worker's lease
-expires without removing the row-level barrier. Each row takes its sending claim immediately
+recovery rule; it is never replayed automatically. After success, error or the hard timeout, the worker explicitly releases its
+lease under its own token, with a separate five-second cleanup allowance. A
+replica can acquire immediately after cleanup; a successor's token cannot be
+cleared. A crashed worker's lease expires without removing the row-level barrier. Each row takes its sending claim immediately
 before its own provider call, which has a ten-second timeout; unsent rows do not
 wait in `sending` behind other deliveries. During its first two minutes, a row
 that changes after preparation returns atomically to its prior pending or retry

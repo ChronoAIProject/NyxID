@@ -595,31 +595,28 @@ async fn platform_binding_live(
         .is_some())
 }
 
-/// The live channel's owner (the route admin for organization bots), read
-/// with a projection and no write.
-async fn live_channel_owner(
+/// Live owner and notification stamp, read with a projection and no write.
+async fn live_channel(
     db: &Database,
     session: &mut ClientSession,
     channel_id: &str,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<Document>> {
     Ok(db
         .collection::<Document>(CHANNELS)
         .find_one(doc! {"_id": channel_id, "status": {"$in": LIVE_CHANNEL_STATUSES.to_vec()}})
-        .projection(doc! {"user_id": 1})
+        .projection(doc! {"user_id": 1, "notification_epoch": 1, "binding_id": 1})
         .session(&mut *session)
-        .await?
-        .and_then(|channel| channel.get_str("user_id").ok().map(str::to_owned)))
+        .await?)
 }
 
-/// Each provider chat has its own fence. Unlink writes all affected thread
-/// rows before purging; chat removal deletes this same row. The channel status
-/// read after the fence is therefore skew-safe without a shared channel write.
+/// Exact-chat removal deletes this fence row. Retirement/rebinding instead
+/// changes the channel epoch; readers reject a producer snapshot that raced it.
 async fn fence_channel_thread(
     db: &Database,
     session: &mut ClientSession,
     channel_id: &str,
     partition: &str,
-) -> AppResult<Option<(String, String)>> {
+) -> AppResult<Option<(Document, String)>> {
     let Some(thread) = db
         .collection::<Document>(CHANNEL_THREADS)
         .find_one_and_update(
@@ -632,10 +629,13 @@ async fn fence_channel_thread(
     else {
         return Ok(None);
     };
-    let Some(owner) = live_channel_owner(db, session, channel_id).await? else {
+    let Some(channel) = live_channel(db, session, channel_id).await? else {
         return Ok(None);
     };
-    Ok(thread.get_str("_id").ok().map(|id| (owner, id.to_owned())))
+    Ok(thread
+        .get_str("_id")
+        .ok()
+        .map(|id| (channel.clone(), id.to_owned())))
 }
 
 /// A destroyed agent produces no further updates. This read is skew-safe:
@@ -708,20 +708,27 @@ pub async fn record_turn_settled_in_session(
         if org_guest {
             // The linking admin's flag decides before the channel is fenced:
             // a disabled feed costs one projection read and no write (D8).
-            let Some(admin) = live_channel_owner(db, session, &channel.nyxbot_channel_id).await?
-            else {
+            let Some(live) = live_channel(db, session, &channel.nyxbot_channel_id).await? else {
                 return Ok(());
             };
-            if !enabled(db, &admin).await? {
+            let Some(admin) = live.get_str("user_id").ok() else {
+                return Ok(());
+            };
+            if !enabled(db, admin).await? {
                 return Ok(());
             }
         }
-        let Some((channel_owner, thread_id)) =
+        let Some((live, thread_id)) =
             fence_channel_thread(db, session, &channel.nyxbot_channel_id, &channel.partition)
                 .await?
         else {
             return Ok(());
         };
+        let Some(channel_owner) = live.get_str("user_id").ok().map(str::to_owned) else {
+            return Ok(());
+        };
+        let channel_epoch = live.get_i64("notification_epoch").unwrap_or(0);
+        let channel_binding_id = live.get_str("binding_id").ok().map(str::to_owned);
         if let Some(execution) = channel.org_execution.as_ref() {
             // Organization lanes: a guest's hidden lane is not the acting
             // person's; the linking admin who owns the route is told, and the
@@ -741,6 +748,8 @@ pub async fn record_turn_settled_in_session(
                     id: thread_id.clone(),
                     conversation_id,
                     channel_id: Some(channel.nyxbot_channel_id.clone()),
+                    channel_epoch,
+                    channel_binding_id,
                     thread_id: Some(thread_id),
                     lane: Some(lane.into()),
                     agent_id: Some(execution.agent_id.clone()),
@@ -758,6 +767,8 @@ pub async fn record_turn_settled_in_session(
                     id: row.id.clone(),
                     conversation_id: Some(row.id.clone()),
                     channel_id: Some(channel.nyxbot_channel_id.clone()),
+                    channel_epoch,
+                    channel_binding_id,
                     thread_id: Some(thread_id),
                     agent_id: row.agent_id.clone(),
                     message_id: Some(message.id.clone()),
@@ -960,6 +971,18 @@ pub async fn record_card_pending_in_session(
         return Ok(());
     }
     let (source_type, id) = card_visible_source(conversation);
+    let channel_id = conversation
+        .channel
+        .as_ref()
+        .or(conversation.reply_channel.as_ref())
+        .map(|channel| channel.nyxbot_channel_id.clone());
+    let channel = match channel_id.as_deref() {
+        Some(id) => match live_channel(db, session, id).await? {
+            Some(channel) => Some(channel),
+            None => return Ok(()),
+        },
+        None => None,
+    };
     record_in_session(
         db,
         session,
@@ -971,11 +994,15 @@ pub async fn record_card_pending_in_session(
                 id,
                 conversation_id: Some(conversation.id.clone()),
                 // Channel unlink and group deletion purge by these references.
-                channel_id: conversation
-                    .channel
+                channel_id,
+                channel_epoch: channel
                     .as_ref()
-                    .or(conversation.reply_channel.as_ref())
-                    .map(|channel| channel.nyxbot_channel_id.clone()),
+                    .and_then(|c| c.get_i64("notification_epoch").ok())
+                    .unwrap_or(0),
+                channel_binding_id: channel
+                    .as_ref()
+                    .and_then(|c| c.get_str("binding_id").ok())
+                    .map(str::to_owned),
                 group_id: conversation.group_id.clone().or_else(|| {
                     conversation
                         .collaboration
@@ -1870,7 +1897,7 @@ async fn load_lookups(
                 CHANNELS,
                 doc! {"_id": {"$in": ids(&channel_ids)}},
                 doc! {"_id": 1, "user_id": 1, "platform": 1, "bot_label": 1, "status": 1,
-                "org_specialist.org_id": 1},
+                "org_specialist.org_id": 1, "notification_epoch": 1, "binding_id": 1},
             )
             .await?,
         )
@@ -2131,6 +2158,12 @@ fn channel_state<'a>(lookups: &'a Lookups, source: &NotificationSource) -> Chann
     {
         None => ChannelState::Absent,
         Some(channel)
+            if channel.get_i64("notification_epoch").unwrap_or(0) != source.channel_epoch
+                || channel.get_str("binding_id").ok() != source.channel_binding_id.as_deref() =>
+        {
+            ChannelState::Absent
+        }
+        Some(channel)
             if channel
                 .get_str("status")
                 .is_ok_and(|status| LIVE_CHANNEL_STATUSES.contains(&status)) =>
@@ -2167,6 +2200,10 @@ fn build(
 ) -> Built {
     let source = &row.source;
     let resolved = row.resolved_at.is_some();
+    if source.channel_id.is_some() && matches!(channel_state(lookups, source), ChannelState::Absent)
+    {
+        return Built::Purge;
+    }
     match row.kind {
         NotificationKind::ChatUpdate if source.lane.is_some() => {
             // Organization channel lane: the row references the chat's public
@@ -2658,7 +2695,12 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
         missing_or_null("$source.thread_id"),
         present("$thread"),
     ]};
+    let channel_stamp_ok = doc! {"$and": [
+        {"$eq": [{"$ifNull": ["$chan0.notification_epoch", 0]}, {"$ifNull": ["$source.channel_epoch", 0]}]},
+        {"$eq": [{"$ifNull": ["$chan0.binding_id", bson::Bson::Null]}, {"$ifNull": ["$source.channel_binding_id", bson::Bson::Null]}]},
+    ]};
     let chan_ok = doc! {"$and": [
+        channel_stamp_ok.clone(),
         present("$chan"),
         {"$in": ["$chan0.status", LIVE_CHANNEL_STATUSES.to_vec()]},
         thread_ok,
@@ -2678,6 +2720,7 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
         {"$or": [run_ok, {"$eq": ["$outcome", "paused"]}]},
     ]};
     let chan_live = doc! {"$and": [
+        channel_stamp_ok.clone(),
         present("$chan"),
         {"$in": ["$chan0.status", LIVE_CHANNEL_STATUSES.to_vec()]},
     ]};
@@ -2732,7 +2775,7 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
             CHANNELS,
             fields::SOURCE_CHANNEL_ID,
             "chan",
-            doc! {"user_id": 1, "status": 1, "org_specialist.org_id": 1},
+            doc! {"user_id": 1, "status": 1, "org_specialist.org_id": 1, "notification_epoch": 1, "binding_id": 1},
         ),
         lookup_by_id(
             CHANNEL_THREADS,
@@ -2799,7 +2842,10 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
             ],
             "as": "org_user",
         }},
-        doc! {"$addFields": {"visible": visible}},
+        doc! {"$addFields": {"visible": {"$and": [visible, {"$or": [
+            missing_or_null("$source.channel_id"),
+            {"$and": [present("$chan"), channel_stamp_ok]},
+        ]}]}}},
         doc! {"$match": {"visible": true}},
         doc! {"$facet": {
             "totals": [{"$group": {
@@ -3340,10 +3386,9 @@ async fn ensure_worker_state(db: &Database) -> mongodb::error::Result<()> {
 /// One replica prepares a batch at a time. The database clock owns the lease;
 /// its 45s lifetime exceeds the worker's hard 30s deadline. Row attempt tokens
 /// remain authoritative even after a crash or a lease handover.
-async fn acquire_worker(db: &Database) -> AppResult<Option<String>> {
+async fn acquire_worker(db: &Database, token: &str) -> AppResult<bool> {
     // Restores and partially completed startup must not silently disable pushes.
     ensure_worker_state(db).await?;
-    let token = Uuid::new_v4().to_string();
     Ok(db
         .collection::<Document>(PUSH_WORKER_STATE)
         .find_one_and_update(
@@ -3355,7 +3400,7 @@ async fn acquire_worker(db: &Database) -> AppResult<Option<String>> {
         )
         .return_document(ReturnDocument::After)
         .await?
-        .map(|_| token))
+        .is_some())
 }
 
 /// Resolve timed-out decision rows and send queued pushes with the real transport.
@@ -3444,34 +3489,59 @@ where
     F: Fn(String, String, String, HashMap<String, String>) -> Fut,
     Fut: std::future::Future<Output = Result<automation::Outcome, &'static str>>,
 {
-    // Include acquisition and release database I/O in the hard bound too.
-    match tokio::time::timeout(PUSH_WORKER_TIMEOUT, async {
-        let Some(token) = acquire_worker(&state.db).await? else {
-            return Ok(());
-        };
-        let result = sweep_batch(state, concurrency, send).await;
-        let released = state
-            .db
-            .collection::<Document>(PUSH_WORKER_STATE)
-            .update_one(
-                doc! {"_id": "push", "token": &token},
-                doc! {"$set": {"lease_until": bson::DateTime::from_millis(0)}, "$unset": {"token": ""}},
-            )
-            .await;
-        result?;
-        released?;
-        Ok(())
+    with_worker_lease(
+        &state.db,
+        PUSH_WORKER_TIMEOUT,
+        sweep_batch(state, concurrency, send),
+    )
+    .await
+}
+
+/// Keep the lease token outside the timed future, so cancellation during
+/// acquisition or delivery can always release our lease without touching a successor.
+async fn with_worker_lease<F>(db: &Database, timeout: std::time::Duration, work: F) -> AppResult<()>
+where
+    F: std::future::Future<Output = AppResult<()>>,
+{
+    let token = Uuid::new_v4().to_string();
+    let mut acquired = None;
+    let result = match tokio::time::timeout(timeout, async {
+        let owns_lease = acquire_worker(db, &token).await?;
+        acquired = Some(owns_lease);
+        if owns_lease { work.await } else { Ok(()) }
     })
     .await
     {
         Ok(result) => result,
-        // Cancellation is conservative: an attempt whose commit/provider
-        // response was interrupted is ambiguous and is never auto-replayed.
-        // An acquisition/release interrupted after commit expires by its lease.
         Err(_) => Err(AppError::Internal(
             "Notification worker deadline reached".into(),
         )),
+    };
+    if acquired == Some(false) {
+        return result;
     }
+    // Cleanup also runs when acquisition was cancelled with an unknown commit.
+    // A successor immediately sees sending rows, whose attempt barriers still
+    // prevent replay. Cleanup gets a separate bounded allowance.
+    let released = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        db.collection::<Document>(PUSH_WORKER_STATE).update_one(
+            doc! {"_id": "push", "token": &token},
+            doc! {"$set": {"lease_until": bson::DateTime::from_millis(0)}, "$unset": {"token": ""}},
+        ).await
+    })
+    .await;
+    let released = match released {
+        Ok(result) => result.map(|_| ()).map_err(AppError::from),
+        Err(_) => Err(AppError::Internal(
+            "Notification worker lease release timed out".into(),
+        )),
+    };
+    if released.is_err() {
+        tracing::warn!(target: "nyxid::assistant_notifications",
+            "Notification worker lease release failed; expiry remains the recovery path");
+    }
+    result?;
+    released
 }
 
 async fn sweep_batch<F, Fut>(state: &AppState, concurrency: usize, send: F) -> AppResult<()>

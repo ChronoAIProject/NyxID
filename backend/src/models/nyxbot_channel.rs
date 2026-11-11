@@ -59,6 +59,9 @@ pub struct GatewayBotMentionSupport {
 /// (`"direct"`).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NyxbotChannel {
+    /// Notification generation; changes with retirement, relinking or provider rebinding.
+    #[serde(default)]
+    pub notification_epoch: i64,
     /// Audience-policy generation. Ordinary traffic never increments it.
     #[serde(default)]
     pub execution_policy_revision: i64,
