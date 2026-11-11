@@ -57,7 +57,8 @@ sudo() {
             ["bash", str(SCRIPT)], env={**os.environ, "BASH_ENV": str(self.harness),
                 "TEST_CALLS": str(self.calls), "TEST_ARGUMENTS": str(self.arguments), "TEST_FAIL": failure,
                 "TEST_DISTRO": distro, "TEST_CODENAME": codename, "TEST_ARCH": arch,
-                "TEST_SOURCES": str(self.sources), "TEST_SOURCES_PATH": str(self.sources_path)},
+                "TEST_SOURCES": str(self.sources), "TEST_SOURCES_PATH": str(self.sources_path),
+                "NYXID_CI_SKIP_DNS_FALLBACK": "1"},
             capture_output=True, text=True, timeout=10,
         )
 
