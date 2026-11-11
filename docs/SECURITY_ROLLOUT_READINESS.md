@@ -253,3 +253,24 @@ fleet before private credentials/funding and at dispatch; assistant callbacks
 share these checks. Admin readiness includes the capability for affected models,
 and public executable-price/image projections fail closed while it is unready.
 See [platform models](PLATFORM_MODELS.md#current-models-through-versioned-api-contracts-2274-follow-up).
+
+## Organization guest Grants cutover (#2366)
+
+`nyxbot:org-guest-grants-v1` gates cap removal and explicit Grants adoption.
+Verify it with `GET /api/v1/admin/security-readiness` after upgrading/draining
+all API, proxy/MCP/LLM and queued/delivery workers in the existing declared roster.
+No new environment variables or feature-flag policy are introduced; the existing
+`nyxbot:org-specialist-channels` flag/readiness still applies.
+
+- Unready/mixed fleet: retain cap/list enforcement; no adoption. Old binaries
+  ignore additive markers and continue enforcing their original fields.
+- Ready: remove the daily cap on every binding; preserve each legacy service list
+  until its admin explicitly adopts saved Grants for all linked bots.
+- New ready bindings: guest-off; enabling uses Grants (including default Use).
+- Readiness loss: use retained legacy restrictions; continue settling all holds.
+
+A registered green fleet cannot detect hidden old workers: roster/drain assertions
+remain mandatory. Rollback disables guests and drains/settles work on upgraded
+binaries before downgrade. Cap-free spend and all legacy settings remain retained;
+old code may refuse above-cap admissions or changed digests. Never reset spend or
+silently regenerate legacy authority to make rollback permissive.

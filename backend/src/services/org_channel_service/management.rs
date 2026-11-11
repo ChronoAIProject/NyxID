@@ -3,7 +3,7 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         assistant_agent::AssistantAgent, credits::Credits, nyxbot_channel::NyxbotChannel,
-        org_channel::GuestPolicy, user_service::UserService,
+        user_service::UserService,
     },
 };
 use bson::{Document, doc};
@@ -11,7 +11,7 @@ use mongodb::{ClientSession, Database};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-pub const ORG_GUEST_EXPLANATION: &str = "Verified organization members use their own permissions and billing. Guests need guest access and a daily budget paid by the organization. Only organization admins can change guest access.";
+pub const ORG_GUEST_EXPLANATION: &str = "Verified organization members use their own permissions and billing. Guests are people who have not verified an organization member account on this bot. The organization pays for their messages and tool use. Only organization admins can change guest access.";
 pub const PERSONAL_GUEST_EXPLANATION: &str = "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.";
 
 pub(crate) fn default_daily_credits() -> Credits {
@@ -23,9 +23,9 @@ pub(crate) fn default_daily_credits() -> Credits {
 pub struct GuestSettings {
     pub enabled: bool,
     #[serde(default)]
-    pub service_ids: Vec<String>,
-    #[serde(default = "default_daily_credits")]
-    pub daily_credits: Credits,
+    pub service_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub daily_credits: Option<Credits>,
     #[serde(default)]
     pub expected_revision: Option<String>,
 }
@@ -61,13 +61,8 @@ pub(crate) async fn patch(
         row,
         GuestSettings {
             enabled: input.enabled.unwrap_or(policy.enabled),
-            service_ids: input
-                .service_ids
-                .unwrap_or_else(|| policy.service_ids.clone()),
-            daily_credits: input
-                .daily_credits
-                .or(policy.daily_credits)
-                .unwrap_or_else(default_daily_credits),
+            service_ids: input.service_ids,
+            daily_credits: input.daily_credits,
             expected_revision: Some(input.expected_revision),
         },
     )
@@ -120,19 +115,28 @@ pub(crate) async fn view(db: &Database, actor: &str, row: &NyxbotChannel) -> App
         access,
         crate::services::org_service::OwnerAccess::AsOrgAdmin { .. }
     );
-    use futures::TryStreamExt;
     let agent = db
         .collection::<AssistantAgent>("assistant_agents")
         .find_one(doc! {"_id":&row.agent_id,"user_id":&b.org_id,"destroyed_at":null})
         .await?;
-    let ids = agent
-        .as_ref()
-        .map(|a| a.grants.service_ids.clone())
-        .unwrap_or_default();
-    let services:Vec<UserService>=db.collection("user_services").find(doc!{"_id":{"$in":ids},"user_id":&b.org_id,"is_active":true,"node_id":null,"service_type":"http"}).limit(100).await?.try_collect().await?;
+    let services = match agent.as_ref() {
+        Some(agent) => guest_services(db, agent).await?,
+        None => Vec::new(),
+    };
+    let ready = super::guest_grants_ready(db).await?;
+    let follows = ready && b.guests.follows_agent_grants;
     let available: Vec<Value> = services
         .iter()
-        .map(|s| json!({"id":s.id,"label":s.slug}))
+        .map(|s| json!({"id":s.id,"label":s.label}))
+        .collect();
+    let effective: Vec<_> = services
+        .iter()
+        .filter(|s| {
+            s.access != "none"
+                && agent
+                    .as_ref()
+                    .is_some_and(|a| super::guest_service_selected(a, &b.guests, ready, &s.id))
+        })
         .collect();
     let (spent, reserved) = super::budget::today(
         db,
@@ -146,7 +150,9 @@ pub(crate) async fn view(db: &Database, actor: &str, row: &NyxbotChannel) -> App
         Err(e) => return Err(e),
     };
     Ok(
-        json!({"channel_id":row.id,"org_id":b.org_id,"can_manage":admin,"member_verified":member_verified,"guest_enabled":b.guests.enabled,
+        json!({"channel_id":row.id,"org_id":b.org_id,"agent_id":row.agent_id,
+        "grants_ready":ready,"guest_policy_mode":if follows {"grants"} else {"legacy"},
+        "legacy_fields_ignored":ready,"effective_guest_services":effective,"can_manage":admin,"member_verified":member_verified,"guest_enabled":b.guests.enabled,
         "delegated_service_ids":b.guests.service_ids,"daily_credits":b.guests.daily_credits,
         "guest_revision":b.guests.revision,"channel_status":row.status,
         "default_daily_credits":default_daily_credits().to_string(),"spent_today_credits":spent,"reserved_today_credits":reserved,
@@ -176,7 +182,17 @@ pub(crate) async fn update(
     {
         return Err(settings_changed());
     }
-    if input.daily_credits <= Credits::ZERO || input.service_ids.len() > 100 {
+    let ready = super::guest_grants_ready(db).await?;
+    let daily_credits = input
+        .daily_credits
+        .or(b.guests.daily_credits)
+        .unwrap_or_else(default_daily_credits);
+    if (!ready && daily_credits <= Credits::ZERO)
+        || input
+            .service_ids
+            .as_ref()
+            .is_some_and(|ids| ids.len() > 100)
+    {
         return Err(AppError::ValidationError(
             "A positive daily guest budget and at most 100 delegated services are required".into(),
         ));
@@ -191,11 +207,18 @@ pub(crate) async fn update(
         )
         .await?
         .ok_or_else(super::denied)?;
-    let mut ids = input.service_ids.clone();
+    let mut ids = if ready {
+        b.guests.service_ids.clone()
+    } else {
+        input
+            .service_ids
+            .clone()
+            .unwrap_or_else(|| b.guests.service_ids.clone())
+    };
     ids.sort();
     ids.dedup();
     let mut authority = BTreeMap::new();
-    for id in &ids {
+    for id in ids.iter().filter(|_| !ready) {
         let service = db
             .collection::<UserService>("user_services")
             .find_one(doc! {"_id":id,"user_id":&b.org_id,"is_active":true})
@@ -209,21 +232,33 @@ pub(crate) async fn update(
         }
         authority.insert(id.clone(), service_digest(&agent, id));
     }
-    let policy = GuestPolicy {
-        revision: uuid::Uuid::new_v4().to_string(),
-        continuity_channel_id: b.guests.continuity_channel_id.clone(),
-        service_authority: authority,
-        enabled: input.enabled,
-        service_ids: ids,
-        daily_credits: Some(input.daily_credits),
-    };
-    let context = (db.clone(), actor.to_owned(), row.clone(), policy, agent);
-    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,row,policy,agent)|Box::pin(async move{
+    let mut policy = b.guests.clone();
+    policy.enabled = input.enabled;
+    if !ready {
+        policy.service_authority = authority;
+        policy.service_ids = ids;
+        policy.daily_credits = Some(daily_credits);
+    }
+    // Deprecated-only writes are accepted without changing or retiring authority.
+    if ready && policy == b.guests {
+        return Ok(());
+    }
+    policy.revision = uuid::Uuid::new_v4().to_string();
+    let context = (
+        db.clone(),
+        actor.to_owned(),
+        row.clone(),
+        policy,
+        agent,
+        ready,
+    );
+    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,row,policy,agent,ready)|Box::pin(async move{
         let b=row.org_specialist.as_ref().ok_or_else(super::denied)?;
         super::fence_management(db,tx,row,actor).await?;
+        if *ready && !super::guest_grants_ready(db).await? { return Err(AppError::SecurityReadinessUnavailable); }
         let live:AssistantAgent=bson::from_document(super::live_doc(db,tx,"assistant_agents",doc!{"_id":&agent.id,"user_id":&b.org_id,"destroyed_at":null},true).await?).map_err(|_|super::denied())?;
-        if policy.service_authority.iter().any(|(id,d)| !live.grants.service_ids.contains(id) || service_digest(&live,id)!=*d) {return Err(AppError::Conflict("Agent permissions changed; review the guest delegation again".into()));}
-        for id in &policy.service_ids {
+        if !*ready && policy.service_authority.iter().any(|(id,d)| !live.grants.service_ids.contains(id) || service_digest(&live,id)!=*d) {return Err(AppError::Conflict("Agent permissions changed; review the guest delegation again".into()));}
+        for id in policy.service_ids.iter().filter(|_| !*ready) {
             let service:UserService=bson::from_document(super::live_doc(db,tx,"user_services",doc!{"_id":id,"user_id":&b.org_id,"is_active":true},true).await?).map_err(|_|super::denied())?;
             if service.node_id.is_some() || service.service_type!="http" {return Err(super::denied());}
         }
@@ -269,6 +304,13 @@ pub(crate) async fn restore_in_session(
     else {
         return Ok(());
     };
+    db.collection::<Document>("nyxbot_channels")
+        .update_one(
+            doc! {"_id":&row.id},
+            doc! {"$set":{"org_specialist.guests.follows_agent_grants":false}},
+        )
+        .session(&mut *tx)
+        .await?;
     let Some(saved) = previous.org_specialist.as_ref() else {
         return Ok(());
     };
@@ -315,9 +357,10 @@ pub(crate) async fn restore_in_session(
             policy.service_authority.insert(id.clone(), digest);
         }
     }
-    if !policy
-        .daily_credits
-        .is_some_and(|credits| credits > Credits::ZERO)
+    if !super::guest_grants_ready(db).await?
+        && !policy
+            .daily_credits
+            .is_some_and(|credits| credits > Credits::ZERO)
     {
         policy.enabled = false;
     }
@@ -343,4 +386,74 @@ pub(crate) async fn restore_in_session(
             "delegated_services":policy.service_ids.len(),"enabled":policy.enabled}),
     )
     .await
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct GuestServiceSummary {
+    pub id: String,
+    pub label: String,
+    pub access: String,
+    pub limited_operations: bool,
+}
+
+pub(crate) async fn guest_services(
+    db: &Database,
+    agent: &AssistantAgent,
+) -> AppResult<Vec<GuestServiceSummary>> {
+    use futures::TryStreamExt;
+    let services: Vec<UserService> = db
+        .collection("user_services")
+        .find(doc! {
+        "_id":{"$in":&agent.grants.service_ids},"user_id":&agent.user_id,
+        "is_active":true,"node_id":null,"service_type":"http"})
+        .sort(doc! {"_id":1})
+        .await?
+        .try_collect()
+        .await?;
+    let ids: Vec<_> = services.iter().map(|s| &s.endpoint_id).collect();
+    let endpoints: Vec<crate::models::user_endpoint::UserEndpoint> = db
+        .collection("user_endpoints")
+        .find(doc! {"_id":{"$in":ids},"user_id":&agent.user_id})
+        .await?
+        .try_collect()
+        .await?;
+    Ok(services
+        .iter()
+        .map(|service| {
+            use crate::services::agent_operation_scope_service::{applicable, guest_level};
+            let scopes: Vec<_> = applicable(
+                &agent.guest_operation_scopes,
+                &service.id,
+                service.catalog_service_id.as_deref(),
+            )
+            .chain(applicable(
+                &agent.operation_scopes,
+                &service.id,
+                service.catalog_service_id.as_deref(),
+            ))
+            .collect();
+            GuestServiceSummary {
+                id: service.id.clone(),
+                label: endpoints
+                    .iter()
+                    .find(|e| e.id == service.endpoint_id)
+                    .map(|e| e.label.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "Unavailable service".into()),
+                access: if scopes.iter().any(|s| s.operations.is_empty()) {
+                    "none".into()
+                } else {
+                    serde_json::to_value(guest_level(
+                        agent,
+                        &service.id,
+                        service.catalog_service_id.as_deref(),
+                    ))
+                    .ok()
+                    .and_then(|v| v.as_str().map(str::to_owned))
+                    .unwrap_or_else(|| "use".into())
+                },
+                limited_operations: !scopes.is_empty(),
+            }
+        })
+        .collect())
 }

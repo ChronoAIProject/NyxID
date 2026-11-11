@@ -2,6 +2,19 @@ import { z } from "zod";
 
 export const orgChannelSettingsSchema = z.object({
   channel_id: z.string(),
+  agent_id: z.string().nullish(),
+  grants_ready: z.boolean().default(false),
+  guest_policy_mode: z.enum(["legacy", "grants"]).default("legacy"),
+  effective_guest_services: z
+    .array(
+      z.object({
+        id: z.string(),
+        label: z.string(),
+        access: z.string(),
+        limited_operations: z.boolean(),
+      }),
+    )
+    .default([]),
   org_id: z.string(),
   can_manage: z.boolean(),
   guest_revision: z.string().default(""),
@@ -18,19 +31,27 @@ export const orgChannelSettingsSchema = z.object({
   available_services: z.array(z.object({ id: z.string(), label: z.string() })),
 });
 export type OrgChannelSettings = z.infer<typeof orgChannelSettingsSchema>;
-export const orgChannelGuestFormSchema = z.object({
-  enabled: z.boolean(),
-  service_ids: z.array(z.string()),
-  daily_credits: z
-    .string()
-    .regex(
-      /^\d+(?:\.\d{1,12})?$/,
-      "Enter a positive credit amount, with up to 12 decimal places",
-    )
-    .refine((v) => /[1-9]/.test(v), "The daily budget must be positive"),
-});
+export const orgChannelGuestFormSchema = z.object({ enabled: z.boolean() });
 export type OrgChannelGuestForm = z.infer<typeof orgChannelGuestFormSchema>;
-export type OrgChannelGuestUpdate = OrgChannelGuestForm & { expected_revision?: string };
+export type OrgChannelGuestUpdate = OrgChannelGuestForm & {
+  expected_revision?: string;
+};
+export const orgGuestAdoptionSchema = z.object({
+  ready: z.boolean(),
+  pending: z.boolean(),
+  review: z.string(),
+  bots: z.array(
+    z.object({ id: z.string(), name: z.string(), status: z.string() }),
+  ),
+  services: z.array(
+    z.object({
+      id: z.string(),
+      label: z.string(),
+      access: z.enum(["none", "read", "use", "all"]),
+      limited_operations: z.boolean(),
+    }),
+  ),
+});
 export const orgChannelChallengeSchema = z.object({
   id: z.string(),
   state: z.string(),

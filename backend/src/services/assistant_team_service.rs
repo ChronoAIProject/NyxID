@@ -2024,6 +2024,7 @@ pub(crate) async fn sync_thread_authority(
                 .as_ref()
                 .and_then(|c| c.org_specialist.as_ref())
                 .map(|b| &b.guests);
+            let ready = super::org_channel_service::guest_grants_ready(db).await?;
             let grants = AgentGrants {
                 service_ids: agent
                     .grants
@@ -2031,13 +2032,7 @@ pub(crate) async fn sync_thread_authority(
                     .iter()
                     .filter(|id| {
                         policy.is_some_and(|p| {
-                            p.service_ids.contains(id)
-                                && p.service_authority.get(*id).is_some_and(|digest| {
-                                    *digest
-                                        == super::org_channel_service::management::service_digest(
-                                            agent, id,
-                                        )
-                                })
+                            super::org_channel_service::guest_service_selected(agent, p, ready, id)
                         })
                     })
                     .cloned()

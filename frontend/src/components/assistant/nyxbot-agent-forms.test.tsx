@@ -171,7 +171,7 @@ it("rejects an invalid name before calling the server and shows server refusals"
   expect(posts).toEqual([]);
 
   respond = () =>
-    new Response(JSON.stringify({ message: "A live agent already uses that name" }), {
+    new Response(JSON.stringify({ error: "conflict", message: "A live agent already uses that name" }), {
       status: 409,
     });
   const name = within(dialog).getByRole("textbox", { name: "Name" });
