@@ -10,7 +10,8 @@ if [[ "$ID" != ubuntu || ! "${VERSION_CODENAME:-}" =~ ^[a-z]+$ ]]; then
   exit 1
 fi
 
-case "$(dpkg --print-architecture)" in
+architecture="$(dpkg --print-architecture)"
+case "$architecture" in
   amd64|i386)
     archive=https://archive.ubuntu.com/ubuntu
     security=https://security.ubuntu.com/ubuntu
@@ -24,6 +25,7 @@ esac
 sources_dir="$(mktemp -d)"
 trap 'rm -rf "$sources_dir"' EXIT
 sources_file="$sources_dir/ubuntu.sources"
+write_sources() {
 cat > "$sources_file" <<EOF
 Types: deb
 URIs: $archive
@@ -40,6 +42,8 @@ EOF
 # apt drops privileges to _apt while reading source files.
 chmod 755 "$sources_dir"
 chmod 644 "$sources_file"
+}
+write_sources
 
 # Retry only package/index acquisition; the calling step also bounds locks and
 # installation scripts. Ignore unrelated runner repositories for both commands.
@@ -52,5 +56,20 @@ apt_options=(
   -o APT::Update::Error-Mode=any
 )
 
-sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update
+update_status=0
+sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update || update_status=$?
+if (( update_status != 0 )); then
+  case "$architecture" in
+    amd64|i386)
+      # Azure-hosted runners can lose DNS for the primary Canonical mirrors.
+      # Keep the same release suites and Ubuntu signing key on the fallback.
+      echo 'Primary Ubuntu index update failed; trying the Azure Ubuntu mirror.' >&2
+      archive=https://azure.archive.ubuntu.com/ubuntu
+      security=$archive
+      write_sources
+      sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update
+      ;;
+    *) exit "$update_status" ;;
+  esac
+fi
 sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" install -y libdbus-1-dev pkg-config ripgrep

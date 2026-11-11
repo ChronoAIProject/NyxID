@@ -1,7 +1,11 @@
 # Test-only tooling for a trusted local HTTPS site and a protocol test server.
 ARG MACHINE_IMAGE=nyxid-node-machine:local
 FROM ${MACHINE_IMAGE}
-RUN apt-get update && apt-get install -y --no-install-recommends libnss3-tools node-ws \
+RUN if ! apt-get -o APT::Update::Error-Mode=any update; then \
+      sed -i 's|http://archive.ubuntu.com/ubuntu|https://azure.archive.ubuntu.com/ubuntu|g; s|http://security.ubuntu.com/ubuntu|https://azure.archive.ubuntu.com/ubuntu|g; s|https://archive.ubuntu.com/ubuntu|https://azure.archive.ubuntu.com/ubuntu|g; s|https://security.ubuntu.com/ubuntu|https://azure.archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources \
+      && apt-get -o APT::Update::Error-Mode=any update; \
+    fi \
+    && apt-get install -y --no-install-recommends libnss3-tools node-ws \
     && rm -rf /var/lib/apt/lists/*
 COPY cli/tests/machine_container_e2e.mjs cli/tests/machine_context_e2e.mjs /test/
 COPY cli/tests/machine_native_probe_drop.py /test/

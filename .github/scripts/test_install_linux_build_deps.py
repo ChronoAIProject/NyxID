@@ -46,6 +46,10 @@ sudo() {
     esac
   done
   printf '%s\\n' "$operation" >> "$TEST_CALLS"
+  if [[ "$operation" == update && "$TEST_FAIL" == first_update && ! -f "$TEST_CALLS.failed" ]]; then
+    touch "$TEST_CALLS.failed"
+    return 17
+  fi
   if [[ "$operation" == "$TEST_FAIL" ]]; then
     return 17
   fi
@@ -112,7 +116,22 @@ sudo() {
     def test_update_failure_stops_before_install(self):
         result = self.invoke("update")
         self.assertEqual(result.returncode, 17, result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), ["update", "update"])
+
+    def test_failed_primary_update_uses_signed_fallback_for_update_and_install(self):
+        result = self.invoke("first_update")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls.read_text().splitlines(), ["update", "update", "install"])
+        sources = self.sources.read_text()
+        self.assertEqual(sources.count("URIs: https://azure.archive.ubuntu.com/ubuntu\n"), 4)
+        self.assertEqual(sources.count("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"), 6)
+        self.assertEqual(self.arguments.read_text().splitlines().count("APT::Update::Error-Mode=any"), 3)
+
+    def test_ports_update_failure_does_not_use_an_incompatible_mirror(self):
+        result = self.invoke("update", arch="arm64")
+        self.assertEqual(result.returncode, 17, result.stderr)
         self.assertEqual(self.calls.read_text().splitlines(), ["update"])
+        self.assertNotIn("azure.archive", self.sources.read_text())
 
     def test_install_failure_is_not_ignored(self):
         result = self.invoke("install")
