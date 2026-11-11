@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
@@ -71,6 +73,7 @@ interface MachineGrantCardProps {
   readonly allowedServiceIds?: readonly string[];
 }
 export function MachineGrantCard(props: MachineGrantCardProps) {
+  useUiTranslation();
   const owner = useAuthStore((state) => state.user?.id);
   return (
     <MachineGrantCardBoundary
@@ -80,6 +83,7 @@ export function MachineGrantCard(props: MachineGrantCardProps) {
   );
 }
 function MachineGrantCardBoundary(props: MachineGrantCardProps) {
+  useUiTranslation();
   if (
     props.machineId &&
     props.source.kind === "api_key" &&
@@ -90,6 +94,7 @@ function MachineGrantCardBoundary(props: MachineGrantCardProps) {
   return <MachineGrantCardContent {...props} />;
 }
 function MachineGrantCardWithKey(props: MachineGrantCardProps) {
+  useUiTranslation();
   const query = useApiKey(
     props.source.kind === "api_key" ? props.source.id : "",
   );
@@ -119,6 +124,7 @@ function MachineGrantCardContent({
   allowedServiceIds,
   keyQuery,
 }: MachineGrantCardProps & { readonly keyQuery?: SourceKeyQuery }) {
+  useUiTranslation();
   const query = useMachineGrant(source);
   const save = useSaveMachineGrant(source);
   const revoke = useRevokeMachineGrant(source);
@@ -305,35 +311,26 @@ function MachineGrantCardContent({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Machine permissions</CardTitle>
+        <CardTitle>{translateUi("Machine permissions")}</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <p className="text-14 text-muted-foreground">
           {source.kind === "api_key"
-            ? "This parent Key and all its valid login credentials share one Machine grant. Logging out a child credential stops only that child’s work; revoking or rotating the parent affects all children and requires new approval for a successor."
-            : "This account and OAuth client share one Machine grant across connections. First approval and reauthorization use the application’s OAuth consent flow."}
+            ? translateUi("This parent Key and all its valid login credentials share one Machine grant. Logging out a child credential stops only that child’s work; revoking or rotating the parent affects all children and requires new approval for a successor.")
+            : translateUi("This account and OAuth client share one Machine grant across connections. First approval and reauthorization use the application’s OAuth consent flow.")}
         </p>
-        <p className="text-13 text-muted-foreground">
-          Revoking only Machine permissions leaves other service consent intact
-          and does not pause or delete the Machine. Changing a grant invalidates
-          its earlier work across every assigned Machine; independent subjects
-          and Assistant assignments are separate.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("Revoking only Machine permissions leaves other service consent intact and does not pause or delete the Machine. Changing a grant invalidates its earlier work across every assigned Machine; independent subjects and Assistant assignments are separate.")}</p>
         {!eligible && (
-          <p className="text-14 text-muted-foreground">
-            This source is not eligible for external Machine permissions. Use an
-            active personal general-purpose Key or the application’s explicit
-            Machine consent.
-          </p>
+          <p className="text-14 text-muted-foreground">{translateUi("This source is not eligible for external Machine permissions. Use an active personal general-purpose Key or the application’s explicit Machine consent.")}</p>
         )}
         <>
-          {query.isPending && <p role="status">Loading Machine permissions…</p>}
+          {query.isPending && <p role="status">{translateUi("Loading Machine permissions…")}</p>}
           {query.error && (
             <ErrorBanner
               message={
                 machineGrantUnavailable(query.error)
-                  ? "Machine grant management is not available on this server yet. No permission state has been inferred."
-                  : "Could not verify Machine permissions. Reload before changing access."
+                  ? translateUi("Machine grant management is not available on this server yet. No permission state has been inferred.")
+                  : translateUi("Could not verify Machine permissions. Reload before changing access.")
               }
               onRetry={() => void query.refetch()}
             />
@@ -341,90 +338,77 @@ function MachineGrantCardContent({
           {!query.error && query.data && (
             <>
               <div className="flex flex-wrap gap-2">
-                <Badge variant={combinedLiveValid ? "success" : "warning"}>
-                  Source + grant:{" "}
+                <Badge variant={combinedLiveValid ? "success" : "warning"}>{translateUi("Source + grant:")}{" "}
                   {query.isFetching
-                    ? "checking"
+                    ? translateUi("checking")
                     : combinedLiveValid
-                      ? "valid"
-                      : "not currently valid"}
+                      ? translateUi("valid")
+                      : translateUi("not currently valid")}
                 </Badge>
                 {independentValidity && (
                   <>
-                    <Badge variant={sourceValid ? "success" : "warning"}>
-                      Source:{" "}
+                    <Badge variant={sourceValid ? "success" : "warning"}>{translateUi("Source:")}{" "}
                       {query.isFetching
-                        ? "Checking"
+                        ? translateUi("Checking")
                         : liveLabel(
                             sourceValid,
                             query.data.source_validity_reason,
                           )}
                     </Badge>
-                    <Badge variant={grantValid ? "success" : "warning"}>
-                      Grant validity:{" "}
+                    <Badge variant={grantValid ? "success" : "warning"}>{translateUi("Grant validity:")}{" "}
                       {query.isFetching
-                        ? "Checking"
+                        ? translateUi("Checking")
                         : liveLabel(grantValid, grantReason)}
                     </Badge>
                   </>
                 )}
-                <Badge variant={active ? "secondary" : "warning"}>
-                  Grant:{" "}
+                <Badge variant={active ? "secondary" : "warning"}>{translateUi("Grant:")}{" "}
                   {!grant
-                    ? "none"
+                    ? translateUi("none")
                     : active
-                      ? "active"
+                      ? translateUi("active")
                       : grant.status === "revoked"
-                        ? "revoked"
-                        : "expired"}
+                        ? translateUi("revoked")
+                        : translateUi("expired")}
                 </Badge>
               </div>
               <p className="text-13 text-muted-foreground">
                 {independentValidity
-                  ? "Source authentication and Machine grant validity are live checks over their authoritative records. Unknown or stale results do not establish execution authority, Machine readiness, or the client’s local token state."
-                  : "The server reports one combined source and grant check; it does not report source validity separately. This result is separate from Machine resource readiness and from the client’s local token or transport state."}
+                  ? translateUi("Source authentication and Machine grant validity are live checks over their authoritative records. Unknown or stale results do not establish execution authority, Machine readiness, or the client’s local token state.")
+                  : translateUi("The server reports one combined source and grant check; it does not report source validity separately. This result is separate from Machine resource readiness and from the client’s local token or transport state.")}
               </p>
               {source.kind === "api_key" ? (
                 <div className="space-y-2 rounded-lg border border-border/50 bg-muted/30 p-3 text-14">
-                  <p className="font-medium">Current parent Key review</p>
+                  <p className="font-medium">{translateUi("Current parent Key review")}</p>
                   {sourceMetadataPending ? (
-                    <p role="status" className="text-muted-foreground">
-                      Loading current Key state and ceilings…
-                    </p>
+                    <p role="status" className="text-muted-foreground">{translateUi("Loading current Key state and ceilings…")}</p>
                   ) : null}
                   {sourceMetadataError ? (
-                    <p role="alert" className="text-warning">
-                      The current parent Key could not be read. Editing is
-                      unavailable until its live state can be reviewed.
-                    </p>
+                    <p role="alert" className="text-warning">{translateUi("The current parent Key could not be read. Editing is unavailable until its live state can be reviewed.")}</p>
                   ) : null}
                   {!sourceMetadataPending &&
                   !sourceMetadataError &&
                   currentKey ? (
                     <dl className="grid gap-2 sm:grid-cols-2">
                       <div>
-                        <dt className="text-muted-foreground">
-                          Key state version
-                        </dt>
-                        <dd>{currentKey.state_version ?? "Not reported"}</dd>
+                        <dt className="text-muted-foreground">{translateUi("Key state version")}</dt>
+                        <dd>{currentKey.state_version ?? translateUi("Not reported")}</dd>
                       </div>
                       <div>
-                        <dt className="text-muted-foreground">Node ceiling</dt>
+                        <dt className="text-muted-foreground">{translateUi("Node ceiling")}</dt>
                         <dd>
                           {currentKey.allow_all_nodes
-                            ? "All eligible Nodes"
-                            : currentKey.allowed_node_ids.join(", ") || "None"}
+                            ? translateUi("All eligible Nodes")
+                            : currentKey.allowed_node_ids.join(", ") || translateUi("None")}
                         </dd>
                       </div>
                       <div>
-                        <dt className="text-muted-foreground">
-                          Service ceiling
-                        </dt>
+                        <dt className="text-muted-foreground">{translateUi("Service ceiling")}</dt>
                         <dd>
                           {currentKey.allow_all_services
-                            ? "All eligible services"
+                            ? translateUi("All eligible services")
                             : currentKey.allowed_service_ids.join(", ") ||
-                              "None"}
+                              translateUi("None")}
                         </dd>
                       </div>
                     </dl>
@@ -435,34 +419,32 @@ function MachineGrantCardContent({
                 <>
                   <dl className="grid gap-x-4 gap-y-2 text-14 sm:grid-cols-2">
                     <div>
-                      <dt className="text-muted-foreground">Grant ID</dt>
+                      <dt className="text-muted-foreground">{translateUi("Grant ID")}</dt>
                       <dd className="break-all font-mono">{grant.id}</dd>
                     </div>
                     <div>
-                      <dt className="text-muted-foreground">
-                        Revision / policy revision
-                      </dt>
+                      <dt className="text-muted-foreground">{translateUi("Revision / policy revision")}</dt>
                       <dd>
                         {grant.revision} / {grant.policy_revision}
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-muted-foreground">Expires</dt>
+                      <dt className="text-muted-foreground">{translateUi("Expires")}</dt>
                       <dd>{formatDate(grant.expires_at)}</dd>
                     </div>
                     <div>
-                      <dt className="text-muted-foreground">Source</dt>
+                      <dt className="text-muted-foreground">{translateUi("Source")}</dt>
                       <dd className="break-all font-mono">
                         {source.kind === "api_key"
-                          ? "Parent Key"
-                          : "OAuth client"}
+                          ? translateUi("Parent Key")
+                          : translateUi("OAuth client")}
                         : {source.id}
                       </dd>
                     </div>
                   </dl>
                   <div
                     className="space-y-2"
-                    aria-label="Affected machine assignments"
+                    aria-label={translateUi("Affected machine assignments")}
                   >
                     {Object.entries(grant.assignments).map(
                       ([nodeId, assignment]) => (
@@ -479,7 +461,7 @@ function MachineGrantCardContent({
                               {nodeId}
                             </Link>
                             {nodeId === machineId ? (
-                              <Badge variant="info">Current Machine</Badge>
+                              <Badge variant="info">{translateUi("Current Machine")}</Badge>
                             ) : null}
                           </div>
                           <p>
@@ -488,52 +470,34 @@ function MachineGrantCardContent({
                               assignment.capabilities.files && "Files",
                             ]
                               .filter(Boolean)
-                              .join(" · ") || "No execution capability"}{" "}
-                            · {assignment.mode} · assignment revision{" "}
+                              .join(" · ") || translateUi("No execution capability")}{" "}
+                            · {assignment.mode}{translateUi(" · assignment revision")}{" "}
                             {assignment.revision}
                           </p>
-                          <p className="break-all">
-                            File roots:{" "}
-                            {assignment.file_roots.join(", ") || "None"}
+                          <p className="break-all">{translateUi("File roots:")}{" "}
+                            {assignment.file_roots.join(", ") || translateUi("None")}
                           </p>
-                          <p className="break-all">
-                            Gateway service ceiling:{" "}
-                            {assignment.service_ids.join(", ") || "None"}
+                          <p className="break-all">{translateUi("Gateway service ceiling:")}{" "}
+                            {assignment.service_ids.join(", ") || translateUi("None")}
                           </p>
                         </article>
                       ),
                     )}
                   </div>
                   {machineId && !currentAssignment ? (
-                    <p role="alert" className="text-14 text-warning">
-                      This source grant no longer includes the current Machine.
-                      Reload the Machine permissions list before taking an
-                      action.
-                    </p>
+                    <p role="alert" className="text-14 text-warning">{translateUi("This source grant no longer includes the current Machine. Reload the Machine permissions list before taking an action.")}</p>
                   ) : null}
                 </>
               )}
               {(query.data.source_valid === false ||
                 (active && query.data.grant_valid === false)) && (
-                <p className="text-14 text-warning">
-                  Current source or grant checks prevent editing. Reload and
-                  review the original authentication source before approving new
-                  Machine permissions.
-                </p>
+                <p className="text-14 text-warning">{translateUi("Current source or grant checks prevent editing. Reload and review the original authentication source before approving new Machine permissions.")}</p>
               )}
               {!sourceVersionAvailable && (
-                <p role="alert" className="text-14 text-warning">
-                  This server did not expose the parent Key revision required
-                  for safe approval. Reload after server integration; approvals
-                  are unavailable.
-                </p>
+                <p role="alert" className="text-14 text-warning">{translateUi("This server did not expose the parent Key revision required for safe approval. Reload after server integration; approvals are unavailable.")}</p>
               )}
               {source.kind === "oauth" && !active && (
-                <p className="text-14 text-muted-foreground">
-                  Reconnect from this application and explicitly approve Machine
-                  access to create a new grant. Existing consent cannot silently
-                  restore revoked or expired Machine permissions.
-                </p>
+                <p className="text-14 text-muted-foreground">{translateUi("Reconnect from this application and explicitly approve Machine access to create a new grant. Existing consent cannot silently restore revoked or expired Machine permissions.")}</p>
               )}
               <div className="flex flex-wrap gap-2">
                 <Button
@@ -543,12 +507,12 @@ function MachineGrantCardContent({
                   onClick={() => setEditing((value) => !value)}
                 >
                   {editing
-                    ? "Close editor"
+                    ? translateUi("Close editor")
                     : active
                       ? machineId
-                        ? "Edit current source grant"
-                        : "Edit Machine permissions"
-                      : "Approve Machine permissions"}
+                        ? translateUi("Edit current source grant")
+                        : translateUi("Edit Machine permissions")
+                      : translateUi("Approve Machine permissions")}
                 </Button>
                 {canManageCurrent ? (
                   <Button
@@ -561,9 +525,7 @@ function MachineGrantCardContent({
                         revision: grant!.revision,
                       });
                     }}
-                  >
-                    Remove current Machine
-                  </Button>
+                  >{translateUi("Remove current Machine")}</Button>
                 ) : null}
                 {active && grant && canWrite && (
                   <Button
@@ -575,9 +537,7 @@ function MachineGrantCardContent({
                         revision: grant.revision,
                       })
                     }
-                  >
-                    Revoke Machine permissions
-                  </Button>
+                  >{translateUi("Revoke Machine permissions")}</Button>
                 )}
                 <Button
                   variant="outline"
@@ -586,9 +546,7 @@ function MachineGrantCardContent({
                     setError(undefined);
                     void query.refetch().then(() => setNeedsReview(false));
                   }}
-                >
-                  Reload permissions
-                </Button>
+                >{translateUi("Reload permissions")}</Button>
               </div>
             </>
           )}
@@ -612,23 +570,14 @@ function MachineGrantCardContent({
         >
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Revoke Machine permissions?</DialogTitle>
-              <DialogDescription>
-                This stops work authorized by this grant across all its
-                Machines. Other service access remains unchanged. The Machine
-                and workspace are retained.
-              </DialogDescription>
+              <DialogTitle>{translateUi("Revoke Machine permissions?")}</DialogTitle>
+              <DialogDescription>{translateUi("This stops work authorized by this grant across all its Machines. Other service access remains unchanged. The Machine and workspace are retained.")}</DialogDescription>
             </DialogHeader>
             {revokeReview && !revokeReviewCurrent && (
-              <p role="alert" className="text-14 text-warning">
-                Machine permissions changed since this review. Close this
-                dialog, reload, and review the current grant before revoking.
-              </p>
+              <p role="alert" className="text-14 text-warning">{translateUi("Machine permissions changed since this review. Close this dialog, reload, and review the current grant before revoking.")}</p>
             )}
             <DialogFooter>
-              <Button variant="outline" onClick={() => setRevokeReview(null)}>
-                Cancel
-              </Button>
+              <Button variant="outline" onClick={() => setRevokeReview(null)}>{translateUi("Cancel")}</Button>
               <Button
                 variant="destructive"
                 disabled={
@@ -671,9 +620,7 @@ function MachineGrantCardContent({
                       setRevokeReview(null);
                     });
                 }}
-              >
-                Revoke Machine permissions
-              </Button>
+              >{translateUi("Revoke Machine permissions")}</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
@@ -690,24 +637,20 @@ function MachineGrantCardContent({
             <DialogHeader>
               <DialogTitle>
                 {grant && Object.keys(grant.assignments).length === 1
-                  ? "Remove the last Machine and revoke this source grant?"
-                  : "Remove this Machine from the source grant?"}
+                  ? translateUi("Remove the last Machine and revoke this source grant?")
+                  : translateUi("Remove this Machine from the source grant?")}
               </DialogTitle>
               <DialogDescription>
                 {grant && Object.keys(grant.assignments).length === 1
-                  ? "This source is currently assigned only to this Machine. The complete source Machine grant will be revoked. The parent Key or OAuth client and its independent service access remain unchanged."
-                  : "This removes the current Machine from the source grant and submits the complete remaining assignment map. Other Machines keep their current mappings; the parent Key or OAuth client remains."}
+                  ? translateUi("This source is currently assigned only to this Machine. The complete source Machine grant will be revoked. The parent Key or OAuth client and its independent service access remain unchanged.")
+                  : translateUi("This removes the current Machine from the source grant and submits the complete remaining assignment map. Other Machines keep their current mappings; the parent Key or OAuth client remains.")}
               </DialogDescription>
             </DialogHeader>
             {removeReview && !removeReviewCurrent ? (
-              <p role="alert" className="text-14 text-warning">
-                The source grant changed since this review. Close this dialog,
-                reload, and review the current assignments before removing the
-                Machine.
-              </p>
+              <p role="alert" className="text-14 text-warning">{translateUi("The source grant changed since this review. Close this dialog, reload, and review the current assignments before removing the Machine.")}</p>
             ) : null}
             <div className="space-y-1 rounded-lg border border-border p-3 text-14">
-              <p className="font-medium">Affected assignments</p>
+              <p className="font-medium">{translateUi("Affected assignments")}</p>
               {grant
                 ? Object.keys(grant.assignments).map((nodeId) => (
                     <p
@@ -720,8 +663,8 @@ function MachineGrantCardContent({
                     >
                       {nodeId}
                       {nodeId === machineId
-                        ? " · current Machine"
-                        : " · retained"}
+                        ? translateUi(" · current Machine")
+                        : translateUi(" · retained")}
                     </p>
                   ))
                 : null}
@@ -735,16 +678,11 @@ function MachineGrantCardContent({
                     onCheckedChange={(checked) =>
                       setRemoveLegacyAccepted(checked === true)
                     }
-                  />
-                  I explicitly allow shared legacy access for the retained
-                  Machines and acknowledge this warning.
-                </Label>
+                  />{translateUi("I explicitly allow shared legacy access for the retained Machines and acknowledge this warning.")}</Label>
               </div>
             ) : null}
             <DialogFooter>
-              <Button variant="outline" onClick={() => setRemoveReview(null)}>
-                Cancel
-              </Button>
+              <Button variant="outline" onClick={() => setRemoveReview(null)}>{translateUi("Cancel")}</Button>
               <Button
                 variant="destructive"
                 disabled={
@@ -759,8 +697,8 @@ function MachineGrantCardContent({
                 onClick={() => void removeCurrentMachine()}
               >
                 {grant && Object.keys(grant.assignments).length === 1
-                  ? "Remove and revoke source grant"
-                  : "Remove current Machine"}
+                  ? translateUi("Remove and revoke source grant")
+                  : translateUi("Remove current Machine")}
               </Button>
             </DialogFooter>
           </DialogContent>

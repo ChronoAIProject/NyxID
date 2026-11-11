@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useRouter } from "@tanstack/react-router";
 import { GroupedDraftContext, useGroupedDraftGuard, type GroupedDraft } from "@/lib/grouped-drafts";
@@ -11,6 +13,7 @@ export function GroupedDraftBoundary({
   readonly children: ReactNode;
   readonly navigation?: boolean;
 }) {
+  useUiTranslation();
   const [entries, setEntries] = useState<ReadonlyMap<string, GroupedDraft>>(new Map());
   const current = useRef(entries);
   const [pending, setPending] = useState(false);
@@ -71,18 +74,19 @@ export function GroupedDraftBoundary({
 
 /** Render inside the sheet so the confirmation inherits its overlay layer. */
 export function GroupedDraftDialog() {
+  useUiTranslation();
   const guard = useGroupedDraftGuard();
   if (!guard) return null;
   const busy = [...guard.entries.values()].some((entry) => entry.dirty && entry.pending);
   return <Dialog open={guard.pending} onOpenChange={(open) => { if (!open) guard.finish(false); }}>
     <DialogContent>
       <DialogHeader>
-        <DialogTitle>Discard unsaved changes?</DialogTitle>
-        <DialogDescription>Your changes have not been saved.</DialogDescription>
+        <DialogTitle>{translateUi("Discard unsaved changes?")}</DialogTitle>
+        <DialogDescription>{translateUi("Your changes have not been saved.")}</DialogDescription>
       </DialogHeader>
       <DialogFooter>
-        <Button variant="ghost" autoFocus onClick={() => guard.finish(false)}>Keep editing</Button>
-        <Button variant="destructive" disabled={busy} onClick={() => guard.finish(true)}>Discard</Button>
+        <Button variant="ghost" autoFocus onClick={() => guard.finish(false)}>{translateUi("Keep editing")}</Button>
+        <Button variant="destructive" disabled={busy} onClick={() => guard.finish(true)}>{translateUi("Discard")}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>;

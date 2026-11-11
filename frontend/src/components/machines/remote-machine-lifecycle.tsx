@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useEffect, useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { useRetryRemoteMachineDelete } from "@/hooks/use-machines";
@@ -30,7 +33,7 @@ function readable(value: string) {
 }
 
 function time(value: string | null | undefined) {
-  return value ? new Date(value).toLocaleString() : "Not reported";
+  return value ? new Date(value).toLocaleString(getFormattingLocale()) : "Not reported";
 }
 
 function pending(operation: RemoteMachineOperation) {
@@ -67,6 +70,7 @@ export function RemoteMachineOperationCard({
   readonly onRetryAccepted?: () => void;
   readonly onReview?: () => Promise<boolean>;
 }) {
+  useUiTranslation();
   // The mutation response is authoritative while the read cache still contains
   // the exact pre-submit snapshot. Any subsequent changed read takes over.
   const [accepted, setAccepted] = useState<{
@@ -103,7 +107,7 @@ export function RemoteMachineOperationCard({
     Date.parse(operation.deadline_at) < now;
   return (
     <DetailSection
-      title={`${readable(operation.action)} operation`}
+      title={translateUi("{{value1}} operation", { value1: translateUi(readable(operation.action)) })}
       className="text-14 max-sm:[&_div.flex.text-14]:flex-col max-sm:[&_div.flex.text-14]:items-start max-sm:[&_div.flex.text-14]:gap-1 max-sm:[&_div.flex.text-14>div]:max-w-full max-sm:[&_.text-right]:text-left"
       action={
         <Badge
@@ -120,24 +124,14 @@ export function RemoteMachineOperationCard({
       }
     >
       {overdue && (
-        <p role="status" className="px-4 py-3 text-14 text-warning">
-          Cleanup target exceeded. Deletion remains pending; this time target
-          does not identify the cause or guarantee completion.
-        </p>
+        <p role="status" className="px-4 py-3 text-14 text-warning">{translateUi("Cleanup target exceeded. Deletion remains pending; this time target does not identify the cause or guarantee completion.")}</p>
       )}
       {operation.action === "delete" && (
         <div className="space-y-2 px-4 py-3 text-14">
           {stopped ? (
-            <p role="status">
-              Automatic deletion attempts stopped. The current round’s server
-              limit is {operation.delete_retry_limit ?? "not reported"}. Cleanup
-              and accounting retain their responsibilities.
-            </p>
+            <p role="status">{translateUi("Automatic deletion attempts stopped. The current round’s server limit is ")}{operation.delete_retry_limit ?? translateUi("not reported")}{translateUi(". Cleanup and accounting retain their responsibilities. ")}</p>
           ) : pending(operation) ? (
-            <p>
-              Deletion is still pending. Acceptance and scheduled attempts do
-              not confirm cleanup or accounting completion.
-            </p>
+            <p>{translateUi("Deletion is still pending. Acceptance and scheduled attempts do not confirm cleanup or accounting completion.")}</p>
           ) : null}
           {deleting && (
             <RemoteMachineDeleteRetry
@@ -156,40 +150,36 @@ export function RemoteMachineOperationCard({
       <dl className="grid gap-3 px-4 py-3 sm:grid-cols-3">
         {operation.action === "delete" && (
           <div className="min-w-0 space-y-1">
-            <dt className="text-13 text-muted-foreground">
-              Attempts this round
-            </dt>
+            <dt className="text-13 text-muted-foreground">{translateUi("Attempts this round")}</dt>
             <dd className="font-medium tabular-nums">
-              {operation.delete_retry_attempts ?? "Not reported"} /{" "}
-              {operation.delete_retry_limit ?? "Not reported"}
+              {operation.delete_retry_attempts ?? translateUi("Not reported")} /{" "}
+              {operation.delete_retry_limit ?? translateUi("Not reported")}
             </dd>
           </div>
         )}
         <div className="min-w-0 space-y-1">
           <dt className="text-13 text-muted-foreground">
             {operation.action === "delete"
-              ? "Total deletion attempts"
-              : "Attempts after retry"}
+              ? translateUi("Total deletion attempts")
+              : translateUi("Attempts after retry")}
           </dt>
           <dd className="font-medium tabular-nums">{operation.retry_count}</dd>
         </div>
         {operation.action === "delete" && (
           <div className="min-w-0 space-y-1">
-            <dt className="text-13 text-muted-foreground">
-              Next platform attempt
-            </dt>
+            <dt className="text-13 text-muted-foreground">{translateUi("Next platform attempt")}</dt>
             <dd className="break-words font-medium">
               {operation.next_attempt_at
                 ? time(operation.next_attempt_at)
                 : stopped
-                  ? "No automatic attempt scheduled"
-                  : "Not reported"}
+                  ? translateUi("No automatic attempt scheduled")
+                  : translateUi("Not reported")}
             </dd>
           </div>
         )}
       </dl>
       <DetailRow
-        label="Recovery code"
+        label={translateUi("Recovery code")}
         value={operation.error_code ?? "No specific cause reported"}
         mono={Boolean(operation.error_code)}
       />
@@ -199,60 +189,48 @@ export function RemoteMachineOperationCard({
         </p>
       )}
       {operation.error_code === "delete_kubernetes_access_denied" && (
-        <p className="px-4 py-3 text-muted-foreground">
-          The platform must review its Kubernetes cleanup permissions. Retrying
-          does not guarantee this access problem will be resolved.
-        </p>
+        <p className="px-4 py-3 text-muted-foreground">{translateUi("The platform must review its Kubernetes cleanup permissions. Retrying does not guarantee this access problem will be resolved.")}</p>
       )}
       <details className="text-14">
-        <summary className="cursor-pointer px-4 py-3 font-medium">
-          View operation progress
-        </summary>
+        <summary className="cursor-pointer px-4 py-3 font-medium">{translateUi("View operation progress")}</summary>
         {machine && (
           <>
             <DetailRow
-              label="Platform object cleanup"
+              label={translateUi("Platform object cleanup")}
               value={readable(machine.cleanup_state)}
             />
             {accounting && (
-              <DetailRow label="Runtime accounting" value={accounting.label} />
+              <DetailRow label={translateUi("Runtime accounting")} value={accounting.label} />
             )}
             <DetailRow
-              label="Final resource result"
+              label={translateUi("Final resource result")}
               value={readable(machine.resource_state)}
             />
           </>
         )}
-        <p className="px-4 py-3 text-muted-foreground">
-          Each result is confirmed independently. Elapsed time is not a
-          completion percentage. Delete completion confirms Sandbox and related
-          namespace objects, terminal creation responsibilities and accounting;
-          physical disk release or erasure is not verified.
-        </p>
+        <p className="px-4 py-3 text-muted-foreground">{translateUi("Each result is confirmed independently. Elapsed time is not a completion percentage. Delete completion confirms Sandbox and related namespace objects, terminal creation responsibilities and accounting; physical disk release or erasure is not verified.")}</p>
         <details>
-          <summary className="cursor-pointer px-4 py-3 font-medium">
-            Diagnostic information
-          </summary>
-          <DetailRow label="Operation ID" value={operation.id} mono copyable />
+          <summary className="cursor-pointer px-4 py-3 font-medium">{translateUi("Diagnostic information")}</summary>
+          <DetailRow label={translateUi("Operation ID")} value={operation.id} mono copyable />
           <DetailRow
-            label="Operation cleanup projection"
+            label={translateUi("Operation cleanup projection")}
             value={readable(operation.cleanup_state)}
           />
-          <DetailRow label="Created" value={time(operation.created_at)} />
-          <DetailRow label="Updated" value={time(operation.updated_at)} />
+          <DetailRow label={translateUi("Created")} value={time(operation.created_at)} />
+          <DetailRow label={translateUi("Updated")} value={time(operation.updated_at)} />
           <DetailRow
-            label="Cleanup target"
+            label={translateUi("Cleanup target")}
             value={time(operation.deadline_at)}
           />
           {operation.terminal_at && (
             <DetailRow
-              label="Terminal result recorded"
+              label={translateUi("Terminal result recorded")}
               value={time(operation.terminal_at)}
             />
           )}
           {operation.evidence_digest && (
             <DetailRow
-              label="Evidence reference"
+              label={translateUi("Evidence reference")}
               value={operation.evidence_digest}
               mono
             />
@@ -283,6 +261,7 @@ function RemoteMachineDeleteRetry({
   readonly onAccepted: (operation: RemoteMachineOperation) => void;
   readonly onReview?: () => Promise<boolean>;
 }) {
+  useUiTranslation();
   const owner = useAuthStore((state) => state.user?.id ?? "");
   const mutation = useRetryRemoteMachineDelete();
   const scope = `${operation.id}:retry-delete`;
@@ -441,29 +420,20 @@ function RemoteMachineDeleteRetry({
         >
           <RefreshCw className="size-3" />
           {busy
-            ? "Retrying deletion…"
+            ? translateUi("Retrying deletion…")
             : phase === "unknown"
-              ? "Confirm retry result"
-              : "Retry deletion"}
+              ? translateUi("Confirm retry result")
+              : translateUi("Retry deletion")}
         </Button>
       )}
       {phase === "accepted" && !newExhaustedRound && (
-        <p role="status">
-          Deletion retry request accepted for the original operation. Deletion
-          completion is still awaiting platform observation.
-        </p>
+        <p role="status">{translateUi("Deletion retry request accepted for the original operation. Deletion completion is still awaiting platform observation.")}</p>
       )}
       {phase === "unknown" && (
-        <p role="status">
-          Deletion retry result unknown. Confirming the result reuses the same
-          request and idempotency key; the machine has not been marked deleted.
-        </p>
+        <p role="status">{translateUi("Deletion retry result unknown. Confirming the result reuses the same request and idempotency key; the machine has not been marked deleted.")}</p>
       )}
       {phase === "conflict" && (
-        <p role="status">
-          Deletion changed during review. Refresh both records and review their
-          latest state before making a new request.
-        </p>
+        <p role="status">{translateUi("Deletion changed during review. Refresh both records and review their latest state before making a new request.")}</p>
       )}
       {error && (
         <p role="alert" className="text-destructive">
@@ -471,15 +441,13 @@ function RemoteMachineDeleteRetry({
         </p>
       )}
       {phase === "conflict" && onReview && (
-        <Button onClick={() => void review()} disabled={busy}>
-          Refresh and review deletion
-        </Button>
+        <Button onClick={() => void review()} disabled={busy}>{translateUi("Refresh and review deletion")}</Button>
       )}
       {phase === "accepted" &&
         operation.delete_retry_stopped &&
         !newExhaustedRound &&
         onReview && (
-          <Button onClick={() => void review()}>Review latest deletion</Button>
+          <Button onClick={() => void review()}>{translateUi("Review latest deletion")}</Button>
         )}
     </div>
   );

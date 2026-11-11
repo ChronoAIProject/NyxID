@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -15,11 +17,12 @@ import { StaleFormNotice } from "@/components/shared/stale-form-notice";
 const emptyPolicy: ConcurrencyPolicy = { default_limit: null, users: [], orgs: [] };
 
 export function ServiceConcurrency({ serviceId }: { readonly serviceId: string }) {
+  useUiTranslation();
   const query = useServiceConcurrency(serviceId);
   return <section className="mt-6 rounded-lg border border-border p-4">
-    <h2 className="type-row-title">Concurrency limits</h2>
-    <p className="mt-1 text-13 text-muted-foreground">Limit simultaneous requests per person across all connections and replicas. Streams and WebSockets count until they close. Service accounts count separately.</p>
-    {query.isPending ? <p className="mt-3 text-13">Loading limits…</p> : query.isError ? <p role="alert" className="mt-3 text-13 text-destructive">Could not load concurrency limits. <Button variant="outline" onClick={() => void query.refetch()}>Retry</Button></p> : <PolicyEditor serviceId={serviceId} policy={query.data.policy} />}
+    <h2 className="type-row-title">{translateUi("Concurrency limits")}</h2>
+    <p className="mt-1 text-13 text-muted-foreground">{translateUi("Limit simultaneous requests per person across all connections and replicas. Streams and WebSockets count until they close. Service accounts count separately.")}</p>
+    {query.isPending ? <p className="mt-3 text-13">{translateUi("Loading limits…")}</p> : query.isError ? <p role="alert" className="mt-3 text-13 text-destructive">{translateUi("Could not load concurrency limits. ")}<Button variant="outline" onClick={() => void query.refetch()}>{translateUi("Retry")}</Button></p> : <PolicyEditor serviceId={serviceId} policy={query.data.policy} />}
   </section>;
 }
 
@@ -28,15 +31,17 @@ function LimitInput({ label, value, onChange }: {
   readonly value: number | null;
   readonly onChange: (value: number | null) => void;
 }) {
+  useUiTranslation();
   return <Label className="flex flex-wrap items-center gap-3">
     <span className="min-w-32 flex-1 break-all">{label}</span>
-    <Input className="h-8 w-28" aria-label={label} type="number" min={1} max={10000} step={1} placeholder="Unlimited"
+    <Input className="h-8 w-28" aria-label={label} type="number" min={1} max={10000} step={1} placeholder={translateUi("Unlimited")}
       value={value ?? ""} onChange={(event) => onChange(event.target.value === "" ? null : Number(event.target.value))} />
-    <span className="w-16 text-muted-foreground">{value === null ? "Unlimited" : "requests"}</span>
+    <span className="w-16 text-muted-foreground">{value === null ? translateUi("Unlimited") : translateUi("requests")}</span>
   </Label>;
 }
 
 export function PolicyEditor({ serviceId, policy }: { readonly serviceId: string; readonly policy: ConcurrencyPolicy | null }) {
+  useUiTranslation();
   const [baseline, setBaseline] = useState(policy);
   const mutation = useUpdateServiceConcurrency(serviceId);
   const people = useAdminUsers(1, 100, undefined, "person");
@@ -58,29 +63,29 @@ export function PolicyEditor({ serviceId, policy }: { readonly serviceId: string
       const result = await mutation.mutateAsync({ policy: values.enabled ? values.policy : null });
       setBaseline(result.policy);
       form.reset({ enabled: result.policy !== null, policy: result.policy ?? emptyPolicy });
-      toast.success("Concurrency limits saved");
+      toast.success(translateUi("Concurrency limits saved"));
     } catch {
       form.setError("root", { message: "Could not save concurrency limits. Try again." });
     }
   }
   return <Form {...form}><form className="mt-4 space-y-4" onSubmit={form.handleSubmit(save)}>
     {stale && <StaleFormNotice onReload={() => { setBaseline(policy); form.reset({ enabled: policy !== null, policy: policy ?? emptyPolicy }); }} />}
-    <Label className="flex items-center gap-2"><Switch aria-label="Enable concurrency limits" checked={enabled} onCheckedChange={(value) => form.setValue("enabled", value)} />Enable concurrency limits</Label>
-    <p className="text-13 text-muted-foreground">Disabled means unlimited for everyone. Leave a limit blank for unlimited. Changes apply to new requests; running requests are allowed to finish.</p>
+    <Label className="flex items-center gap-2"><Switch aria-label={translateUi("Enable concurrency limits")} checked={enabled} onCheckedChange={(value) => form.setValue("enabled", value)} />{translateUi("Enable concurrency limits")}</Label>
+    <p className="text-13 text-muted-foreground">{translateUi("Disabled means unlimited for everyone. Leave a limit blank for unlimited. Changes apply to new requests; running requests are allowed to finish.")}</p>
     {enabled && <>
-      <LimitInput label="Default per-person limit" value={current.default_limit} onChange={(value) => form.setValue("policy.default_limit", value)} />
-      <p className="text-13 text-muted-foreground">A user override wins. Otherwise, the highest limit among active organization memberships wins, with unlimited highest. Without an override, the default applies.</p>
+      <LimitInput label={translateUi("Default per-person limit")} value={current.default_limit} onChange={(value) => form.setValue("policy.default_limit", value)} />
+      <p className="text-13 text-muted-foreground">{translateUi("A user override wins. Otherwise, the highest limit among active organization memberships wins, with unlimited highest. Without an override, the default applies.")}</p>
       <p className="text-13 text-muted-foreground">{count}/500 override targets. New overrides start unlimited.</p>
       {(["users", "orgs"] as const).map((kind) => {
         const Picker = kind === "users" ? PersonPicker : OrgPicker;
         const names = kind === "users" ? people.data?.users : orgs.data?.users;
         return <div key={kind} className="space-y-3">
-          <h3 className="type-secondary-emphasis">{kind === "users" ? "User overrides" : "Organization overrides"}</h3>
+          <h3 className="type-secondary-emphasis">{kind === "users" ? translateUi("User overrides") : translateUi("Organization overrides")}</h3>
           <Picker selected={current[kind].map((row) => row.id)} onChange={(ids) => select(kind, ids)} />
           {current[kind].map((row, index) => {
             const user = names?.find((u) => u.id === row.id);
             const name = user?.display_name || user?.slug || user?.email || row.id;
-            return <LimitInput key={row.id} label={`${name} limit`} value={row.limit}
+            return <LimitInput key={row.id} label={translateUi("{{value1}} limit", { value1: name })} value={row.limit}
               onChange={(value) => form.setValue(`policy.${kind}.${index}.limit`, value)} />;
           })}
         </div>;
@@ -88,6 +93,6 @@ export function PolicyEditor({ serviceId, policy }: { readonly serviceId: string
     </>}
     {form.formState.errors.root && <p role="alert" className="text-13 text-destructive">{form.formState.errors.root.message}</p>}
     <FormSubmitErrors />
-    <Button type="submit" disabled={!form.formState.isDirty || mutation.isPending || stale}>{mutation.isPending ? "Saving…" : "Save concurrency limits"}</Button>
+    <Button type="submit" disabled={!form.formState.isDirty || mutation.isPending || stale}>{mutation.isPending ? translateUi("Saving…") : translateUi("Save concurrency limits")}</Button>
   </form></Form>;
 }

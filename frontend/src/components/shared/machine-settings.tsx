@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { CompactScroll } from "@/components/ui/compact-title";
 import { FormViewport } from "@/components/ui/form-viewport";
@@ -49,6 +51,7 @@ export function MachineSettings({
   readonly canManage: boolean;
   readonly update?: MachineUpdateStatus;
 }) {
+  useUiTranslation();
   const settings = useMachineSettings(node.id);
   const updatePolicy = useMachineUpdatePolicy(node.id);
   const [automaticDraft, setAutomaticDraft] = useState<boolean>();
@@ -135,7 +138,7 @@ export function MachineSettings({
   return (
     <>
       <form
-        aria-label="Machine settings"
+        aria-label={translateUi("Machine settings")}
         onSubmit={form.handleSubmit(save)}
         className="flex min-h-0 min-w-0 flex-1 flex-col text-14"
       >
@@ -144,14 +147,12 @@ export function MachineSettings({
             <>
               <MachineUpdate grouped name={node.name} status={update} />
               <GroupedList
-                title="Automatic updates"
-                footer="Recommended. Updates wait until no job, turn, live desktop or owner control is active. You receive an update notification."
+                title={translateUi("Automatic updates")}
+                footer={translateUi("Recommended. Updates wait until no job, turn, live desktop or owner control is active. You receive an update notification.")}
               >
                 <GroupedRow asChild interactive>
                   <Label>
-                    <span className="min-w-0 flex-1">
-                      Update automatically when idle
-                    </span>
+                    <span className="min-w-0 flex-1">{translateUi("Update automatically when idle")}</span>
                     <Switch
                       checked={automatic}
                       disabled={!canManage}
@@ -163,28 +164,22 @@ export function MachineSettings({
             </>
           )}
           <GroupedList
-            title="Status and capabilities"
+            title={translateUi("Status and capabilities")}
             footer={
               <>
-                <p>Workspace roots: {machine.roots.join(", ")}</p>
+                <p>{translateUi("Workspace roots: ")}{machine.roots.join(", ")}</p>
                 <MachineIsolationDetails machine={machine} />
-                <p>
-                  Agents configured for Shared legacy can run granted commands
-                  and file tools in shared mode, even when separation is
-                  unavailable. A separated assignment refuses execution if its
-                  separate workspace is unavailable; it never falls back to
-                  shared mode.
-                </p>
+                <p>{translateUi("Agents configured for Shared legacy can run granted commands and file tools in shared mode, even when separation is unavailable. A separated assignment refuses execution if its separate workspace is unavailable; it never falls back to shared mode.")}</p>
                 <MachineSeparationSupport humanOnly machine={machine} />
               </>
             }
           >
             <GroupedRow
-              title={node.is_connected ? "Connected" : "Disconnected"}
+              title={node.is_connected ? translateUi("Connected") : translateUi("Disconnected")}
               description={[machine.os, machine.arch].join(" / ")}
             />
             <GroupedRow
-              title="Enabled capabilities"
+              title={translateUi("Enabled capabilities")}
               description={[
                 machine.shell && "Commands",
                 machine.files && "Files",
@@ -195,43 +190,40 @@ export function MachineSettings({
                 .join(" · ")}
             />
             <GroupedRow
-              title="Sharing set per agent"
+              title={translateUi("Sharing set per agent")}
               description={
                 !machine.shell || machine.commands_isolated === true
                   ? undefined
                   : machine.commands_isolated === false
-                    ? "Not isolated"
-                    : "Isolation unknown: update to check"
+                    ? translateUi("Not isolated")
+                    : translateUi("Isolation unknown: update to check")
               }
             />
           </GroupedList>
           {(machine.computer || machine.browser) && (
             <GroupedList
-              title="Live desktop"
+              title={translateUi("Live desktop")}
               footer={
                 machine.computer_permissions && (
-                  <p>
-                    Screen Recording:{" "}
+                  <p>{translateUi("Screen Recording:")}{" "}
                     {machine.computer_permissions.screen_recording
-                      ? "allowed"
-                      : "not granted"}
-                    . Accessibility:{" "}
+                      ? translateUi("allowed")
+                      : translateUi("not granted")}
+                    {translateUi(". Accessibility:")}{" "}
                     {machine.computer_permissions.accessibility
-                      ? "allowed"
-                      : "not granted"}
-                    . Enable permissions for the app running the node in macOS
-                    System Settings.
-                  </p>
+                      ? translateUi("allowed")
+                      : translateUi("not granted")}
+                    {translateUi(". Enable permissions for the app running the node in macOS System Settings. ")}</p>
                 )
               }
             >
               <GroupedRow
                 title={
                   machine.computer_ready
-                    ? "Ready"
-                    : "Permissions or display unavailable"
+                    ? translateUi("Ready")
+                    : translateUi("Permissions or display unavailable")
                 }
-                description={`${machine.computer_mode} mode · cua ${machine.cua_version ?? "unavailable"}`}
+                description={translateUi("{{value1}} mode · cua {{value2}}", { value1: machine.computer_mode, value2: machine.cua_version ?? "unavailable" })}
               />
               <GroupedRow asChild interactive>
                 <Link
@@ -239,7 +231,7 @@ export function MachineSettings({
                   params={{ nodeId: node.id }}
                   search={{ conversation_id: undefined }}
                 >
-                  <span className="flex-1">Open live desktop</span>
+                  <span className="flex-1">{translateUi("Open live desktop")}</span>
                   <ChevronRight
                     aria-hidden
                     className="size-[1.125em] text-text-tertiary"
@@ -250,11 +242,11 @@ export function MachineSettings({
           )}
           {canManage && (
             <GroupedList
-              title="Owner confirmation"
-              footer="Choose when an agent must ask before acting on this machine."
+              title={translateUi("Owner confirmation")}
+              footer={translateUi("Choose when an agent must ask before acting on this machine.")}
             >
               <GroupedRow
-                title="Owner confirmation"
+                title={translateUi("Owner confirmation")}
                 accessory={
                   <Select
                     value={confirm}
@@ -263,13 +255,13 @@ export function MachineSettings({
                     }
                     disabled={saving}
                   >
-                    <SelectTrigger aria-label="Owner confirmation">
+                    <SelectTrigger aria-label={translateUi("Owner confirmation")}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="none">No confirmation</SelectItem>
-                      <SelectItem value="changes">Confirm changes</SelectItem>
-                      <SelectItem value="all">Confirm every operation</SelectItem>
+                      <SelectItem value="none">{translateUi("No confirmation")}</SelectItem>
+                      <SelectItem value="changes">{translateUi("Confirm changes")}</SelectItem>
+                      <SelectItem value="all">{translateUi("Confirm every operation")}</SelectItem>
                     </SelectContent>
                   </Select>
                 }
@@ -280,14 +272,12 @@ export function MachineSettings({
             (machine.browser ?? machine.computer) &&
             !machine.browser_isolated && (
               <GroupedList
-                title="Saved logins on a shared OS user"
+                title={translateUi("Saved logins on a shared OS user")}
                 footer={<p className="text-warning">{SINGLE_USER_WARNING}</p>}
               >
                 <GroupedRow asChild interactive>
                   <Label>
-                    <span className="min-w-0 flex-1">
-                      Allow saved-login typing on this machine
-                    </span>
+                    <span className="min-w-0 flex-1">{translateUi("Allow saved-login typing on this machine")}</span>
                     <Switch
                       checked={allow}
                       disabled={saving}
@@ -301,9 +291,7 @@ export function MachineSettings({
                 {allow && !node.allow_single_user_saved_logins && (
                   <GroupedRow asChild interactive>
                     <Label>
-                      <span className="min-w-0 flex-1">
-                        I understand the shared-user risk and allow typing.
-                      </span>
+                      <span className="min-w-0 flex-1">{translateUi("I understand the shared-user risk and allow typing.")}</span>
                       <Switch
                         checked={acknowledged}
                         disabled={saving}
@@ -318,16 +306,10 @@ export function MachineSettings({
           {canManage && (
             <>
               <GroupedList
-                title="Agent separation choices"
+                title={translateUi("Agent separation choices")}
                 footer={
                   <>
-                    <p>
-                      New assignments need a recorded choice and confirmed
-                      support. Existing Shared legacy assignments retain their
-                      configured access. Open an agent’s access settings to
-                      select supported separation or explicitly approve shared
-                      legacy access through its owner card.
-                    </p>
+                    <p>{translateUi("New assignments need a recorded choice and confirmed support. Existing Shared legacy assignments retain their configured access. Open an agent’s access settings to select supported separation or explicitly approve shared legacy access through its owner card.")}</p>
                     <p className="text-warning">{SHARED_LEGACY_WARNING}</p>
                   </>
                 }
@@ -342,9 +324,7 @@ export function MachineSettings({
                         to="/assistant"
                         search={{ agent: agent.id, details: "grants" }}
                       >
-                        <span className="min-w-0 flex-1">
-                          Review {agent.display_name ?? agent.name} separation
-                        </span>
+                        <span className="min-w-0 flex-1">{translateUi("Review ")}{agent.display_name ?? agent.name}{translateUi(" separation")}</span>
                         <ChevronRight
                           aria-hidden
                           className="size-[1.125em] shrink-0 text-text-tertiary"
@@ -354,14 +334,10 @@ export function MachineSettings({
                   ))}
               </GroupedList>
               <GroupedList
-                title="Specialist access"
+                title={translateUi("Specialist access")}
                 footer={
                   <>
-                    <p>
-                      NyxBot uses configured assignments on machines you own or
-                      administer. Choose which specialists may use this one,
-                      then review their separation choices and capabilities.
-                    </p>
+                    <p>{translateUi("NyxBot uses configured assignments on machines you own or administer. Choose which specialists may use this one, then review their separation choices and capabilities.")}</p>
                     {agents.error && (
                       <p role="alert" className="text-destructive">
                         {agents.error.message}
@@ -371,12 +347,10 @@ export function MachineSettings({
                 }
               >
                 {agents.isPending ? (
-                  <GroupedRow role="status" title="Loading specialists…" />
+                  <GroupedRow role="status" title={translateUi("Loading specialists…")} />
                 ) : specialists.length ? (
                   <fieldset disabled={saving}>
-                    <Label asChild><legend className="sr-only">
-                      Specialists allowed on this machine
-                    </legend></Label>
+                    <Label asChild><legend className="sr-only">{translateUi("Specialists allowed on this machine")}</legend></Label>
                     {specialists.map((agent) => (
                       <GroupedRow key={agent.id} asChild interactive>
                         <Label>
@@ -404,13 +378,11 @@ export function MachineSettings({
                   !agents.error && (
                     <>
                       <GroupedRow
-                        title="No specialists yet"
-                        description="Create one for a focused role, then grant it this machine."
+                        title={translateUi("No specialists yet")}
+                        description={translateUi("Create one for a focused role, then grant it this machine.")}
                       />
                       <GroupedRow asChild interactive>
-                        <button type="button" onClick={() => setCreating(true)}>
-                          Create a specialist
-                        </button>
+                        <button type="button" onClick={() => setCreating(true)}>{translateUi("Create a specialist")}</button>
                       </GroupedRow>
                     </>
                   )
@@ -419,17 +391,13 @@ export function MachineSettings({
             </>
           )}
           <GroupedList
-            title="Saved logins"
+            title={translateUi("Saved logins")}
             footer={
               <>
-                <p>
-                  Manage website logins separately. Agents can fill approved
-                  fields in the secure browser; the developer browser never
-                  receives saved logins.
-                </p>
+                <p>{translateUi("Manage website logins separately. Agents can fill approved fields in the secure browser; the developer browser never receives saved logins.")}</p>
                 {error && (
                   <p role="alert" className="text-destructive">
-                    {error}
+                    {translateUi(error)}
                   </p>
                 )}
               </>
@@ -437,7 +405,7 @@ export function MachineSettings({
           >
             <GroupedRow asChild interactive>
               <Link to="/assistant/machines" search={{ tab: "logins" }}>
-                <span className="flex-1">Manage saved logins</span>
+                <span className="flex-1">{translateUi("Manage saved logins")}</span>
                 <ChevronRight
                   aria-hidden
                   className="size-[1.125em] text-text-tertiary"
@@ -456,7 +424,7 @@ export function MachineSettings({
               ...describeChanges({ automatic: update?.automatic ?? false }, { automatic }, [{ key: "automatic", label: "Update automatically when idle" }]),
               ...grantChanges.map((agent) => ({ label: `Specialist access · ${agent.display_name || agent.name}`, before: agent.machines?.includes(node.id) ? "On" : "Off", after: draftGrants[agent.id] ? "On" : "Off" })),
             ]}
-            label="machine settings"
+            label={translateUi("machine settings")}
             dirty={Boolean(changed)}
             pending={saving}
             disabled={
@@ -464,7 +432,7 @@ export function MachineSettings({
             }
             save={form.handleSubmit(save)}
             discard={discard}
-            saveLabel="Save changes"
+            saveLabel={translateUi("Save changes")}
           />
         )}
       </form>

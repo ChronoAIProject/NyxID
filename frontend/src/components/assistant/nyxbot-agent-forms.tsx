@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Button } from "@/components/ui/button";
 import { usePlatformModels } from "@/hooks/use-platform-models";
 import { Label } from "@/components/ui/label";
@@ -88,6 +90,7 @@ export function ServiceGrantPicker({
   readonly disabled?: boolean;
   readonly footer?: React.ReactNode;
 }) {
+  useUiTranslation();
   const keys = useKeys({ includeTools: true });
   const models = usePlatformModels();
   const [search, setSearch] = useState("");
@@ -128,37 +131,32 @@ export function ServiceGrantPicker({
   }
   if (keys.isPending) {
     return (
-      <GroupedList title="Services" footer={footer}>
-        <GroupedRow title="Loading your services..." />
+      <GroupedList title={translateUi("Services")} footer={footer}>
+        <GroupedRow title={translateUi("Loading your services...")} />
       </GroupedList>
     );
   }
   if (!rows.length) {
     return (
-      <GroupedList title="Services" footer={
+      <GroupedList title={translateUi("Services")} footer={
         <>
           {footer}
-          <p>
-            You have no connected services yet. Connect a service first, then
-            grant it here; the agent uses only what you grant.
-          </p>
+          <p>{translateUi("You have no connected services yet. Connect a service first, then grant it here; the agent uses only what you grant.")}</p>
         </>
       }>
-        <GroupedRow title="No connected services" />
+        <GroupedRow title={translateUi("No connected services")} />
       </GroupedList>
     );
   }
   return (
     <GroupedList
-      title="Services"
+      title={translateUi("Services")}
       footer={
         <>
           {footer}
-          {models.hasNextPage && <Button type="button" variant="ghost" disabled={models.isFetchingNextPage} onClick={() => void models.fetchNextPage()}>More platform models</Button>}
+          {models.hasNextPage && <Button type="button" variant="ghost" disabled={models.isFetchingNextPage} onClick={() => void models.fetchNextPage()}>{translateUi("More platform models")}</Button>}
           {keys.error ? (
-            <span role="alert" className="text-destructive">
-              Could not refresh services. Your selections are kept.
-            </span>
+            <span role="alert" className="text-destructive">{translateUi("Could not refresh services. Your selections are kept.")}</span>
           ) : null}
         </>
       }
@@ -166,8 +164,8 @@ export function ServiceGrantPicker({
       {rows.length > 8 ? (
         <GroupedRow>
           <GroupedInput
-            aria-label="Search services"
-            placeholder="Search services"
+            aria-label={translateUi("Search services")}
+            placeholder={translateUi("Search services")}
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
@@ -175,7 +173,7 @@ export function ServiceGrantPicker({
       ) : null}
       <div
         role="group"
-        aria-label="Services"
+        aria-label={translateUi("Services")}
         className={
           rows.length > 12
             ? "assistant-scrollbar max-h-80 overflow-y-auto"
@@ -205,8 +203,7 @@ export function ServiceGrantPicker({
                     {service.slug}
                   </span>
                   {service.unavailable ? (
-                    <span className="mt-0.5 block type-secondary text-warning">
-                      Currently not executable ({service.unavailable}).
+                    <span className="mt-0.5 block type-secondary text-warning">{translateUi("Currently not executable (")}{service.unavailable}).
                     </span>
                   ) : null}
                 </span>
@@ -227,7 +224,7 @@ export function ServiceGrantPicker({
             .toLowerCase()
             .includes(search.toLowerCase()),
         ) ? (
-          <GroupedRow title="No matching services" />
+          <GroupedRow title={translateUi("No matching services")} />
         ) : null}
       </div>
     </GroupedList>
@@ -249,19 +246,18 @@ function AgentOwnerPicker({
   readonly value?: string;
   readonly onChange: (id: string | undefined) => void;
 }) {
+  useUiTranslation();
   const writable = useWritableOrgs();
   return (
     <GroupedList
       footer={
         value
-          ? "Admins and Members maintain this agent. Each member has private chats; memory is shared."
+          ? translateUi("Admins and Members maintain this agent. Each member has private chats; memory is shared.")
           : undefined
       }
     >
       <GroupedRow>
-        <Label className="flex-1" htmlFor="agent-owner">
-          Ownership
-        </Label>
+        <Label className="flex-1" htmlFor="agent-owner">{translateUi("Ownership")}</Label>
         <Select
           value={value ?? "personal"}
           onValueChange={(id) => onChange(id === "personal" ? undefined : id)}
@@ -270,7 +266,7 @@ function AgentOwnerPicker({
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="personal">Personal</SelectItem>
+            <SelectItem value="personal">{translateUi("Personal")}</SelectItem>
             {writable.map((org) => (
               <SelectItem key={org.id} value={org.id}>
                 {org.display_name ?? org.slug}
@@ -297,6 +293,7 @@ export function NewAgentDialog({
     home_conversation_id: string;
   }) => void;
 }) {
+  useUiTranslation();
   const create = useCreateNyxBotAgent();
   const orgAgentsEnabled = useFeature(FEATURE_FLAG.ORG_AGENTS);
   const form = useAppForm<AssistantAgentCreate>({
@@ -327,7 +324,7 @@ export function NewAgentDialog({
       flushSync(() => form.reset(values));
       onCreated(created);
     } catch (cause) {
-      setError(errorMessage(cause, "Could not create the agent. Try again."));
+      setError(errorMessage(cause, translateUi("Could not create the agent. Try again.")));
     }
   }
 
@@ -340,13 +337,8 @@ export function NewAgentDialog({
     >
       <GroupedDialogContent scrollMode="body" className="md:max-w-lg">
         <DialogHeader className="shrink-0 pr-6">
-          <DialogTitle>New agent</DialogTitle>
-          <DialogDescription>
-            A specialist keeps its own memory and threads and uses only the
-            services you grant here. When you talk to it directly it handles
-            the work itself and tells you what it is missing; you add grants
-            in its details.
-          </DialogDescription>
+          <DialogTitle>{translateUi("New agent")}</DialogTitle>
+          <DialogDescription>{translateUi("A specialist keeps its own memory and threads and uses only the services you grant here. When you talk to it directly it handles the work itself and tells you what it is missing; you add grants in its details.")}</DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form noValidate onSubmit={form.handleSubmit(submit)}>
@@ -363,23 +355,21 @@ export function NewAgentDialog({
                   }}
                 />
               ) : (
-                <GroupedList title="Ownership">
-                  <GroupedRow title="Personal" />
-                  <GroupedFooter>
-                    Organization agents are not enabled yet.
-                  </GroupedFooter>
+                <GroupedList title={translateUi("Ownership")}>
+                  <GroupedRow title={translateUi("Personal")} />
+                  <GroupedFooter>{translateUi("Organization agents are not enabled yet.")}</GroupedFooter>
                 </GroupedList>
               )}
-              <GroupedList title="Profile">
+              <GroupedList title={translateUi("Profile")}>
                 <FormField
                   control={form.control}
                   name="name"
                   render={({ field }) => (
                     <GroupedField>
-                      <GroupedLabel>Name</GroupedLabel>
+                      <GroupedLabel>{translateUi("Name")}</GroupedLabel>
                       <FormControl>
                         <GroupedInput
-                          placeholder="researcher"
+                          placeholder={translateUi("researcher")}
                           autoComplete="off"
                           maxLength={32}
                           {...field}
@@ -387,9 +377,7 @@ export function NewAgentDialog({
                           }
                         />
                       </FormControl>
-                      <GroupedDescription className="text-13">
-                        The @handle: lowercase letters, digits and hyphens.
-                      </GroupedDescription>
+                      <GroupedDescription className="text-13">{translateUi("The @handle: lowercase letters, digits and hyphens.")}</GroupedDescription>
                       <GroupedMessage />
                     </GroupedField>
                   )}
@@ -399,23 +387,18 @@ export function NewAgentDialog({
                   name="display_name"
                   render={({ field }) => (
                     <GroupedField>
-                      <GroupedLabel>
-                        Display name{" "}
-                        <span className="text-text-tertiary">
-                          (optional)
-                        </span>
+                      <GroupedLabel>{translateUi("Display name")}{" "}
+                        <span className="text-text-tertiary">{translateUi("(optional)")}</span>
                       </GroupedLabel>
                       <FormControl>
                         <GroupedInput
-                          placeholder="Luna"
+                          placeholder={translateUi("Luna")}
                           autoComplete="off"
                           maxLength={ASSISTANT_AGENT_DISPLAY_NAME_MAX}
                           {...field}
                         />
                       </FormControl>
-                      <GroupedDescription className="text-13">
-                        Shown instead of the @handle.
-                      </GroupedDescription>
+                      <GroupedDescription className="text-13">{translateUi("Shown instead of the @handle.")}</GroupedDescription>
                       <GroupedMessage />
                     </GroupedField>
                   )}
@@ -425,11 +408,11 @@ export function NewAgentDialog({
                   name="description"
                   render={({ field }) => (
                     <GroupedField>
-                      <GroupedLabel>Role</GroupedLabel>
+                      <GroupedLabel>{translateUi("Role")}</GroupedLabel>
                       <FormControl>
                         <GroupedTextarea
                           maxLength={2048}
-                          placeholder="Tracks open GitHub issues and reports the urgent ones."
+                          placeholder={translateUi("Tracks open GitHub issues and reports the urgent ones.")}
                           {...field}
                         />
                       </FormControl>
@@ -442,11 +425,8 @@ export function NewAgentDialog({
                   name="persona"
                   render={({ field }) => (
                     <GroupedField>
-                      <GroupedLabel>
-                        Persona{" "}
-                        <span className="text-text-tertiary">
-                          (optional)
-                        </span>
+                      <GroupedLabel>{translateUi("Persona")}{" "}
+                        <span className="text-text-tertiary">{translateUi("(optional)")}</span>
                       </GroupedLabel>
                       <FormControl>
                         <GroupedTextarea
@@ -455,10 +435,7 @@ export function NewAgentDialog({
                           {...field}
                         />
                       </FormControl>
-                      <GroupedDescription className="text-13">
-                        Personality and tone only; it never changes what the
-                        agent may do.
-                      </GroupedDescription>
+                      <GroupedDescription className="text-13">{translateUi("Personality and tone only; it never changes what the agent may do.")}</GroupedDescription>
                       <GroupedMessage />
                     </GroupedField>
                   )}
@@ -507,16 +484,11 @@ export function NewAgentDialog({
                   control={form.control}
                   name="account_read"
                   render={({ field }) => (
-                    <GroupedList title="Account access">
+                    <GroupedList title={translateUi("Account access")}>
                       <GroupedField inline>
                         <div className="min-w-0 flex-1">
-                          <FormLabel>
-                            Read my account
-                          </FormLabel>
-                          <GroupedDescription>
-                            Lets it look up your keys, services and nodes. It
-                            can never change or delete them.
-                          </GroupedDescription>
+                          <FormLabel>{translateUi("Read my account")}</FormLabel>
+                          <GroupedDescription>{translateUi("Lets it look up your keys, services and nodes. It can never change or delete them.")}</GroupedDescription>
                         </div>
                         <FormControl>
                           <Switch checked={field.value} onCheckedChange={field.onChange} />
@@ -530,17 +502,17 @@ export function NewAgentDialog({
                 <GroupedList
                   footer={
                     <p role="alert" className="text-destructive">
-                      {error}
+                      {translateUi(error)}
                     </p>
                   }
                 >
-                  <GroupedRow title="Agent could not be created" />
+                  <GroupedRow title={translateUi("Agent could not be created")} />
                 </GroupedList>
               ) : null}
             </DialogBody>
             <GroupedDialogActions
               intent="create"
-              label="new agent"
+              label={translateUi("new agent")}
               dirty={form.formState.isDirty}
               pending={create.isPending}
               disabled={!form.formState.isValid}
@@ -549,7 +521,7 @@ export function NewAgentDialog({
                 form.reset();
                 setError(undefined);
               }}
-              saveLabel="Create agent"
+              saveLabel={translateUi("Create agent")}
             />
           </form>
         </Form>

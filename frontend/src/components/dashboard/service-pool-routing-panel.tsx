@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { Settings2 } from "lucide-react";
@@ -45,6 +48,7 @@ export function ServicePoolRoutingPanel({
   readonly insights: ServiceInsightsState;
   readonly onEdit?: () => void;
 }) {
+  useUiTranslation();
   const ai = pool.strategy === "priority" && pool.member_contract === "ai_chat";
   const [method, setMethod] = useState("POST");
   const [path, setPath] = useState("/");
@@ -68,7 +72,7 @@ export function ServicePoolRoutingPanel({
 
   return (
     <section
-      aria-label={`${pool.name} routing`}
+      aria-label={translateUi("{{value1}} routing", { value1: pool.name })}
       className="min-w-0 space-y-3 p-4"
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -83,22 +87,19 @@ export function ServicePoolRoutingPanel({
               />
               {poolStrategyLabel(pool)}
             </Badge>
-            {!pool.is_active && <Badge variant="secondary">Disabled</Badge>}
+            {!pool.is_active && <Badge variant="secondary">{translateUi("Disabled")}</Badge>}
           </div>
           <code className="block break-all text-14 text-primary-text">
             /api/v1/proxy/s/{pool.slug}
           </code>
           {ai && (
-            <p className="text-13 text-muted-foreground">
-              AI chat · Gateway model <code>pool:{pool.slug}</code>
+            <p className="text-13 text-muted-foreground">{translateUi("AI chat · Gateway model ")}<code>pool:{pool.slug}</code>
             </p>
           )}
         </div>
         {onEdit && (
           <Button variant="outline" size="sm" onClick={onEdit}>
-            <Settings2 className="size-3.5" />
-            Configure pool
-          </Button>
+            <Settings2 className="size-3.5" />{translateUi("Configure pool")}</Button>
         )}
       </div>
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-13">
@@ -110,25 +111,20 @@ export function ServicePoolRoutingPanel({
                 strategy={pool.tier_balance ?? "round_robin"}
                 className="size-3 shrink-0"
               />
-              {pool.tier_balance === "weighted" ? "Weighted" : "Round-robin"}{" "}
-              within each priority
-            </span>
+              {pool.tier_balance === "weighted" ? translateUi("Weighted") : translateUi("Round-robin")}{" "}{translateUi("within each priority")}</span>
             <span className="text-muted-foreground">
-              {policy.per_attempt_timeout_ms / 1000}s per attempt ·{" "}
-              {policy.overall_deadline_ms / 1000}s total
-            </span>
+              {policy.per_attempt_timeout_ms / 1000}{translateUi("s per attempt ·")}{" "}
+              {policy.overall_deadline_ms / 1000}{translateUi("s total")}</span>
           </>
         )}
       </div>
       <p className="text-13 text-muted-foreground">
         {priority
-          ? "Lower priority runs first; ineligible and cooling connections are skipped. Use this pool slug to apply its routing policy."
-          : "Each request selects one eligible connection. Rotation applies when you call this pool slug."}
+          ? translateUi("Lower priority runs first; ineligible and cooling connections are skipped. Use this pool slug to apply its routing policy.")
+          : translateUi("Each request selects one eligible connection. Rotation applies when you call this pool slug.")}
       </p>
       {ai ? (
-        <p className="text-13 text-muted-foreground">
-          Eligibility for POST chat/completions · refreshed every 15s
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("Eligibility for POST chat/completions · refreshed every 15s")}</p>
       ) : (
         <form
           className="flex flex-wrap items-end gap-2"
@@ -138,9 +134,9 @@ export function ServicePoolRoutingPanel({
           }}
         >
           <Label className="space-y-1 text-muted-foreground">
-            <span>Method</span>
+            <span>{translateUi("Method")}</span>
             <select
-              aria-label={`Method for ${pool.name}`}
+              aria-label={translateUi("Method for {{value1}}", { value1: pool.name })}
               value={method}
               onChange={(event) => setMethod(event.target.value)}
               className="block h-8 rounded-md border bg-background px-2 text-foreground"
@@ -153,42 +149,34 @@ export function ServicePoolRoutingPanel({
             </select>
           </Label>
           <Label className="min-w-36 flex-1 space-y-1 text-muted-foreground">
-            <span>Operation path</span>
+            <span>{translateUi("Operation path")}</span>
             <Input
-              aria-label={`Operation path for ${pool.name}`}
+              aria-label={translateUi("Operation path for {{value1}}", { value1: pool.name })}
               value={path}
               onChange={(event) => setPath(event.target.value)}
               className="h-8"
             />
           </Label>
-          <Button type="submit" variant="outline" size="sm">
-            Inspect
-          </Button>
-          <p className="basis-full text-13 text-muted-foreground">
-            Showing {operation.method} {operation.path} · metadata only, no
-            service call · refreshed every 15s
-          </p>
+          <Button type="submit" variant="outline" size="sm">{translateUi("Inspect")}</Button>
+          <p className="basis-full text-13 text-muted-foreground">{translateUi("Showing ")}{operation.method} {operation.path}{translateUi(" · metadata only, no service call · refreshed every 15s")}</p>
         </form>
       )}
       {health.isError && (
-        <p role="status" className="text-13 text-muted-foreground">
-          Eligibility could not be loaded. Saved routing is shown; connection
-          health is unverified.
-        </p>
+        <p role="status" className="text-13 text-muted-foreground">{translateUi("Eligibility could not be loaded. Saved routing is shown; connection health is unverified.")}</p>
       )}
       <div className="overflow-hidden rounded-lg border">
         <Table
-          aria-label={`${pool.name} route members`}
+          aria-label={translateUi("{{value1}} route members", { value1: pool.name })}
           className="min-w-[720px] table-fixed"
         >
           <TableHeader>
             <TableRow>
               <TableHead className="w-[14%]">
-                {priority ? "Priority / Weight" : "Rotation"}
+                {priority ? translateUi("Priority / Weight") : translateUi("Rotation")}
               </TableHead>
-              <TableHead className="w-[25%]">Connection / Credential</TableHead>
-              <TableHead className="w-[27%]">Billing / Payer</TableHead>
-              <TableHead className="w-[34%]">Eligibility / Cooldown</TableHead>
+              <TableHead className="w-[25%]">{translateUi("Connection / Credential")}</TableHead>
+              <TableHead className="w-[27%]">{translateUi("Billing / Payer")}</TableHead>
+              <TableHead className="w-[34%]">{translateUi("Eligibility / Cooldown")}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -212,14 +200,13 @@ export function ServicePoolRoutingPanel({
                   <TableCell className="text-14">
                     <p>
                       {priority
-                        ? `Priority ${member.priority ?? 0}`
+                        ? translateUi("Priority {{value1}}", { value1: member.priority ?? 0 })
                         : pool.strategy === "weighted"
-                          ? `Weight ${member.weight}`
-                          : `Member ${index + 1}`}
+                          ? translateUi("Weight {{value1}}", { value1: member.weight })
+                          : translateUi("Member {{value1}}", { value1: index + 1 })}
                     </p>
                     {priority && pool.tier_balance === "weighted" && (
-                      <p className="mt-1 text-muted-foreground">
-                        Weight {member.weight}
+                      <p className="mt-1 text-muted-foreground">{translateUi("Weight ")}{member.weight}
                       </p>
                     )}
                   </TableCell>
@@ -238,7 +225,7 @@ export function ServicePoolRoutingPanel({
                       >
                         {key?.label ??
                           candidate?.slug ??
-                          "Unavailable connection"}
+                          translateUi("Unavailable connection")}
                       </span>
                     </div>
                     {(key?.slug || candidate?.slug) && (
@@ -260,11 +247,10 @@ export function ServicePoolRoutingPanel({
                     <p className="text-13 text-muted-foreground">
                       {key
                         ? credentialLabel(key, billing)
-                        : "Credential not reported"}
+                        : translateUi("Credential not reported")}
                     </p>
                     {ai && (
-                      <p className="break-words text-13 text-muted-foreground">
-                        Model: {member.model ?? "Not configured"}
+                      <p className="break-words text-13 text-muted-foreground">{translateUi("Model: ")}{member.model ?? translateUi("Not configured")}
                       </p>
                     )}
                   </TableCell>
@@ -272,14 +258,14 @@ export function ServicePoolRoutingPanel({
                     <p>{billingModelLabel(billing)}</p>
                     <p className="text-13 text-muted-foreground">
                       {billing?.context === "configuration"
-                        ? "Expected payer"
-                        : "Payer"}
+                        ? translateUi("Expected payer")
+                        : translateUi("Payer")}
                       : {billingAccountLabel(billing)}
                     </p>
                     <p className="text-13 text-muted-foreground">
                       {billing
                         ? nyxidChargeLabel(billing)
-                        : "Rate not reported"}
+                        : translateUi("Rate not reported")}
                     </p>
                   </TableCell>
                   <TableCell className="space-y-1 text-14">
@@ -291,27 +277,23 @@ export function ServicePoolRoutingPanel({
                       }
                     >
                       {health.isLoading && member.enabled
-                        ? "Inspecting…"
+                        ? translateUi("Inspecting…")
                         : status}
                     </Badge>
                     {candidate && (
                       <p className="text-13 text-muted-foreground">
-                        {candidate.consecutive_failures} failures
-                        {candidate.last_status
-                          ? ` · Last HTTP ${candidate.last_status}`
+                        {candidate.consecutive_failures}{translateUi(" failures")}{candidate.last_status
+                          ? translateUi(" · Last HTTP {{value1}}", { value1: candidate.last_status })
                           : ""}
                       </p>
                     )}
                     {candidate?.cooldown_until && (
-                      <p className="text-13 text-muted-foreground">
-                        Cooldown until{" "}
-                        {new Date(candidate.cooldown_until).toLocaleString()}
+                      <p className="text-13 text-muted-foreground">{translateUi("Cooldown until")}{" "}
+                        {new Date(candidate.cooldown_until).toLocaleString(getFormattingLocale())}
                       </p>
                     )}
                     {!pool.is_active && (
-                      <p className="text-13 text-muted-foreground">
-                        Pool disabled · no execution
-                      </p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Pool disabled · no execution")}</p>
                     )}
                   </TableCell>
                 </TableRow>
@@ -320,48 +302,33 @@ export function ServicePoolRoutingPanel({
           </TableBody>
         </Table>
         {!members.length && (
-          <p className="p-4 text-13 text-muted-foreground">
-            No connections in this pool.
-          </p>
+          <p className="p-4 text-13 text-muted-foreground">{translateUi("No connections in this pool.")}</p>
         )}
       </div>
-      <p className="text-13 text-muted-foreground">
-        Each attempted connection uses its own rates and billing account.
-        Reported usage can charge more than one attempt. Within that account:
-        eligible allowance → credit grants → wallet credits. Platform-key usage
-        bills the acting person.
-      </p>
+      <p className="text-13 text-muted-foreground">{translateUi("Each attempted connection uses its own rates and billing account. Reported usage can charge more than one attempt. Within that account: eligible allowance → credit grants → wallet credits. Platform-key usage bills the acting person.")}</p>
       {priority && (
         <details className="text-13 text-muted-foreground">
-          <summary className="w-fit cursor-pointer">
-            Failover conditions
-          </summary>
+          <summary className="w-fit cursor-pointer">{translateUi("Failover conditions")}</summary>
           <div className="mt-2 space-y-1">
-            <p>
-              Retry causes:{" "}
+            <p>{translateUi("Retry causes:")}{" "}
               {policy.retry_on.length
                 ? policy.retry_on
                     .map((trigger) => trigger.replaceAll("_", " "))
                     .join(", ")
-                : "None"}
+                : translateUi("None")}
               .
             </p>
-            <p>
-              Cooldown: {policy.cooldown.base_ms / 1000}–
-              {policy.cooldown.max_ms / 1000}s after{" "}
-              {policy.cooldown.failures_to_open} failure(s)
-              {policy.cooldown.honor_retry_after
-                ? "; honors provider Retry-After"
+            <p>{translateUi("Cooldown: ")}{policy.cooldown.base_ms / 1000}–
+              {policy.cooldown.max_ms / 1000}{translateUi("s after")}{" "}
+              {policy.cooldown.failures_to_open}{translateUi(" failure(s)")}{policy.cooldown.honor_retry_after
+                ? translateUi("; honors provider Retry-After")
                 : ""}
               .
             </p>
             <p>
               {policy.retry_ambiguous_dispatch
-                ? "Ambiguous replay enabled: a timeout or server error can retry completed work and incur extra charges."
-                : "Ambiguous replay off: a POST timeout or server error does not automatically retry work that may already have run."}{" "}
-              Failover stops once response data reaches the caller. NyxID
-              access, approval and billing errors stop the request.
-            </p>
+                ? translateUi("Ambiguous replay enabled: a timeout or server error can retry completed work and incur extra charges.")
+                : translateUi("Ambiguous replay off: a POST timeout or server error does not automatically retry work that may already have run.")}{" "}{translateUi("Failover stops once response data reaches the caller. NyxID access, approval and billing errors stop the request.")}</p>
           </div>
         </details>
       )}

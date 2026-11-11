@@ -1,11 +1,8 @@
+import { LANGUAGES } from "@/i18n/language";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 
-const languages = [
-  { code: "en", label: "EN" },
-  { code: "zh-CN", label: "简体" },
-  { code: "zh-TW", label: "繁體" },
-];
+const languages = LANGUAGES;
 
 export function LanguageSwitcher() {
   const { i18n } = useTranslation();
@@ -45,7 +42,7 @@ export function LanguageSwitcher() {
       <button
         onClick={() => setOpen((o) => !o)}
         className="flex h-9 items-center gap-1 rounded-full bg-white/[0.04] px-2.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
-        aria-label="Change language"
+        aria-label={i18n.t("Change language", { ns: "app" })}
       >
         <svg
           width="15"
@@ -61,7 +58,7 @@ export function LanguageSwitcher() {
           <path d="M2 12h20" />
           <path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
         </svg>
-        <span className="text-foreground">{current?.label ?? "EN"}</span>
+        <span className="text-foreground">{current?.shortLabel ?? "EN"}</span>
       </button>
 
       {open && (
@@ -76,7 +73,7 @@ export function LanguageSwitcher() {
                   : "text-muted-foreground hover:bg-white/[0.06] hover:text-foreground"
               }`}
             >
-              {lang.label}
+              {lang.shortLabel}
             </button>
           ))}
         </div>

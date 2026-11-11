@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useAppForm } from "@/components/ui/form";
@@ -48,6 +50,7 @@ export function BotAudienceSettings({
   readonly busy?: boolean;
   readonly onReconnect?: () => void;
 }) {
+  useUiTranslation();
   const live = channel.status === "active";
   const drafts = useGroupedDraftGuard();
   const searchId = `channel-audience-${channel.id}`;
@@ -61,7 +64,7 @@ export function BotAudienceSettings({
     <section
       ref={searchTarget}
       data-drawer-search-target={searchId}
-      aria-label={`Who can talk to this bot · ${channel.bot_label}`}
+      aria-label={translateUi("Who can talk to this bot · {{value1}}", { value1: channel.bot_label })}
       className="space-y-3"
     >
       {channel.org_specialist ? (
@@ -80,8 +83,8 @@ export function BotAudienceSettings({
         <div className="space-y-2 px-4 type-secondary text-text-tertiary">
           <p role="status">
             {channel.status === "pending"
-              ? "Connection pending. Finish connecting this bot to change who can talk to it. Your saved settings are shown here."
-              : "This connection is unavailable. Saved guest settings are kept; reconnect the same bot and specialist to use them again."}
+              ? translateUi("Connection pending. Finish connecting this bot to change who can talk to it. Your saved settings are shown here.")
+              : translateUi("This connection is unavailable. Saved guest settings are kept; reconnect the same bot and specialist to use them again.")}
           </p>
           {canManage && onReconnect ? (
             <Button
@@ -93,13 +96,13 @@ export function BotAudienceSettings({
                 if (!drafts || (await drafts.confirmDiscard())) onReconnect();
               }}
             >
-              {channel.status === "pending" ? "Finish connecting" : "Reconnect"}
+              {channel.status === "pending" ? translateUi("Finish connecting") : translateUi("Reconnect")}
             </Button>
           ) : (
             <p>
               {channel.org_specialist
-                ? "Ask an organization admin to restore access and reconnect this bot."
-                : "Choose an available agent above, then reconnect this bot."}
+                ? translateUi("Ask an organization admin to restore access and reconnect this bot.")
+                : translateUi("Choose an available agent above, then reconnect this bot.")}
             </p>
           )}
         </div>
@@ -117,10 +120,11 @@ function PersonalAudience({
   readonly agent?: AssistantAgent;
   readonly disabled: boolean;
 }) {
+  useUiTranslation();
   const access = useSetNyxBotPrivateChats();
   return (
     <GroupedList
-      title="Who can talk to this bot"
+      title={translateUi("Who can talk to this bot")}
       footer={
         <>
           <p>{botAudienceDescription(channel)}</p>
@@ -129,9 +133,7 @@ function PersonalAudience({
             <a
               className="type-button underline"
               href={`/assistant?agent=${encodeURIComponent(agent.id)}&details=grants`}
-            >
-              Guest service access · Agent details → Grants
-            </a>
+            >{translateUi("Guest service access · Agent details → Grants")}</a>
           ) : null}
           {access.error ? (
             <p role="alert" className="text-destructive">
@@ -142,7 +144,7 @@ function PersonalAudience({
       }
     >
       <GroupedRow
-        title="Private chats"
+        title={translateUi("Private chats")}
         accessory={
           <Select
             value={channel.private_chats}
@@ -155,13 +157,13 @@ function PersonalAudience({
             }
           >
             <GroupedSelectTrigger
-              aria-label={`Who can talk to ${channel.bot_label} in private chats`}
+              aria-label={translateUi("Who can talk to {{value1}} in private chats", { value1: channel.bot_label })}
             >
               <SelectValue />
             </GroupedSelectTrigger>
             <SelectContent>
-              <SelectItem value="owner">Only you</SelectItem>
-              <SelectItem value="everyone">Anyone</SelectItem>
+              <SelectItem value="owner">{translateUi("Only you")}</SelectItem>
+              <SelectItem value="everyone">{translateUi("Anyone")}</SelectItem>
             </SelectContent>
           </Select>
         }
@@ -177,12 +179,13 @@ function OrganizationAudience({
   readonly channel: NyxAgentChannelAgent;
   readonly disabled: boolean;
 }) {
+  useUiTranslation();
   const api = useOrgSpecialistChannel(channel.id);
   const settings = api.settings.data;
   if (!settings)
     return (
       <GroupedList
-        title="Who can talk to this bot"
+        title={translateUi("Who can talk to this bot")}
         footer={
           <>
             <p>{botAudienceDescription(channel)}</p>
@@ -191,35 +194,35 @@ function OrganizationAudience({
                 {api.settings.error.message}
               </p>
             ) : (
-              <p role="status">Loading guest settings…</p>
+              <p role="status">{translateUi("Loading guest settings…")}</p>
             )}
           </>
         }
       >
         <GroupedRow
-          title="Allow guests"
+          title={translateUi("Allow guests")}
           accessory={
             <Switch
-              aria-label="Allow guests"
+              aria-label={translateUi("Allow guests")}
               checked={channel.org_specialist?.guest_enabled ?? false}
               disabled
             />
           }
         />
         <GroupedRow
-          title="Daily guest budget"
-          description={`${channel.org_specialist?.daily_credits ?? "Not set"} credits`}
+          title={translateUi("Daily guest budget")}
+          description={translateUi("{{value1}} credits", { value1: channel.org_specialist?.daily_credits ?? "Not set" })}
         />
         <GroupedRow
-          title="Delegated services"
+          title={translateUi("Delegated services")}
           description={
             channel.org_specialist?.delegated_service_ids.join(", ") ||
-            "Model-only chat"
+            translateUi("Model-only chat")
           }
         />
         <GroupedRow
-          title="Organization spend today"
-          description="Unavailable until guest settings load"
+          title={translateUi("Organization spend today")}
+          description={translateUi("Unavailable until guest settings load")}
         />
       </GroupedList>
     );
@@ -258,6 +261,7 @@ function GuestSettings({
   readonly api: ReturnType<typeof useOrgSpecialistChannel>;
   readonly disabled: boolean;
 }) {
+  useUiTranslation();
   const form = useAppForm<OrgChannelGuestForm>({
     resolver: zodResolver(orgChannelGuestFormSchema),
     defaultValues: values(settings),
@@ -311,41 +315,33 @@ function GuestSettings({
   return (
     <form onSubmit={submit} className="space-y-3">
       <GroupedList
-        title="Who can talk to this bot"
+        title={translateUi("Who can talk to this bot")}
         footer={
           <>
             <p>{settings.description ?? botAudienceDescription(channel)}</p>
-            <p>
-              With no delegated services, guests can chat with the model only.
-              Group chats keep their own audience settings.
-            </p>
+            <p>{translateUi("With no delegated services, guests can chat with the model only. Group chats keep their own audience settings.")}</p>
             {!settings.can_manage ? (
-              <p>Only organization admins can change guest access.</p>
+              <p>{translateUi("Only organization admins can change guest access.")}</p>
             ) : null}
             {settings.can_manage && settings.readiness_reason ? (
               <p role="status">
                 {settings.readiness_reason === "org_wallet_not_provisioned"
-                  ? "Provision the organization billing wallet and subscription before enabling guests."
-                  : "The organization wallet is suspended."}{" "}
+                  ? translateUi("Provision the organization billing wallet and subscription before enabling guests.")
+                  : translateUi("The organization wallet is suspended.")}{" "}
                 <a
                   href={`/billing?ownerId=${encodeURIComponent(settings.org_id)}`}
                   className="type-button underline"
-                >
-                  Open organization Billing
-                </a>
+                >{translateUi("Open organization Billing")}</a>
               </p>
             ) : null}
             {dirty ? (
-              <p>
-                Save or discard budget and service changes before switching
-                guest access.
-              </p>
+              <p>{translateUi("Save or discard budget and service changes before switching guest access.")}</p>
             ) : null}
             {error ? (
               <p role="alert" className="text-destructive">
                 {error.message}
                 {dirty
-                  ? " Your edits are kept. Discard to load the latest saved settings."
+                  ? translateUi(" Your edits are kept. Discard to load the latest saved settings.")
                   : ""}
               </p>
             ) : null}
@@ -353,11 +349,11 @@ function GuestSettings({
         }
       >
         <GroupedRow
-          title="Allow guests"
-          description="Enabling saves immediately with the daily budget below."
+          title={translateUi("Allow guests")}
+          description={translateUi("Enabling saves immediately with the daily budget below.")}
           accessory={
             <Switch
-              aria-label="Allow guests"
+              aria-label={translateUi("Allow guests")}
               checked={settings.guest_enabled}
               disabled={
                 disabled ||
@@ -370,9 +366,7 @@ function GuestSettings({
           }
         />
         <GroupedRow className="block space-y-1">
-          <Label htmlFor={`guest-budget-${channel.id}`}>
-            Daily guest budget (credits, UTC)
-          </Label>
+          <Label htmlFor={`guest-budget-${channel.id}`}>{translateUi("Daily guest budget (credits, UTC)")}</Label>
           <GroupedInput
             id={`guest-budget-${channel.id}`}
             {...form.register("daily_credits")}
@@ -396,14 +390,14 @@ function GuestSettings({
           ) : null}
         </GroupedRow>
         <GroupedRow
-          title="Delegated services"
-          description="Only currently granted organization services can be delegated."
+          title={translateUi("Delegated services")}
+          description={translateUi("Only currently granted organization services can be delegated.")}
         />
         {services.length > 8 ? (
           <GroupedRow>
             <GroupedInput
-              aria-label="Search delegated services"
-              placeholder="Search services"
+              aria-label={translateUi("Search delegated services")}
+              placeholder={translateUi("Search services")}
               value={search}
               onChange={(event) => setSearch(event.target.value)}
             />
@@ -440,17 +434,17 @@ function GuestSettings({
         </div>
         {!services.length ? (
           <GroupedRow
-            title="Model-only chat"
-            description="No eligible services are currently granted to this specialist."
+            title={translateUi("Model-only chat")}
+            description={translateUi("No eligible services are currently granted to this specialist.")}
           />
         ) : null}
         <GroupedRow
-          title="Organization spend today"
-          description={`${settings.spent_today_credits} credits (${settings.reserved_today_credits} reserved)`}
+          title={translateUi("Organization spend today")}
+          description={translateUi("{{value1}} credits ({{value2}} reserved)", { value1: settings.spent_today_credits, value2: settings.reserved_today_credits })}
         />
       </GroupedList>
       <GroupedFormActions
-        label={`${channel.bot_label} guest access`}
+        label={translateUi("{{value1}} guest access", { value1: channel.bot_label })}
         dirty={dirty}
         pending={saving}
         disabled={disabled}

@@ -75,7 +75,7 @@ describe("BillingBill", () => {
     expect(screen.getAllByText("GST (9%)")).toHaveLength(2);
     expect(screen.getByText(/10\/1\/2026 – 10\/31\/2026/)).toBeInTheDocument();
     expect(screen.getByText("9/30/2026 · Paid")).toBeInTheDocument();
-    expect(dates).toHaveBeenCalledWith(undefined, { timeZone: "UTC" });
+    expect(dates).toHaveBeenCalledWith("en-US", { timeZone: "UTC" });
     expect(screen.queryByText(/succeeded/)).not.toBeInTheDocument();
   });
   it.each([

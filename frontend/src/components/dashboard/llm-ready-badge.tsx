@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import type { LlmProviderStatus } from "@/types/api";
 import { Badge } from "@/components/ui/badge";
@@ -18,6 +20,7 @@ interface LlmReadyBadgeProps {
 }
 
 export function LlmReadyBadge({ llmStatus, gatewayUrl }: LlmReadyBadgeProps) {
+  useUiTranslation();
   // `pickedKey` is null while keys are still loading OR once they have
   // loaded but the user has zero Agent Keys. In the zero-keys case the
   // picker itself renders a "Create your first Agent Key →" affordance,
@@ -38,38 +41,34 @@ export function LlmReadyBadge({ llmStatus, gatewayUrl }: LlmReadyBadgeProps) {
     <Popover>
       <PopoverTrigger asChild>
         <button type="button" className="cursor-pointer">
-          <Badge variant="success">LLM Ready</Badge>
+          <Badge variant="success">{translateUi("LLM Ready")}</Badge>
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-80" align="end">
         <div className="space-y-3">
-          <p className="type-secondary-emphasis">LLM Proxy URLs</p>
+          <p className="type-secondary-emphasis">{translateUi("LLM Proxy URLs")}</p>
 
           <CopyableField
-            label="Direct Proxy URL"
+            label={translateUi("Direct Proxy URL")}
             value={llmStatus.proxy_url}
           />
 
-          <CopyableField label="Gateway URL" value={gatewayUrl} size="sm" />
+          <CopyableField label={translateUi("Gateway URL")} value={gatewayUrl} size="sm" />
 
           <div>
-            <p className="mb-1 type-group-label text-muted-foreground">
-              Agent Key
-            </p>
+            <p className="mb-1 type-group-label text-muted-foreground">{translateUi("Agent Key")}</p>
             <AgentKeyPicker onSelect={setPickedKey} />
           </div>
 
           <div>
-            <p className="mb-1 type-group-label text-muted-foreground">
-              Example
-            </p>
+            <p className="mb-1 type-group-label text-muted-foreground">{translateUi("Example")}</p>
             <pre className="rounded bg-muted px-2 py-1.5 text-14 overflow-x-auto whitespace-pre-wrap break-all">
               {exampleCurl}
             </pre>
             <p className="mt-1 text-12 text-muted-foreground">
               {pickedKey
-                ? "Using the picked Agent Key preview. Copy the full key from the Agent Keys tab to run this."
-                : "Create an Agent Key in the Agent Keys tab, then pick it above to see a ready-to-run example."}
+                ? translateUi("Using the picked Agent Key preview. Copy the full key from the Agent Keys tab to run this.")
+                : translateUi("Create an Agent Key in the Agent Keys tab, then pick it above to see a ready-to-run example.")}
             </p>
           </div>
         </div>

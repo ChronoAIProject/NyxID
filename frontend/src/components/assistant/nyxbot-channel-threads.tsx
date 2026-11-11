@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import {
   GroupedFooter,
@@ -20,6 +23,7 @@ function ThreadRow({
   readonly thread: NyxAgentChannelThread;
   readonly chat: NyxAgentChannelChat;
 }) {
+  useUiTranslation();
   const stop = useStopNyxBotChannelThread();
   const labels = { active: "Following", opening: "Starting", stopped: "Stopped", expired: "Expired", unavailable: "Unavailable" };
   return (
@@ -40,7 +44,7 @@ function ThreadRow({
             )}
             <span className="type-secondary text-text-tertiary">
               {thread.state === "active" && thread.follow_readiness !== "ready"
-                ? "Unavailable"
+                ? translateUi("Unavailable")
                 : labels[thread.state]}
             </span>
             {thread.state === "active" || thread.state === "opening" ? (
@@ -55,17 +59,15 @@ function ThreadRow({
                     threadId: thread.id,
                   })
                 }
-              >
-                Stop following
-              </Button>
+              >{translateUi("Stop following")}</Button>
             ) : null}
           </div>
           <p className="type-secondary text-text-tertiary">
             {thread.last_admitted_at
-              ? `Last activity ${formatRelativeTime(thread.last_admitted_at)}. `
+              ? translateUi("Last activity {{value1}}. ", { value1: formatRelativeTime(thread.last_admitted_at) })
               : ""}
             {thread.state === "active" && thread.expires_at
-              ? `Idle expiry ${new Date(thread.expires_at).toLocaleString()}. `
+              ? translateUi("Idle expiry {{value1}}. ", { value1: new Date(thread.expires_at).toLocaleString(getFormattingLocale()) })
               : ""}
           </p>
         </li>
@@ -73,13 +75,13 @@ function ThreadRow({
       <GroupedFooter>
         <p>
           {(thread.dropped_message_count ?? 0) > 0
-            ? `${thread.dropped_message_count} messages arrived while busy and were not queued. `
+            ? translateUi("{{value1}} messages arrived while busy and were not queued. ", { value1: thread.dropped_message_count })
             : ""}
-          {thread.kind === "topic" ? "Follows the whole topic. " : ""}
+          {thread.kind === "topic" ? translateUi("Follows the whole topic. ") : ""}
           {thread.context_status === "metadata_only"
-            ? "Earlier message bodies were unavailable."
+            ? translateUi("Earlier message bodies were unavailable.")
             : thread.context_status === "partial"
-              ? "Earlier context is partial."
+              ? translateUi("Earlier context is partial.")
               : ""}
         </p>
         {stop.error ? (
@@ -97,17 +99,18 @@ export function ChannelThreads({
 }: {
   readonly chat: NyxAgentChannelChat;
 }) {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const [history, setHistory] = useState(false);
   const threads = useNyxBotChannelThreads(chat.channel_agent_id, chat.id, history ? "all" : "active", open);
   const rows = threads.data?.pages.flatMap((page) => page.threads) ?? [];
   return (
     <GroupedList
-      title="Threads"
+      title={translateUi("Threads")}
       footer={
         <>
           {chat.reply_mode === "all" ? (
-            <p>Every message still allows replies after you stop following.</p>
+            <p>{translateUi("Every message still allows replies after you stop following.")}</p>
           ) : null}
           {threads.error ? (
             <p role="alert" className="text-destructive">
@@ -117,23 +120,18 @@ export function ChannelThreads({
         </>
       }
     >
-      <GroupedDisclosure aria-expanded={open} onClick={() => setOpen(!open)}>
-        Followed threads ({chat.followed_thread_count ?? 0})
+      <GroupedDisclosure aria-expanded={open} onClick={() => setOpen(!open)}>{translateUi("Followed threads (")}{chat.followed_thread_count ?? 0})
       </GroupedDisclosure>
       {chat.conversation_id ? (
         <GroupedRow asChild interactive>
-          <Link to="/assistant" search={{ c: chat.conversation_id }}>
-            Chat history
-          </Link>
+          <Link to="/assistant" search={{ c: chat.conversation_id }}>{translateUi("Chat history")}</Link>
         </GroupedRow>
       ) : null}
       {open ? (
         <>
           <GroupedRow asChild interactive>
             <Label>
-              <span className="min-w-0 flex-1">
-                Include stopped and expired threads
-              </span>
+              <span className="min-w-0 flex-1">{translateUi("Include stopped and expired threads")}</span>
               <Switch
                 checked={history}
                 onCheckedChange={(value) => setHistory(value === true)}
@@ -142,21 +140,19 @@ export function ChannelThreads({
           </GroupedRow>
           {threads.error ? (
             <GroupedRow asChild interactive>
-              <button type="button" onClick={() => void threads.refetch()}>
-                Retry threads
-              </button>
+              <button type="button" onClick={() => void threads.refetch()}>{translateUi("Retry threads")}</button>
             </GroupedRow>
           ) : threads.isPending ? (
-            <GroupedRow title="Loading threads..." />
+            <GroupedRow title={translateUi("Loading threads...")} />
           ) : rows.length ? (
-            <ul aria-label="Platform threads">
+            <ul aria-label={translateUi("Platform threads")}>
               {rows.map((thread) => (
                 <ThreadRow key={thread.id} thread={thread} chat={chat} />
               ))}
             </ul>
           ) : (
             <GroupedRow
-              title={`No ${history ? "recorded" : "active"} threads.`}
+              title={history ? translateUi("No recorded threads.") : translateUi("No active threads.")}
             />
           )}
           {threads.hasNextPage ? (
@@ -165,9 +161,7 @@ export function ChannelThreads({
                 type="button"
                 disabled={threads.isFetchingNextPage}
                 onClick={() => void threads.fetchNextPage()}
-              >
-                Show more threads
-              </button>
+              >{translateUi("Show more threads")}</button>
             </GroupedRow>
           ) : null}
         </>

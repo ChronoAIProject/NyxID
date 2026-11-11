@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { Label, FieldHelp } from "@/components/ui/label";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
@@ -84,6 +87,7 @@ function StatCard({
   readonly description: string;
   readonly icon: React.ComponentType<{ className?: string }>;
 }) {
+  useUiTranslation();
   return (
     <Card>
       <CardContent className="flex items-start justify-between p-4">
@@ -99,6 +103,7 @@ function StatCard({
 }
 
 export function DeveloperAppsPage() {
+  useUiTranslation();
   const navigate = useNavigate();
   const { data, isLoading, error, refetch } = useDeveloperApps();
   const createMutation = useCreateDeveloperApp();
@@ -127,13 +132,13 @@ export function DeveloperAppsPage() {
 
   async function handleCreate() {
     if (!name.trim()) {
-      toast.error("Application name is required");
+      toast.error(translateErrorMessage("Application name is required"));
       return;
     }
 
     const parsedUris = parseRedirectUris(redirectUrisText);
     if (parsedUris.error) {
-      toast.error(parsedUris.error);
+      toast.error(translateErrorMessage(parsedUris.error));
       return;
     }
 
@@ -145,7 +150,7 @@ export function DeveloperAppsPage() {
         allowed_scopes: selectedScopes,
       });
 
-      toast.success("Developer app created");
+      toast.success(translateUi("Developer app created"));
       if (created.client_secret) {
         setCreatedClientId(created.id);
         setCreatedClientSecret(created.client_secret);
@@ -158,9 +163,9 @@ export function DeveloperAppsPage() {
       setSelectedScopes(["openid", "profile", "email"]);
     } catch (error) {
       if (error instanceof ApiError) {
-        toast.error(error.message);
+        toast.error(translateErrorMessage(error.message));
       } else {
-        toast.error("Failed to create app");
+        toast.error(translateErrorMessage("Failed to create app"));
       }
     }
   }
@@ -169,12 +174,8 @@ export function DeveloperAppsPage() {
     <div className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-            Developer Apps
-          </h2>
-          <p className="text-14 text-muted-foreground">
-            Register and manage OAuth applications for your products.
-          </p>
+          <h2 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>{translateUi("Developer Apps")}</h2>
+          <p className="text-14 text-muted-foreground">{translateUi("Register and manage OAuth applications for your products.")}</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2">
@@ -183,38 +184,30 @@ export function DeveloperAppsPage() {
               checked={showInactive}
               onCheckedChange={setShowInactive}
             />
-            <Label htmlFor="show-inactive" className="text-muted-foreground cursor-pointer">
-              Show inactive
-            </Label>
+            <Label htmlFor="show-inactive" className="text-muted-foreground cursor-pointer">{translateUi("Show inactive")}</Label>
           </div>
-          <AddCtaButton label="New Application" onClick={() => setCreateOpen(true)} />
+          <AddCtaButton label={translateUi("New Application")} onClick={() => setCreateOpen(true)} />
           <Dialog open={createOpen} onOpenChange={setCreateOpen}>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>Create Developer App</DialogTitle>
-                <DialogDescription>
-                  Register a new OAuth application for your product.
-                </DialogDescription>
+                <DialogTitle>{translateUi("Create Developer App")}</DialogTitle>
+                <DialogDescription>{translateUi("Register a new OAuth application for your product.")}</DialogDescription>
               </DialogHeader>
               <div className="space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="app-name">
-                    Application Name
-                  </Label>
+                  <Label htmlFor="app-name">{translateUi("Application Name")}</Label>
                   <Input
                     id="app-name"
                     value={name}
                     onChange={(event) => setName(event.target.value)}
-                    placeholder="My SaaS App"
+                    placeholder={translateUi("My SaaS App")}
                   />
                 </div>
                 <div className="space-y-2">
                   <Label
 
                     htmlFor="redirect-uris"
-                  >
-                    Redirect URIs (one per line)
-                  </Label>
+                  >{translateUi("Redirect URIs (one per line)")}</Label>
                   <textarea
                     id="redirect-uris"
                     value={redirectUrisText}
@@ -228,7 +221,7 @@ export function DeveloperAppsPage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>Client Type</Label>
+                  <Label>{translateUi("Client Type")}</Label>
                   <Select
                     value={clientType}
                     onValueChange={(value: "public" | "confidential") =>
@@ -239,17 +232,14 @@ export function DeveloperAppsPage() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="public">Public (PKCE)</SelectItem>
-                      <SelectItem value="confidential">Confidential</SelectItem>
+                      <SelectItem value="public">{translateUi("Public (PKCE)")}</SelectItem>
+                      <SelectItem value="confidential">{translateUi("Confidential")}</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
                 <div className="space-y-3">
-                  <Label>Allowed Scopes</Label>
-                  <p className="text-13 text-muted-foreground">
-                    OIDC scopes this app can request. Determines what user data
-                    and NyxID capabilities are included in tokens.
-                  </p>
+                  <Label>{translateUi("Allowed Scopes")}</Label>
+                  <p className="text-13 text-muted-foreground">{translateUi("OIDC scopes this app can request. Determines what user data and NyxID capabilities are included in tokens.")}</p>
                   <div className="space-y-2">
                     {OIDC_SCOPES.map((scope) => (
                       <div key={scope.id} className="flex items-start gap-2">
@@ -272,9 +262,7 @@ export function DeveloperAppsPage() {
                           >
                             {scope.label}
                             {scope.required && (
-                              <FieldHelp className="ml-1 text-muted-foreground">
-                                (required)
-                              </FieldHelp>
+                              <FieldHelp className="ml-1 text-muted-foreground">{translateUi("(required)")}</FieldHelp>
                             )}
                           </Label>
                           {"hint" in scope && scope.hint && (
@@ -293,16 +281,12 @@ export function DeveloperAppsPage() {
                   type="button"
                   variant="outline"
                   onClick={() => setCreateOpen(false)}
-                >
-                  Cancel
-                </Button>
+                >{translateUi("Cancel")}</Button>
                 <Button
                   variant="primary"
                   onClick={() => void handleCreate()}
                   isLoading={createMutation.isPending}
-                >
-                  Create App
-                </Button>
+                >{translateUi("Create App")}</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
@@ -317,21 +301,21 @@ export function DeveloperAppsPage() {
 
       <div className="grid gap-4 md:grid-cols-3">
         <StatCard
-          title="Total Apps"
+          title={translateUi("Total Apps")}
           value={apps.length}
-          description="All registered applications"
+          description={translateUi("All registered applications")}
           icon={Code}
         />
         <StatCard
-          title="Active Apps"
+          title={translateUi("Active Apps")}
           value={activeCount}
-          description="Ready for production traffic"
+          description={translateUi("Ready for production traffic")}
           icon={ShieldCheck}
         />
         <StatCard
-          title="Confidential Apps"
+          title={translateUi("Confidential Apps")}
           value={confidentialCount}
-          description="Require client secret"
+          description={translateUi("Require client secret")}
           icon={Shield}
         />
       </div>
@@ -339,7 +323,7 @@ export function DeveloperAppsPage() {
       <div className="grid gap-4 xl:grid-cols-2">
         {!isLoading && error && (
           <div className="xl:col-span-2">
-            <ErrorBanner message="Failed to load developer apps. Please refresh and try again." onRetry={refetch} />
+            <ErrorBanner message={translateUi("Failed to load developer apps. Please refresh and try again.")} onRetry={refetch} />
           </div>
         )}
 
@@ -365,11 +349,10 @@ export function DeveloperAppsPage() {
                 <div className="flex items-center justify-between gap-3">
                   <CardTitle>{app.client_name}</CardTitle>
                   <Badge variant={app.is_active ? "success" : "secondary"}>
-                    {app.is_active ? "Active" : "Inactive"}
+                    {app.is_active ? translateUi("Active") : translateUi("Inactive")}
                   </Badge>
                 </div>
-                <CardDescription className="break-all">
-                  Client ID:{" "}
+                <CardDescription className="break-all">{translateUi("Client ID:")}{" "}
                   <span className="text-13 text-foreground">
                     {app.id}
                   </span>
@@ -379,8 +362,7 @@ export function DeveloperAppsPage() {
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant="secondary">{app.client_type}</Badge>
                   <Badge variant="secondary">
-                    {app.redirect_uris.length} redirect URIs
-                  </Badge>
+                    {app.redirect_uris.length}{translateUi(" redirect URIs")}</Badge>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {(app.allowed_scopes || "")
@@ -407,9 +389,7 @@ export function DeveloperAppsPage() {
                       })
                     }
                   >
-                    <ButtonIcon><ExternalLink className="h-3 w-3" /></ButtonIcon>
-                    View Details
-                  </Button>
+                    <ButtonIcon><ExternalLink className="h-3 w-3" /></ButtonIcon>{translateUi("View Details")}</Button>
                 </div>
               </CardContent>
             </Card>
@@ -420,12 +400,12 @@ export function DeveloperAppsPage() {
             <WebsiteLayoutIcon className="h-64 w-64 text-muted-foreground" />
             <div className="space-y-1">
               <p className="type-row-title text-muted-foreground">
-                {apps.length === 0 ? "No Developer Apps" : "No Active Apps"}
+                {apps.length === 0 ? translateUi("No Developer Apps") : translateUi("No Active Apps")}
               </p>
               <p className="text-13 text-muted-foreground">
                 {apps.length === 0
-                  ? "Create your first application."
-                  : "Enable 'Show inactive' to view deactivated apps."}
+                  ? translateUi("Create your first application.")
+                  : translateUi("Enable 'Show inactive' to view deactivated apps.")}
               </p>
             </div>
           </div>

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import {
   useId,
   useLayoutEffect,
@@ -39,6 +41,7 @@ export function CmaCardFrame({
   readonly controlSubject?: string;
   readonly children: ReactNode;
 }) {
+  useUiTranslation();
   const toggleLabel = `${collapsed ? "Maximise" : "Minimise"} ${controlSubject}`;
   return (
     <section
@@ -62,7 +65,7 @@ export function CmaCardFrame({
         <div
           className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-1"
           role="group"
-          aria-label={`${controlSubject} controls`}
+          aria-label={translateUi("{{value1}} controls", { value1: controlSubject })}
         >
           {controls}
           <Tooltip>
@@ -101,6 +104,7 @@ export function CmaCardDetails({
   readonly visible: boolean;
   readonly children: ReactNode;
 }) {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const content = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);

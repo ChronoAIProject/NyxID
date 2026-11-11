@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { usePlatformModels } from "@/hooks/use-platform-models";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
@@ -7,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { PriceRows, SaveError } from "@/components/platform-models/shared";
 
 export function PlatformModelsPage() {
+  useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.INFERENCE_PLATFORM_MODELS);
   const query = usePlatformModels();
   if (!enabled) return null;
@@ -17,15 +20,13 @@ export function PlatformModelsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Platform Models"
-        description="Models available to your account. Entitlement, execution readiness and prices are checked independently."
+        title={translateUi("Platform Models")}
+        description={translateUi("Models available to your account. Entitlement, execution readiness and prices are checked independently.")}
       />
       <SaveError error={query.error} />
-      {query.isLoading && <p className="type-body">Loading models…</p>}
+      {query.isLoading && <p className="type-body">{translateUi("Loading models…")}</p>}
       {!query.isLoading && !query.error && models.length === 0 && (
-        <p className="type-body text-muted-foreground">
-          No platform models are available to your account.
-        </p>
+        <p className="type-body text-muted-foreground">{translateUi("No platform models are available to your account.")}</p>
       )}
       <div className="grid gap-4 lg:grid-cols-2">
         {models.map((model) => (
@@ -41,10 +42,10 @@ export function PlatformModelsPage() {
               <p className="type-body">{model.description}</p>
               <p className="type-secondary text-muted-foreground">
                 {model.availability === "available"
-                  ? "Ready for use"
+                  ? translateUi("Ready for use")
                   : model.availability === "request_dependent"
-                    ? "Availability checked per request"
-                    : "Execution unavailable"}
+                    ? translateUi("Availability checked per request")
+                    : translateUi("Execution unavailable")}
               </p>
               <p className="type-secondary text-muted-foreground">
                 {model.capabilities.protocols.join(" · ")} ·{" "}
@@ -53,23 +54,19 @@ export function PlatformModelsPage() {
               </p>
             </div>
             {model.retail_prices.length === 0 && (
-              <p className="px-5 pb-5 type-secondary text-muted-foreground">
-                Retail prices unavailable
-              </p>
+              <p className="px-5 pb-5 type-secondary text-muted-foreground">{translateUi("Retail prices unavailable")}</p>
             )}
             {model.retail_prices.map((price, i) => (
               <section key={i} className="border-t border-border/30">
                 <h3 className="px-4 pt-3 type-field-label">
                   {Object.entries(price.variant)
                     .map(([k, v]) => `${k}: ${v}`)
-                    .join(" · ") || "Retail prices"}
+                    .join(" · ") || translateUi("Retail prices")}
                 </h3>
                 {price.available ? (
                   <PriceRows components={price.components} />
                 ) : (
-                  <p className="p-4 type-secondary text-muted-foreground">
-                    Retail prices unavailable
-                  </p>
+                  <p className="p-4 type-secondary text-muted-foreground">{translateUi("Retail prices unavailable")}</p>
                 )}
               </section>
             ))}
@@ -81,9 +78,7 @@ export function PlatformModelsPage() {
           variant="outline"
           disabled={query.isFetchingNextPage}
           onClick={() => void query.fetchNextPage()}
-        >
-          Load more models
-        </Button>
+        >{translateUi("Load more models")}</Button>
       )}
     </div>
   );

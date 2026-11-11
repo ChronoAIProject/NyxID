@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useOrgs } from "@/hooks/use-orgs";
 import { Label } from "@/components/ui/label";
 import {
@@ -54,6 +57,7 @@ import "@/components/billing/billing-page.css";
 export function BillingPage({
   presentation = "page",
 }: { readonly presentation?: "page" | "panel" } = {}) {
+  useUiTranslation();
   const account = useAccountPanel();
   const locationSearch = useSearch({ strict: false });
   const search = normalizeBillingSearch(
@@ -97,18 +101,18 @@ export function BillingPage({
     <div className="billing-page space-y-6">
       {presentation === "page" && (
         <PageHeader
-          title="Billing & Usage"
-          description="Your balance, benefits, and usage in one place."
+          title={translateUi("Billing & Usage")}
+          description={translateUi("Your balance, benefits, and usage in one place.")}
         />
       )}
       <div className="flex flex-wrap items-center gap-3">
-        <Label htmlFor="billing-owner">Billing owner</Label>
+        <Label htmlFor="billing-owner">{translateUi("Billing owner")}</Label>
         <Select value={ownerId ?? "personal"} onValueChange={selectOwner}>
           <SelectTrigger id="billing-owner" className="w-full sm:w-64">
-            <SelectValue placeholder="Organization" />
+            <SelectValue placeholder={translateUi("Organization")} />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="personal">Personal</SelectItem>
+            <SelectItem value="personal">{translateUi("Personal")}</SelectItem>
             {admins.map((org) => (
               <SelectItem key={org.id} value={org.id}>
                 {org.display_name ?? org.slug}
@@ -119,17 +123,14 @@ export function BillingPage({
       </div>
       {orgs.isError && (
         <ErrorBanner
-          message="Organizations could not be loaded."
+          message={translateUi("Organizations could not be loaded.")}
           onRetry={() => void orgs.refetch()}
         />
       )}
       {ownerId && orgs.isLoading ? (
         <Skeleton className="h-40 w-full" />
       ) : !allowed ? (
-        <p role="alert" className="type-body text-muted-foreground">
-          Organization billing is available only to its admins. Select Personal
-          or an organization you administer.
-        </p>
+        <p role="alert" className="type-body text-muted-foreground">{translateUi("Organization billing is available only to its admins. Select Personal or an organization you administer.")}</p>
       ) : (
         <BillingContent
           key={ownerId ?? "personal"}
@@ -148,6 +149,7 @@ function BillingContent({
   presentation: "page" | "panel";
   ownerId?: string;
 }) {
+  useUiTranslation();
   const account = useAccountPanel();
   const locationSearch: Record<string, unknown> = useSearch({ strict: false });
   const rawSearch =
@@ -267,9 +269,9 @@ function BillingContent({
   async function handleProvisionWallet() {
     try {
       await provisionWallet.mutateAsync(ownerId ? { owner_id: ownerId } : {});
-      toast.success("Billing wallet provisioned");
+      toast.success(translateUi("Billing wallet provisioned"));
     } catch (error) {
-      toast.error(errorMessage(error, "Failed to provision billing wallet"));
+      toast.error(translateErrorMessage(errorMessage(error, "Failed to provision billing wallet")));
     }
   }
 
@@ -283,7 +285,7 @@ function BillingContent({
       rememberBillingCheckout(actorId, ownerId, presentation);
       openExternal(checkout.checkout_url);
     } catch (error) {
-      toast.error(errorMessage(error, "Failed to create top-up checkout"));
+      toast.error(translateErrorMessage(errorMessage(error, "Failed to create top-up checkout")));
     }
   }
 
@@ -296,9 +298,9 @@ function BillingContent({
         }
         className="tabbed-billing"
       >
-        <TabsList aria-label="Billing and usage">
-          <TabsTrigger value="billing">Billing</TabsTrigger>
-          <TabsTrigger value="usage">Usage</TabsTrigger>
+        <TabsList aria-label={translateUi("Billing and usage")}>
+          <TabsTrigger value="billing">{translateUi("Billing")}</TabsTrigger>
+          <TabsTrigger value="usage">{translateUi("Usage")}</TabsTrigger>
         </TabsList>
         <AvailableBenefits
           key={ownerId ?? "personal"}
@@ -323,14 +325,12 @@ function BillingContent({
           }
         />
         {billingCapability && !billingReady && (
-          <div className="mt-6 rounded-lg border border-warning/20 bg-warning/5 px-4 py-3 text-14 text-warning">
-            Billing is not available on this deployment.
-          </div>
+          <div className="mt-6 rounded-lg border border-warning/20 bg-warning/5 px-4 py-3 text-14 text-warning">{translateUi("Billing is not available on this deployment.")}</div>
         )}
         {catalogQuery.isError && (
           <div className="mt-6">
             <ErrorBanner
-              message="Service display names could not be loaded."
+              message={translateUi("Service display names could not be loaded.")}
               onRetry={() => void catalogQuery.refetch()}
             />
           </div>
@@ -338,7 +338,7 @@ function BillingContent({
         <TabsContent value="billing" className="mt-6 space-y-6">
           {usageQuery.isError && (
             <ErrorBanner
-              message="Billing availability could not be verified. Retry to enable wallet actions."
+              message={translateUi("Billing availability could not be verified. Retry to enable wallet actions.")}
               onRetry={() => void usageQuery.refetch()}
             />
           )}
@@ -353,10 +353,7 @@ function BillingContent({
           <BillingTopUpHistory ownerId={ownerId} presentation={presentation} />
         </TabsContent>
         <TabsContent value="usage" className="mt-6 space-y-6">
-          <p className="text-14 text-text-tertiary">
-            Credit usage includes voice calls, dictation, and assistant tasks.
-            Explore a service below for its recorded usage and charges.
-          </p>
+          <p className="text-14 text-text-tertiary">{translateUi("Credit usage includes voice calls, dictation, and assistant tasks. Explore a service below for its recorded usage and charges.")}</p>
           <UsageFilters
             services={services}
             values={selected}
@@ -417,12 +414,13 @@ function UsageFilters({
   period: BillingUsagePeriod;
   onPeriodChange: (period: BillingUsagePeriod) => void;
 }) {
+  useUiTranslation();
   return (
     <BillingMultiSelect
-      label="Services"
-      itemLabel="Service"
-      emptyLabel="All"
-      description="Services with recorded usage in this period."
+      label={translateUi("Services")}
+      itemLabel={translateUi("Service")}
+      emptyLabel={translateUi("All")}
+      description={translateUi("Services with recorded usage in this period.")}
       className="rounded-xl border border-border/50 bg-card px-4 py-3"
       disabled={disabled}
       values={values}
@@ -436,7 +434,7 @@ function UsageFilters({
     >
       <div className="ml-auto min-w-0">
         <AnalyticsSelect
-          label="Time range"
+          label={translateUi("Time range")}
           inline
           value={period}
           onChange={(value) => onPeriodChange(value as BillingUsagePeriod)}

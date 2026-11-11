@@ -1,3 +1,5 @@
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import type { SVGProps } from "react";
 import { Bot } from "lucide-react";
 import { ServiceIcon, type ServiceIconSize } from "@/components/service-icon";
@@ -16,11 +18,11 @@ const PLATFORM_SLUG: Readonly<Record<string, string>> = {
 
 /** Supported agent platform values shown by the API-key and CLI selectors. */
 export const PLATFORM_ICON_OPTIONS = [
-  { platform: "claude-code", label: "Claude Code" },
-  { platform: "cursor", label: "Cursor" },
-  { platform: "codex", label: "Codex" },
-  { platform: "openclaw", label: "OpenClaw" },
-  { platform: "generic", label: "Generic agent" },
+  { platform: "claude-code", get label() { return translateUi("Claude Code"); } },
+  { platform: "cursor", get label() { return translateUi("Cursor"); } },
+  { platform: "codex", get label() { return translateUi("Codex"); } },
+  { platform: "openclaw", get label() { return translateUi("OpenClaw"); } },
+  { platform: "generic", get label() { return translateUi("Generic agent"); } },
 ] as const;
 
 // Mirrors `service-icon.tsx`'s scale exactly, `!important` and all, so a
@@ -38,6 +40,7 @@ const SIZE_CLASS: Readonly<Record<ServiceIconSize, string>> = {
 
 /** Cursor editor mark (brand glyph, `currentColor`). */
 function CursorGlyph(props: SVGProps<SVGSVGElement>) {
+  useUiTranslation();
   return (
     <svg
       viewBox="0 0 24 24"
@@ -67,6 +70,7 @@ export function PlatformIcon({
   readonly size?: ServiceIconSize;
   readonly className?: string;
 }) {
+  useUiTranslation();
   if (!platform || platform === "__none__") return null;
   const slug = PLATFORM_SLUG[platform];
   if (slug) {

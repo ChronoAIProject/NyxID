@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { ChannelBotSetup } from "@/components/channels/channel-bot-setup";
@@ -12,6 +14,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import type { ChannelConnectLink } from "@/schemas/channel-connect-links";
 
 export function ChannelConnectLinkPage() {
+  useUiTranslation();
   const { token } = useParams({ strict: false }) as { token: string };
   const { user, isAuthenticated, isLoading } = useAuthStore();
   const navigate = useNavigate();
@@ -60,9 +63,7 @@ export function ChannelConnectLinkPage() {
           />
         </ChannelConnectLinkContext.Provider>
       ) : (
-        <p role="status" className="text-14 text-muted-foreground">
-          Loading connection request…
-        </p>
+        <p role="status" className="text-14 text-muted-foreground">{translateUi("Loading connection request…")}</p>
       )}
     </ChannelConnectionShell>
   );
@@ -81,6 +82,7 @@ function ConnectSession({
   action: ReturnType<typeof useChannelConnectLink>["action"];
   refresh: () => Promise<unknown>;
 }) {
+  useUiTranslation();
   // Keep the wizard mounted after completion so its one-time secret survives status refreshes.
   const [showSetup, setShowSetup] = useState(
     initial.status === "pending" && !initial.bot_id,
@@ -95,15 +97,12 @@ function ConnectSession({
   return (
     <div className="space-y-4">
       {current.requested_by && (
-        <p className="text-13 text-muted-foreground">
-          Requested by {current.requested_by}
+        <p className="text-13 text-muted-foreground">{translateUi("Requested by ")}{current.requested_by}
         </p>
       )}
       {action.error && <ErrorBanner message={action.error.message} />}
       {current.telegram_requires_original_actor && !terminal ? (
-        <p role="status" className="text-14">
-          Another administrator started this Telegram setup. Continue using the NyxID account that started it. This page will update when setup finishes.
-        </p>
+        <p role="status" className="text-14">{translateUi("Another administrator started this Telegram setup. Continue using the NyxID account that started it. This page will update when setup finishes.")}</p>
       ) : showSetup &&
       !acknowledged &&
       (hasSetupResult || !["cancelled", "expired"].includes(current.status)) ? (
@@ -127,28 +126,24 @@ function ConnectSession({
         <div className="space-y-3">
           <p role="status" className="text-14">
             {current.status === "completed"
-              ? `${current.label} is connected.`
+              ? translateUi("{{value1}} is connected.", { value1: current.label })
               : current.status === "pending"
-                ? "Your bot was saved. Retry setup to finish connecting it."
-                : `This connection request is ${current.status}.`}
+                ? translateUi("Your bot was saved. Retry setup to finish connecting it.")
+                : translateUi("This connection request is {{value1}}.", { value1: current.status })}
           </p>
           {!terminal && (
             <Button
               variant="primary"
               isLoading={action.isPending}
               onClick={() => action.mutate("retry")}
-            >
-              Retry setup
-            </Button>
+            >{translateUi("Retry setup")}</Button>
           )}
           {terminal && current.callback_url && (
             <Button
               variant="primary"
               className="w-full"
               onClick={continueToApp}
-            >
-              Continue
-            </Button>
+            >{translateUi("Continue")}</Button>
           )}
           {current.bot_id && (
             <Button
@@ -158,9 +153,7 @@ function ConnectSession({
                   `/channel-bots/${encodeURIComponent(current.bot_id!)}`,
                 )
               }
-            >
-              Open channel bot
-            </Button>
+            >{translateUi("Open channel bot")}</Button>
           )}
         </div>
       )}
@@ -171,9 +164,7 @@ function ConnectSession({
             setShowSetup(false);
             action.mutate("retry");
           }}
-        >
-          Retry saved setup
-        </Button>
+        >{translateUi("Retry saved setup")}</Button>
       )}
       {!terminal &&
         !current.bot_id &&
@@ -183,9 +174,7 @@ function ConnectSession({
             variant="ghost"
             isLoading={action.isPending}
             onClick={() => action.mutate("decline")}
-          >
-            Decline request
-          </Button>
+          >{translateUi("Decline request")}</Button>
         )}
     </div>
   );

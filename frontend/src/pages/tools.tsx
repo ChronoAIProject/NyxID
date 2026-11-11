@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { operationPrice, toolPrice } from "@/lib/tools";
 import { useApiKeys } from "@/hooks/use-api-keys";
 import {
@@ -21,6 +23,7 @@ import { ErrorBanner } from "@/components/shared/error-banner";
 import { ServiceIcon } from "@/components/service-icon";
 
 export function ToolsPage() {
+  useUiTranslation();
   const { data: tools = [], isLoading, error, refetch } = useTools();
   const { data: topics = [] } = useToolTopics();
   const [search, setSearch] = useState("");
@@ -40,12 +43,12 @@ export function ToolsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Tools"
-        description="NyxID-provided operations for your AIs. Your own connections stay in AI Services."
+        title={translateUi("Tools")}
+        description={translateUi("NyxID-provided operations for your AIs. Your own connections stay in AI Services.")}
       />
       <Input
-        aria-label="Search tools"
-        placeholder="Search tools, providers…"
+        aria-label={translateUi("Search tools")}
+        placeholder={translateUi("Search tools, providers…")}
         value={search}
         onChange={(e) => setSearch(e.target.value)}
       />
@@ -53,9 +56,7 @@ export function ToolsPage() {
         <Button
           variant={topic === "" ? "secondary" : "ghost"}
           onClick={() => setTopic("")}
-        >
-          All topics
-        </Button>
+        >{translateUi("All topics")}</Button>
         {topics
           .filter((t) => tools.some((tool) => tool.topics.includes(t.slug)))
           .map((t) => (
@@ -71,12 +72,9 @@ export function ToolsPage() {
       {isLoading ? (
         <Skeleton className="h-48" />
       ) : error ? (
-        <ErrorBanner message="Unable to load tools" onRetry={refetch} />
+        <ErrorBanner message={translateUi("Unable to load tools")} onRetry={refetch} />
       ) : filtered.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-border p-8 text-14 text-muted-foreground">
-          No tools match. Tools use NyxID-provided access; add your own API
-          connections in AI Services.
-        </div>
+        <div className="rounded-xl border border-dashed border-border p-8 text-14 text-muted-foreground">{translateUi("No tools match. Tools use NyxID-provided access; add your own API connections in AI Services.")}</div>
       ) : (
         Array.from(groups, ([supplier, rows]) => (
           <section key={supplier} className="space-y-3">
@@ -93,6 +91,7 @@ export function ToolsPage() {
   );
 }
 export function ToolCard({ tool }: { tool: ToolOffering }) {
+  useUiTranslation();
   const [grantsOpen, setGrantsOpen] = useState(false);
   const operationPriced =
     tool.pricing.platform !== "free" &&
@@ -107,7 +106,7 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
             {tool.supplier ?? tool.provider_label}
           </p>
         </div>
-        <Badge variant="secondary">Provided by NyxID</Badge>
+        <Badge variant="secondary">{translateUi("Provided by NyxID")}</Badge>
         <p className="text-14 text-muted-foreground">{tool.description}</p>
         <div className="flex flex-wrap gap-1">
           {tool.topics.map((t) => (
@@ -119,13 +118,12 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
         <p className="type-card-title">{toolPrice(tool)}</p>
         <p className="text-13 text-text-tertiary">
           {tool.limits
-            ? `${tool.limits.rate_limit_per_second} requests / second · Burst ${tool.limits.burst}`
-            : "No per-user rate limit"}
+            ? translateUi("{{value1}} requests / second · Burst {{value2}}", { value1: tool.limits.rate_limit_per_second, value2: tool.limits.burst })
+            : translateUi("No per-user rate limit")}
         </p>
         <details>
           <summary className="cursor-pointer text-14">
-            {tool.operations.length} operations
-          </summary>
+            {tool.operations.length}{translateUi(" operations")}</summary>
           <div className="mt-3 space-y-3">
             {tool.operations.map((op) => (
               <div
@@ -141,13 +139,12 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
                 </code>
                 {operationPriced && (
                   <p className="text-13 text-text-tertiary">
-                    {operationPrice(tool, op.name)} credits / request
-                  </p>
+                    {operationPrice(tool, op.name)}{translateUi(" credits / request")}</p>
                 )}
                 <div>
                   {op.risk && (
                     <Badge variant={op.risk === "read" ? "success" : "warning"}>
-                      {op.risk === "read" ? "Read-only" : "Changes data"}
+                      {op.risk === "read" ? translateUi("Read-only") : translateUi("Changes data")}
                     </Badge>
                   )}
                 </div>
@@ -156,7 +153,7 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
           </div>
         </details>
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => setGrantsOpen(true)}>Use with my AIs</Button>
+          <Button onClick={() => setGrantsOpen(true)}>{translateUi("Use with my AIs")}</Button>
           <ToolGrantsDialog
             tool={tool}
             open={grantsOpen}
@@ -171,9 +168,7 @@ export function ToolCard({ tool }: { tool: ToolOffering }) {
                   action: "add-service",
                   slug: tool.slug,
                 }}
-              >
-                Use my own key
-              </Link>
+              >{translateUi("Use my own key")}</Link>
             </Button>
           )}
         </div>
@@ -191,15 +186,14 @@ function ToolGrantsDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  useUiTranslation();
   const { data: keys = [], isLoading } = useApiKeys();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Grant {tool.name} to an AI</DialogTitle>
-          <DialogDescription>
-            Choose an agent key to review its grants with this tool selected.
-          </DialogDescription>
+          <DialogTitle>{translateUi("Grant ")}{tool.name}{translateUi(" to an AI")}</DialogTitle>
+          <DialogDescription>{translateUi("Choose an agent key to review its grants with this tool selected.")}</DialogDescription>
         </DialogHeader>
         {isLoading ? (
           <Skeleton className="h-24" />
@@ -222,9 +216,7 @@ function ToolGrantsDialog({
           <Link
             to="/keys"
             search={{ tab: "nyxid", action: "create-key", service: tool.id }}
-          >
-            Create an agent key
-          </Link>
+          >{translateUi("Create an agent key")}</Link>
         </Button>
       </DialogContent>
     </Dialog>

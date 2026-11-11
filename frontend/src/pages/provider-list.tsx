@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useWatch } from "react-hook-form";
@@ -58,13 +61,14 @@ import { DishAntennaIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 const PROVIDER_TYPE_LABELS: Readonly<Record<string, string>> = {
-  oauth2: "OAuth 2.0",
-  api_key: "API Key",
-  device_code: "Device Code",
-  telegram_widget: "Telegram Widget",
+  get oauth2() { return translateUi("OAuth 2.0"); },
+  get api_key() { return translateUi("API Key"); },
+  get device_code() { return translateUi("Device Code"); },
+  get telegram_widget() { return translateUi("Telegram Widget"); },
 };
 
 export function ProviderListPage() {
+  useUiTranslation();
   const { data: providers, isLoading } = useProviders();
   const createMutation = useCreateProvider();
   const navigate = useNavigate();
@@ -112,7 +116,7 @@ export function ProviderListPage() {
           typeof createMutation.mutateAsync
         >[0],
       );
-      toast.success("Provider created successfully");
+      toast.success(translateUi("Provider created successfully"));
       setCreateOpen(false);
       form.reset();
       void navigate({ to: "/providers/$providerId", params: { providerId: created.id } });
@@ -120,7 +124,7 @@ export function ProviderListPage() {
       if (error instanceof ApiError) {
         form.setError("root", { message: error.message });
       } else {
-        toast.error("Failed to create provider");
+        toast.error(translateErrorMessage("Failed to create provider"));
       }
     }
   }
@@ -129,22 +133,15 @@ export function ProviderListPage() {
     <div className="space-y-8">
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h2 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-            Manage Providers
-          </h2>
-          <p className="text-14 text-muted-foreground">
-            Create and manage OAuth, Telegram, device code, and API key
-            providers.
-          </p>
+          <h2 className="type-page-title tracking-tight" style={{ letterSpacing: "-0.03em" }}>{translateUi("Manage Providers")}</h2>
+          <p className="text-14 text-muted-foreground">{translateUi("Create and manage OAuth, Telegram, device code, and API key providers.")}</p>
         </div>
-        <AddCtaButton label="Add Provider" onClick={() => setCreateOpen(true)} />
+        <AddCtaButton label={translateUi("Add Provider")} onClick={() => setCreateOpen(true)} />
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Add Provider</DialogTitle>
-              <DialogDescription>
-                Register a new external provider for user connections.
-              </DialogDescription>
+              <DialogTitle>{translateUi("Add Provider")}</DialogTitle>
+              <DialogDescription>{translateUi("Register a new external provider for user connections.")}</DialogDescription>
             </DialogHeader>
 
             <Form {...form}>
@@ -163,9 +160,9 @@ export function ProviderListPage() {
                   name="name"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Name</FormLabel>
+                      <FormLabel>{translateUi("Name")}</FormLabel>
                       <FormControl>
-                        <Input placeholder="GitHub" {...field} />
+                        <Input placeholder={translateUi("GitHub")} {...field} />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -177,13 +174,11 @@ export function ProviderListPage() {
                   name="slug"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Slug</FormLabel>
+                      <FormLabel>{translateUi("Slug")}</FormLabel>
                       <FormControl>
-                        <Input placeholder="github" {...field} />
+                        <Input placeholder={translateUi("github")} {...field} />
                       </FormControl>
-                      <p className="text-13 text-muted-foreground">
-                        Lowercase letters, digits, and hyphens only.
-                      </p>
+                      <p className="text-13 text-muted-foreground">{translateUi("Lowercase letters, digits, and hyphens only.")}</p>
                       <FormMessage />
                     </FormItem>
                   )}
@@ -194,11 +189,11 @@ export function ProviderListPage() {
                   name="description"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Description</FormLabel>
+                      <FormLabel>{translateUi("Description")}</FormLabel>
                       <FormControl>
                         <textarea
                           className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
-                          placeholder="Optional description"
+                          placeholder={translateUi("Optional description")}
                           {...field}
                         />
                       </FormControl>
@@ -212,7 +207,7 @@ export function ProviderListPage() {
                   name="provider_type"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Provider Type</FormLabel>
+                      <FormLabel>{translateUi("Provider Type")}</FormLabel>
                       <Select
                         value={field.value}
                         onValueChange={(nextValue) => {
@@ -249,7 +244,7 @@ export function ProviderListPage() {
                       >
                         <FormControl>
                           <SelectTrigger>
-                            <SelectValue placeholder="Select provider type" />
+                            <SelectValue placeholder={translateUi("Select provider type")} />
                           </SelectTrigger>
                         </FormControl>
                         <SelectContent>
@@ -272,7 +267,7 @@ export function ProviderListPage() {
                     name="credential_mode"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>Credential Mode</FormLabel>
+                        <FormLabel>{translateUi("Credential Mode")}</FormLabel>
                         <Select
                           value={field.value ?? "admin"}
                           onValueChange={field.onChange}
@@ -283,15 +278,12 @@ export function ProviderListPage() {
                             </SelectTrigger>
                           </FormControl>
                           <SelectContent>
-                            <SelectItem value="admin">Admin Only</SelectItem>
-                            <SelectItem value="user">User Provided</SelectItem>
-                            <SelectItem value="both">Admin or User</SelectItem>
+                            <SelectItem value="admin">{translateUi("Admin Only")}</SelectItem>
+                            <SelectItem value="user">{translateUi("User Provided")}</SelectItem>
+                            <SelectItem value="both">{translateUi("Admin or User")}</SelectItem>
                           </SelectContent>
                         </Select>
-                        <p className="text-13 text-muted-foreground">
-                          Choose whether users rely on admin-managed OAuth apps,
-                          bring their own, or can use either.
-                        </p>
+                        <p className="text-13 text-muted-foreground">{translateUi("Choose whether users rely on admin-managed OAuth apps, bring their own, or can use either.")}</p>
                         <FormMessage />
                       </FormItem>
                     )}
@@ -303,7 +295,7 @@ export function ProviderListPage() {
                   name="icon_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Icon URL</FormLabel>
+                      <FormLabel>{translateUi("Icon URL")}</FormLabel>
                       <FormControl>
                         <Input
                           placeholder="https://example.com/icon.svg"
@@ -320,7 +312,7 @@ export function ProviderListPage() {
                   name="documentation_url"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>Documentation URL</FormLabel>
+                      <FormLabel>{translateUi("Documentation URL")}</FormLabel>
                       <FormControl>
                         <Input
                           placeholder="https://docs.example.com"
@@ -335,16 +327,14 @@ export function ProviderListPage() {
                 {watchedProviderType === "oauth2" && (
                   <>
                     <Separator />
-                    <h4 className="type-card-title">
-                      OAuth 2.0 Configuration
-                    </h4>
+                    <h4 className="type-card-title">{translateUi("OAuth 2.0 Configuration")}</h4>
 
                     <FormField
                       control={form.control}
                       name="authorization_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Authorization URL</FormLabel>
+                          <FormLabel>{translateUi("Authorization URL")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://provider.com/oauth/authorize"
@@ -361,7 +351,7 @@ export function ProviderListPage() {
                       name="token_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Token URL</FormLabel>
+                          <FormLabel>{translateUi("Token URL")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://provider.com/oauth/token"
@@ -378,16 +368,14 @@ export function ProviderListPage() {
                       name="revocation_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Revocation URL</FormLabel>
+                          <FormLabel>{translateUi("Revocation URL")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://provider.com/oauth/revoke"
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-13 text-muted-foreground">
-                            Optional. Used to revoke tokens on disconnect.
-                          </p>
+                          <p className="text-13 text-muted-foreground">{translateUi("Optional. Used to revoke tokens on disconnect.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -398,16 +386,14 @@ export function ProviderListPage() {
                       name="default_scopes"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Default Scopes</FormLabel>
+                          <FormLabel>{translateUi("Default Scopes")}</FormLabel>
                           <FormControl>
                             <Input
-                              placeholder="read, write, user:email"
+                              placeholder={translateUi("read, write, user:email")}
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-13 text-muted-foreground">
-                            Comma-separated list of scopes.
-                          </p>
+                          <p className="text-13 text-muted-foreground">{translateUi("Comma-separated list of scopes.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -418,14 +404,14 @@ export function ProviderListPage() {
                       name="client_id"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Client ID</FormLabel>
+                          <FormLabel>{translateUi("Client ID")}</FormLabel>
                           <FormControl>
-                            <Input placeholder="OAuth client ID" {...field} />
+                            <Input placeholder={translateUi("OAuth client ID")} {...field} />
                           </FormControl>
                           <p className="text-13 text-muted-foreground">
                             {watchedCredentialMode === "admin"
-                              ? "Required in admin mode."
-                              : "Optional. Leave blank to require users to supply their own OAuth app credentials."}
+                              ? translateUi("Required in admin mode.")
+                              : translateUi("Optional. Leave blank to require users to supply their own OAuth app credentials.")}
                           </p>
                           <FormMessage />
                         </FormItem>
@@ -437,18 +423,18 @@ export function ProviderListPage() {
                       name="client_secret"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Client Secret</FormLabel>
+                          <FormLabel>{translateUi("Client Secret")}</FormLabel>
                           <FormControl>
                             <Input
                               type="password"
-                              placeholder="OAuth client secret"
+                              placeholder={translateUi("OAuth client secret")}
                               {...field}
                             />
                           </FormControl>
                           <p className="text-13 text-muted-foreground">
                             {watchedCredentialMode === "admin"
-                              ? "Required for OAuth 2.0 admin credentials."
-                              : "Optional. Only set this when configuring an admin fallback OAuth app."}
+                              ? translateUi("Required for OAuth 2.0 admin credentials.")
+                              : translateUi("Optional. Only set this when configuring an admin fallback OAuth app.")}
                           </p>
                           <FormMessage />
                         </FormItem>
@@ -461,10 +447,8 @@ export function ProviderListPage() {
                       render={({ field }) => (
                         <FormItem className="flex items-center justify-between rounded-lg border p-3">
                           <div className="space-y-0.5">
-                            <FormLabel>Supports PKCE</FormLabel>
-                            <p className="text-13 text-muted-foreground">
-                              Enable Proof Key for Code Exchange.
-                            </p>
+                            <FormLabel>{translateUi("Supports PKCE")}</FormLabel>
+                            <p className="text-13 text-muted-foreground">{translateUi("Enable Proof Key for Code Exchange.")}</p>
                           </div>
                           <FormControl>
                             <Switch
@@ -481,13 +465,8 @@ export function ProviderListPage() {
                       render={({ field }) => (
                         <FormItem className="flex items-center justify-between rounded-lg border p-3">
                           <div className="space-y-0.5">
-                            <FormLabel>Authorization nonce required</FormLabel>
-                            <p className="text-13 text-muted-foreground">
-                              Generate a fresh nonce for each hosted OAuth
-                              authorization attempt.
-                              Enable only when the provider requires it, after
-                              upgrading all backend replicas.
-                            </p>
+                            <FormLabel>{translateUi("Authorization nonce required")}</FormLabel>
+                            <p className="text-13 text-muted-foreground">{translateUi("Generate a fresh nonce for each hosted OAuth authorization attempt. Enable only when the provider requires it, after upgrading all backend replicas.")}</p>
                           </div>
                           <FormControl>
                             <Switch
@@ -504,25 +483,21 @@ export function ProviderListPage() {
                 {watchedProviderType === "device_code" && (
                   <>
                     <Separator />
-                    <h4 className="type-card-title">
-                      Device Code Configuration (RFC 8628)
-                    </h4>
+                    <h4 className="type-card-title">{translateUi("Device Code Configuration (RFC 8628)")}</h4>
 
                     <FormField
                       control={form.control}
                       name="device_code_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Device Code URL</FormLabel>
+                          <FormLabel>{translateUi("Device Code URL")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://auth.openai.com/deviceauth/usercode"
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-13 text-muted-foreground">
-                            Endpoint to request a device code (RFC 8628 step 1).
-                          </p>
+                          <p className="text-13 text-muted-foreground">{translateUi("Endpoint to request a device code (RFC 8628 step 1).")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -533,16 +508,14 @@ export function ProviderListPage() {
                       name="device_token_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Device Token URL</FormLabel>
+                          <FormLabel>{translateUi("Device Token URL")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://auth.openai.com/deviceauth/token"
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-13 text-muted-foreground">
-                            Endpoint to poll for token (RFC 8628 step 3).
-                          </p>
+                          <p className="text-13 text-muted-foreground">{translateUi("Endpoint to poll for token (RFC 8628 step 3).")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -553,7 +526,7 @@ export function ProviderListPage() {
                       name="authorization_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Authorization URL (fallback)</FormLabel>
+                          <FormLabel>{translateUi("Authorization URL (fallback)")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://auth.openai.com/oauth/authorize"
@@ -570,7 +543,7 @@ export function ProviderListPage() {
                       name="token_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Token URL (fallback)</FormLabel>
+                          <FormLabel>{translateUi("Token URL (fallback)")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://auth.openai.com/oauth/token"
@@ -587,16 +560,14 @@ export function ProviderListPage() {
                       name="default_scopes"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Default Scopes</FormLabel>
+                          <FormLabel>{translateUi("Default Scopes")}</FormLabel>
                           <FormControl>
                             <Input
-                              placeholder="openid, profile, offline_access"
+                              placeholder={translateUi("openid, profile, offline_access")}
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-13 text-muted-foreground">
-                            Comma-separated list of scopes.
-                          </p>
+                          <p className="text-13 text-muted-foreground">{translateUi("Comma-separated list of scopes.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -607,17 +578,17 @@ export function ProviderListPage() {
                       name="client_id"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Client ID</FormLabel>
+                          <FormLabel>{translateUi("Client ID")}</FormLabel>
                           <FormControl>
                             <Input
-                              placeholder="app_EMoamEEZ73f0CkXaXp7hrann"
+                              placeholder={translateUi("app_EMoamEEZ73f0CkXaXp7hrann")}
                               {...field}
                             />
                           </FormControl>
                           <p className="text-13 text-muted-foreground">
                             {watchedCredentialMode === "admin"
-                              ? "Required in admin mode."
-                              : "Optional. Needed only when configuring an admin fallback client."}
+                              ? translateUi("Required in admin mode.")
+                              : translateUi("Optional. Needed only when configuring an admin fallback client.")}
                           </p>
                           <FormMessage />
                         </FormItem>
@@ -629,17 +600,15 @@ export function ProviderListPage() {
                       name="client_secret"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Client Secret (optional)</FormLabel>
+                          <FormLabel>{translateUi("Client Secret (optional)")}</FormLabel>
                           <FormControl>
                             <Input
                               type="password"
-                              placeholder="OAuth client secret (if required)"
+                              placeholder={translateUi("OAuth client secret (if required)")}
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-13 text-muted-foreground">
-                            Optional for public OAuth clients.
-                          </p>
+                          <p className="text-13 text-muted-foreground">{translateUi("Optional for public OAuth clients.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -650,23 +619,18 @@ export function ProviderListPage() {
                 {watchedProviderType === "telegram_widget" && (
                   <>
                     <Separator />
-                    <h4 className="type-card-title">
-                      Telegram Widget Configuration
-                    </h4>
+                    <h4 className="type-card-title">{translateUi("Telegram Widget Configuration")}</h4>
 
                     <FormField
                       control={form.control}
                       name="client_id_param_name"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Bot Username</FormLabel>
+                          <FormLabel>{translateUi("Bot Username")}</FormLabel>
                           <FormControl>
-                            <Input placeholder="NyxIdBot" {...field} />
+                            <Input placeholder={translateUi("NyxIdBot")} {...field} />
                           </FormControl>
-                          <p className="text-13 text-muted-foreground">
-                            Enter the BotFather username. A leading
-                            <span> @</span> is optional.
-                          </p>
+                          <p className="text-13 text-muted-foreground">{translateUi("Enter the BotFather username. A leading")}<span> @</span>{translateUi(" is optional.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -677,18 +641,15 @@ export function ProviderListPage() {
                       name="client_secret"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>Bot Token</FormLabel>
+                          <FormLabel>{translateUi("Bot Token")}</FormLabel>
                           <FormControl>
                             <Input
                               type="password"
-                              placeholder="123456:ABC-DEF1234567890"
+                              placeholder={translateUi("123456:ABC-DEF1234567890")}
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-13 text-muted-foreground">
-                            BotFather token used to verify Telegram Login Widget
-                            callbacks.
-                          </p>
+                          <p className="text-13 text-muted-foreground">{translateUi("BotFather token used to verify Telegram Login Widget callbacks.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -699,20 +660,18 @@ export function ProviderListPage() {
                 {watchedProviderType === "api_key" && (
                   <>
                     <Separator />
-                    <h4 className="type-card-title">
-                      API Key Configuration
-                    </h4>
+                    <h4 className="type-card-title">{translateUi("API Key Configuration")}</h4>
 
                     <FormField
                       control={form.control}
                       name="api_key_instructions"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>API Key Instructions</FormLabel>
+                          <FormLabel>{translateUi("API Key Instructions")}</FormLabel>
                           <FormControl>
                             <textarea
                               className="flex min-h-[60px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-14 placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-input-focus disabled:cursor-not-allowed disabled:opacity-50"
-                              placeholder="Instructions for users to obtain an API key"
+                              placeholder={translateUi("Instructions for users to obtain an API key")}
                               {...field}
                             />
                           </FormControl>
@@ -726,16 +685,14 @@ export function ProviderListPage() {
                       name="api_key_url"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>API Key URL</FormLabel>
+                          <FormLabel>{translateUi("API Key URL")}</FormLabel>
                           <FormControl>
                             <Input
                               placeholder="https://provider.com/api-keys"
                               {...field}
                             />
                           </FormControl>
-                          <p className="text-13 text-muted-foreground">
-                            Link where users can generate an API key.
-                          </p>
+                          <p className="text-13 text-muted-foreground">{translateUi("Link where users can generate an API key.")}</p>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -748,12 +705,8 @@ export function ProviderListPage() {
                     type="button"
                     variant="outline"
                     onClick={() => setCreateOpen(false)}
-                  >
-                    Cancel
-                  </Button>
-                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!form.formState.isValid || createMutation.isPending}>
-                    Create Provider
-                  </Button>
+                  >{translateUi("Cancel")}</Button>
+                  <Button variant="primary" type="submit" isLoading={createMutation.isPending} disabled={!form.formState.isValid || createMutation.isPending}>{translateUi("Create Provider")}</Button>
                 </DialogFooter>
               </form>
             </Form>
@@ -771,10 +724,8 @@ export function ProviderListPage() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <DishAntennaIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="type-row-title text-muted-foreground">No Providers</p>
-            <p className="text-13 text-muted-foreground">
-              Add a provider to get started.
-            </p>
+            <p className="type-row-title text-muted-foreground">{translateUi("No Providers")}</p>
+            <p className="text-13 text-muted-foreground">{translateUi("Add a provider to get started.")}</p>
           </div>
         </div>
       ) : (
@@ -823,7 +774,7 @@ export function ProviderListPage() {
                       <Badge
                         variant={provider.is_active ? "success" : "secondary"}
                       >
-                        {provider.is_active ? "Active" : "Inactive"}
+                        {provider.is_active ? translateUi("Active") : translateUi("Inactive")}
                       </Badge>
                     </div>
                     <span className="text-13 text-muted-foreground">

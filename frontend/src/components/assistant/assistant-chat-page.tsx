@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { NyxAgentRequestLinks } from "./nyxagent-request-links";
 import { CmaSessionIndicator } from "./cma-session-card";
 import { useConnectionDown } from "@/hooks/use-connection-down";
@@ -119,7 +122,8 @@ function sidebarConversation(
   };
 }
 
-export function AevatarAssistantMessageList({ session, bottomInset, footer, notice, projectionVersion, emptyDescription }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly footer?: React.ReactNode; readonly notice?: React.ReactNode; readonly projectionVersion?: string; readonly emptyDescription?: React.ReactNode }) { return <ChatMessageList session={session} bottomInset={bottomInset} footer={footer} notice={notice} projectionVersion={projectionVersion} emptyDescription={emptyDescription} />; }
+export function AevatarAssistantMessageList({ session, bottomInset, footer, notice, projectionVersion, emptyDescription }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly footer?: React.ReactNode; readonly notice?: React.ReactNode; readonly projectionVersion?: string; readonly emptyDescription?: React.ReactNode }) {
+  useUiTranslation(); return <ChatMessageList session={session} bottomInset={bottomInset} footer={footer} notice={notice} projectionVersion={projectionVersion} emptyDescription={emptyDescription} />; }
 /** How the NyxAgent thread page renders an assistant reply: the entry with
  * author header and feedback controls, and Retry for a failed reply. */
 export function NyxAgentAssistantEntry({
@@ -135,6 +139,7 @@ export function NyxAgentAssistantEntry({
   readonly checkRecovery: (messageId: string) => Promise<unknown>;
   readonly selectedDecisionId?: string;
 }) {
+  useUiTranslation();
   return (
     <ChatMessageEntry
       message={message}
@@ -158,6 +163,7 @@ export function ChannelUserEntry({
   readonly message: import("@/lib/assistant/chat-types").ChatMessage;
   readonly platform: string;
 }) {
+  useUiTranslation();
   return (
     <div className="flex flex-col items-end gap-1">
       <ChannelBadge platform={platform} />
@@ -166,9 +172,11 @@ export function ChannelUserEntry({
   );
 }
 
-export function NyxAgentThreadMessageList({ session, bottomInset, renderMessage, projectionVersion, notice, emptyDescription, focusMessageId }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly renderMessage?: (message: import("@/lib/assistant/chat-types").ChatMessage) => React.ReactNode; readonly projectionVersion?: string; readonly notice?: React.ReactNode; readonly emptyDescription?: React.ReactNode; readonly focusMessageId?: string }) { return <ChatMessageList session={session} bottomInset={bottomInset} feedbackEnabled renderMessage={renderMessage} projectionVersion={projectionVersion} notice={notice} emptyDescription={emptyDescription} focusMessageId={focusMessageId} />; }
+export function NyxAgentThreadMessageList({ session, bottomInset, renderMessage, projectionVersion, notice, emptyDescription, focusMessageId }: { readonly session: ChatSessionState | null; readonly bottomInset: number; readonly renderMessage?: (message: import("@/lib/assistant/chat-types").ChatMessage) => React.ReactNode; readonly projectionVersion?: string; readonly notice?: React.ReactNode; readonly emptyDescription?: React.ReactNode; readonly focusMessageId?: string }) {
+  useUiTranslation(); return <ChatMessageList session={session} bottomInset={bottomInset} feedbackEnabled renderMessage={renderMessage} projectionVersion={projectionVersion} notice={notice} emptyDescription={emptyDescription} focusMessageId={focusMessageId} />; }
 
 export function AssistantChatPage() {
+  useUiTranslation();
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
   const selectedConversationId = useRouterState({
@@ -274,7 +282,7 @@ export function AssistantChatPage() {
         });
       }
     } catch (error) {
-      toast.error("Could not delete the chat", {
+      toast.error(translateErrorMessage("Could not delete the chat"), {
         description:
           error instanceof Error
             ? error.message
@@ -290,7 +298,7 @@ export function AssistantChatPage() {
       if (actorActive) await chat.steer(content);
       else await chat.send(content);
     } catch (error) {
-      toast.error("The message was not delivered", {
+      toast.error(translateErrorMessage("The message was not delivered"), {
         description:
           error instanceof Error
             ? error.message
@@ -336,7 +344,7 @@ export function AssistantChatPage() {
     : chat.detailState.status === "missing"
       ? "This chat has no saved transcript yet. You can keep chatting."
       : chat.detailState.status === "error"
-        ? `Could not load earlier messages. ${chat.detailState.message}`
+        ? translateUi("Could not load earlier messages. {{message}}", { message: chat.detailState.message })
         : undefined;
 
   return (
@@ -360,9 +368,7 @@ export function AssistantChatPage() {
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         {chat.detailState.status === "loading" &&
         !(chat.session?.messages.length ?? 0) ? (
-          <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">
-            Loading conversation...
-          </div>
+          <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">{translateUi("Loading conversation...")}</div>
         ) : (
           <AssistantLinkModalHost>
             <ChatMessageList
@@ -393,6 +399,7 @@ export function AssistantChatPage() {
 }
 
 export function DirectAssistantChatPage() {
+  useUiTranslation();
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
   const selectedConversationId = useRouterState({
@@ -469,7 +476,7 @@ export function DirectAssistantChatPage() {
       await chat.deleteConversation(conversationId);
       if (selectedId === conversationId) createNewChat();
     } catch (error) {
-      toast.error("Could not delete the chat", {
+      toast.error(translateErrorMessage("Could not delete the chat"), {
         description:
           error instanceof Error
             ? error.message
@@ -484,7 +491,7 @@ export function DirectAssistantChatPage() {
     try {
       await chat.send(content);
     } catch (error) {
-      toast.error("The message was not delivered", {
+      toast.error(translateErrorMessage("The message was not delivered"), {
         description:
           error instanceof Error
             ? error.message
@@ -554,6 +561,7 @@ export function DirectAssistantChatPage() {
  * `?agent=`), or the NyxBot home when none of those are set.
  */
 export function NyxAgentAssistantChatPage() {
+  useUiTranslation();
   const search = useRouterState({
     select: (state) => parseAssistantSearch(state.location.search as Record<string, unknown>),
   });
@@ -564,6 +572,7 @@ export function NyxAgentAssistantChatPage() {
 }
 
 function NyxAgentThreadPage() {
+  useUiTranslation();
   const voiceFlagEnabled = useFeature("assistant:voice");
   const nyxBotSettings = useNyxBotSettings();
   const [voiceSettingsOpen, setVoiceSettingsOpen] = useState(false);
@@ -770,8 +779,8 @@ function NyxAgentThreadPage() {
       // already have reconciled them by the time this catch runs.
       if (isAdmittedSendError(error)) return;
       setRequestError({ scope: errorScope, message });
-      toast.error("Could not retry your message", {
-        description: assistantErrorSummary(message),
+      toast.error(translateErrorMessage("Could not retry your message"), {
+        description: translateErrorMessage(assistantErrorSummary(message)),
       });
     }
   }, [chat, selectedId, errorScope]);
@@ -866,7 +875,7 @@ function NyxAgentThreadPage() {
           : "NyxBot is temporarily unavailable. Try again shortly.";
       setRequestError({ scope: sending.scope, message });
       toast.error(
-        "Could not send your message",
+        translateErrorMessage("Could not send your message"),
         {
           description: assistantErrorSummary(message),
         },
@@ -901,7 +910,7 @@ function NyxAgentThreadPage() {
   }, [replayPending, home, onboarding.data, consumeReplay]);
   function startNextStep(step: NextStep) {
     if (chat.isStreaming) {
-      toast.info("NyxBot is still replying", {
+      toast.info(translateUi("NyxBot is still replying"), {
         description: "Start this step once the current reply finishes.",
       });
       return;
@@ -1003,7 +1012,7 @@ function NyxAgentThreadPage() {
     lastReply?.status === "error"
       ? withAssistantTrace(
           lastReply.error ??
-            "NyxBot could not complete this turn. Check which actions completed before trying again.",
+            translateUi("NyxBot could not complete this turn. Check which actions completed before trying again."),
           lastReply.turnId ?? null,
         )
       : undefined;
@@ -1066,7 +1075,7 @@ function NyxAgentThreadPage() {
       cmaOperations={chat.session.cmaOperations}
       asidePercent={machinePercent}
       onAsidePercentChange={setMachinePercent}
-      title={showHome ? "Home" : chat.session.title}
+      title={showHome ? translateUi("Home") : chat.session.title}
       contentTitle={desktop}
       titleKey={selectedId}
       onRenameTitle={
@@ -1146,9 +1155,7 @@ function NyxAgentThreadPage() {
         ) : null}
         {touring ? <GuidedTour onClose={() => setTouring(false)} /> : null}
         {chat.beforeSeq && !showHome ? (
-          <Button variant="ghost" onClick={() => void chat.loadOlder()}>
-            Load earlier messages
-          </Button>
+          <Button variant="ghost" onClick={() => void chat.loadOlder()}>{translateUi("Load earlier messages")}</Button>
         ) : null}
         {showHome ? (
           <NyxBotHome
@@ -1174,9 +1181,7 @@ function NyxAgentThreadPage() {
             onReplayIntro={() => setIntro("account_menu")}
           />
         ) : chat.isLoading && !chat.session.messages.length ? (
-          <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">
-            Loading conversation...
-          </div>
+          <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">{translateUi("Loading conversation...")}</div>
         ) : (
           <AssistantLinkModalHost>
             {machineOpen && !wideScreen ? (
@@ -1204,9 +1209,7 @@ function NyxAgentThreadPage() {
                     <p
                       role="status"
                       className="ml-[30px] px-[7px] text-13 text-muted-foreground"
-                    >
-                      Continuing after your decision
-                    </p>
+                    >{translateUi("Continuing after your decision")}</p>
                   );
                 if (message.role === "event")
                   return <NyxBotEventNotice message={message} />;
@@ -1317,7 +1320,7 @@ function NyxAgentThreadPage() {
               }
               emptyDescription={
                 headerAgent?.kind === "specialist"
-                  ? `Talk to ${agentName} directly. It handles your request itself, remembers across its threads, and tells you if it needs access you have not granted.`
+                  ? translateUi("Talk to {{value1}} directly. It handles your request itself, remembers across its threads, and tells you if it needs access you have not granted.", { value1: agentName })
                   : "See your connected services, connect a new one, " +
                     "set up a channel bot, or check approvals."
               }
@@ -1326,7 +1329,7 @@ function NyxAgentThreadPage() {
         )}
         {voiceEnabled && !destroyed && !channelPlatform && <Dialog open={voiceSettingsOpen} onOpenChange={setVoiceSettingsOpen}>
           <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-xl" aria-describedby={undefined}>
-            <DialogTitle className="sr-only">Voice settings</DialogTitle>
+            <DialogTitle className="sr-only">{translateUi("Voice settings")}</DialogTitle>
             <VoicePanel key={`${user?.id}:voice-settings:${selectedId ?? "draft"}`} threadId={selectedId ?? ""}
               settingsOnly savedPreferences={nyxBotSettings.data?.voice}
               preferencesReady={!nyxBotSettings.isPending && !nyxBotSettings.isFetching}
@@ -1418,7 +1421,7 @@ function NyxAgentThreadPage() {
             }
             focusRequest={focusRequest}
             agentOverride={agentOverride}
-            placeholder={`Message ${agentName}`}
+            placeholder={translateUi("Message {{value1}}", { value1: agentName })}
             onSend={sendMessage}
             onStop={async () => {
               setRequestError(undefined);
@@ -1430,8 +1433,8 @@ function NyxAgentThreadPage() {
                     ? error.message
                     : "Could not stop NyxBot. Try again shortly.";
                 setRequestError({ scope: errorScope, message });
-                toast.error("Could not stop NyxBot", {
-                  description: assistantErrorSummary(message),
+                toast.error(translateErrorMessage("Could not stop NyxBot"), {
+                  description: translateErrorMessage(assistantErrorSummary(message)),
                 });
               }
             }}

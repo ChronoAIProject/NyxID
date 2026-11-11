@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { ArrowRight } from "lucide-react";
 import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { OnboardingIcon } from "./onboarding-icons";
@@ -19,9 +21,10 @@ export function NextStepCards({
   readonly disabled?: boolean;
   readonly className?: string;
 }) {
+  useUiTranslation();
   return (
     <ul
-      aria-label="Suggested next steps"
+      aria-label={translateUi("Suggested next steps")}
       className={cn("grid gap-2", className)}
     >
       {steps.map((step, index) => {

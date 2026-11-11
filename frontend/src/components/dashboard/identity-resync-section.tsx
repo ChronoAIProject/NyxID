@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
@@ -37,6 +40,7 @@ export function IdentityResyncSection({
     "id" | "name" | "can_resync_identity"
   >;
 }) {
+  useUiTranslation();
   const resync = useResyncServiceIdentity();
   const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState<ResyncIdentityResponse | null>(null);
@@ -48,13 +52,13 @@ export function IdentityResyncSection({
       onSuccess: (response) => {
         setResult(response);
         setConfirming(false);
-        toast.success(`Resync finished: ${resyncResultLabel(response)}`);
+        toast.success(translateUi("Resync finished: {{value1}}", { value1: resyncResultLabel(response) }));
       },
       onError: (error) => {
         toast.error(
-          error instanceof ApiError
+          translateErrorMessage(error instanceof ApiError
             ? error.message
-            : "Failed to resync connection identity",
+            : "Failed to resync connection identity"),
         );
       },
     });
@@ -64,26 +68,19 @@ export function IdentityResyncSection({
     <>
       <Separator />
       <DetailSection
-        title="Connection identity"
+        title={translateUi("Connection identity")}
         action={
           <Button
             variant="outline"
             size="sm"
             onClick={() => setConfirming(true)}
           >
-            <RefreshCw className="h-3 w-3" aria-hidden="true" />
-            Resync connection identity
-          </Button>
+            <RefreshCw className="h-3 w-3" aria-hidden="true" />{translateUi("Resync connection identity")}</Button>
         }
       >
-        <p className="px-4 py-2.5 text-14 text-muted-foreground">
-          Each connection to this service keeps its own copy of the
-          identity-forwarding settings. Editing the service updates connections
-          that still match it and skips customized ones. Resync makes every
-          connection match the service again.
-        </p>
+        <p className="px-4 py-2.5 text-14 text-muted-foreground">{translateUi("Each connection to this service keeps its own copy of the identity-forwarding settings. Editing the service updates connections that still match it and skips customized ones. Resync makes every connection match the service again.")}</p>
         {result && (
-          <DetailRow label="Last resync" value={resyncResultLabel(result)} />
+          <DetailRow label={translateUi("Last resync")} value={resyncResultLabel(result)} />
         )}
       </DetailSection>
 
@@ -100,27 +97,15 @@ export function IdentityResyncSection({
                 <AlertTriangle className="h-4 w-4" aria-hidden="true" />
               </span>
               <div className="space-y-1.5">
-                <DialogTitle>Resync connection identity?</DialogTitle>
-                <DialogDescription>
-                  This overwrites the identity-forwarding settings on every
-                  connection to {service.name}, including connections whose
-                  settings were customized, with this service&apos;s current
-                  settings.
-                </DialogDescription>
+                <DialogTitle>{translateUi("Resync connection identity?")}</DialogTitle>
+                <DialogDescription>{translateUi("This overwrites the identity-forwarding settings on every connection to ")}{service.name}{translateUi(", including connections whose settings were customized, with this service's current settings.")}</DialogDescription>
               </div>
             </div>
           </DialogHeader>
 
           <div className="space-y-2 text-14">
-            <p className="text-muted-foreground">
-              Overwritten: identity propagation mode and included user fields,
-              JWT audience, access-token forwarding, and delegation-token
-              injection and scope.
-            </p>
-            <p className="text-text-tertiary">
-              Connections that already match are left unchanged. Stored
-              credentials and sign-ins are not touched. This cannot be undone.
-            </p>
+            <p className="text-muted-foreground">{translateUi("Overwritten: identity propagation mode and included user fields, JWT audience, access-token forwarding, and delegation-token injection and scope.")}</p>
+            <p className="text-text-tertiary">{translateUi("Connections that already match are left unchanged. Stored credentials and sign-ins are not touched. This cannot be undone.")}</p>
           </div>
 
           <DialogFooter>
@@ -128,16 +113,12 @@ export function IdentityResyncSection({
               variant="outline"
               disabled={resync.isPending}
               onClick={() => setConfirming(false)}
-            >
-              Cancel
-            </Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               variant="primary"
               isLoading={resync.isPending}
               onClick={handleConfirm}
-            >
-              Resync
-            </Button>
+            >{translateUi("Resync")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

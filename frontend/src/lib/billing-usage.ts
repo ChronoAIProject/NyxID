@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { BillingUsageRow } from "@/schemas/billing";
 import { billingMetricLabel } from "@/lib/billing-units";
 import {
@@ -15,12 +16,12 @@ export type Dimension =
   | "layer"
   | "metric";
 export const dimensions: Record<Dimension, string> = {
-  service: "Service",
-  operation: "Operation",
-  model: "Model",
-  agent: "Agent",
-  layer: "Billing layer",
-  metric: "Metric",
+  get service() { return translateUi("Service"); },
+  get operation() { return translateUi("Operation"); },
+  get model() { return translateUi("Model"); },
+  get agent() { return translateUi("Agent"); },
+  get layer() { return translateUi("Billing layer"); },
+  get metric() { return translateUi("Metric"); },
 };
 export function groupRows(
   catalog: BillingCatalog,
@@ -76,9 +77,9 @@ export function groupRows(
 }
 export function layerName(layer: string) {
   return layer === "platform"
-    ? "Platform"
+    ? translateUi("Platform")
     : layer === "resale"
-      ? "Resale"
+      ? translateUi("Resale")
       : layer;
 }
 export function metricTotals(rows: BillingUsageRow[]) {
@@ -96,7 +97,7 @@ export function quantitySummary(rows: BillingUsageRow[]) {
             `${number(quantity)} ${billingMetricLabel(metric)}`,
         )
         .join(" · ")
-    : `${metrics.length} metered units · expand for quantities`;
+    : translateUi("{{count}} metered units · expand for quantities", { count: metrics.length });
 }
 
 export function usageStatus(rows: BillingUsageRow[]) {

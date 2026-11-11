@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { cn } from "@/lib/utils";
 import {
@@ -25,6 +26,7 @@ export function SidebarResizeHandle({
   /** Live width during a drag; `null` when the drag ends. */
   readonly onPreview: (width: number | null) => void;
 }) {
+  const { t } = useUiTranslation();
   const width = useThemeStore((s) => s.sidebarWidths[sidebar]);
   const setSidebarWidth = useThemeStore((s) => s.setSidebarWidth);
   const drag = useRef<{ startX: number; startWidth: number; current: number } | null>(null);
@@ -73,7 +75,7 @@ export function SidebarResizeHandle({
       aria-valuemax={SIDEBAR_WIDTH.max}
       aria-valuenow={width}
       tabIndex={0}
-      title="Drag to resize · double-click to reset"
+      title={t("Drag to resize · double-click to reset")}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={endDrag}

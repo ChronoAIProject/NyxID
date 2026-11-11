@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useAdminAuditLog } from "@/hooks/use-admin";
@@ -84,52 +87,52 @@ const COLUMN_PREFERENCES_KEY = "nyxid.table.admin-audit-log.columns.v1";
 const AUDIT_LOG_COLUMNS: readonly DataTableColumn<AdminAuditLogSortField>[] = [
   {
     field: "created_at",
-    label: "Created",
+    get label() { return translateUi("Created"); },
     defaultWidth: 190,
     cellClassName: "whitespace-nowrap text-14 text-muted-foreground",
   },
   {
     field: "event_type",
-    label: "Event",
+    get label() { return translateUi("Event"); },
     defaultWidth: 240,
   },
   {
     field: "service",
-    label: "Service",
+    get label() { return translateUi("Service"); },
     defaultWidth: 200,
   },
   {
     field: "api_key_name",
-    label: "Agent",
+    get label() { return translateUi("Agent"); },
     defaultWidth: 180,
   },
   {
     field: "status",
-    label: "Status",
+    get label() { return translateUi("Status"); },
     // Wide enough that the label still reads in full alongside the header's
     // drag, sort, and freeze controls.
     defaultWidth: 150,
   },
   {
     field: "user_id",
-    label: "User",
+    get label() { return translateUi("User"); },
     defaultWidth: 300,
   },
   {
     field: "api_key_id",
-    label: "API Key ID",
+    get label() { return translateUi("API Key ID"); },
     defaultWidth: 300,
     cellClassName: "font-mono text-13 text-muted-foreground",
   },
   {
     field: "ip_address",
-    label: "IP",
+    get label() { return translateUi("IP"); },
     defaultWidth: 150,
     cellClassName: "font-mono text-13",
   },
   {
     field: "user_agent",
-    label: "User Agent",
+    get label() { return translateUi("User Agent"); },
     defaultWidth: 280,
     cellClassName: "text-muted-foreground",
   },
@@ -209,6 +212,7 @@ function statusVariant(
 }
 
 export function AdminAuditLogPage() {
+  useUiTranslation();
   const navigate = useNavigate();
   const routeSearch = useSearch({
     strict: false,
@@ -464,12 +468,12 @@ export function AdminAuditLogPage() {
       nextLegacySearch = term;
     } else if (selectedExactParam) {
       if ([...term].length > 256) {
-        toast.error("Search values must be 256 characters or fewer");
+        toast.error(translateErrorMessage("Search values must be 256 characters or fewer"));
         return;
       }
       const exactTerm = selectedExactParam === "turn_id" ? normalizeAuditTurnId(term) : term;
       if (!exactTerm) {
-        toast.error("Enter a complete turn ID");
+        toast.error(translateErrorMessage("Enter a complete turn ID"));
         return;
       }
       exactPatch = { ...exactPatch, [selectedExactParam]: exactTerm };
@@ -488,7 +492,7 @@ export function AdminAuditLogPage() {
         nextValues,
       );
       if (!encoded) {
-        toast.error("Search supports up to 8 values per field and 32 overall");
+        toast.error(translateErrorMessage("Search supports up to 8 values per field and 32 overall"));
         return;
       }
       nextScopedSearch = encoded;
@@ -589,7 +593,7 @@ export function AdminAuditLogPage() {
             <span className="line-clamp-2 break-words type-row-title text-foreground" title={entry.event_type}>{entry.event_type}</span>
             {entry.event_type === "service_change_recorded" && typeof entry.event_data?.service_id === "string"
               && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(entry.event_data.service_id)
-              && <button type="button" className="mt-1 type-row-title text-primary-text underline underline-offset-2" onClick={() => void navigate({ to: "/keys/$keyId", params: { keyId: entry.event_data!.service_id as string } })}>View service history</button>}
+              && <button type="button" className="mt-1 type-row-title text-primary-text underline underline-offset-2" onClick={() => void navigate({ to: "/keys/$keyId", params: { keyId: entry.event_data!.service_id as string } })}>{translateUi("View service history")}</button>}
           </div>
         );
       case "service": {
@@ -693,13 +697,13 @@ export function AdminAuditLogPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Audit Log"
-        description="Search, filter, and sort audit activity across users and agent API keys."
+        title={translateUi("Audit Log")}
+        description={translateUi("Search, filter, and sort audit activity across users and agent API keys.")}
       />
 
       <section
         className="m-0 overflow-hidden rounded-lg border border-border/60 bg-card"
-        aria-label="Audit log"
+        aria-label={translateUi("Audit log")}
       >
         <DataTableControls
           search={
@@ -708,7 +712,7 @@ export function AdminAuditLogPage() {
               value={searchDraft}
               selectedField={selectedSearchField}
               inputRef={searchInputRef}
-              ariaLabel="Search audit log"
+              ariaLabel={translateUi("Search audit log")}
               onValueChange={setSearchDraft}
               onFieldChange={setSelectedSearchField}
               onApply={applySearchDraft}
@@ -747,7 +751,7 @@ export function AdminAuditLogPage() {
                   className="h-3.5 w-3.5 animate-spin"
                   aria-hidden="true"
                 />
-                <span>Updating results</span>
+                <span>{translateUi("Updating results")}</span>
               </div>
             ) : null
           }
@@ -777,9 +781,7 @@ export function AdminAuditLogPage() {
           >
             <div className="flex items-center gap-2 text-destructive">
               <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden="true" />
-              <span>
-                Results may be out of date because the refresh failed.
-              </span>
+              <span>{translateUi("Results may be out of date because the refresh failed.")}</span>
             </div>
             <Button
               type="button"
@@ -787,9 +789,7 @@ export function AdminAuditLogPage() {
               size="sm"
               disabled={isFetching}
               onClick={() => void refetch()}
-            >
-              Retry
-            </Button>
+            >{translateUi("Retry")}</Button>
           </div>
         )}
 
@@ -799,7 +799,7 @@ export function AdminAuditLogPage() {
             role="status"
             aria-live="polite"
             aria-label={
-              isLoading ? "Loading audit log" : "Updating audit log"
+              isLoading ? translateUi("Loading audit log") : translateUi("Updating audit log")
             }
           >
             {Array.from({ length: 6 }).map((_, i) => (
@@ -818,17 +818,13 @@ export function AdminAuditLogPage() {
               className="h-8 w-8 text-destructive"
               aria-hidden="true"
             />
-            <p className="type-row-title text-destructive">
-              Failed to load audit log
-            </p>
+            <p className="type-row-title text-destructive">{translateUi("Failed to load audit log")}</p>
             <Button
               type="button"
               variant="outline"
               size="sm"
               onClick={() => void refetch()}
-            >
-              Retry
-            </Button>
+            >{translateUi("Retry")}</Button>
           </div>
         ) : entries.length === 0 ? (
           <div className="flex min-h-56 flex-col items-center justify-center gap-3 px-4 py-14 text-center">
@@ -836,13 +832,13 @@ export function AdminAuditLogPage() {
             <div>
               <p className="type-row-title text-foreground">
                 {hasActiveFilters
-                  ? "No events match these filters"
-                  : "No audit events"}
+                  ? translateUi("No events match these filters")
+                  : translateUi("No audit events")}
               </p>
               <p className="text-13 text-muted-foreground">
                 {hasActiveFilters
-                  ? "Adjust or clear the current filters."
-                  : "Audit activity will appear here."}
+                  ? translateUi("Adjust or clear the current filters.")
+                  : translateUi("Audit activity will appear here.")}
               </p>
               {hasActiveFilters && (
                 <Button
@@ -851,9 +847,7 @@ export function AdminAuditLogPage() {
                   size="sm"
                   className="mt-3"
                   onClick={clearSearchAndFilters}
-                >
-                  Clear search and filters
-                </Button>
+                >{translateUi("Clear search and filters")}</Button>
               )}
             </div>
           </div>
@@ -918,26 +912,23 @@ export function AdminAuditLogPage() {
             </div>
 
             <div className="flex flex-col gap-3 border-t border-border/60 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
-              <p className="text-13 text-text-tertiary">
-                Showing {String((displayedPage - 1) * displayedPerPage + 1)}-
+              <p className="text-13 text-text-tertiary">{translateUi("Showing ")}{String((displayedPage - 1) * displayedPerPage + 1)}-
                 {String(
                   (displayedPage - 1) * displayedPerPage + entries.length,
                 )}
                 {total === undefined
-                  ? " events"
-                  : ` of ${String(total)} events`}
+                  ? translateUi(" events")
+                  : translateUi(" of {{value1}} events", { value1: String(total) })}
                 {total === undefined && (
                   <span role="status" className="ml-2">
-                    {totalError ? "Total unavailable." : "Counting total…"}
+                    {totalError ? translateUi("Total unavailable.") : translateUi("Counting total…")}
                     {totalError && (
                       <Button
                         type="button"
                         variant="ghost"
                         size="sm"
                         onClick={() => void refetchTotal()}
-                      >
-                        Retry total
-                      </Button>
+                      >{translateUi("Retry total")}</Button>
                     )}
                   </span>
                 )}
@@ -950,9 +941,7 @@ export function AdminAuditLogPage() {
                     size="sm"
                     onClick={resetColumnLayout}
                   >
-                    <RotateCcw className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
-                    Reset columns
-                  </Button>
+                    <RotateCcw className="mr-2 h-3.5 w-3.5" aria-hidden="true" />{translateUi("Reset columns")}</Button>
                 )}
                 <Select
                   value={String(listParams.per_page)}
@@ -968,7 +957,7 @@ export function AdminAuditLogPage() {
                   }
                 >
                   <SelectTrigger
-                    aria-label="Rows per page"
+                    aria-label={translateUi("Rows per page")}
                     className="w-[112px]"
                   >
                     <SelectValue />
@@ -976,8 +965,7 @@ export function AdminAuditLogPage() {
                   <SelectContent>
                     {ADMIN_AUDIT_LOG_PER_PAGE_OPTIONS.map((rows) => (
                       <SelectItem key={rows} value={String(rows)}>
-                        {String(rows)} rows
-                      </SelectItem>
+                        {String(rows)}{translateUi(" rows")}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -990,15 +978,14 @@ export function AdminAuditLogPage() {
                   onClick={() =>
                     updateListSearch({ page: Math.max(1, listParams.page - 1) })
                   }
-                  aria-label="Previous page"
+                  aria-label={translateUi("Previous page")}
                 >
                   <ChevronLeft />
                 </Button>
-                <span className="min-w-[84px] text-center text-13 text-text-tertiary">
-                  Page {String(displayedPage)}
+                <span className="min-w-[84px] text-center text-13 text-text-tertiary">{translateUi("Page ")}{String(displayedPage)}
                   {displayedTotalPages === undefined
                     ? ""
-                    : ` of ${String(displayedTotalPages)}`}
+                    : translateUi(" of {{value1}}", { value1: String(displayedTotalPages) })}
                 </span>
                 <Button
                   type="button"
@@ -1009,7 +996,7 @@ export function AdminAuditLogPage() {
                   onClick={() =>
                     updateListSearch({ page: listParams.page + 1 })
                   }
-                  aria-label="Next page"
+                  aria-label={translateUi("Next page")}
                 >
                   <ChevronRight />
                 </Button>
@@ -1023,5 +1010,6 @@ export function AdminAuditLogPage() {
 }
 
 function EmptyCell() {
+  useUiTranslation();
   return <span className="text-muted-foreground">--</span>;
 }

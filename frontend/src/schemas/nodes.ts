@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { z } from "zod";
 import { isValidHttpUrl } from "./http-url";
 import { decodeBase64UrlNoPad, decodeBase64UrlNoPadExact, MAX_CIPHERTEXT_SIZE } from "@/lib/crypto";
@@ -115,7 +116,7 @@ const ciphertextEnvelopeSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["ciphertext"],
-          message: `Ciphertext must be ${String(MAX_CIPHERTEXT_SIZE)} bytes or less.`,
+          message: translateUi("Ciphertext must be {{value0}} bytes or less.", { value0: String(MAX_CIPHERTEXT_SIZE) }),
         });
       }
     } catch (err) {
@@ -173,7 +174,7 @@ export const fanOutCiphertextsSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["items", index, "ciphertext"],
-          message: `Total fan-out ciphertext bytes must be ${String(MAX_FAN_OUT_CIPHERTEXT_TOTAL_SIZE)} or less.`,
+          message: translateUi("Total fan-out ciphertext bytes must be {{value0}} or less.", { value0: String(MAX_FAN_OUT_CIPHERTEXT_TOTAL_SIZE) }),
         });
         break;
       }
