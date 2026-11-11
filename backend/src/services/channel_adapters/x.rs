@@ -367,6 +367,117 @@ async fn response_json(response: reqwest::Response) -> AppResult<Value> {
     response.json().await.map_err(|_| protocol_error())
 }
 
+/// Account/tag binding is required even for diagnostics about disabled routes.
+pub(crate) fn authenticated_bot(
+    bot: &ChannelBot,
+    secrets: &PlatformVerifySecrets,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> bool {
+    webhooks::verify(secrets, headers, body).is_ok()
+        && webhooks::target(body)
+            .is_ok_and(|target| target.as_deref() == Some(&bot.platform_bot_id))
+        && serde_json::from_slice::<Value>(body)
+            .is_ok_and(|value| value["data"]["tag"] == format!("nyxid:{}", bot.id))
+}
+
+/// Diagnose only a cryptographically authenticated, account/tag-bound rejection.
+/// Selection still refuses dispatch; this does not grant an event any authority.
+pub(crate) fn authenticated_rejection(
+    bot: &ChannelBot,
+    secrets: &PlatformVerifySecrets,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Option<crate::services::channel_inbound_diagnostics::Outcome> {
+    use crate::services::channel_inbound_diagnostics::Outcome;
+    if !authenticated_bot(bot, secrets, headers, body) {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let Some(name) = value["data"]["event_type"].as_str() else {
+        return Some(Outcome::InvalidPayload);
+    };
+    if selected_events(bot)
+        .iter()
+        .any(|event| event_name(*event) == name)
+    {
+        return None;
+    }
+    Some(
+        if matches!(
+            name,
+            "dm.received"
+                | "chat.received"
+                | "post.create"
+                | "post.mention.create"
+                | "post.reply.create"
+        ) {
+            Outcome::EventNotSelected
+        } else {
+            Outcome::UnsupportedEvent
+        },
+    )
+}
+
+/// Every deliberately filtered nested event gets metadata, including mixed
+/// batches where another event was admitted. No untrusted strings escape here.
+pub(crate) fn filtered_webhook_outcomes(
+    body: &[u8],
+    own: &str,
+) -> Vec<crate::services::channel_inbound_diagnostics::Outcome> {
+    use crate::services::channel_inbound_diagnostics::Outcome;
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return vec![];
+    };
+    let data = &value["data"];
+    let payload = &data["payload"];
+    if data["event_type"] == "dm.received" {
+        let Some(events) = payload["direct_message_events"].as_array() else {
+            return vec![];
+        };
+        if events.is_empty() {
+            return vec![Outcome::EmptyBatch];
+        }
+        return events
+            .iter()
+            .filter_map(|event| {
+                let message = &event["message_create"];
+                if event["type"] != "message_create" {
+                    Some(Outcome::UnsupportedEvent)
+                } else if message["sender_id"] == own {
+                    Some(Outcome::SelfEvent)
+                } else if message["target"]["recipient_id"] != own {
+                    Some(Outcome::RecipientMismatch)
+                } else {
+                    None
+                }
+            })
+            .collect();
+    }
+    if data["event_type"] == "chat.received" && payload["sender_id"] == own {
+        return vec![Outcome::SelfEvent];
+    }
+    if matches!(
+        data["event_type"].as_str(),
+        Some("post.mention.create" | "post.reply.create")
+    ) {
+        if payload["author_id"] == own {
+            return vec![Outcome::SelfEvent];
+        }
+        let addressed = if data["event_type"] == "post.mention.create" {
+            payload["entities"]["mentions"]
+                .as_array()
+                .is_some_and(|mentions| mentions.iter().any(|mention| mention["id"] == own))
+        } else {
+            payload["in_reply_to_user_id"] == own
+        };
+        if !addressed {
+            return vec![Outcome::RecipientMismatch];
+        }
+    }
+    vec![]
+}
+
 fn normalize(event: &Value, includes: &Value, own_id: &str) -> AppResult<Option<InboundMessage>> {
     let sender = event["sender_id"].as_str().ok_or_else(protocol_error)?;
     if sender == own_id {

@@ -199,11 +199,24 @@ pub(super) async fn note_owner_presence(
     } else {
         row.owner_sender_ids.iter().any(|id| id == sender_id)
     };
-    if is_group(&chat) && !chat.owner_seen && owner {
+    if owner
+        && ((is_group(&chat) && !chat.owner_seen)
+            || (chat.kind.as_deref() == Some("private") && (!chat.owner_chat || !chat.owner_seen)))
+    {
+        let mut set = doc! {"owner_seen":true};
+        if chat.kind.as_deref() == Some("private") {
+            set.insert("owner_chat", true);
+            set.insert("title", "You");
+            chat.owner_chat = true;
+            chat.title = Some("You".into());
+        }
         state
             .db
             .collection::<NyxbotThread>(THREADS)
-            .update_one(doc! {"_id": &chat.id}, doc! {"$set": {"owner_seen": true}})
+            .update_one(
+                doc! {"_id": &chat.id,"channel_id":&row.id},
+                doc! {"$set": set},
+            )
             .await?;
         chat.owner_seen = true;
     }

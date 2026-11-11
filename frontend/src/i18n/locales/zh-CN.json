@@ -11996,5 +11996,12 @@
   "Agent configuration has not been checked.": "尚未检查智能体配置。",
   "These facts do not confirm complete business information or a successful customer test. Opening access is your choice. During model setup, customer requests wait briefly or receive a safe setup failure.": "这些信息不能确认业务信息完整，也不能确认客户测试成功。是否开放访问由你决定。在模型设置期间，客户请求会短暂等待，或收到安全的设置失败提示。",
   "Customer readiness is unavailable. Refresh to check before relying on replies.": "无法获取客户就绪状态。请刷新检查后再依赖回复。",
-  "present": "已设置"
+  "present": "已设置",
+  "Reply accepted": "回复已被接受",
+  "No problem detected": "未发现问题",
+  "Last outbound attempt": "上次出站尝试",
+  "Last inbound outcome": "上次入站处理结果",
+  "Inbound diagnostics": "入站诊断",
+  "{{code}} at {{time}}": "{{code}}，时间：{{time}}",
+  "{{count}} observed; last {{time}}": "共记录 {{count}} 次；最近一次：{{time}}"
 }

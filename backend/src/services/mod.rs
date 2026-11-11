@@ -74,6 +74,7 @@ pub mod channel_connection_webhook_service;
 pub mod channel_credentials;
 pub mod channel_delivery_service;
 pub mod channel_event_service;
+pub(crate) mod channel_inbound_diagnostics;
 pub mod channel_inbound_service;
 pub mod channel_managed;
 pub mod channel_media_authority;

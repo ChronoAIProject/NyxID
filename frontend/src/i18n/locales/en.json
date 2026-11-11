@@ -11996,5 +11996,12 @@
   "Agent configuration has not been checked.": "Agent configuration has not been checked.",
   "These facts do not confirm complete business information or a successful customer test. Opening access is your choice. During model setup, customer requests wait briefly or receive a safe setup failure.": "These facts do not confirm complete business information or a successful customer test. Opening access is your choice. During model setup, customer requests wait briefly or receive a safe setup failure.",
   "Customer readiness is unavailable. Refresh to check before relying on replies.": "Customer readiness is unavailable. Refresh to check before relying on replies.",
-  "present": "present"
+  "present": "present",
+  "Reply accepted": "Reply accepted",
+  "No problem detected": "No problem detected",
+  "Last outbound attempt": "Last outbound attempt",
+  "Last inbound outcome": "Last inbound outcome",
+  "Inbound diagnostics": "Inbound diagnostics",
+  "{{code}} at {{time}}": "{{code}} at {{time}}",
+  "{{count}} observed; last {{time}}": "{{count}} observed; last {{time}}"
 }

@@ -11996,5 +11996,12 @@
   "Agent configuration has not been checked.": "尚未檢查代理程式設定。",
   "These facts do not confirm complete business information or a successful customer test. Opening access is your choice. During model setup, customer requests wait briefly or receive a safe setup failure.": "這些資訊無法確認業務資訊完整，也無法確認客戶測試成功。是否開放存取由你決定。在模型設定期間，客戶請求會短暫等待，或收到安全的設定失敗提示。",
   "Customer readiness is unavailable. Refresh to check before relying on replies.": "無法取得客戶就緒狀態。請重新整理檢查後再依賴回覆。",
-  "present": "已設定"
+  "present": "已設定",
+  "Reply accepted": "回覆已被接受",
+  "No problem detected": "未發現問題",
+  "Last outbound attempt": "上次傳出嘗試",
+  "Last inbound outcome": "上次傳入處理結果",
+  "Inbound diagnostics": "傳入診斷",
+  "{{code}} at {{time}}": "{{code}}，時間：{{time}}",
+  "{{count}} observed; last {{time}}": "共記錄 {{count}} 次；最近一次：{{time}}"
 }
