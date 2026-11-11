@@ -45,12 +45,12 @@ The **Product Page Information** section has two artwork tabs. Both primary file
 
 | Tab | File in the dark package | Supported sizes shown in App Store Connect |
 | --- | --- | --- |
-| Header | `01-HEADER-DARK-5244x2950.png` | 5244 × 2950 or 3840 × 1646 |
+| Header | `01-HEADER-DARK-5244x2950.png` | 5244 × 2950, 3840 × 2560, or 1920 × 1280 |
 | Search Results | `02-SEARCH-RESULTS-DARK-5244x2950.png` | 5244 × 2950, 3840 × 2560, or 1920 × 1280 |
 
 Upload one image in each tab. The two files use the same dark artwork with different names to identify the destination. Their dimensions and absence of transparency are verified locally. Server upload acceptance has not been exercised from this session.
 
-If App Store Connect also requests device screenshots, use `app-screenshots/iphone/` for the three 1320 × 2868 iPhone images and `app-screenshots/ipad/` for the genuine 2064 × 2752 iPad capture. The portrait files belong in the corresponding device screenshot slots.
+If App Store Connect also requests device screenshots, use `app-screenshots/iphone/` for the three 1206 × 2622 iPhone images and `app-screenshots/ipad/` for the genuine 2064 × 2752 iPad capture. The portrait files belong in the corresponding device screenshot slots.
 
 The dark images use actual app captures. The chat contains a real drafting response, and the captured voice call reached Listening and was ended afterward. `source-captures/` preserves the originals. The simulator uses the build 58 Debug native app with Metro from the PR branch, including its final main merge; the IPA's source manifest remains authoritative for the release binary.
 
