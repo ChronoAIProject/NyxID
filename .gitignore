@@ -66,4 +66,4 @@ k8s/
 __pycache__/
 
 # Local NYX skill template preview report (generated)
-frontend/public/skill-template-report.json
+frontend/src/dev/skill-template-report.local.json

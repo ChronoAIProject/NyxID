@@ -14,6 +14,7 @@ import {
 } from "@/components/assistant/skill-run-checklist";
 import { UserMessageBubble } from "@/components/ui/user-message-bubble";
 import { Button } from "@/components/ui/button";
+import { MISSING_REPORT, loadSkillTemplateReport } from "./skill-template-report";
 import "@/app.css";
 
 // Local-only mock of a NyxBot chat invoking skills. Outlines come from the
@@ -282,13 +283,9 @@ export function SkillChatPreview() {
   }, [theme]);
 
   useEffect(() => {
-    fetch("/skill-template-report.json")
-      .then((response) => {
-        if (!response.ok) throw new Error("missing");
-        return response.json() as Promise<ReportEntry[]>;
-      })
+    loadSkillTemplateReport<ReportEntry[]>()
       .then(setEntries)
-      .catch(() => setError("No report found at public/skill-template-report.json."));
+      .catch(() => setError(MISSING_REPORT));
   }, []);
 
   return (

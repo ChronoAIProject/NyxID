@@ -39,14 +39,15 @@ exact `preview_agent_skill` results to the report.
 ## Preview the cards
 
 ```bash
-cp /tmp/skill-template-report.json frontend/public/skill-template-report.json
+cp /tmp/skill-template-report.json frontend/src/dev/skill-template-report.local.json
 cd frontend && npx vite --port 3000
 # open http://localhost:3000/skill-template-preview.html
 ```
 
 The local preview renders each skill card with `SkillTemplateCard` next to its
-tool results, in dark and light themes. The copied report is a local file; do
-not commit it.
+tool results, in dark and light themes. The copied report is git-ignored and
+stays out of `public/`: only these dev pages load it, and they are not
+production build entries, so it never ships in a build.
 
 `http://localhost:3000/skill-chat-preview.html` shows the same cards in a mock
 NyxBot chat: a skillset suggested from a task, a skill named by the person, and

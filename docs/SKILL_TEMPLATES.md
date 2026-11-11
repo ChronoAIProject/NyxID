@@ -78,8 +78,10 @@ Hard limits (enforced when reading). They count Unicode characters, not bytes:
 
 The reader returns **no outline**, never a cut-down one, when a required section
 is missing; a section appears twice or out of order; a heading is malformed; the
-Approach contains anything other than numbered steps, indented continuation lines
-and tag lines (including a code fence); a line uses tag syntax but is not a
+Approach contains anything other than numbered steps, continuation lines indented
+one to six columns, and tag lines (a code fence at any indentation, or a line
+deep enough to be an indented code block, refuses the outline); a line uses tag
+syntax but is not a
 valid tag line (for example two `Uses` tags, or a tag mixed with prose); a hard
 limit is exceeded; or a `Uses` tag does not resolve (below). Headings inside
 code fences don't count: a fence closes only with the same character, a run at
@@ -92,13 +94,14 @@ an ordinary skill.
 1. Every skill, large or small, has its own Overview and Approach, so it makes
    sense on its own.
 2. `Uses` must identify exactly one declared dependency, by name or GUID. Ornn
-   declares dependencies in frontmatter `metadata.depends-on` as
-   `<name-or-GUID>@<major.minor>` or `<name>@<dist-tag>`, in flow
-   (`[a@1.0, b@beta]`) or block (`- a@1.0`) form. Only the `depends-on` key of
-   the top-level `metadata` mapping counts; the same text inside another key,
-   a block scalar or a nested mapping never does. Forms NyxID can't read with
-   certainty (a flow list spanning lines, quoted keys, a repeated key, nested
-   items) declare nothing, so every `Uses` tag fails closed.
+   declares dependencies in frontmatter `metadata.depends-on` as a YAML list
+   of `<name-or-GUID>@<major.minor>` or `<name>@<dist-tag>` strings. NyxID
+   parses the frontmatter as YAML, so only the `depends-on` key of the
+   top-level `metadata` mapping counts; the same text inside another key, a
+   quoted or block scalar or a nested mapping never does. Frontmatter that
+   doesn't parse strictly (a repeated key; an alias, anchor or merge key; a
+   `depends-on` that isn't a list of strings) declares nothing, so every
+   `Uses` tag fails closed.
 3. NyxID resolves each declared dependency to an exact GUID, version and
    SHA-256 when the skill is previewed and pinned (at most 16 resolved
    dependencies per skill; Ornn itself allows 50 declared). A `Uses` tag matches
@@ -126,7 +129,10 @@ NyxBot's instructions, tool list and tool results are unchanged.
 - **Reading.** `skill_read` accepts `section: "outline"` for an attached skill or
   one of its pinned dependencies. The result is a page of the rendered outline,
   marked `untrusted_guidance`, within the usual tool-response budget; long
-  outlines continue with `next_offset`. A skill without an outline returns
+  outlines continue with `next_offset`, echoing the page's
+  `outline_fingerprint`. If a dependency was re-pinned between pages, the
+  answer is `outline_changed` and the read restarts at `0`, never a page of a
+  different outline. A skill without an outline returns
   `outline_available: false`.
 - **Previewing.** `preview_agent_skill` adds an `outline` page for the verified
   root package, so NyxBot can explain a skill before it is attached. When the

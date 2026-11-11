@@ -393,6 +393,21 @@ fn fence_examples_never_become_the_outline() {
     let real = parse(&skill(&format!("{longer}{BODY}")), &closure).expect("outline");
     assert!(!render(&real).contains("FAKE"));
     assert!(real.overview.starts_with("Give me a topic"));
+    // Inside a step, an example is never read as prose or tags: a fence at any
+    // indentation, or an indented code block, refuses the outline.
+    let step = "   Uses: firecrawl-via-nyxid\n";
+    for example in [
+        "    ```\n    Asks you\n    ```\n",
+        "       ~~~\n       Asks you\n       ~~~\n",
+        "\n       Asks you\n",
+        "\n\t\tAsks you\n",
+    ] {
+        let body = BODY.replacen(step, &format!("{step}{example}"), 1);
+        assert!(parse(&skill(&body), &closure).is_none(), "{example:?}");
+    }
+    // An ordinary continuation keeps working, including after a blank line.
+    let body = BODY.replacen(step, &format!("{step}\n   More detail.\n"), 1);
+    assert!(parse(&skill(&body), &closure).is_some());
 }
 
 #[test]
@@ -415,13 +430,35 @@ fn only_the_metadata_depends_on_key_declares_dependencies() {
     assert!(with(&nested, "helper").is_none());
     let top = format!("depends-on: [helper@1.0]\n{direct}");
     assert!(with(&top, "helper").is_none());
-    // Forms the scan can't read with certainty fail closed.
-    for unreadable in [
+    // The frontmatter is YAML: quoting, multi-line flow lists and flow
+    // mappings mean what they mean to any YAML reader.
+    for readable in [
         "metadata:\n  \"depends-on\": [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]\n",
         "metadata:\n  depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2,\n    other@1.0]\n",
+        "metadata: {depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]}\n",
+        "\"metadata\":\n  depends-on: ['firecrawl-via-nyxid@1.3', \"github-via-nyxid@1.2\"]\n",
+    ] {
+        assert!(
+            with(readable, "firecrawl-via-nyxid").is_some(),
+            "{readable}"
+        );
+    }
+    // A quoted scalar spanning lines can't pose as the metadata mapping: here
+    // only `wrapper` is declared, so `helper` (pinned through it) can't be used.
+    let spoof = "name: example\ndescription: \"Example text\nmetadata:\n  depends-on: [helper@1.0]\n\"\n\"metadata\":\n  category: plain\n  depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]\n";
+    assert!(with(spoof, "helper").is_none());
+    let indented = "description: \"Example text\n  metadata:\n    depends-on: [helper@1.0]\n  \"\n\"metadata\":\n  depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]\n";
+    assert!(with(indented, "helper").is_none());
+    assert!(with(indented, "firecrawl-via-nyxid").is_some());
+    // Anything that doesn't parse strictly declares nothing.
+    for unreadable in [
         "metadata:\n  depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]\n  depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]\n",
         "metadata:\n  depends-on:\n    - firecrawl-via-nyxid@1.3\n    - github-via-nyxid@1.2\n    - name: other\n",
-        "metadata: {depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]}\n",
+        "metadata:\n  depends-on: firecrawl-via-nyxid@1.3\n",
+        "deps: &deps [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]\nmetadata:\n  depends-on: *deps\n",
+        "base: &base {depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]}\nmetadata:\n  <<: *base\n",
+        "metadata:\n  depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]\nmetadata:\n  depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2]\n",
+        "metadata:\n  depends-on: [firecrawl-via-nyxid@1.3, github-via-nyxid@1.2\n",
     ] {
         assert!(
             with(unreadable, "firecrawl-via-nyxid").is_none(),
@@ -434,11 +471,38 @@ fn only_the_metadata_depends_on_key_declares_dependencies() {
         .replace("   Uses: github-via-nyxid\n", "");
     assert!(
         parse(
-            &format!("---\nmetadata:\n  \"depends-on\": [x@1.0]\n---\n{plain}"),
+            &format!("---\nmetadata:\n  depends-on: [x@1.0\n---\n{plain}"),
             &closure
         )
         .is_some()
     );
+}
+
+#[test]
+fn uses_must_name_the_exact_pin_a_declaration_names() {
+    const A: &str = "11111111-1111-4111-8111-111111111111";
+    const B: &str = "22222222-2222-4222-8222-222222222222";
+    let mut closure = closure();
+    // Pin B's name is pin A's GUID; B arrives transitively through another pin.
+    closure.push(pin(A, "helper", "1.0"));
+    closure.push(pin(B, A, "1.0"));
+    let with = |declares: &str, uses: &str| {
+        let body = BODY.replace("Uses: firecrawl-via-nyxid", &format!("Uses: {uses}"));
+        parse(
+            &format!(
+                "---\nmetadata:\n  depends-on: [{declares}, github-via-nyxid@1.2]\n---\n{body}"
+            ),
+            &closure,
+        )
+    };
+    // A declaration whose text is B's name never authorizes B by its GUID,
+    // and an identifier naming two pins authorizes and selects nothing.
+    assert!(with(&format!("{A}@1.0"), B).is_none());
+    assert!(with(&format!("{A}@1.0"), A).is_none());
+    assert!(with(&format!("{A}@1.0"), "helper").is_none());
+    // A declaration by GUID authorizes a tag that names the same pin by name.
+    let outline = with(&format!("{FIRECRAWL}@1.3"), "firecrawl-via-nyxid").expect("outline");
+    assert_eq!(outline.steps[1].uses.as_ref().unwrap().skill_id, FIRECRAWL);
 }
 
 #[test]
@@ -610,6 +674,75 @@ async fn flag_gates_tool_discovery_and_skill_read() {
         crate::handlers::agent_skills::dispatch(&f.state, &guest, "skill_read", &outline_read).await,
         Err(AppError::Forbidden(m)) if m.contains("owner turns")
     ));
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn execution_accepts_outline_arguments_only_where_advertised() {
+    use crate::services::feature_flag_service::{FlagTarget, set_platform_override};
+    let f =
+        crate::services::assistant_authority_tests::orchestrator_fixture("skill_outline_execution")
+            .await;
+    let run = |args: Value, tool: &'static str| {
+        let (state, chat) = (&f.state, &f.chat);
+        async move {
+            let (value, error) =
+                crate::handlers::assistant_team::execute_tool(state, chat, tool, &args).await;
+            (value.to_string(), error)
+        }
+    };
+    let read = json!({"skill": "not-attached", "section": "outline", "offset": 0});
+    let continued = json!({"skill": "not-attached", "section": "outline", "offset": 12, "outline_fingerprint": "0123"});
+    let preview = json!({"skill": "not-attached", "version": "1.0", "outline_offset": 0, "outline_fingerprint": "0123"});
+
+    // Flag off: outline arguments are unknown, exactly as before this feature.
+    for (args, tool) in [
+        (read.clone(), "nyxid__skill_read"),
+        (continued.clone(), "nyxid__skill_read"),
+        (preview.clone(), "nyxid__preview_agent_skill"),
+    ] {
+        let (text, error) = run(args, tool).await;
+        assert!(
+            error && text.contains("Invalid arguments for nyxid__"),
+            "{tool}: {text}"
+        );
+    }
+
+    set_platform_override(
+        &f.state.db,
+        FLAG_KEY,
+        &FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    // Flag on: the advertised arguments reach the handlers' own checks.
+    for args in [read, continued] {
+        let (text, error) = run(args, "nyxid__skill_read").await;
+        assert!(error && text.contains("Skill unavailable"), "{text}");
+    }
+    let (text, _) = run(preview, "nyxid__preview_agent_skill").await;
+    assert!(!text.contains("Invalid arguments"), "{text}");
+    // Values outside the advertised schema are still refused.
+    let (text, error) = run(
+        json!({"skill": "not-attached", "section": "files"}),
+        "nyxid__skill_read",
+    )
+    .await;
+    assert!(
+        error && text.contains("Invalid arguments for nyxid__skill_read"),
+        "{text}"
+    );
+    let (text, error) = run(
+        json!({"skill": "not-attached", "version": "1.0", "outline_offset": -1}),
+        "nyxid__preview_agent_skill",
+    )
+    .await;
+    assert!(
+        error && text.contains("Invalid arguments for nyxid__preview_agent_skill"),
+        "{text}"
+    );
     f.state.db.drop().await.unwrap();
 }
 

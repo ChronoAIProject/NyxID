@@ -13,8 +13,8 @@ use crate::{
     services::{feature_flag_service, mcp_service::McpToolEndpoint},
 };
 use mongodb::Database;
-use serde::Serialize;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 pub const FLAG_KEY: &str = feature_flag_service::SKILL_RUNS_FLAG_KEY;
 
@@ -24,6 +24,9 @@ pub const MAX_TITLE: usize = 80;
 pub const MAX_STEP_TEXT: usize = 300;
 pub const MAX_NEEDS: usize = 200;
 const MAX_USES: usize = 256;
+/// Deepest continuation indent, in columns: a step's text starts at column 3
+/// or 4, and four more would make an indented code block.
+const MAX_CONTINUATION_INDENT: usize = 6;
 const RECOMMENDED_STEPS: std::ops::RangeInclusive<usize> = 3..=7;
 const RECOMMENDED_TOTAL: usize = 2_000;
 
@@ -38,7 +41,7 @@ pub const AUTHORING_GUIDANCE: &str = "\nWhen drafting a skill, start skill_md wi
 pub const NO_OUTLINE_HINT: &str =
     "This skill has no NYX template outline. Read SKILL.md and explain it in your own words.";
 
-const SKILL_READ_OUTLINE: &str = " Pass section=outline instead of path to read the skill's NYX template outline (Overview, Approach steps, Needs and produces); page it with offset and next_offset.";
+const SKILL_READ_OUTLINE: &str = " Pass section=outline instead of path to read the skill's NYX template outline (Overview, Approach steps, Needs and produces); for the next page pass offset=next_offset and the page's outline_fingerprint.";
 const PREVIEW_OUTLINE: &str = " Also returns the skill's NYX template outline as outline (outline_available false when it has none). When outline has a next_offset, call again with outline_offset=next_offset and its outline_fingerprint for an outline-only page; if the result has no outline field, call again with outline_offset=0.";
 
 /// Stable-instruction text this feature adds to an owner turn: empty with the
@@ -59,42 +62,70 @@ pub async fn enabled(db: &Database, actor: &str) -> AppResult<bool> {
     }
 }
 
+/// The arguments a skill tool gains with the flag on: discovery advertises
+/// them and execution validates against them, so the two never disagree.
+fn outline_properties(tool: &str) -> Option<(&'static str, Vec<(&'static str, Value)>)> {
+    let fingerprint = (
+        "outline_fingerprint",
+        json!({"type": "string", "maxLength": 64}),
+    );
+    match tool {
+        "skill_read" => Some((
+            SKILL_READ_OUTLINE,
+            vec![
+                ("section", json!({"type": "string", "enum": ["outline"]})),
+                fingerprint,
+            ],
+        )),
+        "preview_agent_skill" => Some((
+            PREVIEW_OUTLINE,
+            vec![
+                (
+                    "outline_offset",
+                    json!({"type": "integer", "minimum": 0, "maximum": 65536}),
+                ),
+                fingerprint,
+            ],
+        )),
+        _ => None,
+    }
+}
+
+/// Add the outline arguments to a skill tool's request schema; other tools
+/// are unchanged.
+pub fn extend_schema(tool: &str, schema: &mut Value) {
+    let Some((_, properties)) = outline_properties(tool) else {
+        return;
+    };
+    if let Some(schema) = schema
+        .get_mut("properties")
+        .and_then(|properties| properties.as_object_mut())
+    {
+        for (name, property) in properties {
+            schema.insert(name.into(), property);
+        }
+    }
+}
+
+/// Whether a call passes any outline argument, so ordinary calls never look
+/// up the flag.
+pub fn uses_outline_arguments(tool: &str, args: &Value) -> bool {
+    outline_properties(tool)
+        .is_some_and(|(_, properties)| properties.iter().any(|(name, _)| args.get(name).is_some()))
+}
+
 /// Advertise the outline options on the caller's existing skill tools. Only
 /// called for owner chats with the flag on; flag-off tool lists stay unchanged.
 pub fn extend_tools(endpoints: &mut [McpToolEndpoint]) {
     for endpoint in endpoints {
-        let (suffix, properties) = match endpoint.name.as_str() {
-            "skill_read" => (
-                SKILL_READ_OUTLINE,
-                vec![("section", json!({"type": "string", "enum": ["outline"]}))],
-            ),
-            "preview_agent_skill" => (
-                PREVIEW_OUTLINE,
-                vec![
-                    (
-                        "outline_offset",
-                        json!({"type": "integer", "minimum": 0, "maximum": 65536}),
-                    ),
-                    (
-                        "outline_fingerprint",
-                        json!({"type": "string", "maxLength": 64}),
-                    ),
-                ],
-            ),
-            _ => continue,
+        let Some((suffix, _)) = outline_properties(&endpoint.name) else {
+            continue;
         };
         if let Some(description) = endpoint.description.as_mut() {
             description.push_str(suffix);
         }
-        if let Some(schema) = endpoint
-            .request_body_schema
-            .as_mut()
-            .and_then(|schema| schema.get_mut("properties"))
-            .and_then(|properties| properties.as_object_mut())
-        {
-            for (name, property) in properties {
-                schema.insert(name.into(), property);
-            }
+        if let Some(schema) = endpoint.request_body_schema.as_mut() {
+            extend_schema(&endpoint.name, schema);
         }
     }
 }
@@ -295,109 +326,55 @@ fn split_frontmatter(text: &str) -> (Option<&str>, &str) {
 }
 
 /// Identifiers (name or GUID, before `@`) declared by the top-level
-/// `metadata` mapping's `depends-on`, in flow (`[a@1.0, b@beta]`) or block
-/// (`- a@1.0`) form. Only that exact key counts: text in other keys, block
-/// scalars or nested mappings never does. Forms this scan cannot read with
-/// certainty (multi-line flow, quoted keys, duplicates, nested items) are
-/// `Err`, so `Uses` fails closed. Ornn validates the YAML itself at publication.
+/// `metadata` mapping's `depends-on` list. The frontmatter is parsed as YAML,
+/// so only that exact key counts and quoting, block scalars and flow style
+/// mean what they mean to any YAML reader. Anything that does not parse
+/// strictly (a repeated key, an alias, anchor or merge key, a `depends-on`
+/// that is not a list of strings, an unreadable entry) is `Err`, so `Uses`
+/// fails closed. Ornn validates the YAML itself at publication.
 fn declared_dependencies(front: &str) -> Result<Vec<String>, ()> {
-    fn indent(line: &str) -> usize {
-        line.len() - line.trim_start().len()
+    #[derive(Deserialize)]
+    struct Frontmatter {
+        #[serde(default)]
+        metadata: Option<Metadata>,
     }
-    fn content(line: &str) -> bool {
-        let trimmed = line.trim_start();
-        !trimmed.is_empty() && !trimmed.starts_with('#')
+    #[derive(Deserialize)]
+    struct Metadata {
+        #[serde(default, rename = "depends-on")]
+        depends_on: Option<Vec<String>>,
     }
-    fn value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
-        let rest = line.trim_start().strip_prefix(key)?.strip_prefix(':')?;
-        (rest.is_empty() || rest.starts_with([' ', '\t'])).then(|| strip_comment(rest).trim())
-    }
-    let lines: Vec<&str> = front.lines().collect();
-    let mut metadata = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| indent(line) == 0 && value(line, "metadata").is_some());
-    let Some((index, line)) = metadata.next() else {
-        return Ok(Vec::new());
+    let options = serde_saphyr::options! {
+        budget: serde_saphyr::budget! {
+            max_depth: 16,
+            max_documents: 1,
+            max_nodes: 10_000,
+            max_aliases: 0,
+            max_anchors: 0,
+            max_merge_keys: 0,
+        },
+        duplicate_keys: serde_saphyr::options::DuplicateKeyPolicy::Error,
+        merge_keys: serde_saphyr::options::MergeKeyPolicy::Error,
+        strict_booleans: true,
+        with_snippet: false,
     };
-    if metadata.next().is_some() {
-        return Err(());
-    }
-    if value(line, "metadata").is_some_and(|rest| !rest.is_empty()) {
-        // Flow-style metadata: only unambiguous when it declares nothing.
-        return if line.contains("depends-on") {
-            Err(())
-        } else {
-            Ok(Vec::new())
-        };
-    }
-    let block_end = lines[index + 1..]
-        .iter()
-        .position(|line| content(line) && indent(line) == 0)
-        .map_or(lines.len(), |offset| index + 1 + offset);
-    let block = &lines[index + 1..block_end];
-    let Some(child) = block
-        .iter()
-        .find(|line| content(line))
-        .map(|line| indent(line))
-    else {
+    if front.trim().is_empty() {
         return Ok(Vec::new());
-    };
-    let mut declared: Option<Vec<String>> = None;
-    for (position, line) in block.iter().enumerate() {
-        if indent(line) != child || !content(line) {
-            continue;
-        }
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("\"depends-on\"") || trimmed.starts_with("'depends-on'") {
-            return Err(());
-        }
-        let Some(rest) = value(line, "depends-on") else {
-            continue;
-        };
-        if declared.is_some() {
-            return Err(());
-        }
-        let ids = if let Some(inner) = rest.strip_prefix('[') {
-            let inner = inner.strip_suffix(']').ok_or(())?;
-            inner
-                .split(',')
-                .filter(|item| !item.trim().is_empty())
-                .map(dependency_id)
-                .collect::<Option<Vec<_>>>()
-                .ok_or(())?
-        } else if rest.is_empty() {
-            let mut ids = Vec::new();
-            for next in &block[position + 1..] {
-                if !content(next) {
-                    continue;
-                }
-                let item_indent = indent(next);
-                let item = next.trim_start();
-                if item_indent < child || (item_indent == child && !item.starts_with("- ")) {
-                    break;
-                }
-                let entry = item.strip_prefix("- ").ok_or(())?;
-                ids.push(dependency_id(strip_comment(entry)).ok_or(())?);
-            }
-            ids
-        } else {
-            return Err(());
-        };
-        declared = Some(ids);
     }
-    Ok(declared.unwrap_or_default())
-}
-
-fn strip_comment(value: &str) -> &str {
-    value.split(" #").next().unwrap_or(value)
+    let front: Option<Frontmatter> =
+        serde_saphyr::from_str_with_options(front, options).map_err(|_| ())?;
+    front
+        .and_then(|front| front.metadata)
+        .and_then(|metadata| metadata.depends_on)
+        .unwrap_or_default()
+        .iter()
+        .map(|entry| dependency_id(entry).ok_or(()))
+        .collect()
 }
 
 /// The name or GUID before `@`; `None` for anything else (nested mappings,
 /// stray syntax), which makes the whole declaration unreadable.
 fn dependency_id(raw: &str) -> Option<String> {
-    let value = raw.trim().trim_matches(|c| c == '"' || c == '\'');
-    let id = value.split('@').next()?.trim();
+    let id = raw.trim().split('@').next()?.trim();
     (!id.is_empty()
         && id
             .chars()
@@ -607,6 +584,25 @@ fn parse_approach(
         let Some(step) = drafts.last_mut().filter(|_| line.starts_with([' ', '\t'])) else {
             return Err(Problem::MalformedApproach);
         };
+        // A step continues only with prose or tag lines. A fence at any
+        // indentation, or a line deep enough to be an indented code block,
+        // is example text: refuse the outline rather than read it as tags.
+        let width = line
+            .chars()
+            .take_while(|c| matches!(c, ' ' | '\t'))
+            .fold(0, |width, c| {
+                if c == '\t' {
+                    width + 4 - width % 4
+                } else {
+                    width + 1
+                }
+            });
+        if width > MAX_CONTINUATION_INDENT
+            || trimmed.starts_with("```")
+            || trimmed.starts_with("~~~")
+        {
+            return Err(Problem::MalformedApproach);
+        }
         match tags(trimmed)? {
             Some((uses, asks_you)) => {
                 if uses.is_some() && step.uses.is_some() {
@@ -684,18 +680,26 @@ fn tags(line: &str) -> Result<Option<(Option<String>, bool)>, Problem> {
     Ok(Some((dependency, asks_you)))
 }
 
+/// The one pin `id` names by GUID or name; `None` when it names none or
+/// several, for example when one pin's name is another pin's GUID.
+fn named_pin<'a>(id: &str, closure: &'a [SkillPin]) -> Option<&'a SkillPin> {
+    let mut matches = closure
+        .iter()
+        .filter(|pin| pin.skill_id == id || pin.name == id);
+    let pin = matches.next()?;
+    matches.next().is_none().then_some(pin)
+}
+
 fn resolve(name: &str, closure: &[SkillPin], declared: &[String]) -> Result<SkillPin, Problem> {
     if chars(name) > MAX_USES {
         return Err(Problem::OverLimit);
     }
-    let mut matches = closure
+    let pin = named_pin(name, closure).ok_or(Problem::UsesUnresolved)?;
+    // A declaration authorizes the tag only when it names this exact pin
+    // itself, never because its text happens to equal the pin's name or GUID.
+    if !declared
         .iter()
-        .filter(|pin| pin.skill_id == name || pin.name == name);
-    let pin = matches.next().ok_or(Problem::UsesUnresolved)?;
-    if matches.next().is_some()
-        || !declared
-            .iter()
-            .any(|id| id == &pin.skill_id || id == &pin.name)
+        .any(|id| named_pin(id, closure).is_some_and(|declared| std::ptr::eq(declared, pin)))
     {
         return Err(Problem::UsesUnresolved);
     }

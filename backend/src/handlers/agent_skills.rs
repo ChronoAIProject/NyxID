@@ -796,6 +796,7 @@ async fn read_attached(
             arg(args, "skill"),
             args["dependency"].as_str(),
             offset,
+            args["outline_fingerprint"].as_str(),
         )
         .await
     } else {

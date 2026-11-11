@@ -762,16 +762,31 @@ pub async fn read_outline(
     skill: &str,
     dependency: Option<&str>,
     offset: usize,
+    fingerprint: Option<&str>,
 ) -> AppResult<Value> {
     let (root, id, version, hash) = attached_pin(agent, skill, dependency)?;
     let files = package(&download(reader, id, version, hash).await?)?;
     let skill_md = files
         .get("SKILL.md")
         .and_then(|content| std::str::from_utf8(content).ok());
-    match rendered_outline(skill_md, &root.dependencies) {
-        Some(outline) => page(&outline, id, version, "outline", offset),
-        None => Ok(no_outline(id, version)),
+    let Some(outline) = rendered_outline(skill_md, &root.dependencies) else {
+        return Ok(no_outline(id, version));
+    };
+    // A re-pin can move a dependency without changing the root's identity,
+    // so continuation pages are bound to the rendered outline itself.
+    let print = outline_fingerprint(&outline);
+    if outline_changed(offset, fingerprint, &print) {
+        return Ok(changed_outline(id, version, READ_RESTART));
     }
+    outline_page_value(
+        &outline,
+        id,
+        version,
+        offset,
+        PAGE_BUDGET,
+        &print,
+        READ_HINT,
+    )
 }
 
 /// `preview_agent_skill` with the verified root's outline
@@ -796,15 +811,18 @@ pub fn preview_with_outline(
             return Ok(no_outline(id, version));
         };
         let print = outline_fingerprint(&outline);
-        // A supplied fingerprint is always checked; offset 0 without one is an
-        // intentional fresh read.
-        let changed = fingerprint.is_some_and(|expected| expected != print);
-        if changed || (offset > 0 && fingerprint.is_none()) {
-            return Ok(
-                json!({"skill_id":id,"version":version,"path":"outline","untrusted_guidance":true,"outline_changed":true,"complete":false,"next_offset":0,"continuation_hint":"The outline changed since the page you continued from, for example because a dependency tag moved. Call preview_agent_skill again without outline_offset for a fresh preview."}),
-            );
+        if outline_changed(offset, fingerprint, &print) {
+            return Ok(changed_outline(id, version, PREVIEW_RESTART));
         }
-        return outline_page_value(&outline, id, version, offset, PAGE_BUDGET, &print);
+        return outline_page_value(
+            &outline,
+            id,
+            version,
+            offset,
+            PAGE_BUDGET,
+            &print,
+            PREVIEW_HINT,
+        );
     }
     let plain = json!(preview);
     let mut candidates = Vec::new();
@@ -814,7 +832,13 @@ pub fn preview_with_outline(
             let budget = PAGE_BUDGET.saturating_sub(wire_len(&plain));
             if budget >= MIN_OUTLINE_BUDGET {
                 candidates.push(outline_page_value(
-                    &outline, id, version, 0, budget, &print,
+                    &outline,
+                    id,
+                    version,
+                    0,
+                    budget,
+                    &print,
+                    PREVIEW_HINT,
                 )?);
             }
             candidates.push(json!({"skill_id":id,"version":version,"path":"outline","untrusted_guidance":true,"outline_available":true,"outline_fingerprint":print,"complete":false,"next_offset":0,"continuation_hint":"The outline did not fit in this preview. Call preview_agent_skill again with outline_offset=0 and this outline_fingerprint for an outline-only page."}));
@@ -834,6 +858,19 @@ pub fn preview_with_outline(
 /// Room left in a page budget for the `outline_fingerprint` field.
 const FINGERPRINT_ROOM: usize = 96;
 const PREVIEW_HINT: &str = "Call preview_agent_skill again with outline_offset=next_offset and this outline_fingerprint for the next outline-only page.";
+const PREVIEW_RESTART: &str = "The outline changed since the page you continued from, for example because a dependency tag moved. Call preview_agent_skill again without outline_offset for a fresh preview.";
+const READ_HINT: &str = "Call skill_read again with section=outline, offset=next_offset and this outline_fingerprint for the next page.";
+const READ_RESTART: &str = "The outline changed since the page you continued from, for example because a dependency was re-pinned. Read it again from offset 0.";
+
+/// A supplied fingerprint is always checked; offset 0 without one is an
+/// intentional fresh read, and later pages must name the page they continue.
+fn outline_changed(offset: usize, fingerprint: Option<&str>, print: &str) -> bool {
+    fingerprint.is_some_and(|expected| expected != print) || (offset > 0 && fingerprint.is_none())
+}
+
+fn changed_outline(id: &str, version: &str, hint: &str) -> Value {
+    json!({"skill_id":id,"version":version,"path":"outline","untrusted_guidance":true,"outline_changed":true,"complete":false,"next_offset":0,"continuation_hint":hint})
+}
 
 fn outline_page_value(
     outline: &str,
@@ -842,6 +879,7 @@ fn outline_page_value(
     offset: usize,
     budget: usize,
     print: &str,
+    hint: &str,
 ) -> AppResult<Value> {
     let mut page = page_with(
         outline,
@@ -850,7 +888,7 @@ fn outline_page_value(
         "outline",
         offset,
         budget.saturating_sub(FINGERPRINT_ROOM),
-        PREVIEW_HINT,
+        hint,
     )?;
     page["outline_fingerprint"] = print.into();
     Ok(page)

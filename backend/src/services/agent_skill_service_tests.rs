@@ -1052,16 +1052,27 @@ async fn max_size_cjk_outline_pages_through_skill_read_and_preview() {
         .await
         .unwrap();
     agent.skills = vec![registry.reference()];
+    let first = read_outline(&registry, &agent, ID, None, 0, None)
+        .await
+        .unwrap();
+    let read_print = first["outline_fingerprint"].as_str().unwrap().to_owned();
     let via_read = collect_pages(|offset| {
-        let (registry, agent) = (&registry, &agent);
+        let (registry, agent, print) = (&registry, &agent, &read_print);
         async move {
-            read_outline(registry, agent, ID, None, offset)
+            read_outline(registry, agent, ID, None, offset, Some(print))
                 .await
                 .unwrap()
         }
     })
     .await;
     assert_eq!(via_read, expected);
+    // Later pages must name the page they continue.
+    let next = first["next_offset"].as_u64().unwrap() as usize;
+    let unbound = read_outline(&registry, &agent, ID, None, next, None)
+        .await
+        .unwrap();
+    assert_eq!(unbound["outline_changed"], true);
+    assert!(unbound.get("content").is_none());
 
     let verified = preview(&registry, ID, "1.0").await.unwrap();
     let first = preview_with_outline(&verified, None, None).unwrap();
@@ -1088,7 +1099,11 @@ async fn outline_reads_only_attached_pins_and_resolves_uses_in_the_root_closure(
     let mut agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
         .await
         .unwrap();
-    assert!(read_outline(&registry, &agent, ID, None, 0).await.is_err());
+    assert!(
+        read_outline(&registry, &agent, ID, None, 0, None)
+            .await
+            .is_err()
+    );
     assert!(registry.calls.lock().unwrap().is_empty());
     let mut reference = registry.reference();
     reference.dependencies.push(SkillPin {
@@ -1099,31 +1114,48 @@ async fn outline_reads_only_attached_pins_and_resolves_uses_in_the_root_closure(
         sha256: reference.sha256.clone(),
     });
     agent.skills = vec![reference.clone()];
-    let page = read_outline(&registry, &agent, ID, None, 0).await.unwrap();
+    let page = read_outline(&registry, &agent, ID, None, 0, None)
+        .await
+        .unwrap();
     assert_eq!(page["path"], "outline");
     assert_eq!(page["untrusted_guidance"], true);
     assert!(page["content"].as_str().unwrap().contains(&format!(
         "Uses: helper (skill {dependency_id}, version 1.0)"
     )));
+    // Re-pinning only the dependency keeps the root's identity but changes
+    // the outline, so a page bound to the old one restarts instead of splicing.
+    let print = page["outline_fingerprint"].as_str().unwrap().to_owned();
+    agent.skills[0].dependencies[0].version = "1.10".into();
+    let moved = read_outline(&registry, &agent, ID, None, 0, Some(&print))
+        .await
+        .unwrap();
+    assert_eq!(moved["outline_changed"], true);
+    assert_eq!(moved["next_offset"], 0);
+    assert!(moved.get("content").is_none());
+    agent.skills = vec![reference.clone()];
     // A pinned dependency is readable through its root; same package here.
     assert!(
-        read_outline(&registry, &agent, ID, Some("helper"), 0)
+        read_outline(&registry, &agent, ID, Some("helper"), 0, None)
             .await
             .is_ok()
     );
     // A dependency that is not pinned with this root is refused.
     assert!(
-        read_outline(&registry, &agent, ID, Some("not-pinned"), 0)
+        read_outline(&registry, &agent, ID, Some("not-pinned"), 0, None)
             .await
             .is_err()
     );
     // Disabled pins and tampered packages are refused like ordinary reads.
     let tampered = outline_registry("changed after pinning");
     assert!(
-        matches!(read_outline(&tampered, &agent, ID, None, 0).await, Err(AppError::ValidationError(message)) if message.contains("SHA-256"))
+        matches!(read_outline(&tampered, &agent, ID, None, 0, None).await, Err(AppError::ValidationError(message)) if message.contains("SHA-256"))
     );
     agent.skills[0].disabled = true;
-    assert!(read_outline(&registry, &agent, ID, None, 0).await.is_err());
+    assert!(
+        read_outline(&registry, &agent, ID, None, 0, None)
+            .await
+            .is_err()
+    );
     f.state.db.drop().await.unwrap();
 }
 

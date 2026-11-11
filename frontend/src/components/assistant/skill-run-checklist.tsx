@@ -55,8 +55,16 @@ function StepIcon({ status, small = false }: { readonly status: SkillRunStepStat
   }
 }
 
-function settled(status: SkillRunStepStatus): boolean {
-  return status === "done" || status === "skipped";
+/**
+ * The step the run is on: a running or waiting step, else the next pending
+ * one. With no live step, a failed step means the run stopped there; `-1`
+ * when the run has ended.
+ */
+function currentStep(steps: readonly SkillRunStep[]): number {
+  const live = steps.findIndex((step) => step.status === "running" || step.status === "needs_you");
+  if (live !== -1) return live;
+  if (steps.some((step) => step.status === "failed")) return -1;
+  return steps.findIndex((step) => step.status === "pending");
 }
 
 /**
@@ -66,13 +74,24 @@ function settled(status: SkillRunStepStatus): boolean {
  * arrive as their own cards.
  */
 export function SkillRunChecklist({ name, version, kind, steps, elapsed, onStop }: SkillRunChecklistProps) {
-  const done = steps.filter((step) => settled(step.status)).length;
-  const current = steps.findIndex((step) => !settled(step.status));
+  const done = steps.filter((step) => step.status === "done" || step.status === "skipped").length;
+  const current = currentStep(steps);
   const finished = current === -1;
+  const failed = steps.findIndex((step) => step.status === "failed");
+  const stopped = finished && failed !== -1;
   const active = finished ? undefined : steps[current];
-  const label = finished
-    ? `Finished · ${steps.length} steps`
-    : `Step ${current + 1} of ${steps.length}`;
+  const heading = stopped
+    ? "Stopped"
+    : finished
+      ? "Done"
+      : kind === "skillset"
+        ? "Running skillset"
+        : "Running skill";
+  const label = stopped
+    ? `Step ${failed + 1} of ${steps.length} failed`
+    : finished
+      ? `Finished · ${steps.length} steps`
+      : `Step ${current + 1} of ${steps.length}`;
   return (
     <section
       aria-label={`${name} run`}
@@ -81,14 +100,15 @@ export function SkillRunChecklist({ name, version, kind, steps, elapsed, onStop 
       <div className="space-y-2">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 space-y-1">
-            <p className="type-group-label uppercase tracking-[1.5px] text-text-tertiary">
-              {finished ? "Done" : kind === "skillset" ? "Running skillset" : "Running skill"}
-            </p>
+            <p className="type-group-label uppercase tracking-[1.5px] text-text-tertiary">{heading}</p>
             <p className="type-card-title break-words text-foreground">
               {name} <span className="font-mono font-normal text-text-tertiary">{version}</span>
             </p>
           </div>
-          <span role="status" className="type-secondary shrink-0 pt-0.5 text-muted-foreground">
+          <span
+            role="status"
+            className={cn("type-secondary shrink-0 pt-0.5", stopped ? "text-destructive" : "text-muted-foreground")}
+          >
             {label}
             {active?.status === "running" && elapsed ? ` · ${elapsed}` : ""}
           </span>
@@ -102,7 +122,10 @@ export function SkillRunChecklist({ name, version, kind, steps, elapsed, onStop 
           className="h-1 overflow-hidden rounded-full bg-overlay"
         >
           <div
-            className={cn("h-full rounded-full transition-[width] duration-500", finished ? "bg-success" : "nyx-gradient-vivid")}
+            className={cn(
+              "h-full rounded-full transition-[width] duration-500",
+              stopped ? "bg-destructive" : finished ? "bg-success" : "nyx-gradient-vivid",
+            )}
             style={{ width: `${steps.length ? (done / steps.length) * 100 : 0}%` }}
           />
         </div>

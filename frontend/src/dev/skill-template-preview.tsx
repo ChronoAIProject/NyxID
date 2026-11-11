@@ -6,6 +6,7 @@ import {
   SkillTemplateCard,
   type SkillTemplateOutline,
 } from "@/components/assistant/skill-template-card";
+import { MISSING_REPORT, loadSkillTemplateReport } from "./skill-template-report";
 import "@/app.css";
 
 // Local-only preview of NYX template cards. The report is produced by the
@@ -101,13 +102,9 @@ export function SkillTemplatePreview() {
   }, [theme]);
 
   useEffect(() => {
-    fetch("/skill-template-report.json")
-      .then((response) => {
-        if (!response.ok) throw new Error("missing");
-        return response.json() as Promise<ReportEntry[]>;
-      })
+    loadSkillTemplateReport<ReportEntry[]>()
       .then(setEntries)
-      .catch(() => setError("No report found. Run the template check with NYX_SKILL_TEMPLATE_REPORT, then copy it to public/skill-template-report.json."));
+      .catch(() => setError(MISSING_REPORT));
   }, []);
 
   const visible = useMemo(

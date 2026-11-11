@@ -2,8 +2,9 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { SkillRunChecklist, type SkillRunStep } from "./skill-run-checklist";
 
+const first: SkillRunStep = { id: "step-1", title: "Get a number", status: "done", detail: "+65 6018 2245 reserved." };
 const steps: SkillRunStep[] = [
-  { id: "step-1", title: "Get a number", status: "done", detail: "+65 6018 2245 reserved." },
+  first,
   {
     id: "step-2",
     title: "Create the voice agent",
@@ -41,7 +42,7 @@ describe("SkillRunChecklist", () => {
         name="front-desk"
         version="1.0"
         kind="skill"
-        steps={[{ ...steps[0] }, { id: "step-2", title: "Choose the voice", status: "needs_you", detail: "Pick a voice." }]}
+        steps={[first, { id: "step-2", title: "Choose the voice", status: "needs_you", detail: "Pick a voice." }]}
       />,
     );
     expect(screen.getByText("Running skill")).toBeInTheDocument();
@@ -57,7 +58,7 @@ describe("SkillRunChecklist", () => {
         name="front-desk"
         version="1.0"
         kind="skillset"
-        steps={[{ ...steps[0] }, { id: "step-2", title: "Payment links", status: "skipped" }]}
+        steps={[first, { id: "step-2", title: "Payment links", status: "skipped" }]}
         onStop={vi.fn()}
       />,
     );
@@ -65,5 +66,45 @@ describe("SkillRunChecklist", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Finished · 2 steps");
     expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "2");
     expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+  });
+
+  it("reports a run that stopped at a failed step, and keeps going past a recovered one", () => {
+    const failed: SkillRunStep = { id: "step-2", title: "Create the voice agent", status: "failed", detail: "Telnyx refused the request." };
+    const { rerender } = render(
+      <SkillRunChecklist
+        name="front-desk"
+        version="1.0"
+        kind="skillset"
+        steps={[first, failed, { id: "step-3", title: "Payment links", status: "skipped" }]}
+        onStop={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Stopped")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Step 2 of 3 failed");
+    expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+    // Pending steps after a failure don't make the run look active.
+    rerender(
+      <SkillRunChecklist
+        name="front-desk"
+        version="1.0"
+        kind="skillset"
+        steps={[first, failed, { id: "step-3", title: "Payment links", status: "pending" }]}
+        onStop={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Step 2 of 3 failed");
+    // A live step after a failure is the current one.
+    rerender(
+      <SkillRunChecklist
+        name="front-desk"
+        version="1.0"
+        kind="skillset"
+        steps={[first, failed, { id: "step-3", title: "Payment links", status: "running" }]}
+        onStop={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Running skillset")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Step 3 of 3");
+    expect(screen.getByRole("button", { name: "Stop" })).toBeInTheDocument();
   });
 });
