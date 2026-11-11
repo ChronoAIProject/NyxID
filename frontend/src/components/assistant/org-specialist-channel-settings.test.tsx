@@ -97,29 +97,8 @@ it("members can confirm only their own chat account and cannot edit guest exposu
     await screen.findByText("Your chat account is verified."),
   ).toBeVisible();
 });
-it("keeps credit precision and rejects absent, zero and fractional-overflow budgets", () => {
-  for (const daily_credits of [
-    "",
-    "0",
-    "0.000",
-    "-1",
-    "0.0000000000001",
-    "NaN",
-  ])
-    expect(
-      orgChannelGuestFormSchema.safeParse({
-        enabled: true,
-        service_ids: [],
-        daily_credits,
-      }).success,
-    ).toBe(false);
-  expect(
-    orgChannelGuestFormSchema.parse({
-      enabled: true,
-      service_ids: [],
-      daily_credits: "0.000000000001",
-    }).daily_credits,
-  ).toBe("0.000000000001");
+it("saves only the guest switch without requiring a budget or a service selection", () => {
+  expect(orgChannelGuestFormSchema.parse({enabled:true})).toEqual({enabled:true});
 });
 
 

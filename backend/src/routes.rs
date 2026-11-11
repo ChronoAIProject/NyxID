@@ -3079,6 +3079,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
         )
         .route(
+            "/nyxagent/agents/{id}/org-guest-grants",
+            get(handlers::org_specialist_channels::adoption_preview)
+                .post(handlers::org_specialist_channels::adopt_grants),
+        )
+        .route(
             "/nyxagent/channels/{id}/org-specialist",
             get(handlers::org_specialist_channels::get)
                 .put(handlers::org_specialist_channels::update),
