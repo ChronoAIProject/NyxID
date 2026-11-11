@@ -397,7 +397,11 @@ jobs:
       !(inputs.force-all && contains(fromJSON(inputs.reuse-jobs || '[]'), 'oracle-worker-test')) &&
       (inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.oracle_worker == 'true')
     runs-on: ubuntu-latest
-    # Cold Chromium dependency downloads need room alongside the browser suite.
+    # Match the worker's exact playwright-core version and avoid runner APT/DNS
+    # dependencies by using the official browser image, pinned by digest.
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
+      options: --ipc=host
     timeout-minutes: 30
     defaults:
       run:
@@ -408,7 +412,6 @@ jobs:
         with:
           node-version-file: .node-version
       - run: npm install --ignore-scripts --no-package-lock --no-audit --no-fund
-      - run: npx --no-install playwright-core install --with-deps chromium
       - run: npm run check
       - run: npm test
       - run: npm run test:browser
