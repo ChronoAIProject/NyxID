@@ -12,6 +12,7 @@ LIMITS = {
     "en-US/description.txt": 4000,
     "en-US/whats-new.txt": 4000,
     "app-review-notes.txt": 4000,
+    "testflight-testing-notes.txt": 4000,
     "resubmission-message.txt": 4000,
 }
 

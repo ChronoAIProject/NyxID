@@ -1,6 +1,6 @@
 # Prepare App Review accounts
 
-Review access is pending. This document supplies the setup and verification steps; it does not claim that accounts or credentials have been created.
+A live admin lookup on 12 November 2026 confirmed that the existing primary App Review account is active, email-verified, a regular user, and has MFA disabled. Its identifier and last-login status are recorded in the private Desktop package. Fresh password sign-in and model/voice access remain unverified, and a separate deletion-test account has not been identified. Use the steps below to complete review access.
 
 ## Prepare the primary demo account
 

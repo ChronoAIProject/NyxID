@@ -32,6 +32,7 @@ Open the **English (U.S.)** localization. Each text file contains the field valu
 | Keywords | [keywords.txt](en-US/keywords.txt) | 94 | 100 |
 | What's New in This Version | [whats-new.txt](en-US/whats-new.txt) | 638 | 4,000 |
 | App Review notes | [app-review-notes.txt](app-review-notes.txt) | See file | 4,000 |
+| TestFlight What to Test | [testflight-testing-notes.txt](testflight-testing-notes.txt) | See file | 4,000 |
 
 Run `python3 mobile/release/1.0.4-58/validate_metadata.py` from the repository root to verify the field lengths after edits. The trailing file newline is excluded from the pasted field value.
 
@@ -41,14 +42,14 @@ The copy describes the current AI workspace. Language support is limited to supp
 
 The current dark-only Desktop package is `~/Desktop/NyxID-58-Submission-DARK`. It contains the submission text, review notes, changelog, two primary landscape assets, and dark iPhone and iPad screenshots.
 
-The **Product Page Information** section has two artwork tabs. Both primary files are **5244 × 2950**, a size explicitly accepted by both uploaders in the supplied App Store Connect screenshots.
+The **Product Page Information** section has two artwork tabs. The primary files use the smaller accepted sizes shown in each uploader: **3840 × 1646 for Header** and **1920 × 1280 for Search Results**. The artwork introduces NyxBot with the headline “Give your AI more to work with.” Large app captures fill the background, while the title stays centered for mobile crops.
 
 | Tab | File in the dark package | Supported sizes shown in App Store Connect |
 | --- | --- | --- |
-| Header | `01-HEADER-DARK-5244x2950.png` | 5244 × 2950, 3840 × 2560, or 1920 × 1280 |
-| Search Results | `02-SEARCH-RESULTS-DARK-5244x2950.png` | 5244 × 2950, 3840 × 2560, or 1920 × 1280 |
+| Header | `01-HEADER-DARK-3840x1646.png` | 5244 × 2950 or 3840 × 1646 |
+| Search Results | `02-SEARCH-RESULTS-DARK-1920x1280.png` | 5244 × 2950, 3840 × 2560, or 1920 × 1280 |
 
-Upload one image in each tab. The two files use the same dark artwork with different names to identify the destination. Their dimensions and absence of transparency are verified locally. Server upload acceptance has not been exercised from this session.
+Upload one image in each tab. Each file has a composition fitted to its destination's aspect ratio. Their dimensions and absence of transparency are verified locally. `verification/header-center-crop-preview.png` simulates a square center crop for local inspection; it is not an upload asset. Server upload acceptance has not been exercised from this session.
 
 If App Store Connect also requests device screenshots, use `app-screenshots/iphone/` for the three 1206 × 2622 iPhone images and `app-screenshots/ipad/` for the genuine 2064 × 2752 iPad capture. The portrait files belong in the corresponding device screenshot slots.
 
@@ -58,7 +59,7 @@ Read `READ-ME-FIRST.txt` in the dark package for the field mapping. `verificatio
 
 ## Complete private review access
 
-Use [review-account-setup.md](review-account-setup.md) to prepare the primary demo account and a disposable deletion-test account. Enter credentials in App Store Connect's private **Sign-in Information** fields. The pack does not contain credentials, and account provisioning or successful reviewer sign-in has not been verified.
+Use [TESTING-NOTES-AND-ACCOUNTS.md](TESTING-NOTES-AND-ACCOUNTS.md) to find the testing fields and account-readiness notes, and [review-account-setup.md](review-account-setup.md) to complete the primary demo account and disposable deletion-test account checks. The existing primary account's active, email-verified state was confirmed through a live admin read on 12 November 2026; its identifier is recorded only in the private Desktop copy. Password sign-in, model/voice access, and a separate deletion account remain unverified. Enter credentials in App Store Connect's private **Sign-in Information** fields. The pack does not contain passwords.
 
 Paste [app-review-notes.txt](app-review-notes.txt) into **Notes** after the accounts and feature access are ready. Put the App Review contact person's current name, phone, and email into the corresponding private fields; those details are not inferred from the public support email.
 
