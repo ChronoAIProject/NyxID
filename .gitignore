@@ -64,6 +64,3 @@ k8s/
 
 # Python bytecode from repository scripts
 __pycache__/
-
-# Local NYX skill template preview report (generated)
-frontend/src/dev/skill-template-report.local.json

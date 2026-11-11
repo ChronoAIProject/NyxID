@@ -192,26 +192,6 @@ repository: capability skills such as `sms-send-twilio`, `records-notion` and
 skillset as one skill (its master prompt as `SKILL.md`, its members as the
 dependencies) is proposed for a later part of #2331.
 
-To check templates locally, run the ignored `validate_skill_template_dir` test
-on a folder of `<name>/SKILL.md` (or `<name>/SKILLSET.md`) packages. It parses
-each with the real reader and writes the exact `preview_agent_skill` results to
-`NYX_SKILL_TEMPLATE_REPORT`:
-
-```bash
-NYX_SKILL_TEMPLATE_DIR=/path/to/skills \
-NYX_SKILL_TEMPLATE_REPORT=frontend/src/dev/skill-template-report.local.json \
-RUST_MIN_STACK=8388608 \
-cargo test -p nyxid --bin nyxid-server validate_skill_template_dir -- --ignored --nocapture
-```
-
-With the frontend dev server running, `/skill-template-preview.html` shows each
-skill's card next to its tool results, for any folder.
-`/skill-chat-preview.html` is a scripted mock NyxBot chat built around the
-`phone-front-desk-sg` example, so it needs that skillset and its
-`sms-send-twilio` and `voice-agent-telnyx` members in the folder. The report is
-git-ignored and only these dev pages load it; they are not production build
-entries.
-
 ## Rollout
 
 `assistant:skill-runs` is off by default for everyone. Upgrade every backend
