@@ -367,7 +367,7 @@ it("shows the server's refusal of a display name", async () => {
   const sheet = await screen.findByRole("dialog", { name: "Agent details" });
   const profile = await within(sheet).findByLabelText("Profile", { selector: "form" });
   globalThis.__nyxidAssistantHttpMock = () =>
-    new Response(JSON.stringify({ message: "A display name must not contain credentials" }), {
+    new Response(JSON.stringify({ error: "bad_request", message: "A display name must not contain credentials" }), {
       status: 400,
     });
   appendText(within(profile).getByLabelText("Display name", { selector: "input,textarea" }), "sk-live");
@@ -866,7 +866,7 @@ function machineAccessFixture() {
       writes.push({ endpoint, method: init.method!, body });
       if (control.fail === (machineWrite ? "machine access" : "grants")) {
         return new Response(
-          JSON.stringify({ message: "Access changed; review and retry." }),
+          JSON.stringify({ error: "conflict", message: "Access changed; review and retry." }),
           { status: 409 },
         );
       }

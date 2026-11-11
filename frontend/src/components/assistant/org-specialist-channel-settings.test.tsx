@@ -30,7 +30,7 @@ beforeEach(() => {
   writes = [];
   globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
     if (settingsUnavailable && endpoint.endsWith("/org-specialist")) {
-      return new Response(JSON.stringify({ message: "Organization access is unavailable" }), { status: 403 });
+      return new Response(JSON.stringify({ error: "forbidden", message: "Organization access is unavailable" }), { status: 403 });
     }
     if (init.method && init.method !== "GET")
       writes.push({

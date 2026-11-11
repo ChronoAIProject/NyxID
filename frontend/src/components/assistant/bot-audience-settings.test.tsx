@@ -104,6 +104,7 @@ beforeEach(() => {
       if (conflict)
         return new Response(
           JSON.stringify({
+            error: "conflict",
             message: "Guest settings changed; reload them before saving",
           }),
           { status: 409 },
