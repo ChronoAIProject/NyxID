@@ -2312,6 +2312,7 @@ pub(crate) async fn setup_link_tool(
     let now = Utc::now();
     let family = canonical_platform(&platform).to_owned();
     let mut set = provenance.fields();
+    set.insert("source_turn_id", provenance.source_turn_id.clone());
     set.insert("agent_id", agent.id.clone());
     set.insert("conversation_id", source_conversation_id);
     set.insert("connect_link_id", &created.link.id);
@@ -2418,7 +2419,14 @@ fn watch_snapshot(watch: &NyxbotWatch) -> bson::Document {
     "agent_id":&watch.agent_id,"connect_link_id":&watch.connect_link_id,
     "created_at":bson::DateTime::from_chrono(watch.created_at),
     "expires_at":bson::DateTime::from_chrono(watch.expires_at),
-    "source_turn_id":&watch.source_turn_id,"source_connect_link_id":&watch.source_connect_link_id,"report_to":&watch.report_to,"report_provenance":watch.report_provenance as i32};
+    "report_to":&watch.report_to,"report_provenance":watch.report_provenance as i32};
+    if watch.kind == "channel_bot" {
+        filter.insert("source_turn_id", watch.source_turn_id.clone());
+        filter.insert(
+            "source_connect_link_id",
+            watch.source_connect_link_id.clone(),
+        );
+    }
     if watch.report_provenance == 0 {
         // Pre-provenance rows deserialize as legacy version zero.
         filter.insert("report_provenance", doc! {"$in":[0,bson::Bson::Null]});

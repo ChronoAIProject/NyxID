@@ -7237,12 +7237,12 @@ async fn onboarding_2318_resume_context_is_source_bound_and_legacy_reset_safe() 
     let f =
         crate::services::assistant_authority_tests::orchestrator_fixture("onboarding2318_context")
             .await;
-    let provenance = ReportProvenance::from_chat(&f.chat);
+    let provenance = ReportProvenance::from_channel_setup_chat(&f.chat);
     assert_eq!(provenance.source_turn_id, f.chat.turn_id);
     let mut stopped = f.chat.clone();
     stopped.turn_stopped = true;
     assert!(
-        ReportProvenance::from_chat(&stopped)
+        ReportProvenance::from_channel_setup_chat(&stopped)
             .source_turn_id
             .is_none()
     );
@@ -7252,6 +7252,11 @@ async fn onboarding_2318_resume_context_is_source_bound_and_legacy_reset_safe() 
     })
     .unwrap();
     assert!(watch.source_turn_id.is_none());
+    assert!(watch_snapshot(&watch).contains_key("source_turn_id"));
+    let mut machine_watch = watch.clone();
+    machine_watch.kind = "machine_setup".into();
+    assert!(!watch_snapshot(&machine_watch).contains_key("source_turn_id"));
+    assert!(!watch_snapshot(&machine_watch).contains_key("source_connect_link_id"));
     assert!(
         onboarding_context(&f.state.db, &watch)
             .await

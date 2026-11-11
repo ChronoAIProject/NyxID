@@ -2006,6 +2006,10 @@ async fn machine_watches_and_jobs_carry_validated_report_provenance() {
     let mut live = f.chat.clone();
     live.report_to = Some("nyxa-assigning".into());
     assert_eq!(ReportProvenance::from_chat(&live), assigned);
+    let setup = ReportProvenance::from_channel_setup_chat(&live);
+    assert_eq!(setup.source_turn_id, live.turn_id);
+    assert_eq!(setup.carried(), assigned.carried());
+    assert_eq!(setup.fields(), assigned.fields());
     f.state.db.drop().await.unwrap();
 }
 

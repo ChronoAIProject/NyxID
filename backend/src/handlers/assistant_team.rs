@@ -2961,7 +2961,9 @@ async fn dispatch_channels(
                 text_arg(args, "platform"),
                 args["label"].as_str(),
                 &agent,
-                crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
+                crate::services::nyxbot_watch_service::ReportProvenance::from_channel_setup_chat(
+                    chat,
+                ),
             )
             .await?
         }
