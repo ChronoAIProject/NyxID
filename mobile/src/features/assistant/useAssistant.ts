@@ -1,3 +1,4 @@
+import { retryAgentRead, agentReadRetryDelay } from "../../lib/api/agentReadRetry";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
@@ -109,7 +110,8 @@ export function useAssistant(
     queryKey: ["workspace", "agents", "list"],
     queryFn: ({ signal }) => agentsApi.list(signal),
     enabled: active,
-    retry: false,
+    retry: (count, error) => activeRef.current && retryAgentRead(count, error),
+    retryDelay: agentReadRetryDelay,
     staleTime: 15_000,
   });
   const agentId = resolveChatAgentId(

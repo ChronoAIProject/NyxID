@@ -61,6 +61,7 @@ pub mod feature_flag_override;
 pub mod group;
 pub(crate) mod hmac_keyset;
 pub mod invite_code;
+pub mod invocation_diagnostic;
 pub mod login_approval;
 pub mod login_client_context;
 pub mod login_code;

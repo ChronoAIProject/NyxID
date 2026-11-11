@@ -50,7 +50,7 @@ describe("production attachment upload error telemetry", () => {
     const xhr = UploadRequest.latest;
     const trace = "76dd13d5-e7cf-4c63-a33b-26036d2a495d";
     xhr.responseHeaders.set("X-NyxID-Trace-Id", trace);
-    xhr.respond(status, JSON.stringify({ message: "private response" }));
+    xhr.respond(status, JSON.stringify({ error: "request_failed", error_code: 1000, message: "private response" }));
     // A second callback must not emit another event for this upload.
     xhr.onerror?.();
     await pending;
@@ -95,6 +95,16 @@ describe("production attachment upload error telemetry", () => {
     await pending;
     expect(capture).not.toHaveBeenCalled();
   });
+
+  it.each([[503, "<html>nginx</html>"], [502, "private proxy body"], [504, ""], [503, '{"error":']])(
+    "sanitizes an upload HTTP %s error without replay", async (status, body) => {
+      const pending = uploadFile(scope, file, new AbortController().signal, vi.fn());
+      const xhr = UploadRequest.latest;
+      xhr.responseHeaders.set("x-request-id", "request-2275");
+      xhr.respond(status as number, body as string);
+      await expect(pending).rejects.toMatchObject({ status, requestId: "request-2275", message: "NyxID is temporarily unavailable. Try again in a moment." });
+      expect(xhr.send).toHaveBeenCalledTimes(1);
+    });
 
   it("preserves a successful upload and emits no error", async () => {
     const progress = vi.fn();

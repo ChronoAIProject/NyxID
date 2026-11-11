@@ -1,4 +1,5 @@
 import { assistantHttp, type AssistantHttpRequest } from "./assistant-http";
+import { ApiError, apiErrorBody } from "@/lib/api-error";
 
 const MAX_CMA_JSON_BYTES = 2 * 1024 * 1024;
 
@@ -38,9 +39,13 @@ export async function readCmaJson(
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return JSON.parse(
-    new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-  ) as unknown;
+  try {
+    return JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+    ) as unknown;
+  } catch {
+    throw new ApiError(response.status, apiErrorBody(null, response.status), response.headers);
+  }
 }
 
 export async function cmaJson(
@@ -50,7 +55,7 @@ export async function cmaJson(
   const signal = options.signal
     ? AbortSignal.any([options.signal, AbortSignal.timeout(30_000)])
     : AbortSignal.timeout(30_000);
-  const response = await assistantHttp(path, { ...options, signal });
+  const response = await assistantHttp(path, { ...options, signal, errorFormat: "cma" });
   const result = await readCmaJson(response);
   signal.throwIfAborted();
   options.authorityGuard?.();

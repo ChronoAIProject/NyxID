@@ -1412,7 +1412,7 @@ cross-service extension, not an endpoint implemented by this change.
 Default-off `nyxbot:org-specialist-channels` adds a same-org specialist binding.
 Provider/creator keys stay on the linking admin and route keys stay org-owned;
 CMA source contracts are unchanged. NyxID resolves each verified sender to a
-live org member or an explicitly delegated, budgeted org-paid guest. Optional
+live org member or an explicitly enabled org-paid guest under specialist Grants (or frozen legacy service limits). Optional
 versioned origins carry that actor through replay/queues/async replies. Native
 and relay events use the same authority checks and dedup namespace. There is no
 CMA-provided membership/payer and no fallback to a personal agent. See

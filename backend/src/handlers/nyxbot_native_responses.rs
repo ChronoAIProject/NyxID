@@ -38,12 +38,12 @@ async fn respond_impl(
     // CMA retries only this exact refusal as proven pre-admission. A generic
     // 503 is an uncertain submission and must never be used for preparation.
     if row.gateway_native_phase.as_deref() == Some("preparing") {
-        return (
+        return provider_refusal::coded((
             StatusCode::TOO_MANY_REQUESTS,
             [("retry-after", "1")],
             Json(json!({"error":{"type":"invalid_request_error","code":"conversation_not_ready"}})),
         )
-            .into_response();
+            .into_response(), "conversation_not_ready");
     }
     match Box::pin(accept(&state, &row, &request, &idempotency)).await {
         Ok(stored) => stream(state, row, headers, stored.response_id, None),
@@ -56,7 +56,7 @@ async fn respond_impl(
             let _=state.db.collection::<NyxbotChannel>(CHANNELS).update_one(
                 doc! {"_id":&row.id,"binding_id":&row.binding_id,"gateway_source":bson::to_bson(&row.gateway_source).unwrap_or(bson::Bson::Null)},
                 doc! {"$set":{"gateway_native_delivery":code}}).await;
-            error.into_response()
+            provider_refusal::error(error)
         }
     }
 }
@@ -471,12 +471,24 @@ pub async fn snapshot(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
+    provider_refusal::scope(
+        &state.db,
+        provider_refusal::Endpoint::ResponseGet,
+        snapshot_inner(State(state.clone()), Path(id), headers),
+    )
+    .await
+}
+async fn snapshot_inner(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
     let (row, _) = match provider_channel(&state, &headers).await {
         Ok(v) => v,
         Err(r) => return r,
     };
     if let Err(error) = relay_responses::claim_replay(&state, &row, &id).await {
-        return error.into_response();
+        return provider_refusal::error(error);
     }
     match current(&state, &row, &id).await {
         Ok(Some((_, body, trace))) => {
@@ -487,10 +499,10 @@ pub async fn snapshot(
                 Ok(([("cache-control", "no-store")], Json(body.snapshot)).into_response())
             })
             .await
-            .unwrap_or_else(IntoResponse::into_response)
+            .unwrap_or_else(provider_refusal::error)
         }
         Ok(None) => problem(StatusCode::NOT_FOUND, "response_not_found"),
-        Err(e) => e.into_response(),
+        Err(e) => provider_refusal::error(e),
     }
 }
 pub async fn events(
@@ -499,16 +511,29 @@ pub async fn events(
     Query(query): Query<Cursor>,
     headers: HeaderMap,
 ) -> Response {
-    let after = match cursor(query.starting_after.as_deref()) {
-        Ok(v) => v,
-        Err(e) => return e.into_response(),
-    };
+    provider_refusal::scope(
+        &state.db,
+        provider_refusal::Endpoint::Events,
+        events_inner(State(state.clone()), Path(id), Query(query), headers),
+    )
+    .await
+}
+async fn events_inner(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<Cursor>,
+    headers: HeaderMap,
+) -> Response {
     let (row, _) = match provider_channel(&state, &headers).await {
         Ok(v) => v,
         Err(r) => return r,
     };
+    let after = match cursor(query.starting_after.as_deref()) {
+        Ok(v) => v,
+        Err(e) => return provider_refusal::error(e),
+    };
     if let Err(error) = relay_responses::claim_replay(&state, &row, &id).await {
-        return error.into_response();
+        return provider_refusal::error(error);
     }
     match current(&state, &row, &id).await {
         Ok(Some((_, body, trace))) if after.is_none_or(|n| n < body.frames.len() as u64) => {
@@ -519,7 +544,7 @@ pub async fn events(
         }
         Ok(Some(_)) => problem(StatusCode::BAD_REQUEST, "invalid_replay_cursor"),
         Ok(None) => problem(StatusCode::NOT_FOUND, "response_not_found"),
-        Err(e) => e.into_response(),
+        Err(e) => provider_refusal::error(e),
     }
 }
 async fn current(
@@ -547,6 +572,10 @@ async fn current(
         .collection::<NyxbotEvent>(EVENTS)
         .find_one(doc! {"_id":&stored.event_key})
         .await?;
+    if let Some(event) = event.as_ref() {
+        provider_refusal::partition_known();
+        provider_refusal::event(&event.event_id);
+    }
     let trace = event
         .as_ref()
         .and_then(|event| event.turn_id.as_deref())

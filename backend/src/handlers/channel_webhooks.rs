@@ -22,6 +22,7 @@ use crate::handlers::channel_bots::resolve_adapter;
 #[cfg(test)]
 use crate::models::api_key::COLLECTION_NAME as API_KEYS;
 use crate::services::channel_bot_service;
+use crate::services::channel_inbound_diagnostics::{self as inbound_diagnostics, Outcome};
 
 use crate::services::channel_inbound_service::InboundDeps as WebhookHandlerDeps;
 
@@ -268,7 +269,7 @@ pub(crate) async fn channel_webhook_with_producers(
                 )
                 .await
                 {
-                    tracing::warn!(bot_id = %bot_id, platform = %platform, error = %e, "channel webhook processing failed (suppressed)");
+                    tracing::warn!(bot_id = %bot_id, platform = %platform, error_code = ?e.downcast_ref::<crate::errors::AppError>().map(|error| error.error_code()), "channel webhook processing failed (suppressed)");
                 }
             });
             webhook_response(response, empty_ack_is_text)
@@ -281,7 +282,7 @@ pub(crate) async fn channel_webhook_with_producers(
             {
                 Ok(response) => webhook_response(response, empty_ack_is_text),
                 Err(e) => {
-                    tracing::warn!(bot_id = %bot_id, platform = %platform, error = %e, "channel webhook processing failed (suppressed)");
+                    tracing::warn!(bot_id = %bot_id, platform = %platform, error_code = ?e.downcast_ref::<crate::errors::AppError>().map(|error| error.error_code()), "channel webhook processing failed (suppressed)");
                     webhook_response(None, empty_ack_is_text)
                 }
             }
@@ -442,6 +443,35 @@ pub(crate) async fn dispatch_platform_webhook_with_producers(
             channel_bot_service::find_active_webhook_bot(&state.db, platform, source, &target)
                 .await?;
         let Some(bot) = bot else {
+            if platform == "x" {
+                // A signed stale subscription can still name a disabled bot.
+                // Bind its exact tag/account; never dispatch or revive it.
+                let value = serde_json::from_slice::<serde_json::Value>(body).ok();
+                if let Some(id) = value
+                    .as_ref()
+                    .and_then(|v| v["data"]["tag"].as_str())
+                    .and_then(|tag| tag.strip_prefix("nyxid:"))
+                    && let Ok(bot) = channel_bot_service::get_bot(&state.db, id).await
+                    && bot.platform == "x"
+                    && bot.credential_source == source
+                    && crate::services::channel_adapters::x::authenticated_bot(
+                        &bot,
+                        &credentials,
+                        headers,
+                        body,
+                    )
+                {
+                    inbound_diagnostics::authenticated(&state.db, &bot).await;
+                    inbound_diagnostics::record(&state.db, &bot, Outcome::BotInactive).await;
+                } else {
+                    crate::services::channel_bot_health::record_webhook_rejection(
+                        &state.db,
+                        platform,
+                        "bot_unavailable",
+                    )
+                    .await;
+                }
+            }
             tracing::warn!(
                 platform,
                 stage = "bot_lookup",
@@ -548,7 +578,7 @@ pub(crate) async fn handle_webhook_inner_with_producers(
     body: &[u8],
     producers: Option<ManagerProducers>,
 ) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
-    match crate::services::platform_entry_ingress_service::intercept(
+    let intercepted = crate::services::platform_entry_ingress_service::intercept(
         state,
         bot_id,
         expected_platform,
@@ -556,8 +586,26 @@ pub(crate) async fn handle_webhook_inner_with_producers(
         body,
         producers,
     )
-    .await?
+    .await;
+    if let Err(error) = &intercepted
+        && expected_platform == "x"
+        && let Ok(bot) = channel_bot_service::get_bot(&state.db, bot_id).await
     {
+        let outcome = if error.is_forbidden() {
+            Outcome::AuthorityChanged
+        } else {
+            Outcome::StorageUnavailable
+        };
+        diagnose_x_refusal(
+            WebhookHandlerDeps::from(state),
+            &bot,
+            headers,
+            body,
+            outcome,
+        )
+        .await;
+    }
+    match intercepted? {
         crate::services::platform_entry_ingress_service::NativeWebhook::Ordinary => {}
         crate::services::platform_entry_ingress_service::NativeWebhook::Consumed(response) => {
             return Ok(response);
@@ -571,6 +619,37 @@ pub(crate) async fn handle_webhook_inner_with_producers(
         body,
     )
     .await
+}
+
+/// An early local refusal is attributable only after independent signature,
+/// account and subscription-tag verification. No credentials are refreshed.
+async fn diagnose_x_refusal(
+    state: WebhookHandlerDeps<'_>,
+    bot: &crate::models::channel_bot::ChannelBot,
+    headers: &HeaderMap,
+    body: &[u8],
+    outcome: Outcome,
+) {
+    if bot.platform != "x" {
+        return;
+    }
+    let Ok(adapter) = resolve_adapter("x", state.token_exchange_cache) else {
+        return;
+    };
+    let Ok(secrets) = crate::services::channel_managed::build_verify_secrets(
+        state.db,
+        state.encryption_keys,
+        adapter.as_ref(),
+        bot,
+    )
+    .await
+    else {
+        return;
+    };
+    if crate::services::channel_adapters::x::authenticated_bot(bot, &secrets, headers, body) {
+        inbound_diagnostics::authenticated(state.db, bot).await;
+        inbound_diagnostics::record(state.db, bot, outcome).await;
+    }
 }
 
 type WebhookResult = Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>;
@@ -634,6 +713,7 @@ async fn handle_webhook_inner_impl(
 
     // Reject if bot is inactive
     if !bot.is_active {
+        diagnose_x_refusal(state, &bot, headers, body, Outcome::BotInactive).await;
         tracing::debug!(bot_id = %bot_id, status = %bot.status, "webhook for inactive bot");
         return Ok(None);
     }
@@ -642,6 +722,7 @@ async fn handle_webhook_inner_impl(
     // after signature verification succeeds (not before).
     let is_pending_webhook = bot.status == "pending_webhook";
     if !is_pending_webhook && bot.status != "active" {
+        diagnose_x_refusal(state, &bot, headers, body, Outcome::BotInactive).await;
         tracing::debug!(bot_id = %bot_id, status = %bot.status, "webhook for non-active bot");
         return Ok(None);
     }
@@ -685,6 +766,18 @@ async fn handle_webhook_inner_impl(
     {
         Ok(prepared) => prepared,
         Err(error) => {
+            if bot.platform == "x"
+                && let Some(outcome) = crate::services::channel_adapters::x::authenticated_rejection(
+                    &bot,
+                    &verify_secrets,
+                    headers,
+                    body,
+                )
+            {
+                inbound_diagnostics::authenticated(state.db, &bot).await;
+                inbound_diagnostics::record(state.db, &bot, outcome).await;
+                return Ok(None);
+            }
             // Unauthenticated: a forged POST must not write the bot row.
             crate::services::channel_bot_health::record_webhook_rejection(
                 state.db,
@@ -708,8 +801,10 @@ async fn handle_webhook_inner_impl(
         return Ok(Some(challenge_response));
     }
 
+    inbound_diagnostics::authenticated(state.db, &bot).await;
     if bot.credential_source == "connection" {
         if !bot.webhook_registered {
+            inbound_diagnostics::record(state.db, &bot, Outcome::Unregistered).await;
             tracing::warn!(platform = %bot.platform, bot_id, stage = "subscription", "channel webhook is not registered");
             channel_bot_service::record_webhook_error(
                 state.db,
@@ -719,20 +814,32 @@ async fn handle_webhook_inner_impl(
             .await?;
             return Ok(None);
         }
-        crate::services::channel_credentials::resolve_bot_token(
+        if let Err(error) = crate::services::channel_credentials::resolve_bot_token(
             state.db,
             state.encryption_keys,
             adapter.as_ref(),
             &bot,
         )
         .await
-        .inspect_err(|error| tracing::warn!(platform = %bot.platform, bot_id, stage = "connection", error_code = error.error_code(), "channel webhook connection unavailable"))?;
+        {
+            inbound_diagnostics::record(state.db, &bot, Outcome::ConnectionUnavailable).await;
+            tracing::warn!(platform = %bot.platform, bot_id, stage = "connection", error_code = error.error_code(), "channel webhook connection unavailable");
+            return Err(Box::new(error));
+        }
     }
 
     // Auto-promote pending_webhook bots AFTER successful signature verification.
     // This proves the user correctly configured the webhook URL on the platform.
     if is_pending_webhook && prepared.activate_bot {
-        if !snapshot.activate(state.db).await? {
+        if !inbound_diagnostics::checked(
+            state.db,
+            &bot,
+            Outcome::StorageUnavailable,
+            snapshot.activate(state.db).await,
+        )
+        .await?
+        {
+            inbound_diagnostics::record(state.db, &bot, Outcome::AuthorityChanged).await;
             return Ok(None);
         }
         tracing::info!(bot_id = %bot_id, "verified bot webhook is active");
@@ -832,12 +939,26 @@ async fn handle_webhook_inner_impl(
         }
     }
 
-    let messages = adapter.parse_inbound(&prepared.body).await.map_err(
-        |e| -> Box<dyn std::error::Error + Send + Sync> {
+    let messages = match adapter.parse_inbound(&prepared.body).await {
+        Ok(messages) => messages,
+        Err(error) => {
+            inbound_diagnostics::record(state.db, &bot, Outcome::InvalidPayload).await;
             tracing::warn!(platform = %bot.platform, bot_id, stage = "payload", "channel webhook payload rejected");
-            format!("failed to parse inbound messages: {e}").into()
-        },
-    )?;
+            return Err(Box::new(error));
+        }
+    };
+    if bot.platform == "x" {
+        let outcomes = crate::services::channel_adapters::x::filtered_webhook_outcomes(
+            &prepared.body,
+            &bot.platform_bot_id,
+        );
+        if messages.is_empty() && outcomes.is_empty() {
+            inbound_diagnostics::record(state.db, &bot, Outcome::EmptyBatch).await;
+        }
+        for outcome in outcomes {
+            inbound_diagnostics::record(state.db, &bot, outcome).await;
+        }
+    }
 
     crate::services::channel_inbound_service::process_inbound_messages(
         crate::services::channel_inbound_service::InboundSource::Webhook,
@@ -1569,6 +1690,7 @@ mod tests {
             resource_request_proof_enabled: false,
             base_url: "http://localhost:3001".to_string(),
             chrono_probe_url: None,
+            invocation_diagnostics_enabled: false,
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
             csrf_trusted_origins: vec![],

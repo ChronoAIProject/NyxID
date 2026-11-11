@@ -45,7 +45,12 @@ pub(crate) struct Fixture {
 }
 impl Fixture {
     pub(crate) async fn new(name: &str) -> Self {
-        let org = crate::services::org_agent_tests::Fixture::new(name).await;
+        let mut org = crate::services::org_agent_tests::Fixture::new(name).await;
+        // Existing #2215 coverage explicitly models the pre-cutover fleet.
+        org.readiness.abort();
+        org.readiness =
+            super::super::security_readiness_service::legacy_org_guest_test_replica(&org.state.db)
+                .await;
         let (agent, _) = org.create().await;
         let db = &org.state.db;
         ensure_indexes(db).await.unwrap();
@@ -139,8 +144,8 @@ impl Fixture {
             management::GuestSettings {
                 expected_revision: None,
                 enabled: true,
-                service_ids: ids,
-                daily_credits: Credits::from_whole(1),
+                service_ids: Some(ids),
+                daily_credits: Some(Credits::from_whole(1)),
             },
         )
         .await
@@ -435,8 +440,8 @@ async fn exact_guest_billing_lane_preserves_ordinary_platform_key_payers() {
             management::GuestSettings {
                 expected_revision: None,
                 enabled: true,
-                service_ids: vec![],
-                daily_credits: Credits::from_whole(1)
+                service_ids: Some(vec![]),
+                daily_credits: Some(Credits::from_whole(1))
             }
         )
         .await
@@ -550,8 +555,8 @@ async fn guest_delegation_requires_admin_and_live_agent_policy_intersection() {
                 management::GuestSettings {
                     expected_revision: None,
                     enabled: true,
-                    service_ids: vec![id.clone()],
-                    daily_credits: Credits::from_whole(1)
+                    service_ids: Some(vec![id.clone()]),
+                    daily_credits: Some(Credits::from_whole(1))
                 }
             )
             .await
@@ -758,8 +763,8 @@ async fn guest_budget_reserves_fractional_tax_upward_at_the_exact_cap() {
             management::GuestSettings {
                 expected_revision: None,
                 enabled: true,
-                service_ids: vec![],
-                daily_credits: Credits::from_pico(cap).unwrap(),
+                service_ids: Some(vec![]),
+                daily_credits: Some(Credits::from_pico(cap).unwrap()),
             },
         )
         .await
@@ -1272,8 +1277,8 @@ async fn org_channel_rotated_guest_key_keeps_typed_lane_and_is_revoked_with_expo
         management::GuestSettings {
             expected_revision: None,
             enabled: false,
-            service_ids: vec![],
-            daily_credits: Credits::from_whole(1),
+            service_ids: Some(vec![]),
+            daily_credits: Some(Credits::from_whole(1)),
         },
     )
     .await
@@ -1713,8 +1718,8 @@ async fn narrowing_guest_exposure_stops_guest_and_setup_keys_but_preserves_membe
         management::GuestSettings {
             expected_revision: None,
             enabled: false,
-            service_ids: vec![],
-            daily_credits: Credits::from_whole(1),
+            service_ids: Some(vec![]),
+            daily_credits: Some(Credits::from_whole(1)),
         },
     )
     .await
@@ -2220,3 +2225,6 @@ async fn notifications_are_purged_by_exact_org_channel_actor_and_thread() {
     probe(db, &remaining, true).await;
     db.drop().await.unwrap();
 }
+
+#[path = "grants_cutover_tests.rs"]
+mod grants_cutover;

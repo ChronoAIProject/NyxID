@@ -2483,6 +2483,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Routes that ALLOW delegated tokens (proxy, LLM gateway, delegation refresh)
     // Also accessible by service accounts.
     let api_v1_delegated = Router::new()
+        .route(
+            "/monitoring/invocation-diagnostics",
+            post(handlers::invocation_diagnostics::redeem).layer(DefaultBodyLimit::max(256)),
+        )
         .route("/channel-adapters", get(handlers::call_adapters::catalog))
         .route(
             "/channel-platforms",
@@ -3089,6 +3093,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/channels/{id}",
             delete(handlers::nyxbot::disconnect_channel).patch(handlers::nyxbot::link_channel),
+        )
+        .route(
+            "/nyxagent/agents/{id}/org-guest-grants",
+            get(handlers::org_specialist_channels::adoption_preview)
+                .post(handlers::org_specialist_channels::adopt_grants),
         )
         .route(
             "/nyxagent/channels/{id}/org-specialist",

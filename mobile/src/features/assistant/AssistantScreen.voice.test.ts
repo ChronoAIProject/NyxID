@@ -1,3 +1,4 @@
+import { buildApiError } from "../../lib/api/responseError";
 import {
   createAssistantDraftStore,
   assistantDraftKey,
@@ -120,6 +121,8 @@ function setup(
     models: [],
     model: "nyxagent/chat",
     agents: [agent],
+    agentsError: undefined as string | undefined,
+    reloadAgents: async () => { events.push(["reloadAgents"]); assistant.agentsError = undefined; },
     conversations: [],
     inputAttachments: [],
     online: true,
@@ -1903,3 +1906,20 @@ test("Android picker destinations wait for the dismiss slide; reduced motion ski
   }
 });
 
+
+test("Home displays a friendly 503 beside Reload agents and clears it after retry", async () => {
+  const x = setup();
+  x.assistant.agentsError = buildApiError("<html><center>nginx</center></html>", 503).message;
+  x.harness.render();
+  assert.ok(x.all().some((node) => node.props.message === "NyxID is temporarily unavailable. Try again in a moment."));
+  assert.doesNotMatch(JSON.stringify(x.harness.value()), /<html>|nginx/);
+  const reload = x.all().find((node) => node.props.label === "Reload agents");
+  assert.ok(reload);
+  reload.props.onPress();
+  await x.harness.settle();
+  x.harness.render();
+  assert.ok(x.events.some(([name]) => name === "reloadAgents"));
+  assert.equal(x.all().some((node) => node.props.label === "Reload agents"), false);
+  assert.equal(x.all().some((node) => node.props.message === "NyxID is temporarily unavailable. Try again in a moment."), false);
+  x.harness.unmount();
+});

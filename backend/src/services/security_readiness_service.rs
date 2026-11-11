@@ -47,6 +47,7 @@ pub const CAPABILITIES: &[&str] = &[
     "assistant:generated-artifacts",
     "assistant:org-agents",
     super::org_channel_service::FLAG,
+    super::org_channel_service::GUEST_GRANTS_READINESS,
     "assistant:shared-agents",
     super::collaboration_group_service::READINESS,
     super::shared_agent_transport::READINESS,
@@ -367,23 +368,24 @@ pub async fn require_platform(db: &Database, local_required: bool) -> AppResult<
 
 #[cfg(test)]
 pub(crate) async fn ready_test_replica(db: &Database) {
-    drop(ready_test_replica_inner(db, false).await);
+    drop(ready_test_replica_inner(db, false, None).await);
 }
 
 #[cfg(test)]
 pub(crate) async fn ready_automation_test_replica(db: &Database) {
-    drop(ready_test_replica_inner(db, true).await);
+    drop(ready_test_replica_inner(db, true, None).await);
 }
 
 #[cfg(test)]
 pub(crate) async fn controlled_ready_test_replica(db: &Database) -> tokio::task::JoinHandle<()> {
-    ready_test_replica_inner(db, false).await
+    ready_test_replica_inner(db, false, None).await
 }
 
 #[cfg(test)]
 async fn ready_test_replica_inner(
     db: &Database,
     automation_enabled: bool,
+    excluded: Option<&'static str>,
 ) -> tokio::task::JoinHandle<()> {
     let local = Runtime {
         identity: ReplicaIdentity {
@@ -399,8 +401,16 @@ async fn ready_test_replica_inner(
     };
     RUNTIME.get_or_init(|| local);
     let db = db.clone();
+    let mut capabilities: Vec<_> = CAPABILITIES
+        .iter()
+        .copied()
+        .filter(|c| Some(*c) != excluded)
+        .collect();
+    if automation_enabled {
+        capabilities.push(AUTOMATION_COMPLETION);
+    }
     let heartbeat = || async {
-        observe_with_automation(
+        observe_with_capabilities(
             &db,
             &ReplicaIdentity {
                 instance_name: "test-backend".into(),
@@ -412,7 +422,7 @@ async fn ready_test_replica_inner(
                 drained: true,
             },
             false,
-            automation_enabled,
+            &capabilities,
         )
         .await
         .expect("test replica observation");
@@ -421,7 +431,7 @@ async fn ready_test_replica_inner(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-            observe_with_automation(
+            observe_with_capabilities(
                 &db,
                 &ReplicaIdentity {
                     instance_name: "test-backend".into(),
@@ -433,7 +443,7 @@ async fn ready_test_replica_inner(
                     drained: true,
                 },
                 false,
-                automation_enabled,
+                &capabilities,
             )
             .await
             .expect("test replica heartbeat");
@@ -444,3 +454,13 @@ async fn ready_test_replica_inner(
 #[cfg(test)]
 #[path = "security_readiness_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(crate) async fn legacy_org_guest_test_replica(db: &Database) -> tokio::task::JoinHandle<()> {
+    ready_test_replica_inner(
+        db,
+        false,
+        Some(super::org_channel_service::GUEST_GRANTS_READINESS),
+    )
+    .await
+}

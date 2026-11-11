@@ -489,7 +489,7 @@ pub fn schema(name: &str) -> Value {
         "update_channel_access" => (
             json!({"channel_agent_id": string(64),
                 "org_guests":{"type":"object","additionalProperties":false,
-                    "description":"Organization-specialist guest settings, admins only. Read guest_revision from list_channel_agents and pass it as expected_revision. Omitted budget/services keep their saved values; first enable defaults to one credit per UTC day. Enabling guests also admits private guest chats; groups retain their own permissions. Cannot be combined with private_chats or posting fields.",
+                    "description":"Organization-specialist guest settings, admins only. Read guest_revision from list_channel_agents and pass it as expected_revision. Once org guest Grants readiness is complete, daily_credits and service_ids are deprecated and ignored. Guests are paid by the organization; service access follows specialist Grants after an explicit human adoption there. Existing bindings retain their old service limits until adoption. Enabling guests also admits private guest chats; groups retain their own permissions. Cannot be combined with private_chats or posting fields.",
                     "properties":{"enabled":{"type":"boolean"},"daily_credits":string(64),
                         "service_ids":{"type":"array","maxItems":100,"items":string(64)},
                         "expected_revision":{"type":"string","maxLength":64}},

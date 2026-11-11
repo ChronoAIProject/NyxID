@@ -42,6 +42,10 @@ pub struct ChannelBotSubscriptionState {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChannelBotDiagnostics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_inbound_outcome: Option<ChannelInboundOutcome>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub inbound_outcomes: std::collections::BTreeMap<String, ChannelInboundCounter>,
     /// Authenticated URL challenge only; never message receipt or activation.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub last_callback_challenge_at: Option<DateTime<Utc>>,
@@ -71,6 +75,20 @@ pub struct ChannelBotDiagnostics {
     pub consecutive_errors: u32,
     #[serde(default)]
     pub failure_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelInboundOutcome {
+    pub code: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChannelInboundCounter {
+    pub count: i64,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
