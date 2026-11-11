@@ -109,23 +109,33 @@ pnpm run android -- --device
 
 ## Agent 结果汇总
 
+本轮验证为五个独立分支，全部从同一个固定基线 `0246eebd3d587fc4805db09371ba8d36dd5dee41` 创建。每个分支使用独立 worktree，未修改业务代码；这样每组结果都能单独复核，后续如果发现缺陷也可以在对应分支隔离修复。
+
+| Agent | 分支 | Worktree |
+| --- | --- | --- |
+| Agent 1 | `codex/android-qa-auth` | `/Users/abigaildeng/.codex/worktrees/android-qa-auth/NyxID` |
+| Agent 2 | `codex/android-qa-chat` | `/Users/abigaildeng/.codex/worktrees/android-qa-chat/NyxID` |
+| Agent 3 | `codex/android-qa-workspace` | `/Users/abigaildeng/.codex/worktrees/android-qa-workspace/NyxID` |
+| Agent 4 | `codex/android-qa-ops` | `/Users/abigaildeng/.codex/worktrees/android-qa-ops/NyxID` |
+| Agent 5 | `codex/android-qa-native` | `/Users/abigaildeng/.codex/worktrees/android-qa-native/NyxID` |
+
 | Agent | 覆盖范围 | 状态 | 报告/证据 |
 | --- | --- | --- | --- |
-| Agent 1 | Auth、MFA、Social OAuth、Device Login、Agent Key、公开入口 | `CODE-PASS / BLOCKED` | 189 个聚焦测试通过；真实 Android、provider、MFA backend、FCM 未可用，AUTH-01/05/07/08/09 的设备验收待补 |
-| Agent 2 | Workspace、Assistant、Chat、附件、acknowledgement、语音 | `CODE-PASS / BLOCKED` | 345 个聚焦测试通过；adb/emulator/Java 不可用，CHAT-02/03/04/08 的真实滚动、键盘、权限、麦克风、前后台待补 |
-| Agent 3 | Agents、Groups、Plugins、Services、Machines | `CODE-PASS / BLOCKED` | 152 个聚焦测试通过；真实 backend、OAuth provider、机器节点和 Android 设备不可用，WORK-08/09/10 的集成验收待补 |
-| Agent 4 | Automations、Activity/Approvals、Account、Settings | `CODE-PASS / BLOCKED` | 71 + 39 个聚焦测试通过；真实账号、FCM、Telegram、MFA、删除账户和 Android 权限不可用，OPS-01/04/05/06/07 的手测待补 |
-| Agent 5 | Android 原生、权限、深链接、离线/前后台、构建 | `CODE-PASS / BLOCKED` | config/linking/orientation/build helper 聚焦检查通过；adb/emulator/Java 不可用，NATIVE-02~08 的真实设备或 release 构建待补 |
+| Agent 1 | Auth、MFA、Social OAuth、Device Login、Agent Key、公开入口 | `CODE-PASS / BLOCKED` | 独立分支聚焦测试 201 通过，扩展安全/session 选择集 240 通过，0 失败；真实 Android、provider、MFA backend、FCM 未可用，AUTH-01/05/07/08/09 的设备验收待补 |
+| Agent 2 | Workspace、Assistant、Chat、附件、acknowledgement、语音 | `CODE-PASS / BLOCKED` | 独立分支聚焦测试 942 通过，0 失败；adb/emulator/Java 不可用，CHAT-02/03/04/08 的真实滚动、键盘、权限、麦克风、前后台待补 |
+| Agent 3 | Agents、Groups、Plugins、Services、Machines | `CODE-PASS / BLOCKED` | 独立分支聚焦测试 329 通过，额外导航选择集 377 通过，0 失败；真实 backend、OAuth provider、机器节点和 Android 设备不可用，WORK-08/09/10 的集成验收待补 |
+| Agent 4 | Automations、Activity/Approvals、Account、Settings | `CODE-PASS / BLOCKED` | 独立分支聚焦测试 166 通过，0 失败；真实账号、FCM、Telegram、MFA、删除账户和 Android 权限不可用，OPS-04/05/06/07 的手测待补 |
+| Agent 5 | Android 原生、权限、深链接、离线/前后台、构建 | `CODE-PASS / BLOCKED` | 独立分支聚焦测试 65 通过，0 失败；dev/prod Expo config、Firebase 选择、scheme、intent filters、相机/录音权限和签名 helper 已静态核对，adb/emulator/Java 不可用，NATIVE-02~08 的真实设备或 release 构建待补 |
 
 ## 已完成的代码级证据
 
-以下结果来自五个测试方向中的前四个，只证明状态模型、导航模型、API contract 和组件逻辑；它们不能替代真实 Android 设备验收：
+以下结果来自五个独立分支，只证明状态模型、导航模型、API contract、Expo 配置和组件逻辑；它们不能替代真实 Android 设备验收：
 
-- Agent 1：认证、MFA、OAuth callback、Device Login、Agent Key、session persistence、法律页和导航测试共 189 个通过，0 失败。
-- Agent 2：Assistant、composer、附件、stream、acknowledgement、voice、drawer、keyboard、sheet、recents/search/deep link 测试共 345 个通过，0 失败。
-- Agent 3：Agents、Groups、Plugins、Services、Machines、desktop route 和导航测试共 152 个通过，0 失败。
-- Agent 4：Automations、Activity/Approvals、Account、Security、Notifications、Display/Privacy、Sessions、MFA lifecycle 测试共 110 个通过，0 失败。
-- Agent 5：Firebase/profile config、signing helper、linking、orientation、auth/navigation 聚焦检查共 98 个通过，0 失败；`git diff --check` 通过。
+- Agent 1：认证、MFA、OAuth callback、Device Login、Agent Key、session persistence、法律页和导航测试 201 个通过，扩展选择集 240 个通过，0 失败。
+- Agent 2：Assistant、composer、附件、stream、acknowledgement、voice、drawer、keyboard、sheet、recents/search/deep link 测试 942 个通过，0 失败。
+- Agent 3：Agents、Groups、Plugins、Services、Machines、desktop route 和导航测试 329 个通过，额外导航选择集 377 个通过，0 失败。
+- Agent 4：Automations、Activity/Approvals、Account、Security、Notifications、Display/Privacy、Sessions、MFA lifecycle 测试 166 个通过，0 失败。
+- Agent 5：Firebase/profile config、signing helper、linking、orientation、auth/navigation 聚焦检查 65 个通过，0 失败；`node --check`、`git diff --check` 通过。带最小测试环境变量的 Expo config 检查确认 dev package `dev.nyxid.nativecheck` 不注入 Firebase，prod package `fun.chronoai.nyxid` 使用 `./google-services.json`。
 
 ## 当前真实设备阻塞
 
