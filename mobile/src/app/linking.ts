@@ -34,6 +34,24 @@ export const notificationLinkConfig = {
   ],
 };
 
+const directLinkListeners = new Set<() => void>();
+
+export function subscribeDirectLinkOpened(listener: () => void): () => void {
+  directLinkListeners.add(listener);
+  return () => {
+    directLinkListeners.delete(listener);
+  };
+}
+
+function reportDirectLinkOpened(url: string): void {
+  // React Navigation owns direct links; supersede older queued notification
+  // intent before it receives this destination. Ignore untrusted URL events.
+  if (nativeNotificationUrl(url, notificationLinkConfig)) {
+    for (const listener of directLinkListeners) listener();
+  }
+  reportDeepLinkOpened(url);
+}
+
 export function extractChallengeIdFromUrl(url: string): string | null {
   try {
     const normalized = nativeNotificationUrl(url, notificationLinkConfig);
@@ -150,7 +168,7 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
     try {
       const directUrl = await Linking.getInitialURL();
       if (directUrl) {
-        reportDeepLinkOpened(directUrl);
+        reportDirectLinkOpened(directUrl);
         return rewriteChallengeUrl(directUrl);
       }
     } catch (error) {
@@ -165,7 +183,7 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
 
     try {
       linkingSubscription = Linking.addEventListener("url", ({ url }) => {
-        reportDeepLinkOpened(url);
+        reportDirectLinkOpened(url);
         listener(rewriteChallengeUrl(url));
       });
     } catch (error) {

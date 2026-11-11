@@ -39,6 +39,8 @@ function setup(initialAccount: string | null = null) {
   const guards = { current: new Set<symbol>() };
   const actions: any[] = [];
   const cached = deferred<any>();
+  let initialUrl: string | null = null;
+  let directLink: ((event: { url: string }) => void) | undefined;
   let tap!: (response: any) => void;
   let unsubscribed = false;
   let cleared = 0;
@@ -58,7 +60,19 @@ function setup(initialAccount: string | null = null) {
         };
       },
     },
-    "react-native": { Linking: { getInitialURL: async () => null } },
+    "react-native": {
+      Linking: {
+        getInitialURL: async () => initialUrl,
+        addEventListener: (_: string, listener: typeof directLink) => {
+          directLink = listener;
+          return {
+            remove: () => {
+              directLink = undefined;
+            },
+          };
+        },
+      },
+    },
     "../lib/env": {
       NYXID_APP_SCHEME: "nyxid",
       NYXID_TRUSTED_FRONTEND_URLS: ["https://nyx.example"],
@@ -116,6 +130,13 @@ function setup(initialAccount: string | null = null) {
     telemetry,
     cached,
     linking,
+    directLink: (url: string) => {
+      assert.ok(directLink, "the real appLinking subscription must be mounted");
+      directLink({ url });
+    },
+    setInitialUrl: (url: string) => {
+      initialUrl = url;
+    },
     tap: (r: any) => tap(r),
     cleared: () => cleared,
     unsubscribed: () => unsubscribed,
@@ -199,6 +220,80 @@ test("warm tap and foreground Open share guards; newest destination replaces an 
   f.tap(response({ type: "approval_request", request_id: "review" }, "review"));
   assert.equal(f.actions.length, 2);
   assert.match(JSON.stringify(f.actions[1]), /review/);
+  f.h.unmount();
+});
+
+for (const url of [
+  "nyxid://assistant?c=newer-direct-thread",
+  "https://nyx.example/assistant?c=newer-direct-thread",
+]) {
+  test(`a direct link supersedes a guarded notification: ${url}`, async () => {
+    const f = setup();
+    await f.signIn();
+    const guard = Symbol();
+    f.guards.current.add(guard);
+    f.tap(response({ conversation_id: "older-notification-thread" }));
+    const directUrls: string[] = [];
+    const unsubscribe = f.linking.appLinking.subscribe((next: string) =>
+      directUrls.push(next),
+    );
+    f.directLink(url);
+    assert.deepEqual(directUrls, [url]);
+    f.guards.current.delete(guard);
+    f.h.value().flush();
+    assert.equal(
+      f.actions.length,
+      0,
+      "the old notification must not override the direct route",
+    );
+    f.tap(response({ conversation_id: "newest-notification-thread" }, "newest"));
+    assert.equal(f.actions.length, 1);
+    assert.match(JSON.stringify(f.actions[0]), /newest-notification-thread/);
+    unsubscribe();
+    f.h.unmount();
+  });
+}
+
+test("a direct link fences a late cached notification response", async () => {
+  const f = setup();
+  await f.signIn();
+  const unsubscribe = f.linking.appLinking.subscribe(() => {});
+  f.directLink("nyxid://challenge/newer-direct-approval");
+  f.cached.resolve(response({ conversation_id: "stale-cold-thread" }));
+  await f.h.settle();
+  f.h.value().flush();
+  assert.equal(f.actions.length, 0);
+  unsubscribe();
+  f.h.unmount();
+});
+
+test("an initial direct link supersedes a notification waiting for navigation", async () => {
+  const f = setup();
+  f.cached.resolve(response({ conversation_id: "older-cold-thread" }));
+  await f.h.settle();
+  f.setInitialUrl("nyxid://challenge/initial-direct-approval");
+  assert.equal(
+    await f.linking.appLinking.getInitialURL(),
+    "nyxid://activity?challengeId=initial-direct-approval",
+  );
+  await f.signIn();
+  assert.equal(f.actions.length, 0);
+  f.h.unmount();
+});
+
+test("an untrusted direct URL does not discard a guarded notification", async () => {
+  const f = setup();
+  await f.signIn();
+  const guard = Symbol();
+  f.guards.current.add(guard);
+  f.tap(response({ conversation_id: "trusted-notification-thread" }));
+  const unsubscribe = f.linking.appLinking.subscribe(() => {});
+  f.directLink("https://untrusted.example/assistant?c=ignored");
+  f.guards.current.delete(guard);
+  f.h.value().flush();
+  assert.equal(f.actions.length, 1);
+  assert.match(JSON.stringify(f.actions[0]), /trusted-notification-thread/);
+  unsubscribe();
   f.h.unmount();
 });
 test("actual response extraction covers APNs trigger payload and FCM remote message data", () => {

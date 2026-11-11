@@ -13,6 +13,7 @@ import {
   extractUrlFromNotificationResponse,
   notificationLinkConfig,
   reportDeepLinkOpened,
+  subscribeDirectLinkOpened,
 } from "./linking";
 import {
   getAuthAccountId,
@@ -100,6 +101,15 @@ export function useNotificationNavigation(
     flush();
     return unsubscribe;
   }, [flush]);
+
+  useEffect(
+    () =>
+      subscribeDirectLinkOpened(() => {
+        intentRevision.current++;
+        pending.current = null;
+      }),
+    [],
+  );
 
   useEffect(() => {
     let mounted = true;
