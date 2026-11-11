@@ -581,6 +581,15 @@ an arbitrary modern `UserApiKey` by provider or uses the billing payer as owner.
 Explicit credentials, manual connections, node-managed or platform-bound routes,
 and explicit multi-account connection/target selection keep their existing paths.
 
+Catalog-owned automatic endpoints follow catalog URL changes without changing
+connection or endpoint IDs. With no SPRs, no provider token is inherited even if
+the owner has one. Optional inheritance keeps its stricter destination fence:
+until the stored endpoint has been reconciled to the live catalog, it refuses
+before materializing tokens. After repair, the owner's legacy token may reach the
+new admin-configured catalog destination under the existing optional SPR policy.
+A held target for the old host remains refused, including after repair. Manual,
+custom, gateway-URL and node-routed destinations retain their existing rules.
+
 ### Known gaps
 
 1. Creating a service on a disabled row's slug is accepted, then re-enabling the
