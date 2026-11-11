@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import {
   useCallback,
@@ -511,7 +512,7 @@ export function useComposerDictation({
               ? "[&_svg]:size-5 text-primary hover:text-primary focus-visible:text-primary active:text-primary"
               : "[&_svg]:size-5"
           }
-          aria-label={capturing ? "Stop dictation" : "Dictate a message"}
+          aria-label={capturing ? translateUi("Stop dictation") : translateUi("Dictate a message")}
           aria-pressed={capturing}
           disabled={disabled || stage === "finalizing" || stage === "review"}
           {...pressHandlers}
@@ -528,7 +529,7 @@ export function useComposerDictation({
             type="button"
             size="icon"
             variant="ghost"
-            aria-label="Configure dictation"
+            aria-label={translateUi("Configure dictation")}
             className="dictation-chevron"
             disabled={disabled || active}
             onMouseMove={(event) => {
@@ -558,7 +559,7 @@ export function useComposerDictation({
       >
         <div
           className="mb-2 flex h-8 items-center gap-3 px-1"
-          aria-label="Microphone input level"
+          aria-label={translateUi("Microphone input level")}
           data-capture-active={Boolean(preview.current) || undefined}
         >
           <Button
@@ -566,9 +567,9 @@ export function useComposerDictation({
             size="icon"
             variant="ghost"
             aria-label={
-              preview.current ? "Stop microphone test" : "Test microphone"
+              preview.current ? translateUi("Stop microphone test") : translateUi("Test microphone")
             }
-            title={preview.current ? "Stop microphone test" : "Test microphone"}
+            title={preview.current ? translateUi("Stop microphone test") : translateUi("Test microphone")}
             onClick={() => {
               if (preview.current) {
                 releasePreview();
@@ -586,7 +587,7 @@ export function useComposerDictation({
             />
           </div>
         </div>
-        <div aria-label="Microphone devices" className="space-y-0.5">
+        <div aria-label={translateUi("Microphone devices")} className="space-y-0.5">
           {devices.map((item, index) => (
             <button
               key={item.deviceId || index}
@@ -596,7 +597,7 @@ export function useComposerDictation({
               onClick={() => selectDevice(item.deviceId)}
             >
               <span className="min-w-0 flex-1 truncate">
-                {item.label || `Microphone ${index + 1}`}
+                {item.label || translateUi("Microphone {{value1}}", { value1: index + 1 })}
               </span>
               {(device ? device === item.deviceId : index === 0) && (
                 <Check className="size-4 text-primary" />
@@ -611,18 +612,14 @@ export function useComposerDictation({
             className="w-full justify-start"
             disabled={disabled}
             onClick={() => enableDevice()}
-          >
-            Enable microphone
-          </Button>
+          >{translateUi("Enable microphone")}</Button>
         )}
         <div className="mt-2 flex min-h-12 items-center gap-3 border-t border-hairline px-1 pt-2">
           <Hand className="size-4 text-text-secondary" />
-          <Label htmlFor={`hold-${scope}`} className="flex-1">
-            Hold to record
-          </Label>
+          <Label htmlFor={`hold-${scope}`} className="flex-1">{translateUi("Hold to record")}</Label>
           <Switch
             id={`hold-${scope}`}
-            aria-label="Hold to record"
+            aria-label={translateUi("Hold to record")}
             checked={mode === "hold"}
             onCheckedChange={(checked) => {
               const value = checked ? "hold" : "toggle";
@@ -636,16 +633,12 @@ export function useComposerDictation({
           />
         </div>
         <details className="mt-2 text-13 text-text-tertiary">
-          <summary className="cursor-pointer">
-            Transcription source
-          </summary>
+          <summary className="cursor-pointer">{translateUi("Transcription source")}</summary>
           <p className="mt-1">
-            {option?.model_label ?? "Platform transcription"}. Review before
-            inserting; never auto-sends. Maximum 2 minutes.
-          </p>
+            {option?.model_label ?? translateUi("Platform transcription")}{translateUi(". Review before inserting; never auto-sends. Maximum 2 minutes. ")}</p>
           {choices.length > 1 && (
             <select
-              aria-label="Dictation source"
+              aria-label={translateUi("Dictation source")}
               value={option ? option.service_id + option.model : ""}
               onChange={(event) => setSelection(event.target.value)}
               className="mt-1 w-full rounded border border-input bg-background p-1"
@@ -656,18 +649,15 @@ export function useComposerDictation({
                   value={item.service_id + item.model}
                   disabled={!item.available}
                 >
-                  {item.model_label} · Platform
-                </option>
+                  {item.model_label}{translateUi(" · Platform")}</option>
               ))}
             </select>
           )}
         </details>
         <details className="mt-2 text-13 text-text-tertiary">
-          <summary className="cursor-pointer">Credit usage</summary>
+          <summary className="cursor-pointer">{translateUi("Credit usage")}</summary>
           <p className="mt-1">{optionsError || `${quote(option)}.`}</p>
-          <p className="mt-1">
-            View recorded charges in your account menu under Usage.
-          </p>
+          <p className="mt-1">{translateUi("View recorded charges in your account menu under Usage.")}</p>
         </details>
         {configureVoice && (
           <Button
@@ -676,9 +666,7 @@ export function useComposerDictation({
             size="sm"
             className="mt-1 w-full justify-start text-text-secondary"
             onClick={configureVoice}
-          >
-            Voice settings…
-          </Button>
+          >{translateUi("Voice settings…")}</Button>
         )}
         {notice && (
           <p role="alert" className="mt-2 text-14 text-destructive">
@@ -689,7 +677,7 @@ export function useComposerDictation({
     </Popover>
   ) : null;
   const review = active ? (
-    <div className="space-y-3 py-2" aria-label="Dictation review">
+    <div className="space-y-3 py-2" aria-label={translateUi("Dictation review")}>
       <div className="min-h-10 whitespace-pre-wrap text-15">
         {text.parts?.length ? (
           text.parts.map((part, index) => (
@@ -717,12 +705,12 @@ export function useComposerDictation({
         {!text.final && !text.interim && (
           <span className="text-text-tertiary">
             {stage === "requesting"
-              ? "Allow microphone access in your browser…"
+              ? translateUi("Allow microphone access in your browser…")
               : stage === "connecting"
-                ? "Connecting dictation…"
+                ? translateUi("Connecting dictation…")
                 : stage === "review"
-                  ? "No speech captured."
-                  : "Speak your message…"}
+                  ? translateUi("No speech captured.")
+                  : translateUi("Speak your message…")}
           </span>
         )}
       </div>
@@ -741,19 +729,19 @@ export function useComposerDictation({
         </div>
         <span role="status" className="text-13 text-text-tertiary">
           {stage === "capturing"
-            ? "Listening"
+            ? translateUi("Listening")
             : stage === "finalizing"
-              ? "Finishing…"
+              ? translateUi("Finishing…")
               : stage === "review"
-                ? "Review"
-                : "Starting…"}
+                ? translateUi("Review")
+                : translateUi("Starting…")}
         </span>
         {capturing && (
           <Button
             type="button"
             size="icon"
             variant="outline"
-            aria-label="Stop dictation for review"
+            aria-label={translateUi("Stop dictation for review")}
             onClick={stop}
           >
             <Square className="size-3 fill-current" />
@@ -763,7 +751,7 @@ export function useComposerDictation({
           type="button"
           size="icon"
           variant="outline"
-          aria-label="Cancel dictation"
+          aria-label={translateUi("Cancel dictation")}
           onClick={() => cancel()}
         >
           <X />
@@ -772,7 +760,7 @@ export function useComposerDictation({
           type="button"
           size="icon"
           variant="primary"
-          aria-label="Insert dictation"
+          aria-label={translateUi("Insert dictation")}
           disabled={stage !== "review" || !text.final.trim()}
           onClick={() => {
             if (insert(text.final.trim())) cancel();

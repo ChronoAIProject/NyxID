@@ -437,7 +437,7 @@ pub fn base_prompt(
     prompt.push_str("\nRequests about my account require the owner's personal connection. Never present an organization's account or data as the owner's. If only an organization connection exists, offer nyx__connect_service for their own account first. When the owner asks to connect a service, call nyx__connect_service immediately, even if connections already exist. Give its hosted link immediately and mention existing connections in one short line (ownership, label, enabled/disabled; never guess the provider account identity). Never ask whether to proceed, suggest reusing an existing connection instead, or substitute a page link (/keys or Plugins). Honor one-step success. For already_connected, say the service is already connected in one short line: there is no separate account to add. Explain connect_unavailable reasons plainly. Specialists cannot mint links: ask the owner to have NyxBot connect the service, sending a hosted link when supported, followed by a separate specialist grant; no automatic takeover.");
     prompt.push_str(TASK_COMPLETION_PROMPT);
     if row.role == AgentRole::Orchestrator && !row.guest_turn {
-        prompt.push_str("\n\nFor channel setup, first read nyxid__channel_setup_guide (built-in; no optional skill needed). Inspect list_channel_bots/get_channel_bot, list_channel_agents and list_channel_chats before changes. Use channel_bot_setup_link for a new messaging bot, list_channel_adapters for phone/SMS/speech. Distinguish catalog slug, service connection ID, credential connection_id, bot_id and provider slug. Report configured account, receive, send, route and automatic replies separately with evidence; never invent buttons/scopes or run Verify, Resubscribe or test sends as a diagnostic read. Native public/personal entry has its own authority; do not relink it as a personal bot.");
+        prompt.push_str("\n\nFor channel setup, first read nyxid__channel_setup_guide (built-in; no optional skill needed). Inspect list_channel_bots/get_channel_bot, list_channel_agents and list_channel_chats before changes. Use channel_bot_setup_link for a new messaging bot, list_channel_adapters for phone/SMS/speech. Distinguish catalog slug, service connection ID, credential connection_id, bot_id and provider slug. Report configured account, receive, send, route and automatic replies separately with evidence; never invent buttons/scopes or run Verify, Resubscribe or test sends as a diagnostic read. Native public/personal entry has its own authority; do not relink it as a personal bot. Keep unanswered onboarding questions pending across setup links and resumes. Creating or linking a bot is not customer readiness or consent to open access. Do not propose everyone until the owner asks or business configuration and a customer test support readiness. Model readiness alone and field presence do not prove this. An explicit owner choice can open access now; disclose audience_readiness facts and unresolved questions without another confirmation.");
     }
     prompt.push_str(WEB_RESEARCH_PROMPT);
     prompt.push_str(CLI_PROMPT);
@@ -945,7 +945,9 @@ pub(crate) fn event_notice_text(event: &AgentEvent) -> String {
 
 /// Queued owner messages keep more text than status notices.
 pub fn event_text_limit(event: &AgentEvent) -> usize {
-    if matches!(
+    if event.kind == "channel_bot_linked" {
+        4800
+    } else if matches!(
         event.kind.as_str(),
         "message" | "group_settled" | "skill_request_allowed"
     ) {
@@ -2629,7 +2631,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         && row.channel.as_ref().is_some_and(|o| o.thread.is_some())
         && !events
             .iter()
-            .any(|e| e.kind == super::async_service_operation::EVENT_KIND)
+            .any(super::async_service_operation::watch_delivery_event)
     {
         // A queued owner request retains its own authority even
         // when the preceding turn's guest is no longer eligible.
@@ -2688,7 +2690,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         TurnOrigin::Group => ("group", start.text.clone()),
         TurnOrigin::Trigger => ("event", start.text.clone()),
         TurnOrigin::User | TurnOrigin::Channel => {
-            // Only the owner's messages reset the event-turn guard.
+            // An owner's message resets the event-turn guard; a guest's does not.
             if !start.guest {
                 row.event_streak = 0;
                 if start.acknowledgement_id.is_none()
@@ -3818,10 +3820,11 @@ pub async fn push_events(
         .map_err(transactions::map_transaction_error)
 }
 
-/// Ordinary notices can be evicted only when no invocation continuation is
-/// queued. Delegated results follow the same FIFO eviction as ordinary notices;
-/// images must not monopolize the queue. Accepted source questions are never
-/// evicted. Capacity refusal aborts transactional producers unless they
+/// Invocation, provider approval, automation and accepted source events are never
+/// evicted. Queued invocation/approval continuations block ordinary notice eviction
+/// unless automation recovery can replace an ordinary notice.
+/// Delegated results follow ordinary FIFO eviction; images must not monopolize
+/// the queue. Capacity refusal aborts transactional producers unless they
 /// explicitly degrade optional publication without discarding their source work.
 pub async fn append_events_in_session(
     db: &Database,
@@ -3863,9 +3866,13 @@ pub async fn append_events_in_session(
                 .iter()
                 .any(|e| e.automation_work.is_some());
             if event.invocation_id.is_some()
+                || super::async_service_operation::cma_wake_event(event)
                 || event.automation_work.is_some()
                 || (!protected_automation
-                    && row.pending_events.iter().any(|e| e.invocation_id.is_some()))
+                    && row.pending_events.iter().any(|e| {
+                        e.invocation_id.is_some()
+                            || super::async_service_operation::cma_wake_event(e)
+                    }))
             {
                 return Err(AppError::Conflict("Assistant event queue is full".into()));
             }
@@ -3876,6 +3883,7 @@ pub async fn append_events_in_session(
                     e.source_event_ids.is_empty()
                         && e.automation_work.is_none()
                         && e.invocation_id.is_none()
+                        && !super::async_service_operation::cma_wake_event(e)
                 })
                 .ok_or_else(|| AppError::Conflict("Assistant event queue is full".into()))?;
             row.pending_events.remove(index);
@@ -5411,7 +5419,7 @@ pub async fn read_attachment_for_caller(
 pub const MAX_TURN_ACTIVITIES: i64 = 40;
 pub const MAX_ACTIVITY_LABEL_CHARS: usize = 120;
 
-fn append_activity(entry: bson::Document) -> Vec<bson::Document> {
+pub(crate) fn append_activity(entry: bson::Document) -> Vec<bson::Document> {
     let external =
         super::assistant_checking_notice::requires_check(entry.get_str("label").unwrap_or("tool"));
     vec![doc! {"$set": {
@@ -6044,8 +6052,8 @@ pub async fn activity_finished_for_turn(
     ok: bool,
     failure: Option<crate::models::assistant_conversation::ToolFailure>,
 ) -> AppResult<()> {
-    db.collection::<AssistantConversation>(CONVERSATIONS)
-        .update_one(
+    let recorded = db.collection::<bson::Document>(CONVERSATIONS)
+        .find_one_and_update(
             doc! {
                 "_id": conversation_id,
                 "user_id": user_id,
@@ -6062,7 +6070,51 @@ pub async fn activity_finished_for_turn(
                             "failure":{"$literal":failure.map(|v| bson::to_bson(&v).expect("tool failure")).unwrap_or(bson::Bson::Null)}}]},"$$a"]}}},
             }}],
         )
+        .projection(doc! {"active_turn.stop_requested":1,"active_turn.activities.id":1,"active_turn.activities.decision":1,"active_turn.activities.machine":1})
+        .return_document(mongodb::options::ReturnDocument::After)
         .await?;
+    if let Some(recorded) = recorded {
+        let activity = recorded
+            .get_document("active_turn")
+            .ok()
+            .and_then(|turn| turn.get_array("activities").ok())
+            .and_then(|a| {
+                a.iter()
+                    .filter_map(bson::Bson::as_document)
+                    .find(|a| a.get_str("id").ok() == Some(activity_id))
+            });
+        let decision = activity
+            .and_then(|a| a.get("decision"))
+            .cloned()
+            .and_then(|v| bson::from_bson(v).ok());
+        let machine = activity
+            .and_then(|a| a.get("machine"))
+            .cloned()
+            .and_then(|v| bson::from_bson(v).ok());
+        use super::assistant_activity_decision::Completion;
+        let completion = if ok {
+            Completion::Succeeded
+        } else if recorded
+            .get_document("active_turn")
+            .ok()
+            .and_then(|t| t.get_bool("stop_requested").ok())
+            .unwrap_or(false)
+        {
+            Completion::Cancelled
+        } else {
+            Completion::Failed
+        };
+        super::assistant_activity_decision::finished(
+            db,
+            conversation_id,
+            turn_id,
+            activity_id,
+            decision.as_ref(),
+            completion,
+            machine.as_ref(),
+        )
+        .await?;
+    }
     if !ok {
         // A failure after node execution (for example, attachment storage) can
         // leave an unfinished receipt. Preserve specific outcomes and Stop.

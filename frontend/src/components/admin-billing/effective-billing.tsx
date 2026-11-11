@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { titleCase } from "@/schemas/platform-models";
 import { Link } from "@tanstack/react-router";
 import { PriceRows } from "@/components/platform-models/shared";
@@ -14,11 +16,11 @@ import type {
 } from "@/schemas/admin-billing";
 
 const SOURCE_LABELS: Record<BillingSource, string> = {
-  env: "Environment",
-  global: "Global default",
-  service: "Service",
-  legacy: "Legacy",
-  free: "Free",
+  get env() { return translateUi("Environment"); },
+  get global() { return translateUi("Global default"); },
+  get service() { return translateUi("Service"); },
+  get legacy() { return translateUi("Legacy"); },
+  get free() { return translateUi("Free"); },
 };
 
 const SOURCE_VARIANTS: Record<
@@ -33,12 +35,12 @@ const SOURCE_VARIANTS: Record<
 };
 
 const CLASS_LABELS: Record<CredentialClass, string> = {
-  nyxid_managed_master: "NyxID platform key",
-  nyxid_platform_oauth_app: "NyxID shared OAuth app",
-  user_owned: "Own key",
-  agent_override_user_owned: "Agent credential override",
-  node_managed: "Node credential",
-  no_auth: "No credential",
+  get nyxid_managed_master() { return translateUi("NyxID platform key"); },
+  get nyxid_platform_oauth_app() { return translateUi("NyxID shared OAuth app"); },
+  get user_owned() { return translateUi("Own key"); },
+  get agent_override_user_owned() { return translateUi("Agent credential override"); },
+  get node_managed() { return translateUi("Node credential"); },
+  get no_auth() { return translateUi("No credential"); },
 };
 
 const REASON_TEXT: Record<EffectiveReason, string> = {
@@ -60,17 +62,18 @@ const REASON_TEXT: Record<EffectiveReason, string> = {
 };
 
 const ORIGIN_LABELS: Record<EffectivePrice["origin"], string> = {
-  lane_primary: "lane price",
-  lane_component: "lane component",
-  operation: "operation price",
-  service_price: "legacy service price",
-  legacy_plan: "Lago plan price",
-  resale_plan: "resale",
+  get lane_primary() { return translateUi("lane price"); },
+  get lane_component() { return translateUi("lane component"); },
+  get operation() { return translateUi("operation price"); },
+  get service_price() { return translateUi("legacy service price"); },
+  get legacy_plan() { return translateUi("Lago plan price"); },
+  get resale_plan() { return translateUi("resale"); },
 };
 
 export function SourceBadge({ source }: { readonly source: BillingSource }) {
+  useUiTranslation();
   return (
-    <Badge variant={SOURCE_VARIANTS[source]} title={`Source: ${source}`}>
+    <Badge variant={SOURCE_VARIANTS[source]} title={translateUi("Source: {{value1}}", { value1: source })}>
       {SOURCE_LABELS[source]}
     </Badge>
   );
@@ -81,14 +84,15 @@ function SyncBadge({
 }: {
   readonly status: EffectivePrice["sync_status"];
 }) {
+  useUiTranslation();
   if (!status) return null;
   return (
     <Badge variant={status === "synced" ? "success" : "warning"}>
       {status === "synced"
-        ? "Synced"
+        ? translateUi("Synced")
         : status === "failed"
-          ? "Failed"
-          : "Pending"}
+          ? translateUi("Failed")
+          : translateUi("Pending")}
     </Badge>
   );
 }
@@ -105,14 +109,15 @@ function priceLabel(price: EffectivePrice): string {
 }
 
 export function PriceLine({ price }: { readonly price: EffectivePrice }) {
+  useUiTranslation();
   return (
     <li className="flex flex-wrap items-center gap-1.5 text-14">
       <span>{priceLabel(price)}</span>
       <SourceBadge source={price.source} />
       <SyncBadge status={price.sync_status} />
-      {price.cached_rate?.stale && <Badge variant="warning">Stale rate</Badge>}
+      {price.cached_rate?.stale && <Badge variant="warning">{translateUi("Stale rate")}</Badge>}
       {price.cached_rate?.retired && (
-        <Badge variant="destructive">Retired rate</Badge>
+        <Badge variant="destructive">{translateUi("Retired rate")}</Badge>
       )}
       {price.sync_error && (
         <span className="text-13 text-destructive">{price.sync_error}</span>
@@ -126,6 +131,7 @@ export function EffectiveClassBlock({
 }: {
   readonly group: EffectiveClass;
 }) {
+  useUiTranslation();
   return (
     <div className="space-y-1" data-testid="effective-class">
       <div className="flex flex-wrap items-center gap-1.5 type-row-title">
@@ -134,9 +140,9 @@ export function EffectiveClassBlock({
         </span>
         <SourceBadge source={group.source} />
         {group.platform_charged ? (
-          <Badge variant="default">Charged</Badge>
+          <Badge variant="default">{translateUi("Charged")}</Badge>
         ) : (
-          <Badge variant="secondary">Not charged</Badge>
+          <Badge variant="secondary">{translateUi("Not charged")}</Badge>
         )}
       </div>
       <p className="text-13 text-muted-foreground">
@@ -154,9 +160,7 @@ export function EffectiveClassBlock({
       )}
       {group.pending.length > 0 && (
         <div className="space-y-1">
-          <div className="text-13 text-muted-foreground">
-            Configured, not charged until synced:
-          </div>
+          <div className="text-13 text-muted-foreground">{translateUi("Configured, not charged until synced:")}</div>
           <ul className="space-y-1">
             {group.pending.map((price) => (
               <PriceLine
@@ -176,6 +180,7 @@ export function EffectiveBilling({
 }: {
   readonly service: BillingService;
 }) {
+  useUiTranslation();
   const { resale } = service.effective;
   return (
     <div className="space-y-3">
@@ -186,16 +191,15 @@ export function EffectiveBilling({
         />
       ))}
       {service.effective.model_prices?.map((price, i) => <section key={i} className="rounded-lg border border-border/40 p-3 space-y-2">
-        <Link to="/admin/platform-models/$modelId" params={{ modelId: price.model_id }} className="type-row-title text-primary">Model tariff · {titleCase(price.lane)}</Link>
-        <p className="type-secondary">{price.available ? "Prices ready" : `Unavailable: ${titleCase(price.blocking_reason ?? "unknown")}`}</p>
+        <Link to="/admin/platform-models/$modelId" params={{ modelId: price.model_id }} className="type-row-title text-primary">{translateUi("Model tariff · ")}{titleCase(price.lane)}</Link>
+        <p className="type-secondary">{price.available ? translateUi("Prices ready") : translateUi("Unavailable: {{value1}}", { value1: titleCase(price.blocking_reason ?? "unknown") })}</p>
         {price.available && <PriceRows components={price.components} />}
       </section>)}
       {resale.configured && (
-        <p className="flex items-center gap-1.5 text-13 text-muted-foreground">
-          Resale{" "}
+        <p className="flex items-center gap-1.5 text-13 text-muted-foreground">{translateUi("Resale")}{" "}
           {resale.applied
-            ? "applies to NyxID platform-key traffic"
-            : "is configured but disabled"}
+            ? translateUi("applies to NyxID platform-key traffic")
+            : translateUi("is configured but disabled")}
           <SourceBadge source={resale.source} />
         </p>
       )}
@@ -209,23 +213,20 @@ export function EffectiveBillingSummary({
 }: {
   readonly serviceId: string;
 }) {
+  useUiTranslation();
   const { data, isLoading, error } = useAdminBillingService(serviceId);
   return (
     <section className="space-y-2 rounded-lg border border-border/50 p-3">
-      <h3 className="type-card-title">Effective billing</h3>
+      <h3 className="type-card-title">{translateUi("Effective billing")}</h3>
       {isLoading && (
-        <p className="text-14 text-muted-foreground">Resolving prices…</p>
+        <p className="text-14 text-muted-foreground">{translateUi("Resolving prices…")}</p>
       )}
       {error && (
-        <p className="text-14 text-destructive">
-          Effective billing is unavailable: {error.message}
+        <p className="text-14 text-destructive">{translateUi("Effective billing is unavailable: ")}{error.message}
         </p>
       )}
       {data && <EffectiveBilling service={data} />}
-      <p className="text-13 text-muted-foreground">
-        Resolved by the server from the saved configuration exactly as billing
-        charges it. Global defaults live in Admin → Billing.
-      </p>
+      <p className="text-13 text-muted-foreground">{translateUi("Resolved by the server from the saved configuration exactly as billing charges it. Global defaults live in Admin → Billing.")}</p>
     </section>
   );
 }

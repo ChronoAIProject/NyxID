@@ -2648,6 +2648,34 @@ mod tests {
     }
 
     #[test]
+    fn delegated_account_read_denies_cma_management_history_and_live_views() {
+        let headers = HeaderMap::new();
+        for suffix in [
+            "sandboxes",
+            "sandboxes/id",
+            "sandboxes/unregistered",
+            "sandboxes/id/events",
+            "cma-agents/id",
+            "cma-agents/id/transcript",
+            "cma-agents/id/events/snapshot",
+            "cma-agents/id/events",
+            "cma-agents/id/responses/response-id",
+            "cma-agents/id/responses/response-id/events",
+            "cma-agents/id/desktop",
+            "cma-agents/id/desktop/ws",
+        ] {
+            let path = format!("/api/v1/assistant/nyxagent/{suffix}");
+            assert!(delegated_read_denied_path(&path));
+            assert!(!delegated_request_allowed(
+                &Method::GET,
+                &path,
+                &headers,
+                ACCOUNT_READ_SCOPE
+            ));
+        }
+    }
+
+    #[test]
     fn delegated_account_read_denies_org_invite_bearer_material() {
         let headers = HeaderMap::new();
 

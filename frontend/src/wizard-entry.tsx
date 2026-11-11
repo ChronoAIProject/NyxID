@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import "./lib/zod-csp";
 /* eslint-disable react-refresh/only-export-components -- standalone entry exports a pure helper for focused tests. */
 
@@ -181,6 +184,7 @@ export function shouldShowUpstreamBanner(
 }
 
 function WizardApp() {
+  useUiTranslation();
   const [stage, setStage] = useState<ModeAPhase>({ phase: "claimed" })
   const [completeError, setCompleteError] = useState<string | null>(null)
   // ai-key sub-state: `false` → catalog grid (step 1 · pick a
@@ -433,6 +437,7 @@ export function ConfirmDispatcher({
   readonly onCancel: () => void
   readonly onSlugPicked: (slug: string) => void
 }) {
+  useUiTranslation();
   // Sentinel pairingId — Mode A has no pairing record, but the
   // confirm panels pass it through to `reservePairingAction` /
   // `withRewindOnError` which are intercepted as no-ops by
@@ -447,8 +452,8 @@ export function ConfirmDispatcher({
             prefill={prefill as ApiKeyCreatePrefill}
             pairingId={pairingId}
             onSuccess={onSuccess}
+            onCancel={onCancel}
           />
-          <CancelLink onCancel={onCancel} />
         </div>
       )
     case "api-key-rotate":
@@ -560,17 +565,18 @@ function SecretDispatcher({
   readonly completeError: string | null
   readonly onAck: () => void
 }) {
+  useUiTranslation();
   const isCompleting = completeError === null
   if (result.kind === "api-key-create") {
     return (
       <DisplayOncePanel
-        title="API key created"
-        description={`Save this key now — it won't be shown again. ${result.expires_at === undefined
-          ? "Refresh the key details to confirm its expiry."
-          : result.expires_at === null ? "This key has no expiry."
-          : `Expires ${new Date(result.expires_at).toLocaleString()}.`}`}
+        title={translateUi("API key created")}
+        description={translateUi("Save this key now — it won't be shown again. {{value1}}", { value1: result.expires_at === undefined
+          ? translateUi("Refresh the key details to confirm its expiry.")
+          : result.expires_at === null ? translateUi("This key has no expiry.")
+          : translateUi("Expires {{date}}.", { date: new Date(result.expires_at).toLocaleString(getFormattingLocale()) }) })}
         secret={result.full_key}
-        ackButtonLabel="I have saved this — close"
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={isCompleting && completeError === null && false}
       />
@@ -580,8 +586,8 @@ function SecretDispatcher({
     return (
       <ApiKeyRotationResult
         result={result}
-        description="The previous key is revoked. Save this new value now — it won't be shown again."
-        ackButtonLabel="I have saved this — close"
+        description={translateUi("The previous key is revoked. Save this new value now — it won't be shown again.")}
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
       />
     )
@@ -589,10 +595,10 @@ function SecretDispatcher({
   if (result.kind === "node-register-token") {
     return (
       <DisplayOncePanel
-        title="Registration token generated"
-        description="Use this with `nyxid node register`. Save it now — it won't be shown again."
+        title={translateUi("Registration token generated")}
+        description={translateUi("Use this with `nyxid node register`. Save it now — it won't be shown again.")}
         secret={result.token}
-        ackButtonLabel="I have saved this — close"
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -601,14 +607,14 @@ function SecretDispatcher({
   if (result.kind === "node-rotate-token") {
     return (
       <DisplayOncePanel
-        title="Node tokens rotated"
-        description="Update the node with `nyxid node rekey`. Save both values now — they won't be shown again."
+        title={translateUi("Node tokens rotated")}
+        description={translateUi("Update the node with `nyxid node rekey`. Save both values now — they won't be shown again.")}
         secret={result.auth_token}
         secondarySecret={{
           label: "Signing secret",
           value: result.signing_secret,
         }}
-        ackButtonLabel="I have saved this — close"
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -617,11 +623,11 @@ function SecretDispatcher({
   if (result.kind === "service-account-create") {
     return (
       <DisplayOncePanel
-        title="Service account created"
-        description="Save the client_secret — it isn't shown again. Use it with the OAuth client_credentials flow."
+        title={translateUi("Service account created")}
+        description={translateUi("Save the client_secret — it isn't shown again. Use it with the OAuth client_credentials flow.")}
         secret={result.client_secret}
         secondarySecret={{ label: "Client ID", value: result.client_id }}
-        ackButtonLabel="I have saved this — close"
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -630,11 +636,11 @@ function SecretDispatcher({
   if (result.kind === "service-account-rotate-secret") {
     return (
       <DisplayOncePanel
-        title="Service account secret rotated"
-        description="All previously-issued tokens have been revoked. Save this new client_secret — it isn't shown again."
+        title={translateUi("Service account secret rotated")}
+        description={translateUi("All previously-issued tokens have been revoked. Save this new client_secret — it isn't shown again.")}
         secret={result.client_secret}
         secondarySecret={{ label: "Client ID", value: result.client_id }}
-        ackButtonLabel="I have saved this — close"
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -643,10 +649,10 @@ function SecretDispatcher({
   if (result.kind === "developer-app-create") {
     return (
       <DisplayOncePanel
-        title="Developer app created"
-        description="Save the client_secret — it isn't shown again. Use it to sign Sign-in-with-NyxID requests."
+        title={translateUi("Developer app created")}
+        description={translateUi("Save the client_secret — it isn't shown again. Use it to sign Sign-in-with-NyxID requests.")}
         secret={result.client_secret}
-        ackButtonLabel="I have saved this — close"
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -655,10 +661,10 @@ function SecretDispatcher({
   if (result.kind === "developer-app-rotate-secret") {
     return (
       <DisplayOncePanel
-        title="Developer app secret rotated"
-        description="The previous client_secret no longer authenticates. Update any deployments using it."
+        title={translateUi("Developer app secret rotated")}
+        description={translateUi("The previous client_secret no longer authenticates. Update any deployments using it.")}
         secret={result.client_secret}
-        ackButtonLabel="I have saved this — close"
+        ackButtonLabel={translateUi("I have saved this — close")}
         onAcknowledge={onAck}
         isAcknowledging={false}
       />
@@ -671,7 +677,7 @@ function SecretDispatcher({
   }
   // ai-key uses `acking` phase instead of `secret`, so this is
   // unreachable — keep it exhaustive.
-  return <p className="text-14 text-destructive">Unknown result kind.</p>
+  return <p className="text-14 text-destructive">{translateUi("Unknown result kind.")}</p>
 }
 
 function AckingPanel({
@@ -683,20 +689,16 @@ function AckingPanel({
   readonly completeError: string | null
   readonly onRetry: () => void
 }) {
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-4">
-      <WizardHeading title="Service added">
-        <code className="font-mono text-14">{result.slug}</code> is now connected. Check
-        your terminal for the final summary.
-      </WizardHeading>
+      <WizardHeading title={translateUi("Service added")}>
+        <code className="font-mono text-14">{result.slug}</code>{translateUi(" is now connected. Check your terminal for the final summary.")}</WizardHeading>
       {completeError ? (
         <div className="flex flex-col gap-2">
-          <p className="text-14 text-destructive">
-            Couldn't notify CLI: {completeError}
+          <p className="text-14 text-destructive">{translateUi("Couldn't notify CLI: ")}{completeError}
           </p>
-          <Button variant="outline" onClick={onRetry}>
-            Retry
-          </Button>
+          <Button variant="outline" onClick={onRetry}>{translateUi("Retry")}</Button>
         </div>
       ) : null}
     </div>
@@ -704,22 +706,19 @@ function AckingPanel({
 }
 
 function DonePanel() {
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-4">
-      <WizardHeading title="Done">
-        You can close this tab and return to your terminal.
-      </WizardHeading>
+      <WizardHeading title={translateUi("Done")}>{translateUi("You can close this tab and return to your terminal.")}</WizardHeading>
     </div>
   )
 }
 
 function CancelledPanel() {
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-4">
-      <WizardHeading title="Cancelled">
-        Nothing was created. You can close this tab — your CLI should
-        already be back at the prompt.
-      </WizardHeading>
+      <WizardHeading title={translateUi("Cancelled")}>{translateUi("Nothing was created. You can close this tab — your CLI should already be back at the prompt.")}</WizardHeading>
     </div>
   )
 }
@@ -737,19 +736,12 @@ function CancelledPanel() {
  * success or failure.
  */
 function WizardLostPanel() {
+  useUiTranslation();
   return (
     <div className="flex flex-col gap-4">
-      <WizardHeading title="Wizard interrupted">
-        <p>
-          Lost contact with the <code>nyxid</code> CLI. The CLI may have
-          finished and exited successfully, or the connection was
-          interrupted before the result reached this page.
-        </p>
-        <p className="mt-2">
-          Run <code>nyxid status</code> in your terminal to see whether
-          the service was created. If it&rsquo;s missing, re-run the
-          wizard command.
-        </p>
+      <WizardHeading title={translateUi("Wizard interrupted")}>
+        <p>{translateUi("Lost contact with the ")}<code>nyxid</code>{translateUi(" CLI. The CLI may have finished and exited successfully, or the connection was interrupted before the result reached this page.")}</p>
+        <p className="mt-2">{translateUi("Run ")}<code>nyxid status</code>{translateUi(" in your terminal to see whether the service was created. If it’s missing, re-run the wizard command.")}</p>
       </WizardHeading>
     </div>
   )
@@ -762,27 +754,23 @@ function CancelLink({
   readonly onCancel: () => void
   readonly centered?: boolean
 }) {
+  useUiTranslation();
   return (
     <button
       type="button"
       onClick={onCancel}
       className={`${centered ? "self-center" : "self-start"} text-13 text-muted-foreground underline underline-offset-2 hover:text-foreground`}
-    >
-      Cancel and return to terminal
-    </button>
+    >{translateUi("Cancel and return to terminal")}</button>
   )
 }
 
 function NoBootstrapFallback() {
+  useUiTranslation();
   return (
     <NotFoundPage
-      title="Wizard not available here"
+      title={translateUi("Wizard not available here")}
       description={
-        <>
-          This page is served by the <code>nyxid</code> CLI&rsquo;s local
-          wizard server, which injects its config on request. Open the URL
-          printed by the CLI instead.
-        </>
+        <>{translateUi("This page is served by the ")}<code>nyxid</code>{translateUi(" CLI’s local wizard server, which injects its config on request. Open the URL printed by the CLI instead.")}</>
       }
     />
   )

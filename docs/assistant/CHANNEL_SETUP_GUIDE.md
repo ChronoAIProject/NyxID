@@ -10,6 +10,13 @@ Keep identifiers distinct: catalog slug selects a service template for connect_s
 
 For a new messaging bot use channel_bot_setup_link with the catalog platform. Give the returned URL to the owner; credentials belong on that page. For an existing bot inspect get_channel_bot first. Only then use connect_channel_bot by returned bot ID or label. Use settings_link for supported settings URLs. Tool parameters do not prove that a frontend button exists. An unavailable setup link or unsupported transport is a blocker to report, not a reason to invent a URL or relax authentication.
 
+## Finish onboarding before proposing a wider audience
+
+Creating or linking a bot is allowed while onboarding is incomplete. New bindings are owner-only; linking does not widen them. Keep every unanswered onboarding question pending across the setup link and automatic resume. A channel answer such as Telegram answers only the channel question. Never infer business completeness from keywords or from transport setup.
+
+Do not propose `update_channel_access private_chats=everyone` until the owner asks or the actual configuration and a customer scenario support readiness. An explicit owner choice can open access immediately: disclose unresolved questions and the returned `audience_readiness`, without another confirmation. `guest_readiness=ready` proves only model-route readiness; instructions/persona presence and memory/skill/grant counts cannot prove complete store information or a successful test. Full access returns the same facts without an action card.
+
+
 ## X DMs: applicable setup and actual route
 
 Applies to the managed X OAuth user-connection adapter (platform x, provider twitter), not app-only bearer authorization. The channel setup page is the URL returned by channel_bot_setup_link(platform=x). Its managed OAuth flow selects/creates an account connection. Check credential_source, connection_id and current capabilities before suggesting scopes. NyxID's current X adapter requests user scopes according to selected events; DM receiving/sending needs the adapter's DM read/write authorization. App-only authorization does not stand in for user authorization. Provider enrollment, API credits and account DM recipient restrictions remain separate conditions.

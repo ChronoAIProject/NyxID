@@ -1777,7 +1777,7 @@ Specialists never mint links, even in routed mode. Their refusal includes only s
 Opening private chats to everyone, enabling group members or relinking an open
 bot starts model setup for the linked agent/profile. NyxBot should report the
 returned `guest_readiness`: `setting_up` means preparation is running, `ready`
-means ready for visitors, and `not_ready` includes the fix for a real failure
+means the model route is ready (not proof of complete business information or testing), and `not_ready` includes the fix for a real failure
 (such as unavailable model credentials or credits). Do not ask owners to send a
 warm-up message. The first admitted visitor waits in a source-bound guest queue,
 then receives its answer automatically. Concurrent visitors share one setup.
@@ -1971,3 +1971,16 @@ coordinator before final completion. This lineage grants no execution authority;
 webhook confirmation floors also apply to v2 children. Initial occurrence budgets
 are charged once; continuations use per-run bounds and ordinary model billing.
 A disabled option blocks new enrollment while persisted work continues draining.
+
+
+### Onboarding context and audience decisions (#2318)
+
+A hosted bot-setup watch retains an optional, server-authored `source_turn_id` from the exact live chat authority, bound by `source_connect_link_id` to the exact hosted request. If an old replica replaces the request but leaves these unknown fields, the mismatched link makes the context unknown. On completion it reads at most four retained messages around that turn in the requesting owner's conversation, retaining a bounded excerpt of the preceding questions and the partial answer in the setup notice. This historical context is not new authority. Missing/legacy origin, deleted history, or a context reset yields an explicit unknown-context instruction; NyxBot must recover the unanswered questions. The existing outcome sentence stays first so web/mobile keep their compact channel-status label; historical context follows only for the model. Escaped excerpts remain complete JSON and bounded. The setup notice alone has a 4,800-character ceiling. The stable system/schedule prompt still satisfies its 4 KiB compile-time limit.
+
+Creating/linking a bot does not mean onboarding is complete and never widens its `private_chats`: a new binding is `owner`. NyxBot must not propose `everyone` merely because setup finished. It keeps unanswered questions pending and proposes a wider audience only when the owner asks or actual configuration and a customer test support readiness. Explicit owner opening remains allowed; no keyword classifier, new approval format, readiness veto, or second confirmation is introduced.
+
+The existing `update_channel_access` action summary discloses the live customer-model readiness, instructions/persona presence, memory-note and skill counts, service-grant count and account-read flag before opening. The tool response (including Full access) and human audience settings use the same metadata-only facts. Settings GET adds optional `configuration`; the audience PATCH/tool result adds `audience_readiness`. A post-save model-setup/readiness failure is reported as `readiness_unavailable` with a saved-access explanation, not as an unsuccessful audience write. No instructions, memory contents, or secrets enter these diagnostics or audits.
+
+These are structural facts, not a business-readiness verdict: even a ready model with populated fields may lack correct store information or a successful customer test. Existing guest admission remains authoritative: pending model setup holds eligible source-bound customer work briefly in its encrypted queue (up to the existing 60-second deadline), then resumes with the guest policy or returns the existing safe setup failure. It never grants owner tools or invents an answer while model admission is unavailable. Ready models still require appropriate instructions and testing by the owner.
+
+Old watches omit `source_turn_id`; old servers omit configuration facts, which the UI describes as unchecked. Web and mobile action cards retain their existing summary renderer and one-use decision contract. No schema enum or guest permission changes.

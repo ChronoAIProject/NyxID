@@ -241,3 +241,15 @@ and async workers, drain older workers, inspect both readiness reports, then
 opt in a linking person before broader rollout. Flag-off denies new guest
 fetch/model reads, including model-setup waits, without deleting retained
 human-owner uploads. Retention and erasure continue normally.
+
+### Platform model family contracts
+
+`inference:platform-model-contracts-v1` gates authoring and executing the new v2
+family/transport fixture digests. Historical v1 tariffs keep their gates and
+immutable digests. New tariffs use existing fields only, so old readers can
+inspect rows, but old selectors/certification reject v2 before send. Upgrade and
+drain all API/worker replicas before activation. New executors recheck the live
+fleet before private credentials/funding and at dispatch; assistant callbacks
+share these checks. Admin readiness includes the capability for affected models,
+and public executable-price/image projections fail closed while it is unready.
+See [platform models](PLATFORM_MODELS.md#current-models-through-versioned-api-contracts-2274-follow-up).

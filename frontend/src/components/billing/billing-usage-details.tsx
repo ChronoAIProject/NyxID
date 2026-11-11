@@ -1,3 +1,4 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { BillingFundingChart } from "./billing-funding-chart";
@@ -21,6 +22,7 @@ import {
 } from "@/lib/billing-usage";
 
 export function FundingDetails({ rows }: { rows: BillingUsageRow[] }) {
+  const { t } = useUiTranslation();
   const estimated = creditsLabel(rows, "estimated_credits_micros");
   const grants = creditsLabel(rows, "grant_credits_micros");
   const allowances = creditsLabel(rows, "allowance_credits_micros");
@@ -31,43 +33,33 @@ export function FundingDetails({ rows }: { rows: BillingUsageRow[] }) {
     allowances.unknown,
     wallet.unknown,
   );
-  const [records, were, their] =
-    unpriced === 1 ? ["record", "was", "its"] : ["records", "were", "their"];
   return (
     <dl className="split-facts funding-facts">
       <div>
-        <dt>Estimated cost</dt>
-        <dd>{estimated.text} credits</dd>
+        <dt>{t("Estimated cost")}</dt>
+        <dd>{estimated.text}{t(" credits")}</dd>
       </div>
       <div>
-        <dt>Funded by credit grants</dt>
-        <dd>{grants.text} credits</dd>
+        <dt>{t("Funded by credit grants")}</dt>
+        <dd>{grants.text}{t(" credits")}</dd>
       </div>
       <div>
-        <dt>Funded by allowances</dt>
-        <dd>{allowances.text} credits</dd>
+        <dt>{t("Funded by allowances")}</dt>
+        <dd>{allowances.text}{t(" credits")}</dd>
       </div>
       <div>
-        <dt>Wallet-funded cost</dt>
-        <dd>{wallet.text} credits</dd>
+        <dt>{t("Wallet-funded cost")}</dt>
+        <dd>{wallet.text}{t(" credits")}</dd>
       </div>
       {unpriced > 0 && (
         <div>
-          <dt>Incomplete reporting</dt>
+          <dt>{t("Incomplete reporting")}</dt>
           <dd>
             {rows.length === 1 ? (
-              <>
-                This charged record was metered under a price that is no longer
-                available, so its gross, wallet and allowance costs cannot be
-                estimated. Credit-grant funding is still exact.
-              </>
+              <>{t("This charged record was metered under a price that is no longer available, so its gross, wallet and allowance costs cannot be estimated. Credit-grant funding is still exact.")}</>
             ) : (
               <>
-                {unpriced} charged {records} {were} metered under a price that
-                is no longer available, so {their} gross, wallet and allowance
-                costs cannot be estimated. Amounts marked ≥ are lower bounds.
-                Credit-grant funding is still exact.
-              </>
+                {t("{{count}} charged records were metered under a price that is no longer available, so their gross, wallet and allowance costs cannot be estimated. Amounts marked ≥ are lower bounds. Credit-grant funding is still exact.", { count: unpriced })}</>
             )}
           </dd>
         </div>
@@ -76,6 +68,7 @@ export function FundingDetails({ rows }: { rows: BillingUsageRow[] }) {
   );
 }
 export function MetricDetails({ rows }: { rows: BillingUsageRow[] }) {
+  const { t } = useUiTranslation();
   const actual = new Map(metricTotals(rows));
   const names = [
     ...new Set([
@@ -94,7 +87,7 @@ export function MetricDetails({ rows }: { rows: BillingUsageRow[] }) {
     <div>
       {["Tokens", "Cache", "Requests & other units"].map((family) => (
         <section className="metric-family" key={family}>
-          <h4>{family}</h4>
+          <h4>{t(family)}</h4>
           <dl className="split-facts metric-facts">
             {names
               .filter((metric) => metricFamily(metric) === family)
@@ -104,17 +97,14 @@ export function MetricDetails({ rows }: { rows: BillingUsageRow[] }) {
                   <dd>
                     {actual.has(metric)
                       ? number(actual.get(metric)!)
-                      : "Not metered"}
+                      : t("Not metered")}
                   </dd>
                 </div>
               ))}
           </dl>
         </section>
       ))}
-      <p className="fine-print">
-        Metered quantities, kept in their original units. Total tokens and token
-        classes may overlap; they are not added together.
-      </p>
+      <p className="fine-print">{t("Metered quantities, kept in their original units. Total tokens and token classes may overlap; they are not added together.")}</p>
     </div>
   );
 }
@@ -125,42 +115,40 @@ export function UsageMetricsDisclosure({
   rows: BillingUsageRow[];
   totals?: BillingUsageTotals;
 }) {
+  const { t } = useUiTranslation();
   return (
     <details className="all-metrics">
       <summary>
         <ChevronDown size={14} className="disclosure-arrow" />
-        <strong>All metrics & funding</strong>
-        <span>Tokens, caches, images, bytes, and funding sources</span>
+        <strong>{t("All metrics & funding")}</strong>
+        <span>{t("Tokens, caches, images, bytes, and funding sources")}</span>
       </summary>
       <div className="expanded-metrics">
         <section>
-          <h3>Metered quantities</h3>
+          <h3>{t("Metered quantities")}</h3>
           <MetricDetails rows={rows} />
         </section>
         <section>
-          <h3>Funding breakdown</h3>
+          <h3>{t("Funding breakdown")}</h3>
           <FundingDetails rows={rows} />
           <AllowanceFunding rows={rows} />
           {totals && (
             <dl className="split-facts">
               <div>
-                <dt>Reported requests</dt>
+                <dt>{t("Reported requests")}</dt>
                 <dd>{number(totals.requests)}</dd>
               </div>
               <div>
-                <dt>Reported bytes</dt>
+                <dt>{t("Reported bytes")}</dt>
                 <dd>{number(totals.bytes)}</dd>
               </div>
               <div>
-                <dt>Meter events</dt>
+                <dt>{t("Meter events")}</dt>
                 <dd>{number(totals.events)}</dd>
               </div>
             </dl>
           )}
-          <p className="fine-print">
-            Estimated prices and settled funding can differ. Wallet-funded cost
-            is separate from rounded wallet debits.
-          </p>
+          <p className="fine-print">{t("Estimated prices and settled funding can differ. Wallet-funded cost is separate from rounded wallet debits.")}</p>
         </section>
       </div>
     </details>
@@ -194,21 +182,20 @@ export function ExpandableUsage({
   dimension?: Dimension;
   search?: string;
 }) {
+  const { t } = useUiTranslation();
   const [openGroups, setOpenGroups] = useState<Set<string>>(() => new Set());
   const groups = groupRows(catalog, rows, dimension).filter((group) =>
     group.name.toLowerCase().includes(search.trim().toLowerCase()),
   );
   if (!groups.length)
     return (
-      <p className="empty-inline">
-        No matching usage. Change the filters to see more.
-      </p>
+      <p className="empty-inline">{t("No matching usage. Change the filters to see more.")}</p>
     );
   return (
     <div className="expandable-usage">
       <div className="usage-column-labels">
         <span>{dimensions[dimension]}</span>
-        <span>Estimated cost</span>
+        <span>{t("Estimated cost")}</span>
       </div>
       {groups.map((group) => (
         <details
@@ -231,7 +218,7 @@ export function ExpandableUsage({
               <strong>{group.name}</strong>
               <small>{quantitySummary(group.rows)}</small>
               {usageStatus(group.rows).mixed && (
-                <small>Includes free usage</small>
+                <small>{t("Includes free usage")}</small>
               )}
             </span>
             <span className="row-credit">
@@ -240,13 +227,13 @@ export function ExpandableUsage({
               ) : (
                 <>
                   {creditsLabel(group.rows, "estimated_credits_micros").text}{" "}
-                  <small>credits</small>
+                  <small>{t("credits")}</small>
                 </>
               )}
               <span
                 className={`usage-status ${usageStatus(group.rows).label === "Pending" ? "text-warning" : usageStatus(group.rows).label === "Free" ? "text-success" : ""}`}
               >
-                {usageStatus(group.rows).label}
+                {t(usageStatus(group.rows).label)}
               </span>
             </span>
           </summary>
@@ -260,10 +247,11 @@ export function ExpandableUsage({
 }
 
 export function AllowanceFunding({ rows }: { rows: BillingUsageRow[] }) {
+  const { t } = useUiTranslation();
   const metrics = [...new Set(rows.map((row) => row.metric))];
   return (
     <section className="allowance-funding">
-      <h4>Units covered by allowances</h4>
+      <h4>{t("Units covered by allowances")}</h4>
       <dl className="split-facts">
         {metrics.map((metric) => {
           const records = rows.filter((row) => row.metric === metric);
@@ -272,7 +260,7 @@ export function AllowanceFunding({ rows }: { rows: BillingUsageRow[] }) {
               <dt className="capitalize">{billingMetricLabel(metric)}</dt>
               <dd>
                 {records.some((row) => row.allowance_quantity == null)
-                  ? "Unavailable"
+                  ? t("Unavailable")
                   : number(
                       records.reduce(
                         (sum, row) => sum + row.allowance_quantity!,
@@ -295,13 +283,14 @@ export function ServiceUsage({
   catalog: BillingCatalog;
   rows: BillingUsageRow[];
 }) {
+  const { t } = useUiTranslation();
   const categories = [
     ...new Set(
       rows.map((row) => serviceCategory(catalog, row.service_slug ?? "")),
     ),
   ].sort();
   if (!rows.length)
-    return <p className="empty-inline">No usage in this period.</p>;
+    return <p className="empty-inline">{t("No usage in this period.")}</p>;
   return (
     <div className="service-categories">
       {categories.map((category) => {
@@ -312,12 +301,12 @@ export function ServiceUsage({
         return (
           <section className="service-category" key={category}>
             <h4>
-              {category}
+              {t(category)}
               <span>
                 {groupRows(catalog, categoryRows, "service").length}{" "}
                 {groupRows(catalog, categoryRows, "service").length === 1
-                  ? "service"
-                  : "services"}
+                  ? t("service")
+                  : t("services")}
               </span>
             </h4>
             <ExpandableUsage catalog={catalog} rows={categoryRows} />

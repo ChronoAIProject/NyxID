@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import {
   useEffect,
   useId,
@@ -91,6 +93,7 @@ function suggestions(
 }
 
 export function AsyncOptionSelect(props: Props) {
+  useUiTranslation();
   const identity = useAuthStore((state) => state.user?.id);
   const [session, setSession] = useState({
     identity,
@@ -166,6 +169,7 @@ function OptionSelection({
   ref: forwardedRef,
   ...inputProps
 }: Props) {
+  useUiTranslation();
   const generatedId = useId();
   const id = inputProps.id ?? generatedId;
   const listId = `${id}-options`;
@@ -343,9 +347,9 @@ function OptionSelection({
       placeholder={
         allowCustom
           ? selected.length
-            ? "Add value…"
-            : "Select or type…"
-          : "Search choices…"
+            ? translateUi("Add value…")
+            : translateUi("Select or type…")
+          : translateUi("Search choices…")
       }
       disabled={disabled}
       value={draft}
@@ -410,7 +414,7 @@ function OptionSelection({
             <div
               key={v}
               role="group"
-              aria-label={`Selected ${v}`}
+              aria-label={translateUi("Selected {{value1}}", { value1: v })}
               className={cn(
                 "flex min-h-6 max-w-full items-stretch overflow-hidden rounded-md border border-input bg-muted/25 text-14",
                 original === v && "border-ring ring-1 ring-ring",
@@ -429,7 +433,7 @@ function OptionSelection({
                   type="button"
                   data-scope-edit={v}
                   disabled={disabled}
-                  aria-label={`Edit ${v}`}
+                  aria-label={translateUi("Edit {{value1}}", { value1: v })}
                   className="min-w-0 break-all px-2 py-0.5 text-left font-mono outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                   onClick={() => edit(v)}
                 >
@@ -439,7 +443,7 @@ function OptionSelection({
               <button
                 type="button"
                 disabled={disabled}
-                aria-label={`Remove ${v}`}
+                aria-label={translateUi("Remove {{value1}}", { value1: v })}
                 className="flex w-6 shrink-0 items-center justify-center border-l border-border/70 text-text-tertiary outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                 onPointerDown={(event) => event.preventDefault()}
                 onClick={() => remove(v)}
@@ -460,7 +464,7 @@ function OptionSelection({
               tabIndex={-1}
               disabled={disabled}
               className="flex h-6 shrink-0 items-center rounded text-text-tertiary"
-              aria-label={`Toggle ${label.toLowerCase()} suggestions`}
+              aria-label={translateUi("Toggle {{value1}} suggestions", { value1: label.toLowerCase() })}
               onPointerDown={(event) => event.preventDefault()}
               onClick={() => {
                 setOpen(!open);
@@ -495,24 +499,22 @@ function OptionSelection({
         }}
       >
         {original !== undefined && (
-          <p className="border-b px-2 py-2 text-13 text-muted-foreground">
-            Editing value. Enter saves; Escape cancels.
-          </p>
+          <p className="border-b px-2 py-2 text-13 text-muted-foreground">{translateUi("Editing value. Enter saves; Escape cancels.")}</p>
         )}
         {query.isFetching && (
           <p role="status" className="px-3 py-2 text-13 text-muted-foreground">
             {pages.length
-              ? "Loading remaining suggestions…"
-              : "Loading suggestions…"}
+              ? translateUi("Loading remaining suggestions…")
+              : translateUi("Loading suggestions…")}
           </p>
         )}
         {query.isError && !query.versionChanged && (
           <div role="alert" className="px-3 py-2 text-13">
             <p className="text-destructive">
               {pages.length
-                ? "Some suggestions could not load."
-                : "Suggestions unavailable."}
-              {allowCustom ? " Custom values still work." : ""}
+                ? translateUi("Some suggestions could not load.")
+                : translateUi("Suggestions unavailable.")}
+              {allowCustom ? translateUi(" Custom values still work.") : ""}
             </p>
             <Button
               type="button"
@@ -524,15 +526,13 @@ function OptionSelection({
                   ? query.fetchNextPage()
                   : query.refetch())
               }
-            >
-              Retry suggestions
-            </Button>
+            >{translateUi("Retry suggestions")}</Button>
           </div>
         )}
         <div
           id={listId}
           role="listbox"
-          aria-label={`${label} suggestions`}
+          aria-label={translateUi("{{value1}} suggestions", { value1: translateUi(label) })}
           aria-multiselectable="true"
           className="max-h-64 overflow-y-auto overscroll-contain"
         >
@@ -543,7 +543,7 @@ function OptionSelection({
               role="option"
               aria-label={
                 choice.kind === "branch"
-                  ? `Explore ${choice.value}`
+                  ? translateUi("Explore {{value1}}", { value1: choice.value })
                   : optionSet === "service-scope"
                     ? choice.value
                     : (choice.label ?? choice.value)
@@ -586,14 +586,10 @@ function OptionSelection({
           ))}
         </div>
         {!choices.length && !query.isFetching && query.isSuccess && (
-          <p role="status" className="px-3 py-2 text-13 text-muted-foreground">
-            No matching suggestions.
-          </p>
+          <p role="status" className="px-3 py-2 text-13 text-muted-foreground">{translateUi("No matching suggestions.")}</p>
         )}
         {allowCustom && draft.trim() && !editing?.branch && (
-          <p className="border-t px-2 py-2 text-13 text-muted-foreground">
-            Press Enter to finish this scope.
-          </p>
+          <p className="border-t px-2 py-2 text-13 text-muted-foreground">{translateUi("Press Enter to finish this scope.")}</p>
         )}
       </PopoverContent>
     </Popover>

@@ -1,3 +1,5 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { z } from "zod";
 const pinSchema = z.object({
   source: z.literal("ornn"),
@@ -241,23 +243,26 @@ export type SkillDraftDiagnostic = z.infer<typeof skillDraftDiagnosticSchema> & 
 };
 
 const DRAFT_FIELD_LABELS: Record<string, string> = {
-  name: "the skill name",
-  description: "the description",
-  skill_md: "SKILL.md",
-  rationale: "the rationale",
-  safety_notes: "the safety notes",
-  kind: "the draft kind",
-  base_skill: "the base skill",
-  files: "the files",
-  draft: "the draft",
-  schema_version: "the draft format",
+  get name() { return translateUi("the skill name"); },
+  get description() { return translateUi("the description"); },
+  get skill_md() { return translateUi("SKILL.md"); },
+  get rationale() { return translateUi("the rationale"); },
+  get safety_notes() { return translateUi("the safety notes"); },
+  get kind() { return translateUi("the draft kind"); },
+  get base_skill() { return translateUi("the base skill"); },
+  get files() { return translateUi("the files"); },
+  get draft() { return translateUi("the draft"); },
+  get schema_version() { return translateUi("the draft format"); },
 };
 
 /** A readable name for a diagnostic's field, including `files[i].path`. */
 export function skillDraftFieldLabel(field: string): string {
   const file = /^files\[(\d+)\]\.(path|content)$/.exec(field);
   if (file) {
-    return `file ${Number(file[1]) + 1} ${file[2] === "path" ? "path" : "content"}`;
+    return translateUi("file {{number}} {{part}}", {
+      number: Number(file[1]) + 1,
+      part: translateUi(file[2] === "path" ? "path" : "content"),
+    });
   }
   return DRAFT_FIELD_LABELS[field] ?? field;
 }
@@ -270,47 +275,47 @@ export function skillDraftRemediation(
   diagnostic: z.infer<typeof skillDraftDiagnosticSchema>,
 ): string {
   const field = skillDraftFieldLabel(diagnostic.field);
-  const at = diagnostic.line ? ` on line ${diagnostic.line}` : "";
+  const at = diagnostic.line ? translateUi(" on line {{line}}", { line: diagnostic.line }) : "";
   switch (diagnostic.rule) {
     case "required":
-      return `Fill in ${field}.`;
+      return translateUi("Fill in {{field}}.", { field });
     case "too_large": {
-      if (diagnostic.limit === undefined) return `Shorten ${field}.`;
-      const unit = diagnostic.unit ? ` ${diagnostic.unit}` : "";
+      if (diagnostic.limit === undefined) return translateUi("Shorten {{field}}.", { field });
+      const unit = diagnostic.unit ? ` ${translateUi(diagnostic.unit)}` : "";
       const actual =
         diagnostic.actual === undefined
           ? ""
-          : ` (it has ${diagnostic.actual.toLocaleString("en-US")})`;
-      return `Shorten ${field} to at most ${diagnostic.limit.toLocaleString("en-US")}${unit}${actual}.`;
+          : translateUi(" (it has {{actual}})", { actual: diagnostic.actual.toLocaleString(getFormattingLocale()) });
+      return translateUi("Shorten {{field}} to at most {{limit}}{{unit}}{{actual}}.", { field, limit: diagnostic.limit.toLocaleString(getFormattingLocale()), unit, actual });
     }
     case "credential_shape":
-      return `Remove the credential-like text${at} in ${field}; skills must never contain secrets.`;
+      return translateUi("Remove the credential-like text{{at}} in {{field}}; skills must never contain secrets.", { at, field });
     case "text_only":
-      return `Use plain text${at} in ${field}; remove binary or control characters.`;
+      return translateUi("Use plain text{{at}} in {{field}}; remove binary or control characters.", { at, field });
     case "invalid_name":
-      return "Use lowercase letters, digits and single hyphens, with no hyphen at the start or end.";
+      return translateUi("Use lowercase letters, digits and single hyphens, with no hyphen at the start or end.");
     case "invalid_kind":
-      return 'Choose "new" or "improve".';
+      return translateUi('Choose "new" or "improve".');
     case "base_skill_mismatch":
-      return "An improve draft needs a base skill; a new skill must not have one.";
+      return translateUi("An improve draft needs a base skill; a new skill must not have one.");
     case "base_skill_not_attached":
-      return "Pick one of this agent's attached skills as the base skill.";
+      return translateUi("Pick one of this agent's attached skills as the base skill.");
     case "base_skill_name_mismatch":
-      return "An improve draft keeps the base skill's name; restore that name.";
+      return translateUi("An improve draft keeps the base skill's name; restore that name.");
     case "unsafe_path":
-      return "Use a relative path ending in .md or .txt, without a leading /, .., \\ or :.";
+      return translateUi("Use a relative path ending in .md or .txt, without a leading /, .., \\ or :.");
     case "duplicate_path":
-      return "Give every file a unique path; SKILL.md is reserved.";
+      return translateUi("Give every file a unique path; SKILL.md is reserved.");
     case "invalid_shape":
-      return `Correct the format of ${field}.`;
+      return translateUi("Correct the format of {{field}}.", { field });
     case "unknown_field":
-      return `Remove ${field}; this draft format does not support it.`;
+      return translateUi("Remove {{field}}; this draft format does not support it.", { field });
     case "unsupported_schema":
-      return "This draft uses a format this page cannot edit. Reload the draft and try again.";
+      return translateUi("This draft uses a format this page cannot edit. Reload the draft and try again.");
     case "private_material":
-      return `Remove emails, tokens, keys or other private data from ${field}.`;
+      return translateUi("Remove emails, tokens, keys or other private data from {{field}}.", { field });
     default:
-      return `Check ${field} and try again.`;
+      return translateUi("Check {{field}} and try again.", { field });
   }
 }
 

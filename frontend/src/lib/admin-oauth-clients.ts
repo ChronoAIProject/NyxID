@@ -1,3 +1,5 @@
+import { getCalendarDateFormatter } from "@/lib/formatting-locale";
+import { translateUi } from "@/i18n/use-ui-translation";
 import type {
   AdminOAuthClientBrokerFilter,
   AdminOAuthClientCreatorType,
@@ -83,34 +85,34 @@ const SEARCH_FIELD_KEYS = ADMIN_OAUTH_CLIENT_SEARCH_FIELDS.map(
 );
 
 const CLIENT_TYPE_LABELS: Record<AdminOAuthClientTypeFilter, string> = {
-  public: "Public",
-  confidential: "Confidential",
-  other: "Other",
+  get public() { return translateUi("Public"); },
+  get confidential() { return translateUi("Confidential"); },
+  get other() { return translateUi("Other"); },
 };
 
 const CREATOR_TYPE_LABELS: Record<AdminOAuthClientCreatorType, string> = {
-  dynamic_registration: "Dynamic registration",
-  system: "System",
-  owned: "User / org",
-  ownerless: "Ownerless",
+  get dynamic_registration() { return translateUi("Dynamic registration"); },
+  get system() { return translateUi("System"); },
+  get owned() { return translateUi("User / org"); },
+  get ownerless() { return translateUi("Ownerless"); },
 };
 
 const BROKER_FILTER_LABELS: Record<AdminOAuthClientBrokerFilter, string> = {
-  enabled: "Enabled",
-  disabled: "Disabled",
-  flag: "Enabled by admin grant",
-  scope: "Enabled by broker scope",
+  get enabled() { return translateUi("Enabled"); },
+  get disabled() { return translateUi("Disabled"); },
+  get flag() { return translateUi("Enabled by admin grant"); },
+  get scope() { return translateUi("Enabled by broker scope"); },
 };
 
 const SCOPE_LABELS: Readonly<Record<string, string>> = {
-  openid: "OpenID",
-  profile: "Profile",
-  email: "Email",
-  roles: "Roles",
-  groups: "Groups",
-  offline_access: "Offline access",
-  proxy: "Proxy",
-  "urn:nyxid:scope:broker_binding": "Broker binding",
+  get openid() { return translateUi("OpenID"); },
+  get profile() { return translateUi("Profile"); },
+  get email() { return translateUi("Email"); },
+  get roles() { return translateUi("Roles"); },
+  get groups() { return translateUi("Groups"); },
+  get offline_access() { return translateUi("Offline access"); },
+  get proxy() { return translateUi("Proxy"); },
+  get "urn:nyxid:scope:broker_binding"() { return translateUi("Broker binding"); },
 };
 
 function option(value: string, label: string) {
@@ -552,16 +554,10 @@ export function getAdminOAuthClientFilterValues(
 export type AppliedAdminOAuthClientFilter =
   AppliedDataTableFilter<AdminOAuthClientFilterKey>;
 
-const DATE_FORMATTER = new Intl.DateTimeFormat("en-US", {
-  month: "short",
-  day: "numeric",
-  year: "numeric",
-  timeZone: "UTC",
-});
 
 function formatCalendarDate(value: string): string {
   const date = calendarDateObject(value);
-  return date ? DATE_FORMATTER.format(date) : value;
+  return date ? getCalendarDateFormatter().format(date) : value;
 }
 
 function appliedDateFilter(

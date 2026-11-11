@@ -148,6 +148,8 @@ pub mod assistant_agent_learning;
 pub mod assistant_attachment;
 pub mod assistant_channel_media;
 pub mod assistant_checkpoint;
+pub mod assistant_cma_agent;
+pub mod assistant_cma_sandbox;
 pub mod assistant_conversation;
 pub mod assistant_direct_handoff;
 pub mod assistant_group;
@@ -253,6 +255,7 @@ pub mod discord_gateway;
 
 pub mod assistant_delegated_image;
 
+pub mod assistant_cma_creation;
 pub mod cma_session_origin;
 pub mod org_channel;
 pub mod voice_responses;

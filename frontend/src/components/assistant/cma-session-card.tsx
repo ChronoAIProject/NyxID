@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import {
   useLayoutEffect,
   useId,
@@ -26,6 +29,12 @@ import {
   TooltipContent,
 } from "@/components/ui/tooltip";
 import { CmaGlyph } from "@/components/service-icons/cma";
+import {
+  CmaExecutionControl,
+  CmaOperationCard,
+  CmaSessionRequests,
+} from "./cma-operation-card";
+import type { CmaOperation } from "@/schemas/cma-operation";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { safeCmaUrl } from "@/lib/assistant/cma-url";
 import {
@@ -55,20 +64,33 @@ const STATUS_LABELS: Record<CmaSessionStatus, string> = {
 };
 
 export function CmaSessionCards() {
+  useUiTranslation();
   return <CmaSessionObserver>{(cards) => cards}</CmaSessionObserver>;
 }
 
 export function CmaSessionObserver({
   children,
+  operations = [],
 }: {
   readonly children: (cards: ReactNode) => ReactNode;
+  readonly operations?: readonly CmaOperation[];
 }) {
+  useUiTranslation();
   const ownerId = useAuthStore((state) => state.user?.id);
   const sessions = useObservedCmaSessions();
+  const matchingSession = (operation: CmaOperation, session: CmaSessionReference) =>
+    operation.service_id === session.connection.id &&
+    operation.agent_id === session.agentId &&
+    (!operation.reason || operation.reason === "completed");
+  const [receiptLimit, setReceiptLimit] = useState(3);
+  const receipts = operations.filter(
+    (operation) =>
+      !sessions.some(({ session }) => matchingSession(operation, session)),
+  );
   return children(
-    ownerId && sessions.length ? (
+    ownerId && (sessions.length || receipts.length) ? (
       <aside
-        aria-label="CMA sessions"
+        aria-label={translateUi("CMA sessions")}
         className="flex min-h-0 shrink-0 flex-col gap-3"
       >
         {sessions.map((observation) => (
@@ -76,8 +98,16 @@ export function CmaSessionObserver({
             key={`${observation.session.connection.id}:${observation.session.agentId}`}
             ownerId={ownerId}
             observation={observation}
+            operations={operations.filter((operation) => matchingSession(operation, observation.session))}
           />
         ))}
+        {receipts.slice(0, receiptLimit).map((operation) => (
+          <CmaOperationCard key={operation.id} operation={operation} />
+        ))}
+        {receipts.length > receiptLimit ? (
+          <Button variant="ghost" size="sm" onClick={() => setReceiptLimit((value) => value + 3)}>{translateUi("Show older CMA submissions (")}{receipts.length - receiptLimit})
+          </Button>
+        ) : null}
       </aside>
     ) : null,
   );
@@ -85,6 +115,7 @@ export function CmaSessionObserver({
 
 /** Every route outside the assistant shell gets the same pinned cards. */
 export function FloatingCmaSessions() {
+  useUiTranslation();
   const assistant = useRouterState({
     select: (state) =>
       !state.matches.some(
@@ -100,6 +131,9 @@ export function FloatingCmaSessions() {
             "/assistant/machines",
             "/assistant/machines/new",
             "/assistant/machines/pair",
+            "/assistant/sandboxes",
+            "/assistant/sandboxes/$sandboxId",
+            "/assistant/cma-agents/$agentId",
           ].includes(match.routeId) &&
           match.status === "success" &&
           match.pathname.replace(/\/$/, "") ===
@@ -126,6 +160,7 @@ export function CmaSessionIndicator({
 }: {
   readonly conversationId: string;
 }) {
+  useUiTranslation();
   const sessions = useObservedCmaSessions().filter(
     ({ session }) => session.origin?.conversation_id === conversationId,
   );
@@ -138,14 +173,13 @@ export function CmaSessionIndicator({
       role="status"
       aria-label={
         working
-          ? "CMA is working in this session"
-          : "CMA activity in this session"
+          ? translateUi("CMA is working in this session")
+          : translateUi("CMA activity in this session")
       }
-      title={`${sessions.length} CMA session${sessions.length === 1 ? "" : "s"}`}
+      title={translateUi("{{count}} CMA sessions", { count: sessions.length })}
       className="inline-flex min-h-7 items-center gap-1.5 rounded-full border border-border px-2 py-0.5 type-group-label text-muted-foreground"
     >
-      <CmaGlyph aria-hidden="true" className="h-3.5 w-3.5" /> CMA
-      <span
+      <CmaGlyph aria-hidden="true" className="h-3.5 w-3.5" />{translateUi(" CMA")}<span
         aria-hidden="true"
         className={cn(
           "h-1.5 w-1.5 rounded-full",
@@ -159,10 +193,13 @@ export function CmaSessionIndicator({
 function CmaSessionCard({
   ownerId,
   observation,
+  operations,
 }: {
+  readonly operations: readonly CmaOperation[];
   readonly ownerId: string;
   readonly observation: ObservedCmaSession;
 }) {
+  useUiTranslation();
   const { session, state, reconnect } = observation;
   const key = `${session.connection.id}:${session.agentId}`;
   const collapsed = useCmaSessionStore(
@@ -180,9 +217,15 @@ function CmaSessionCard({
   );
   const detailsId = `cma-session-${session.connection.id}-${session.agentId}`;
   const scrollBody = useRef<HTMLDivElement>(null);
+  const activeActionId =
+    state.status === "working" || state.status === "starting"
+      ? [...state.actions]
+          .reverse()
+          .find((action) => action.status === "running")?.id
+      : undefined;
   return (
     <section
-      aria-label={`CMA session: ${state.title}`}
+      aria-label={translateUi("CMA session: {{value1}}", { value1: state.title })}
       data-private="true"
       data-ph-no-capture
       className="flex max-h-[min(440px,40dvh)] min-h-0 w-full max-w-[500px] shrink-0 flex-col self-start gap-2 overflow-hidden rounded-xl border border-border/50 bg-card p-3 text-14 lg:max-h-[480px] lg:rounded-2xl lg:border-0 lg:shadow-sm"
@@ -201,8 +244,9 @@ function CmaSessionCard({
         <div
           className="ml-auto flex max-w-full shrink-0 flex-wrap items-center justify-end gap-1"
           role="group"
-          aria-label="CMA session controls"
+          aria-label={translateUi("CMA session controls")}
         >
+          <CmaExecutionControl operations={operations} />
           {session.origin ? (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -218,13 +262,13 @@ function CmaSessionCard({
                       c: session.origin.conversation_id,
                       agent: session.origin.specialist_id,
                     }}
-                    aria-label="Open source chat"
+                    aria-label={translateUi("Open source chat")}
                   >
                     <MessageSquare aria-hidden="true" />
                   </Link>
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Open source chat</TooltipContent>
+              <TooltipContent>{translateUi("Open source chat")}</TooltipContent>
             </Tooltip>
           ) : null}
           {cmaUrl ? (
@@ -240,13 +284,13 @@ function CmaSessionCard({
                     href={cmaUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    aria-label="View in CMA"
+                    aria-label={translateUi("View in CMA")}
                   >
                     <ExternalLink aria-hidden="true" />
                   </a>
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>View in CMA</TooltipContent>
+              <TooltipContent>{translateUi("View in CMA")}</TooltipContent>
             </Tooltip>
           ) : null}
           <Tooltip>
@@ -255,7 +299,7 @@ function CmaSessionCard({
                 variant="ghost"
                 size={pinned ? "sm" : "icon"}
                 aria-label={
-                  pinned ? "Unpin CMA session (Pinned)" : "Pin CMA session"
+                  pinned ? translateUi("Unpin CMA session (Pinned)") : translateUi("Pin CMA session")
                 }
                 aria-pressed={pinned}
                 onClick={() => setPinned(ownerId, key, !pinned)}
@@ -271,14 +315,14 @@ function CmaSessionCard({
                   className={pinned ? "fill-current" : undefined}
                 />
                 {pinned ? (
-                  <span className="whitespace-nowrap">Pinned</span>
+                  <span className="whitespace-nowrap">{translateUi("Pinned")}</span>
                 ) : null}
               </Button>
             </TooltipTrigger>
             <TooltipContent>
               {pinned
-                ? "Unpin: show only in the source chat"
-                : "Pin to monitor on every page"}
+                ? translateUi("Unpin: show only in the source chat")
+                : translateUi("Pin to monitor on every page")}
             </TooltipContent>
           </Tooltip>
           <Tooltip>
@@ -287,7 +331,7 @@ function CmaSessionCard({
                 variant="ghost"
                 size="icon"
                 aria-label={
-                  collapsed ? "Maximise CMA session" : "Minimise CMA session"
+                  collapsed ? translateUi("Maximise CMA session") : translateUi("Minimise CMA session")
                 }
                 aria-expanded={!collapsed}
                 aria-controls={detailsId}
@@ -298,13 +342,13 @@ function CmaSessionCard({
               </Button>
             </TooltipTrigger>
             <TooltipContent>
-              {collapsed ? "Maximise CMA session" : "Minimise CMA session"}
+              {collapsed ? translateUi("Maximise CMA session") : translateUi("Minimise CMA session")}
             </TooltipContent>
           </Tooltip>
         </div>
       </div>
       <div ref={scrollBody} className="min-h-0 space-y-2 overflow-y-auto">
-        <SessionStatus state={state} />
+        <SessionStatus state={state} animate={collapsed || !activeActionId} />
         {collapsed && state.actions.length ? (
           <p className="truncate text-13 text-muted-foreground">
             {state.actions.at(-1)?.title}
@@ -320,13 +364,16 @@ function CmaSessionCard({
                 onClick={reconnect}
                 className="focus-visible:ring-2 focus-visible:ring-ring"
               >
-                <RefreshCw /> Reconnect
-              </Button>
+                <RefreshCw />{translateUi(" Reconnect")}</Button>
             ) : null}
           </div>
         ) : null}
         <div id={detailsId} hidden={collapsed} className="space-y-2">
-          <SessionActivity state={state} />
+          <SessionActivity
+            state={state}
+            activeActionId={collapsed ? undefined : activeActionId}
+          />
+          <CmaSessionRequests operations={operations} scrollBody={scrollBody} visible={!collapsed} />
           <SessionDetails
             session={session}
             state={state}
@@ -350,6 +397,7 @@ function SessionDetails({
   readonly scrollBody: RefObject<HTMLDivElement | null>;
   readonly visible: boolean;
 }) {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const content = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
@@ -386,9 +434,7 @@ function SessionDetails({
         aria-controls={contentId}
         onClick={() => setOpen((value) => !value)}
         className="w-full justify-between px-0 focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        Session details
-        <ChevronDown
+      >{translateUi("Session details")}<ChevronDown
           aria-hidden="true"
           className={cn(
             "transition-transform motion-reduce:transition-none",
@@ -399,23 +445,23 @@ function SessionDetails({
       <div ref={content} id={contentId} hidden={!open}>
         <dl className="space-y-2 px-1 pb-1 pt-2">
           <div>
-            <dt>Connection</dt>
+            <dt>{translateUi("Connection")}</dt>
             <dd className="mt-0.5 break-words text-muted-foreground">
               {session.connection.name}
             </dd>
           </div>
           {state.updatedAt ? (
             <div>
-              <dt>Last activity</dt>
+              <dt>{translateUi("Last activity")}</dt>
               <dd className="mt-0.5 text-muted-foreground">
-                <time dateTime={state.updatedAt} aria-label="Last CMA activity">
-                  {new Date(state.updatedAt).toLocaleString()}
+                <time dateTime={state.updatedAt} aria-label={translateUi("Last CMA activity")}>
+                  {new Date(state.updatedAt).toLocaleString(getFormattingLocale())}
                 </time>
               </dd>
             </div>
           ) : null}
           <div>
-            <dt>Session ID</dt>
+            <dt>{translateUi("Session ID")}</dt>
             <dd className="mt-0.5 break-all font-mono text-muted-foreground">
               {session.agentId}
             </dd>
@@ -426,16 +472,28 @@ function SessionDetails({
   );
 }
 
-function SessionStatus({ state }: { readonly state: CmaSessionState }) {
+function SessionStatus({
+  state,
+  animate,
+}: {
+  readonly state: CmaSessionState;
+  readonly animate: boolean;
+}) {
+  useUiTranslation();
   const live = state.connection === "live";
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <span className="text-13 text-muted-foreground">{translateUi("Agent:")}</span>
       <span
         role="status"
+        aria-label={translateUi("CMA agent status: {{value1}}", { value1: STATUS_LABELS[state.status] })}
         className="flex items-center gap-1.5 text-13 text-foreground"
       >
-        {state.status === "working" || state.status === "starting" ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary-text" />
+        {animate && (state.status === "working" || state.status === "starting") ? (
+          <Loader2
+            aria-hidden="true"
+            className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary-text"
+          />
         ) : (
           <Circle
             className={cn(
@@ -453,7 +511,7 @@ function SessionStatus({ state }: { readonly state: CmaSessionState }) {
       </span>
       <span
         className="flex items-center gap-1.5 text-13 text-muted-foreground"
-        aria-label={`Status stream ${state.connection}`}
+        aria-label={translateUi("Status stream {{value1}}", { value1: state.connection })}
       >
         <span
           className={cn(
@@ -466,18 +524,25 @@ function SessionStatus({ state }: { readonly state: CmaSessionState }) {
           )}
         />
         {live
-          ? "Live"
+          ? translateUi("Live")
           : state.connection === "reconnecting"
-            ? "Reconnecting"
+            ? translateUi("Reconnecting")
             : state.connection === "unavailable"
-              ? "Disconnected"
-              : "Connecting"}
+              ? translateUi("Disconnected")
+              : translateUi("Connecting")}
       </span>
     </div>
   );
 }
 
-function SessionActivity({ state }: { readonly state: CmaSessionState }) {
+function SessionActivity({
+  state,
+  activeActionId,
+}: {
+  readonly state: CmaSessionState;
+  readonly activeActionId?: string;
+}) {
+  useUiTranslation();
   const [expanded, setExpanded] = useState(false);
   const actions = [...state.actions].reverse();
   const historyId = useId();
@@ -491,11 +556,9 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
           {state.notice}
         </p>
       ) : null}
-      <section aria-label="CMA activity">
+      <section aria-label={translateUi("CMA activity")}>
         <div className="mb-0.5 flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
-          <h4 className="type-group-label text-text-tertiary">
-            Recent actions
-          </h4>
+          <h4 className="type-group-label text-text-tertiary">{translateUi("Recent actions")}</h4>
           {actions.length > 3 ? (
             <Button
               variant="ghost"
@@ -506,8 +569,8 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
               onClick={() => setExpanded((value) => !value)}
             >
               {expanded
-                ? "Show recent actions"
-                : `Show all ${actions.length} actions`}
+                ? translateUi("Show recent actions")
+                : translateUi("Show all {{value1}} actions", { value1: actions.length })}
             </Button>
           ) : null}
         </div>
@@ -519,14 +582,21 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
                 className="flex items-start gap-1.5 py-1 text-13"
               >
                 <span className="mt-0.5 shrink-0" aria-label={action.status}>
-                  {action.status === "running" ? (
+                  {action.id === activeActionId ? (
                     <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none text-primary-text" />
                   ) : action.status === "completed" ? (
                     <Check className="h-3 w-3 text-success" />
                   ) : action.status === "failed" ? (
                     <X className="h-3 w-3 text-destructive" />
                   ) : (
-                    <Circle className="h-3 w-3 text-text-tertiary" />
+                    <Circle
+                      className={cn(
+                        "h-3 w-3",
+                        action.status === "running"
+                          ? "text-primary-text"
+                          : "text-text-tertiary",
+                      )}
+                    />
                   )}
                 </span>
                 <span className="min-w-0 break-words text-muted-foreground">
@@ -538,8 +608,8 @@ function SessionActivity({ state }: { readonly state: CmaSessionState }) {
         ) : (
           <p className="text-13 text-text-tertiary">
             {state.status === "working"
-              ? "CMA is working. Actions will appear as it reports them."
-              : "New session activity will appear here."}
+              ? translateUi("CMA is working. Actions will appear as it reports them.")
+              : translateUi("New session activity will appear here.")}
           </p>
         )}
       </section>

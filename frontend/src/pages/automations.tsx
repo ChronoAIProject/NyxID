@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { Label } from "@/components/ui/label";
 import { describeChanges, labelValue } from "@/lib/grouped-form-changes";
 import { TEXT_STYLES } from "@/lib/typography";
@@ -100,6 +103,7 @@ const message = (e: unknown) =>
   e instanceof Error ? e.message : "Could not save automation";
 
 export function AutomationsPage() {
+  useUiTranslation();
   return (
     <GroupedPage>
       <AutomationsContent />
@@ -108,6 +112,7 @@ export function AutomationsPage() {
 }
 
 function AutomationsContent() {
+  useUiTranslation();
   const search = parseAutomationSearch(useSearch({ strict: false }));
   const setup = useAutomationSetup(search.setup);
   const settings = useNyxBotSettings();
@@ -134,12 +139,12 @@ function AutomationsContent() {
     const delivery = row.delivery;
     return delivery.type === "assistant"
       ? (agents.data?.agents.find((a) => a.id === delivery.agent_id)?.name ??
-          "Agent")
+          translateUi("Agent"))
       : delivery.type === "agent"
-        ? "Device agent"
+        ? translateUi("Device agent")
         : delivery.type === "notification"
-          ? "Notification"
-          : "Webhook";
+          ? translateUi("Notification")
+          : translateUi("Webhook");
   };
   function actions(row: TriggerResponse) {
     return (
@@ -148,15 +153,13 @@ function AutomationsContent() {
           <Button
             variant="ghost"
             size="icon"
-            aria-label={`Actions for ${row.label}`}
+            aria-label={translateUi("Actions for {{value1}}", { value1: row.label })}
           >
             <MoreVertical className="h-4 w-4" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          <DropdownMenuItem onClick={() => setEditing(row)}>
-            Edit
-          </DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setEditing(row)}>{translateUi("Edit")}</DropdownMenuItem>
           <DropdownMenuItem
             onClick={() => {
               void update
@@ -166,31 +169,25 @@ function AutomationsContent() {
                     status: row.status === "active" ? "disabled" : "active",
                   },
                 })
-                .catch((e: unknown) => toast.error(message(e)));
+                .catch((e: unknown) => toast.error(translateErrorMessage(message(e))));
             }}
           >
-            {row.status === "active" ? "Pause" : "Resume"}
+            {row.status === "active" ? translateUi("Pause") : translateUi("Resume")}
           </DropdownMenuItem>
           <DropdownMenuItem
             disabled={row.status !== "active" || run.isPending}
             onClick={() => {
               void run
                 .mutateAsync(row.id)
-                .then(() => toast.success("Run queued"))
-                .catch((e: unknown) => toast.error(message(e)));
+                .then(() => toast.success(translateUi("Run queued")))
+                .catch((e: unknown) => toast.error(translateErrorMessage(message(e))));
             }}
-          >
-            Run now
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={() => setHistory(row)}>
-            Run history
-          </DropdownMenuItem>
+          >{translateUi("Run now")}</DropdownMenuItem>
+          <DropdownMenuItem onClick={() => setHistory(row)}>{translateUi("Run history")}</DropdownMenuItem>
           <DropdownMenuItem
             className="text-destructive"
             onClick={() => setDeleting(row)}
-          >
-            Delete
-          </DropdownMenuItem>
+          >{translateUi("Delete")}</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     );
@@ -199,16 +196,16 @@ function AutomationsContent() {
     <div className="shell-page-stack">
       <WorkspacePageHeader
         column
-        title="Automations"
-        description="Scheduled work, reminders and webhook events for your agents."
+        title={translateUi("Automations")}
+        description={translateUi("Scheduled work, reminders and webhook events for your agents.")}
         actions={
           <AddCtaButton
-            label="Create automation"
+            label={translateUi("Create automation")}
             onClick={() => setEditing("new")}
           />
         }
       />
-      <AutomationPreferences title="Settings" />
+      <AutomationPreferences title={translateUi("Settings")} />
       {triggers.error && (
         <ErrorBanner
           message={triggers.error.message}
@@ -216,29 +213,25 @@ function AutomationsContent() {
         />
       )}
       {triggers.isPending ? (
-        <Skeleton className="h-36 w-full" aria-label="Loading automations" />
+        <Skeleton className="h-36 w-full" aria-label={translateUi("Loading automations")} />
       ) : rows.length === 0 ? (
         <GroupedList
           className="max-w-2xl"
           footer={
-            <Link className="underline" to="/triggers">
-              Webhook secrets and delivery replay
-            </Link>
+            <Link className="underline" to="/triggers">{translateUi("Webhook secrets and delivery replay")}</Link>
           }
         >
           <GroupedRow
-            title="No automations yet"
-            description="Ask NyxBot to schedule a task or create one here."
+            title={translateUi("No automations yet")}
+            description={translateUi("Ask NyxBot to schedule a task or create one here.")}
           />
         </GroupedList>
       ) : (
         <GroupedList
-          title="Your automations"
+          title={translateUi("Your automations")}
           className="max-w-2xl"
           footer={
-            <Link className="underline" to="/triggers">
-              Webhook secrets and delivery replay
-            </Link>
+            <Link className="underline" to="/triggers">{translateUi("Webhook secrets and delivery replay")}</Link>
           }
         >
           {rows.map((row) => (
@@ -254,29 +247,29 @@ function AutomationsContent() {
                 </span>
                 <span className="mt-0.5 block type-secondary text-text-tertiary">
                   {target(row)} ·{" "}
-                  {row.source === "schedule" ? "Schedule" : "Webhook"} ·{" "}
+                  {row.source === "schedule" ? translateUi("Schedule") : translateUi("Webhook")} ·{" "}
                   <span
                     className={
                       row.status === "active" ? "text-success" : undefined
                     }
                   >
-                    {row.status === "active" ? "Active" : "Paused"}
+                    {row.status === "active" ? translateUi("Active") : translateUi("Paused")}
                   </span>
                 </span>
                 <span className="mt-1 block type-secondary text-text-tertiary">
                   {row.source === "webhook"
-                    ? "Runs on webhook events"
+                    ? translateUi("Runs on webhook events")
                     : row.status !== "active"
-                      ? "Schedule paused"
+                      ? translateUi("Schedule paused")
                       : row.next_run_at
-                        ? `Next: ${formatAutomationTime(row.next_run_at, zone)}`
-                        : "No run scheduled"} · {row.last_run?.outcome
-                    ? `Last run: ${row.last_run.outcome.replaceAll("_", " ")}`
-                    : "Not run yet"}
+                        ? translateUi("Next: {{value1}}", { value1: formatAutomationTime(row.next_run_at, zone) })
+                        : translateUi("No run scheduled")} · {row.last_run?.outcome
+                    ? translateUi("Last run: {{value1}}", { value1: translateUi(row.last_run.outcome.replaceAll("_", " ")) })
+                    : translateUi("Not run yet")}
                 </span>
                 {row.last_run?.notification_delivery?.message && (
                   <span className="mt-1 block type-secondary text-warning">
-                    {row.last_run.execution_outcome === "completed" ? "Task completed. " : ""}{row.last_run.notification_delivery.message}
+                    {row.last_run.execution_outcome === "completed" ? translateUi("Task completed. ") : ""}{row.last_run.notification_delivery.message}
                   </span>
                 )}
                 {row.pause_reason && (
@@ -292,7 +285,7 @@ function AutomationsContent() {
       )}
       {setup.error && <ErrorBanner message={setup.error.message} />}
       {search.setup && setup.isPending && (
-        <Skeleton className="h-24 w-full" aria-label="Loading setup" />
+        <Skeleton className="h-24 w-full" aria-label={translateUi("Loading setup")} />
       )}
       {editing && (!search.setup || setup.data) && (
         <AutomationEditor
@@ -313,8 +306,8 @@ function AutomationsContent() {
           if (!open) setSecrets([]);
         }}
         values={secrets}
-        title="Automation secrets"
-        description="Save these secrets now. They are shown only once."
+        title={translateUi("Automation secrets")}
+        description={translateUi("Save these secrets now. They are shown only once.")}
       />
       <Dialog
         open={Boolean(deleting)}
@@ -324,15 +317,11 @@ function AutomationsContent() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete {deleting?.label}?</DialogTitle>
-            <DialogDescription>
-              Future runs stop. Existing run threads remain available.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Delete ")}{deleting?.label}?</DialogTitle>
+            <DialogDescription>{translateUi("Future runs stop. Existing run threads remain available.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleting(null)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setDeleting(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               disabled={remove.isPending}
@@ -341,11 +330,9 @@ function AutomationsContent() {
                   void remove
                     .mutateAsync(deleting.id)
                     .then(() => setDeleting(null))
-                    .catch((e: unknown) => toast.error(message(e)));
+                    .catch((e: unknown) => toast.error(translateErrorMessage(message(e))));
               }}
-            >
-              Delete
-            </Button>
+            >{translateUi("Delete")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -368,6 +355,7 @@ export function AutomationEditor({
   readonly onClose: () => void;
   readonly onSecrets: (values: readonly OneTimeSecretValue[]) => void;
 }) {
+  useUiTranslation();
   const settings = useNyxBotSettings();
   const saveSettings = useUpdateNyxBotSettings();
   const agents = useNyxBotAgents();
@@ -449,7 +437,7 @@ export function AutomationEditor({
       <GroupedRow key={name} asChild className="block space-y-0.5">
         <Label>
           <span className="text-text-tertiary">
-            {label}
+            {translateUi(label)}
           </span>
           <GroupedInput
             type={type}
@@ -472,7 +460,7 @@ export function AutomationEditor({
     return (
       <>
         <GroupedRow
-          title={label}
+          title={translateUi(label)}
           accessory={
             <Select
               value={String(form.watch(name)) || "__empty"}
@@ -485,7 +473,7 @@ export function AutomationEditor({
               disabled={disabled}
             >
               <GroupedSelectTrigger
-                aria-label={label}
+                aria-label={translateUi(label)}
                 aria-describedby={`automation-${name}-error`}
                 aria-invalid={Boolean(form.formState.errors[name])}
               >
@@ -547,7 +535,7 @@ export function AutomationEditor({
           errorId={`automation-${name}-error`}
           invalid={Boolean(form.formState.errors[name])}
           timezone={values.timezone}
-          label={label}
+          label={translateUi(label)}
           optional={optional}
           value={values[name]}
           onChange={(value) => form.setValue(name, value)}
@@ -601,7 +589,7 @@ export function AutomationEditor({
           });
         if (secrets.length) onSecrets(secrets);
       }
-      toast.success(row ? "Automation updated" : "Automation created");
+      toast.success(translateUi(row ? "Automation updated" : "Automation created"));
       onClose();
     } catch (e) {
       setError(message(e));
@@ -618,23 +606,19 @@ export function AutomationEditor({
       <GroupedDialogContent scrollMode="body" className="md:max-w-xl">
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>
-            {row ? "Edit automation" : "Create automation"}
+            {row ? translateUi("Edit automation") : translateUi("Create automation")}
           </DialogTitle>
-          <DialogDescription>
-            Choose when to run, what to do and where the answer arrives.
-          </DialogDescription>
+          <DialogDescription>{translateUi("Choose when to run, what to do and where the answer arrives.")}</DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form className="min-h-0" onSubmit={form.handleSubmit(save)}>
             <DialogBody className="space-y-6 pb-4">
-              <GroupedList title="What">
-                {input("label", "Label")}
+              <GroupedList title={translateUi("What")}>
+                {input("label", translateUi("Label"))}
                 {values.delivery_type === "assistant" && (
                   <GroupedRow asChild className="block space-y-0.5">
                     <Label>
-                      <span className="text-text-tertiary">
-                        Instruction
-                      </span>
+                      <span className="text-text-tertiary">{translateUi("Instruction")}</span>
                       <GroupedTextarea
                         {...form.register("instruction")}
                         aria-invalid={Boolean(
@@ -648,10 +632,10 @@ export function AutomationEditor({
                 )}
               </GroupedList>
               <GroupedList
-                title="When"
+                title={translateUi("When")}
                 footer={
                   values.source === "schedule" && values.kind === "cron"
-                    ? "Minute · hour · day · month · weekday. Missing DST times run once at the first valid time after the gap; repeated times use the earlier instant."
+                    ? translateUi("Minute · hour · day · month · weekday. Missing DST times run once at the first valid time after the gap; repeated times use the earlier instant.")
                     : undefined
                 }
               >
@@ -674,42 +658,36 @@ export function AutomationEditor({
                     {values.kind === "cron" ? (
                       <>
                         <GroupedRow
-                          title="Preset"
+                          title={translateUi("Preset")}
                           accessory={
                             <Select
                               onValueChange={(value) =>
                                 form.setValue("expression", value)
                               }
                             >
-                              <GroupedSelectTrigger aria-label="Preset">
-                                <SelectValue placeholder="Choose a preset…" />
+                              <GroupedSelectTrigger aria-label={translateUi("Preset")}>
+                                <SelectValue placeholder={translateUi("Choose a preset…")} />
                               </GroupedSelectTrigger>
                               <SelectContent>
-                                <SelectItem value="0 8 * * 1-5">
-                                  Weekdays at 8:00
-                                </SelectItem>
-                                <SelectItem value="0 9 * * *">
-                                  Daily at 9:00
-                                </SelectItem>
-                                <SelectItem value="0 17 * * 5">
-                                  Friday at 17:00
-                                </SelectItem>
+                                <SelectItem value="0 8 * * 1-5">{translateUi("Weekdays at 8:00")}</SelectItem>
+                                <SelectItem value="0 9 * * *">{translateUi("Daily at 9:00")}</SelectItem>
+                                <SelectItem value="0 17 * * 5">{translateUi("Friday at 17:00")}</SelectItem>
                               </SelectContent>
                             </Select>
                           }
                         />
-                        {input("expression", "Cron expression")}
+                        {input("expression", translateUi("Cron expression"))}
                       </>
                     ) : values.kind === "every" ? (
                       <>
                         <GroupedRow
-                          title="Interval"
+                          title={translateUi("Interval")}
                           accessory={
                             <div className="flex max-w-full flex-wrap items-center gap-2">
                               <GroupedInput
                                 type="number"
                                 className="w-16"
-                                aria-label="Interval amount"
+                                aria-label={translateUi("Interval amount")}
                                 aria-invalid={Boolean(
                                   form.formState.errors.amount,
                                 )}
@@ -728,7 +706,7 @@ export function AutomationEditor({
                                 }
                               >
                                 <GroupedSelectTrigger
-                                  aria-label="Interval unit"
+                                  aria-label={translateUi("Interval unit")}
                                   aria-invalid={Boolean(
                                     form.formState.errors.unit,
                                   )}
@@ -750,14 +728,14 @@ export function AutomationEditor({
                         />
                         {fieldError("amount")}
                         {fieldError("unit")}
-                        {dateTime("anchor", "Anchor", false)}
+                        {dateTime("anchor", translateUi("Anchor"), false)}
                       </>
                     ) : (
-                      dateTime("at", "Run at", false)
+                      dateTime("at", translateUi("Run at"), false)
                     )}
                     <TimezoneSelect
                       grouped
-                      label="IANA timezone"
+                      label={translateUi("IANA timezone")}
                       describedBy="automation-timezone-error"
                       invalid={Boolean(form.formState.errors.timezone)}
                       value={values.timezone}
@@ -767,15 +745,13 @@ export function AutomationEditor({
                     <GroupedDisclosure
                       aria-expanded={advanced}
                       onClick={() => setAdvanced(!advanced)}
-                    >
-                      Start, end and run limits
-                    </GroupedDisclosure>
+                    >{translateUi("Start, end and run limits")}</GroupedDisclosure>
                   </>
                 ) : (
                   <>
                     {select(
                       "verification_mode",
-                      "Inbound verification",
+                      translateUi("Inbound verification"),
                       [
                         ["bearer", "Bearer token"],
                         ["query", "Query token"],
@@ -784,25 +760,25 @@ export function AutomationEditor({
                       Boolean(row),
                     )}
                     {values.verification_mode === "hmac" &&
-                      input("signature_header", "Signature header")}
+                      input("signature_header", translateUi("Signature header"))}
                   </>
                 )}
               </GroupedList>
               {values.source === "schedule" && advanced && (
-                <GroupedList title="Start, end and run limits">
-                  {dateTime("start", "Start", true)}
-                  {dateTime("end", "End", true)}
-                  {input("max_runs", "Maximum occurrences", "number")}
+                <GroupedList title={translateUi("Start, end and run limits")}>
+                  {dateTime("start", translateUi("Start"), true)}
+                  {dateTime("end", translateUi("End"), true)}
+                  {input("max_runs", translateUi("Maximum occurrences"), "number")}
                   {input(
                     "grace_seconds",
-                    "Grace window in seconds (optional)",
+                    translateUi("Grace window in seconds (optional)"),
                     "number",
                   )}
                 </GroupedList>
               )}
               {values.source === "schedule" && (
                 <GroupedList
-                  title="Next runs"
+                  title={translateUi("Next runs")}
                   aria-live="polite"
                   footer={
                     preview.error ? (
@@ -818,7 +794,7 @@ export function AutomationEditor({
                     <GroupedRow>
                       <Skeleton
                         className="h-8 w-full"
-                        aria-label="Calculating next runs"
+                        aria-label={translateUi("Calculating next runs")}
                       />
                     </GroupedRow>
                   ) : preview.data?.next_runs.length ? (
@@ -832,45 +808,34 @@ export function AutomationEditor({
                       />
                     ))
                   ) : (
-                    <GroupedRow title="Choose a valid schedule to preview its next runs" />
+                    <GroupedRow title={translateUi("Choose a valid schedule to preview its next runs")} />
                   )}
                 </GroupedList>
               )}
               {values.delivery_type === "assistant" && (
                 <GroupedList
-                  title="Who"
+                  title={translateUi("Who")}
                   footer={
                     <>
                       {values.source === "webhook" &&
                         values.confirmation_policy === "destructive" && (
-                          <p role="alert" className="text-warning">
-                            Untrusted webhook content can cause changes using
-                            your account without confirmation. Choose this only
-                            for event sources you trust.
-                          </p>
+                          <p role="alert" className="text-warning">{translateUi("Untrusted webhook content can cause changes using your account without confirmation. Choose this only for event sources you trust.")}</p>
                         )}
                       {values.source === "webhook" &&
                         values.thread_policy === "home" && (
-                          <p role="alert" className="text-warning">
-                            Untrusted webhook content will remain in your home
-                            thread and can influence later owner turns,
-                            including private channel chats, with full account
-                            authority. Webhook confirmations do not protect
-                            those later turns. Choose this only if you accept
-                            that risk.
-                          </p>
+                          <p role="alert" className="text-warning">{translateUi("Untrusted webhook content will remain in your home thread and can influence later owner turns, including private channel chats, with full account authority. Webhook confirmations do not protect those later turns. Choose this only if you accept that risk.")}</p>
                         )}
                     </>
                   }
                 >
-                  {select("agent_id", "Target agent", [
+                  {select("agent_id", translateUi("Target agent"), [
                     ["", "Choose an agent…"],
                     ...(agents.data?.agents
                       .filter((a) => a.status !== "destroyed")
                       .map((a) => [a.id, a.display_name ?? a.name] as const) ??
                       []),
                   ])}
-                  {select("thread_policy", "Thread", [
+                  {select("thread_policy", translateUi("Thread"), [
                     [
                       "default",
                       values.source === "webhook"
@@ -882,14 +847,14 @@ export function AutomationEditor({
                     ["new", "New thread each run"],
                   ])}
                   {values.source === "webhook" &&
-                    select("confirmation_policy", "Confirm webhook actions", [
+                    select("confirmation_policy", translateUi("Confirm webhook actions"), [
                       ["changes", "Every changing action (recommended)"],
                       ["destructive", "Only destructive actions"],
                     ])}
                 </GroupedList>
               )}
-              <GroupedList title="Deliver to" footer={values.delivery_type === "assistant" && values.deliver_type === "notification" ? "Mobile push requires an enabled, registered device in the NyxID app. For Telegram reports, choose Channel chat; linking Telegram notifications does not enable push." : undefined}>
-                {select("delivery_type", "Delivery", [
+              <GroupedList title={translateUi("Deliver to")} footer={values.delivery_type === "assistant" && values.deliver_type === "notification" ? translateUi("Mobile push requires an enabled, registered device in the NyxID app. For Telegram reports, choose Channel chat; linking Telegram notifications does not enable push.") : undefined}>
+                {select("delivery_type", translateUi("Delivery"), [
                   ["assistant", "NyxBot / specialist"],
                   ["notification", "Notification reminder"],
                   ["webhook", "Webhook"],
@@ -897,13 +862,13 @@ export function AutomationEditor({
                 ])}
                 {values.delivery_type === "assistant" ? (
                   <>
-                    {select("deliver_type", "Send result to", [
+                    {select("deliver_type", translateUi("Send result to"), [
                       ["thread", "Web thread"],
                       ["chat", "Channel chat"],
                       ["notification", "Mobile push"],
                     ])}
                     {values.deliver_type === "chat" &&
-                      select("chat_id", "Chat (posting must be allowed)", [
+                      select("chat_id", translateUi("Chat (posting must be allowed)"), [
                         ["", "Choose a chat…"],
                         ...(chats.data?.map(
                           (chat) =>
@@ -915,22 +880,22 @@ export function AutomationEditor({
                       ])}
                   </>
                 ) : values.delivery_type === "webhook" ? (
-                  input("webhook_url", "Delivery HTTPS URL")
+                  input("webhook_url", translateUi("Delivery HTTPS URL"))
                 ) : values.delivery_type === "agent" ? (
-                  input("conversation_id", "Device conversation ID")
+                  input("conversation_id", translateUi("Device conversation ID"))
                 ) : null}
               </GroupedList>
               <GroupedList
-                title="If still running"
+                title={translateUi("If still running")}
                 footer={
                   error && (
                     <p role="alert" className="text-destructive">
-                      {error}
+                      {translateUi(error)}
                     </p>
                   )
                 }
               >
-                {select("overlap", "If the previous run is still active", [
+                {select("overlap", translateUi("If the previous run is still active"), [
                   ["skip", "Skip"],
                   ["queue", "Queue one"],
                 ])}
@@ -940,7 +905,7 @@ export function AutomationEditor({
               changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "label", label: "Label" }, { key: "instruction", label: "Instruction" }, { key: "source", label: "Source", format: labelValue({ schedule: "Schedule", webhook: "Webhook" }) }, { key: "kind", label: "Schedule type", format: labelValue({ cron: "Calendar", every: "Every", at: "Once" }) }, { key: "expression", label: "Cron expression" }, { key: "timezone", label: "Timezone" }, { key: "amount", label: "Interval" }, { key: "unit", label: "Interval unit", format: labelValue({ minutes: "Minutes", hours: "Hours", days: "Days" }) }, { key: "anchor", label: "Anchor" }, { key: "at", label: "Run at" }, { key: "start", label: "Start" }, { key: "end", label: "End" }, { key: "max_runs", label: "Maximum runs" }, { key: "grace_seconds", label: "Grace period (seconds)" }, { key: "delivery_type", label: "Delivery type", format: labelValue({ assistant: "Assistant", notification: "Notification", webhook: "Webhook", agent: "Device agent" }) }, { key: "agent_id", label: "Target agent", format: (value) => { const agent = agents.data?.agents.find((agent) => agent.id === value); return agent?.display_name || agent?.name || String(value || "None"); } }, { key: "thread_policy", label: "Thread", format: labelValue({ default: values.source === "webhook" ? "Default (dedicated thread)" : "Default (NyxBot home, specialist dedicated)", home: "Home thread", dedicated: "One thread for this automation", new: "New thread each run" }) }, { key: "confirmation_policy", label: "Confirmation policy", format: labelValue({ changes: "Every changing action (recommended)", destructive: "Only destructive actions" }) }, { key: "deliver_type", label: "Send result to", format: labelValue({ thread: "Web thread", chat: "Channel chat", notification: "Mobile push" }) }, { key: "chat_id", label: "Chat", format: (value) => { const chat = chats.data?.find((chat) => chat.id === value); return chat ? `${chat.bot_label}: ${chat.title ?? chat.kind ?? "Chat"}` : value ? "Saved chat" : "None"; } }, { key: "overlap", label: "If still running", format: labelValue({ skip: "Skip", queue: "Queue one" }) }, { key: "webhook_url", label: "Webhook URL", format: (value) => value === form.formState.defaultValues?.webhook_url ? "Saved destination (hidden)" : "New destination (hidden)" }, { key: "conversation_id", label: "Device conversation" }, { key: "verification_mode", label: "Verification method", format: labelValue({ bearer: "Bearer token", query: "Query token", hmac: "HMAC signature" }) }, { key: "signature_header", label: "Signature header" }])}
               intent={row ? "edit" : "create"}
               disabled={!form.formState.isValid}
-              label="automation"
+              label={translateUi("automation")}
               dirty={form.formState.isDirty || prefillDirty}
               pending={busy}
               save={form.handleSubmit(save)}
@@ -950,7 +915,7 @@ export function AutomationEditor({
                 setError(undefined);
                 if (prefillDirty) onClose();
               }}
-              saveLabel="Save automation"
+              saveLabel={translateUi("Save automation")}
             />
           </form>
         </Form>
@@ -966,6 +931,7 @@ function AutomationHistory({
   readonly row: TriggerResponse;
   readonly onClose: () => void;
 }) {
+  useUiTranslation();
   const settings = useNyxBotSettings();
   const zone = settings.data?.timezone ?? browserTimezone();
   const history = useAutomationRuns(row.id);
@@ -981,23 +947,21 @@ function AutomationHistory({
     >
       <DialogContent className="bg-background sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{row.label}: run history</DialogTitle>
-          <DialogDescription>
-            Up to 1,000 recent runs are retained for 90 days.
-          </DialogDescription>
+          <DialogTitle>{row.label}{translateUi(": run history")}</DialogTitle>
+          <DialogDescription>{translateUi("Up to 1,000 recent runs are retained for 90 days.")}</DialogDescription>
         </DialogHeader>
         <Dialog open={cancelling !== null} onOpenChange={(open) => { if (!open) setCancelling(null); }}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Cancel this automation run?</DialogTitle>
-              <DialogDescription>Stop this run and its delegated work. Completed actions remain completed.</DialogDescription>
+              <DialogTitle>{translateUi("Cancel this automation run?")}</DialogTitle>
+              <DialogDescription>{translateUi("Stop this run and its delegated work. Completed actions remain completed.")}</DialogDescription>
             </DialogHeader>
             <DialogFooter>
-              <Button variant="outline" onClick={() => setCancelling(null)}>Keep run</Button>
+              <Button variant="outline" onClick={() => setCancelling(null)}>{translateUi("Keep run")}</Button>
               <Button variant="destructive" disabled={cancelRun.isPending} onClick={() => {
                 if (cancelling) cancelRun.mutate({ triggerId: row.id, runId: cancelling });
                 setCancelling(null);
-              }}>Confirm cancellation</Button>
+              }}>{translateUi("Confirm cancellation")}</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
@@ -1005,10 +969,10 @@ function AutomationHistory({
         {history.error ? (
           <ErrorBanner message={history.error.message} />
         ) : history.isPending ? (
-          <Skeleton className="h-24 w-full" aria-label="Loading runs" />
+          <Skeleton className="h-24 w-full" aria-label={translateUi("Loading runs")} />
         ) : !runs.length ? (
           <GroupedList>
-            <GroupedRow title="No runs yet." />
+            <GroupedRow title={translateUi("No runs yet.")} />
           </GroupedList>
         ) : (
           <div className="space-y-6">
@@ -1019,33 +983,31 @@ function AutomationHistory({
                 footer={
                   <>
                     {run.started_at && (
-                      <p>
-                        Started{" "}
+                      <p>{translateUi("Started")}{" "}
                         {formatAutomationTime(run.started_at, zone, true)}
                       </p>
                     )}
                     {run.capacity_wait_ms != null &&
                       run.capacity_wait_ms > 0 && (
-                        <p>waited {formatCapacityWait(run.capacity_wait_ms)} for capacity</p>
+                        <p>{translateUi("waited ")}{formatCapacityWait(run.capacity_wait_ms)}{translateUi(" for capacity")}</p>
                       )}
                     {run.notification_delivery && (
                       <>
                         {run.notification_delivery.message && <p>{run.notification_delivery.message}</p>}
-                        {run.notification_delivery.retry_at && <p>Next delivery attempt: {formatAutomationTime(run.notification_delivery.retry_at, zone, true)}</p>}
-                        <p>{run.notification_delivery.attempts} push {run.notification_delivery.attempts === 1 ? "attempt" : "attempts"}{run.notification_delivery.http_status != null ? ` · Provider HTTP ${run.notification_delivery.http_status}` : ""}</p>
+                        {run.notification_delivery.retry_at && <p>{translateUi("Next delivery attempt: ")}{formatAutomationTime(run.notification_delivery.retry_at, zone, true)}</p>}
+                        <p>{run.notification_delivery.attempts}{translateUi(" push ")}{run.notification_delivery.attempts === 1 ? translateUi("attempt") : translateUi("attempts")}{run.notification_delivery.http_status != null ? translateUi(" · Provider HTTP {{value1}}", { value1: run.notification_delivery.http_status }) : ""}</p>
                       </>
                     )}
                     {run.missed ? (
-                      <p>
-                        Missed {run.missed.count} occurrences between{" "}
-                        {formatAutomationTime(run.missed.from, zone)} and{" "}
+                      <p>{translateUi("Missed ")}{run.missed.count}{translateUi(" occurrences between")}{" "}
+                        {formatAutomationTime(run.missed.from, zone)}{translateUi(" and")}{" "}
                         {formatAutomationTime(run.missed.through, zone)}.
                       </p>
                     ) : run.failure_reason ? (
                       <p>
                         {run.failure_reason.stage === "model_proxy"
-                          ? "Model request failed"
-                          : "Assistant request failed"}
+                          ? translateUi("Model request failed")
+                          : translateUi("Assistant request failed")}
                         {": "}
                         {run.failure_reason.code}
                         {run.failure_reason.http_status != null &&
@@ -1053,26 +1015,26 @@ function AutomationHistory({
                       </p>
                     ) : (
                       run.reason && run.reason !== run.notification_delivery?.reason && <p>{run.reason === "coordinator_timeout"
-                        ? "Coordinator deadline expired (coordinator_timeout)."
+                        ? translateUi("Coordinator deadline expired (coordinator_timeout).")
                         : run.outcome === "waiting" && run.wait_kind === "coordinator"
-                          ? "Waiting for delegated work to finish"
+                          ? translateUi("Waiting for delegated work to finish")
                           : run.reason.replaceAll("_", " ")}</p>
                     )}
                     {run.duration_ms !== null && (
-                      <p>{(run.duration_ms / 1000).toFixed(1)} seconds</p>
+                      <p>{(run.duration_ms / 1000).toFixed(1)}{translateUi(" seconds")}</p>
                     )}
                   </>
                 }
               >
                 <GroupedRow
-                  title={run.scheduled_at ? "Scheduled" : "On demand"}
+                  title={run.scheduled_at ? translateUi("Scheduled") : translateUi("On demand")}
                   accessory={run.scheduled_at ? formatAutomationTime(run.scheduled_at, zone, true) : "Started by an event or request"}
                 />
-                {run.execution_outcome && <GroupedRow title="Task execution" accessory={run.execution_outcome} />}
-                {run.notification_delivery && <GroupedRow title="Mobile push delivery" accessory={run.notification_delivery.state === "accepted" ? "Accepted by push provider" : run.notification_delivery.state} />}
+                {run.execution_outcome && <GroupedRow title={translateUi("Task execution")} accessory={run.execution_outcome} />}
+                {run.notification_delivery && <GroupedRow title={translateUi("Mobile push delivery")} accessory={run.notification_delivery.state === "accepted" ? "Accepted by push provider" : run.notification_delivery.state} />}
                 {run.outcome === "waiting" && run.coordinator_deadline && (
                   <GroupedRow
-                    title="Completion deadline"
+                    title={translateUi("Completion deadline")}
                     accessory={formatAutomationTime(run.coordinator_deadline, zone, true)}
                   />
                 )}
@@ -1082,9 +1044,7 @@ function AutomationHistory({
                     size="sm"
                     disabled={cancelRun.isPending}
                     onClick={() => setCancelling(run.id)}
-                  >
-                    Cancel run
-                  </Button>
+                  >{translateUi("Cancel run")}</Button>
                 )}
                 {run.thread_id && (
                   <GroupedRow asChild interactive>
@@ -1092,9 +1052,7 @@ function AutomationHistory({
                       className="text-primary-text underline"
                       to="/assistant"
                       search={{ c: run.thread_id }}
-                    >
-                      Open thread
-                    </Link>
+                    >{translateUi("Open thread")}</Link>
                   </GroupedRow>
                 )}
               </GroupedList>
@@ -1108,9 +1066,7 @@ function AutomationHistory({
                 type="button"
                 disabled={history.isFetchingNextPage}
                 onClick={() => void history.fetchNextPage()}
-              >
-                Load older runs
-              </button>
+              >{translateUi("Load older runs")}</button>
             </GroupedRow>
           </GroupedList>
         )}

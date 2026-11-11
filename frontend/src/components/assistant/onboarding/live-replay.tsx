@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { ArrowUp } from "lucide-react";
 import { ChatMessageBubble } from "@/components/assistant/chat-message";
@@ -189,6 +191,7 @@ export function LiveReplay({
   /** What the replay shows, for assistive tech. */
   readonly label: string;
 }) {
+  useUiTranslation();
   const still = useMediaQuery("(prefers-reduced-motion: reduce)");
   const [beats] = useState(() =>
     kind === "chief-of-staff" ? chiefScript(topics) : kind === "specialists" ? SPECIALISTS : CONTROL,
@@ -200,7 +203,7 @@ export function LiveReplay({
       <div aria-hidden="true" className="pointer-events-none select-none">
         <div className="flex items-center gap-2 border-b border-border/50 bg-sidebar px-3 py-2">
           <AgentAvatar agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }} size="sm" />
-          <span className="type-row-title text-foreground">NyxBot</span>
+          <span className="type-row-title text-foreground">{translateUi("NyxBot")}</span>
         </div>
         <div className="flex h-[18.75rem] flex-col justify-end gap-3 overflow-hidden px-4 pt-3">
           {scene.messages.map((entry) => (
@@ -213,11 +216,9 @@ export function LiveReplay({
                   <AgentAvatar agent={RESEARCH} size="xs" />
                   {scene.specialist.state === "working" ? (
                     <span className="flex items-center gap-1.5">
-                      <span className="h-1.5 w-1.5 rounded-full bg-success motion-safe:animate-pulse" />
-                      Research is working on it
-                    </span>
+                      <span className="h-1.5 w-1.5 rounded-full bg-success motion-safe:animate-pulse" />{translateUi("Research is working on it")}</span>
                   ) : (
-                    <span>Research replied to NyxBot</span>
+                    <span>{translateUi("Research replied to NyxBot")}</span>
                   )}
                 </div>
               ) : null}
@@ -242,7 +243,7 @@ export function LiveReplay({
         <div className="p-3">
           <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-3 py-2 text-16">
             <span className={cn("min-w-0 flex-1 truncate", scene.typed ? "text-foreground" : "text-text-tertiary")}>
-              {scene.typed || "Message NyxBot"}
+              {scene.typed || translateUi("Message NyxBot")}
               {scene.typed ? <span className="ml-px inline-block h-[1em] w-px translate-y-[0.15em] bg-foreground motion-safe:animate-pulse" /> : null}
             </span>
             <span

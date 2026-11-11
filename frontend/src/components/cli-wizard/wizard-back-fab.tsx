@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { ChevronLeft } from "lucide-react"
 
 /**
@@ -6,6 +8,7 @@ import { ChevronLeft } from "lucide-react"
  * while the step scrolls without taking up layout space.
  */
 export function WizardBackFab({ onBack }: { readonly onBack: () => void }) {
+  useUiTranslation();
   return (
     // Sticky offsets are measured from the card's content edge (inside its
     // padding), so `top-0` keeps the button in the same corner spot before
@@ -21,7 +24,7 @@ export function WizardBackFab({ onBack }: { readonly onBack: () => void }) {
       <button
         type="button"
         onClick={onBack}
-        aria-label="Back"
+        aria-label={translateUi("Back")}
         className="absolute -left-3 -top-3 flex size-9 items-center justify-center rounded-full border border-hairline-strong bg-muted text-foreground shadow-sm transition-[filter] hover:brightness-125 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
       >
         <ChevronLeft className="size-4" aria-hidden="true" />

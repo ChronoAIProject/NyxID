@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useId, useState } from "react";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import type { z } from "zod";
@@ -32,6 +34,7 @@ function interruptedCopy(actions: readonly string[]): string {
 type AuthoredPreview = z.infer<typeof authoredSkillPreviewSchema>;
 
 function FailureDetails({ data }: { readonly data: AuthoredPreview }) {
+  useUiTranslation();
   if (!data.failure_code) return null;
   return (
     <>
@@ -43,7 +46,7 @@ function FailureDetails({ data }: { readonly data: AuthoredPreview }) {
           {data.failure_rules.map((rule) => <li key={rule}>{publicationRuleText(rule)}</li>)}
         </ul>
       ) : data.failure_details_unavailable ? (
-        <p className="text-13 text-muted-foreground">Format details unavailable.</p>
+        <p className="text-13 text-muted-foreground">{translateUi("Format details unavailable.")}</p>
       ) : null}
     </>
   );
@@ -55,11 +58,10 @@ function ScopeSection({ data, id, accepted, onAccepted }: {
   readonly accepted: boolean;
   readonly onAccepted: (accepted: boolean) => void;
 }) {
+  useUiTranslation();
   if (data.scope_unavailable) {
     return (
-      <p role="alert" className="text-13 text-muted-foreground">
-        Scope unavailable. Reload the draft before allowing publication.
-      </p>
+      <p role="alert" className="text-13 text-muted-foreground">{translateUi("Scope unavailable. Reload the draft before allowing publication.")}</p>
     );
   }
   if (!data.scope) return null;
@@ -67,7 +69,7 @@ function ScopeSection({ data, id, accepted, onAccepted }: {
   return (
     <>
       {omissions.length ? (
-        <ul aria-label="Declared omissions" className="list-disc pl-5 text-13 text-muted-foreground">
+        <ul aria-label={translateUi("Declared omissions")} className="list-disc pl-5 text-13 text-muted-foreground">
           {omissions.map((text, index) => <li key={index}>{text}</li>)}
         </ul>
       ) : null}
@@ -78,16 +80,11 @@ function ScopeSection({ data, id, accepted, onAccepted }: {
             checked={accepted}
             onCheckedChange={(checked) => onAccepted(checked === true)}
           />
-          <Label htmlFor={id}>
-            I accept this reduced scope ({omissions.length} declared omission
-            {omissions.length === 1 ? "" : "s"}).
+          <Label htmlFor={id}>{translateUi("I accept this reduced scope (")}{omissions.length}{translateUi(" declared omission")}{omissions.length === 1 ? "" : "s"}).
           </Label>
         </div>
       ) : (
-        <p className="text-13 text-muted-foreground">
-          The drafting agent declares this draft covers everything requested.
-          The read coverage shown here is what NyxID observed.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("The drafting agent declares this draft covers everything requested. The read coverage shown here is what NyxID observed.")}</p>
       )}
     </>
   );
@@ -103,19 +100,19 @@ function coverageText(upload: AuthoredPreview["coverage"][number]): string {
 }
 
 function CoverageList({ data }: { readonly data: AuthoredPreview }) {
+  useUiTranslation();
   return (
     <>
       {data.coverage.length ? (
         <div className="space-y-1 text-13 text-muted-foreground">
-          <p>Observed reads in the drafting conversation</p>
+          <p>{translateUi("Observed reads in the drafting conversation")}</p>
           <ul>
             {data.coverage.map((upload) => (
               <li key={upload.id}>
                 {upload.name}: {coverageText(upload)}
                 {upload.since_reset_percent != null ? (
-                  <>; {upload.lower_bound ? "at least " : "read "}
-                    {upload.since_reset_percent}% since the last context reset
-                  </>
+                  <>; {upload.lower_bound ? translateUi("at least ") : translateUi("read ")}
+                    {upload.since_reset_percent}{translateUi("% since the last context reset")}</>
                 ) : null}
               </li>
             ))}
@@ -124,8 +121,7 @@ function CoverageList({ data }: { readonly data: AuthoredPreview }) {
       ) : null}
       {data.coverage_omitted ? (
         <p className="text-13 text-muted-foreground">
-          {data.coverage_omitted} earlier uploads are not shown.
-        </p>
+          {data.coverage_omitted}{translateUi(" earlier uploads are not shown.")}</p>
       ) : null}
     </>
   );
@@ -140,6 +136,7 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
   readonly deciding: boolean;
   readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
 }) {
+  useUiTranslation();
   const reference = card.authored_skill!;
   const owner = useAuthStore((s) => s.user?.id);
   const queryClient = useQueryClient();
@@ -205,19 +202,19 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
     finally { await refresh(); }
   }
   const messages = <>
-    {error ? <p role="alert" className="text-14 text-destructive">{error}</p> : null}
+    {error ? <p role="alert" className="text-14 text-destructive">{translateUi(error)}</p> : null}
     {notice ? <p role="status" className="text-14 text-muted-foreground">{notice}</p> : null}
   </>;
   const buttons = actions.length > 0 ? <div className="flex justify-end gap-2">
-    {actions.includes("deny") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>Deny</Button> : null}
-    {actions.includes("dismiss_card") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>Dismiss confirmation</Button> : null}
-    {actions.includes("discard") ? <Button variant="outline" disabled={deciding} onClick={() => void postAction("reject")}>Discard</Button> : null}
-    {actions.includes("renew") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("approve")}>Request a new confirmation</Button> : null}
-    {actions.includes("publish") ? <Button variant="primary" disabled={deciding || scopePending} onClick={() => void decide("allow")}>Allow and publish</Button> : null}
-    {actions.includes("retry") ? <Button variant="primary" disabled={deciding || scopePending} onClick={() => void decide("allow")}>Retry publication</Button> : null}
-    {actions.includes("check") ? <Button variant="primary" disabled={deciding || scopePending} onClick={() => void decide("allow")}>Check again</Button> : null}
-    {actions.includes("reprepare") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>Review updated package</Button> : null}
-    {actions.includes("show_updated_draft") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>Show updated draft</Button> : null}
+    {actions.includes("deny") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>{translateUi("Deny")}</Button> : null}
+    {actions.includes("dismiss_card") ? <Button variant="outline" disabled={deciding} onClick={() => void decide("deny")}>{translateUi("Dismiss confirmation")}</Button> : null}
+    {actions.includes("discard") ? <Button variant="outline" disabled={deciding} onClick={() => void postAction("reject")}>{translateUi("Discard")}</Button> : null}
+    {actions.includes("renew") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("approve")}>{translateUi("Request a new confirmation")}</Button> : null}
+    {actions.includes("publish") ? <Button variant="primary" disabled={deciding || scopePending} onClick={() => void decide("allow")}>{translateUi("Allow and publish")}</Button> : null}
+    {actions.includes("retry") ? <Button variant="primary" disabled={deciding || scopePending} onClick={() => void decide("allow")}>{translateUi("Retry publication")}</Button> : null}
+    {actions.includes("check") ? <Button variant="primary" disabled={deciding || scopePending} onClick={() => void decide("allow")}>{translateUi("Check again")}</Button> : null}
+    {actions.includes("reprepare") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>{translateUi("Review updated package")}</Button> : null}
+    {actions.includes("show_updated_draft") ? <Button variant="primary" disabled={deciding} onClick={() => void postAction("reprepare")}>{translateUi("Show updated draft")}</Button> : null}
   </div> : null;
   if (confirmationsBypassed) {
     return <DecisionReceipt acknowledgement={card} retired={card.status === "pending"}
@@ -236,28 +233,28 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
     return <div className="space-y-2">
       {status}
       <div className="ml-[30px] space-y-2">
-        {actions.includes("show_updated_draft") ? <p className="text-14 text-muted-foreground">A rebuilt package for this draft is waiting for its review card.</p> : null}
+        {actions.includes("show_updated_draft") ? <p className="text-14 text-muted-foreground">{translateUi("A rebuilt package for this draft is waiting for its review card.")}</p> : null}
         {messages}
         {buttons}
       </div>
     </div>;
   }
   if (!data && card.status !== "pending") return <DecisionReceipt acknowledgement={card} />;
-  return <section aria-label="Review skill draft" className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}>
-    <p className="type-card-title">Review skill draft{data ? `: ${data.name} · ${data.version}` : ""}</p>
-    {data ? <p className="text-14">Attach to {data.agent_name}</p> : null}
-    <p className="text-14 text-muted-foreground">Allow publishes these files privately to Ornn under your identity and attaches this exact version to the agent. Skill instructions never grant permissions.</p>
-    {data?.base_scripts_not_copied ? <p className="text-14 text-muted-foreground">Scripts and executable files from the source skill are not copied into this draft.</p> : null}
+  return <section aria-label={translateUi("Review skill draft")} className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}>
+    <p className="type-card-title">{translateUi("Review skill draft")}{data ? translateUi(": {{name}} · {{version}}", { name: data.name, version: data.version }) : ""}</p>
+    {data ? <p className="text-14">{translateUi("Attach to ")}{data.agent_name}</p> : null}
+    <p className="text-14 text-muted-foreground">{translateUi("Allow publishes these files privately to Ornn under your identity and attaches this exact version to the agent. Skill instructions never grant permissions.")}</p>
+    {data?.base_scripts_not_copied ? <p className="text-14 text-muted-foreground">{translateUi("Scripts and executable files from the source skill are not copied into this draft.")}</p> : null}
     {data?.files.map((file) => <div key={file.path}>
       <p className="type-row-title">{file.path}</p>
       <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-muted p-3 text-14">{file.content}</pre>
     </div>)}
     {data && learningDraftEditable(data.status) ? <div className="space-y-2">
       <Button variant="outline" size="sm" aria-expanded={editing} disabled={deciding} onClick={() => setEditing(!editing)}>
-        {editing ? "Close the editor" : "Edit before publishing"}
+        {editing ? translateUi("Close the editor") : translateUi("Edit before publishing")}
       </Button>
       {editing ? <>
-        <p className="text-14 text-muted-foreground">Saving changes this draft and posts a new review card for the saved version in this conversation. Publish from that new card.</p>
+        <p className="text-14 text-muted-foreground">{translateUi("Saving changes this draft and posts a new review card for the saved version in this conversation. Publish from that new card.")}</p>
         <ProposalDraftEditor agentId={reference.agent_id} proposalId={reference.proposal_id} showCardLink={false} onSaved={() => {
           setEditing(false);
           setNotice(SAVED_EDIT_NOTICE);
@@ -265,9 +262,9 @@ export function AuthoredSkillCard({ acknowledgement: card, confirmationsBypassed
         }} />
       </> : null}
     </div> : null}
-    {data?.status === "publishing" ? <p role="status" className="text-14 text-muted-foreground">{data.lease_live ? "Publication is in progress." : interruptedCopy(actions)}</p> : null}
-    {preview.isLoading ? <p role="status">Loading complete draft…</p> : null}
-    {preview.isError ? <p role="alert" className="text-14 text-destructive">Draft unavailable or changed. Reload and review it again.</p> : null}
+    {data?.status === "publishing" ? <p role="status" className="text-14 text-muted-foreground">{data.lease_live ? translateUi("Publication is in progress.") : interruptedCopy(actions)}</p> : null}
+    {preview.isLoading ? <p role="status">{translateUi("Loading complete draft…")}</p> : null}
+    {preview.isError ? <p role="alert" className="text-14 text-destructive">{translateUi("Draft unavailable or changed. Reload and review it again.")}</p> : null}
     {data ? (
       <>
         <FailureDetails data={data} />

@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { z } from "zod";
 
 export const SERVICE_BILLING_METRICS = [
@@ -29,60 +30,60 @@ export const BILLING_UNITS: Record<
   (typeof BILLING_METRICS)[number],
   { label: string; singular: string; tokenFamily: boolean }
 > = {
-  tokens: { label: "tokens", singular: "token", tokenFamily: true },
-  requests: { label: "requests", singular: "request", tokenFamily: false },
-  bytes: { label: "bytes", singular: "byte", tokenFamily: false },
+  tokens: { get label() { return translateUi("tokens"); }, get singular() { return translateUi("token"); }, tokenFamily: true },
+  requests: { get label() { return translateUi("requests"); }, get singular() { return translateUi("request"); }, tokenFamily: false },
+  bytes: { get label() { return translateUi("bytes"); }, get singular() { return translateUi("byte"); }, tokenFamily: false },
   input_tokens: {
-    label: "input tokens",
-    singular: "input token",
+    get label() { return translateUi("input tokens"); },
+    get singular() { return translateUi("input token"); },
     tokenFamily: true,
   },
   output_tokens: {
-    label: "output tokens",
-    singular: "output token",
+    get label() { return translateUi("output tokens"); },
+    get singular() { return translateUi("output token"); },
     tokenFamily: true,
   },
   cache_read_tokens: {
-    label: "cache-read tokens",
-    singular: "cache-read token",
+    get label() { return translateUi("cache-read tokens"); },
+    get singular() { return translateUi("cache-read token"); },
     tokenFamily: true,
   },
   cache_write_tokens: {
-    label: "cache-write tokens",
-    singular: "cache-write token",
+    get label() { return translateUi("cache-write tokens"); },
+    get singular() { return translateUi("cache-write token"); },
     tokenFamily: true,
   },
   voice_seconds: {
-    label: "voice seconds",
-    singular: "voice second",
+    get label() { return translateUi("voice seconds"); },
+    get singular() { return translateUi("voice second"); },
     tokenFamily: false,
   },
   machine_running_seconds: {
-    label: "machine running seconds",
-    singular: "machine running second",
+    get label() { return translateUi("machine running seconds"); },
+    get singular() { return translateUi("machine running second"); },
     tokenFamily: false,
   },
   sandbox_cpu_millis_seconds: {
-    label: "Sandbox CPU millicore-seconds",
-    singular: "Sandbox CPU millicore-second",
+    get label() { return translateUi("Sandbox CPU millicore-seconds"); },
+    get singular() { return translateUi("Sandbox CPU millicore-second"); },
     tokenFamily: false,
   },
   sandbox_memory_mib_seconds: {
-    label: "Sandbox RAM MiB-seconds",
-    singular: "Sandbox RAM MiB-second",
+    get label() { return translateUi("Sandbox RAM MiB-seconds"); },
+    get singular() { return translateUi("Sandbox RAM MiB-second"); },
     tokenFamily: false,
   },
   sandbox_disk_gib_seconds: {
-    label: "Sandbox disk GiB-seconds",
-    singular: "Sandbox disk GiB-second",
+    get label() { return translateUi("Sandbox disk GiB-seconds"); },
+    get singular() { return translateUi("Sandbox disk GiB-second"); },
     tokenFamily: false,
   },
-  reasoning_tokens: { label: "reasoning tokens", singular: "reasoning token", tokenFamily: true },
-  image_input_tokens: { label: "image input tokens", singular: "image input token", tokenFamily: true },
-  image_output_tokens: { label: "image output tokens", singular: "image output token", tokenFamily: true },
-  audio_input_tokens: { label: "audio input tokens", singular: "audio input token", tokenFamily: true },
-  audio_output_tokens: { label: "audio output tokens", singular: "audio output token", tokenFamily: true },
-  images: { label: "images", singular: "image", tokenFamily: false },
+  reasoning_tokens: { get label() { return translateUi("reasoning tokens"); }, get singular() { return translateUi("reasoning token"); }, tokenFamily: true },
+  image_input_tokens: { get label() { return translateUi("image input tokens"); }, get singular() { return translateUi("image input token"); }, tokenFamily: true },
+  image_output_tokens: { get label() { return translateUi("image output tokens"); }, get singular() { return translateUi("image output token"); }, tokenFamily: true },
+  audio_input_tokens: { get label() { return translateUi("audio input tokens"); }, get singular() { return translateUi("audio input token"); }, tokenFamily: true },
+  audio_output_tokens: { get label() { return translateUi("audio output tokens"); }, get singular() { return translateUi("audio output token"); }, tokenFamily: true },
+  images: { get label() { return translateUi("images"); }, get singular() { return translateUi("image"); }, tokenFamily: false },
 };
 export function metricLabel(metric: string, quantity?: number): string {
   const unit = BILLING_UNITS[metric as keyof typeof BILLING_UNITS];

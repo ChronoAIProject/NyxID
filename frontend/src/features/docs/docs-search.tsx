@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Search, X } from "lucide-react";
@@ -11,10 +13,10 @@ interface IndexEntry {
 }
 
 const TAB_LABEL: Record<string, string> = {
-  ai: "AI-assisted",
-  web: "Web",
-  cli: "CLI",
-  shared: "Concepts",
+  get ai() { return translateUi("AI-assisted"); },
+  get web() { return translateUi("Web"); },
+  get cli() { return translateUi("CLI"); },
+  get shared() { return translateUi("Concepts"); },
 };
 
 export function DocsSearch({
@@ -24,6 +26,7 @@ export function DocsSearch({
   readonly open: boolean;
   readonly onClose: () => void;
 }) {
+  useUiTranslation();
   const [entries, setEntries] = useState<IndexEntry[]>([]);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
@@ -118,7 +121,7 @@ export function DocsSearch({
               setActiveIndex(0); // a new query resets the highlight to the top
             }}
             onKeyDown={onInputKeyDown}
-            placeholder="Search the docs…"
+            placeholder={translateUi("Search the docs…")}
             role="combobox"
             aria-expanded={results.length > 0}
             aria-controls="docs-search-results"
@@ -127,17 +130,15 @@ export function DocsSearch({
             }
             className="h-12 flex-1 bg-transparent text-14 text-foreground placeholder:text-text-tertiary focus:outline-none"
           />
-          <button type="button" aria-label="Close search" onClick={onClose}>
+          <button type="button" aria-label={translateUi("Close search")} onClick={onClose}>
             <X className="h-4 w-4 text-text-tertiary transition-colors hover:text-foreground" />
           </button>
         </div>
         <div className="max-h-[60vh] overflow-y-auto p-2">
           {query.trim() === "" ? (
-            <p className="px-3 py-6 text-center text-14 text-text-tertiary">
-              Type to search across CLI, Web, AI-assisted, and Concepts.
-            </p>
+            <p className="px-3 py-6 text-center text-14 text-text-tertiary">{translateUi("Type to search across CLI, Web, AI-assisted, and Concepts.")}</p>
           ) : results.length === 0 ? (
-            <p className="px-3 py-6 text-center text-14 text-text-tertiary">No results for “{query}”.</p>
+            <p className="px-3 py-6 text-center text-14 text-text-tertiary">{translateUi("No results for “")}{query}”.</p>
           ) : (
             <ul className="space-y-0.5" id="docs-search-results" role="listbox" ref={listRef}>
               {results.map((e, i) => {
@@ -173,17 +174,11 @@ export function DocsSearch({
         <div className="flex items-center gap-4 border-t border-border px-4 py-2 text-13 text-text-tertiary">
           <span className="flex items-center gap-1">
             <kbd className="rounded border border-border px-1 font-mono">↑</kbd>
-            <kbd className="rounded border border-border px-1 font-mono">↓</kbd>
-            navigate
-          </span>
+            <kbd className="rounded border border-border px-1 font-mono">↓</kbd>{translateUi("navigate")}</span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-border px-1 font-mono">↵</kbd>
-            open
-          </span>
+            <kbd className="rounded border border-border px-1 font-mono">↵</kbd>{translateUi("open")}</span>
           <span className="flex items-center gap-1">
-            <kbd className="rounded border border-border px-1 font-mono">esc</kbd>
-            close
-          </span>
+            <kbd className="rounded border border-border px-1 font-mono">{translateUi("esc")}</kbd>{translateUi("close")}</span>
         </div>
       </div>
     </div>

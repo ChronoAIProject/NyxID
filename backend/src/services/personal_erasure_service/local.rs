@@ -12,6 +12,18 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
     use crate::models as m;
     let mut rows: Vec<(&'static str, Document)> = vec![
         (
+            m::assistant_cma_sandbox::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
+            m::assistant_cma_agent::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
+            m::assistant_cma_creation::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
+        (
             super::preparation::PREPARATIONS,
             doc! {"$or":[{"_id":owner},{"user_id":owner}]},
         ),

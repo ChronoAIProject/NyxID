@@ -71,6 +71,25 @@ function renderCard() {
 beforeEach(() => vi.clearAllMocks());
 
 describe("ChannelBotHealthCard", () => {
+  it("shows a formatting fallback without claiming that delivery succeeded", async () => {
+    const result = health({ platform: "telegram" });
+    mockGet.mockResolvedValue({
+      ...result,
+      diagnostics: {
+        ...result.diagnostics,
+        last_outbound_notice: {
+          code: "10005",
+          reason: "telegram_formatting_fallback",
+          at: "2026-11-10T09:00:00Z",
+        },
+      },
+    });
+    renderCard();
+    expect(await screen.findByText("Formatting notice")).toBeInTheDocument();
+    expect(screen.getByText(/attempted the same text without styling; see the delivery result for confirmation/)).toBeInTheDocument();
+    expect(screen.getByText(/rate_limited at/)).toBeInTheDocument();
+  });
+
   it("renders the diagnostics from /health with formatted times and errors", async () => {
     mockGet.mockResolvedValue(health());
     renderCard();
@@ -145,4 +164,37 @@ describe("ChannelBotHealthCard", () => {
       "Health is unavailable",
     );
   });
+});
+
+
+it("shows native hand-over evidence without presenting selection as healthy", async () => {
+  mockGet.mockResolvedValue(health({platform:"discord", recommended_action:"contact_admin", recommended_action_text:"No native event confirmed.",
+    discord_intake:{receiving_side:"native_gateway",state:"unconfirmed",code:"discord_native_intake_unconfirmed",block_reason:null,handed_over_at:"2026-11-07T00:00:00Z",last_inbound_at:null}}));
+  renderCard();
+  expect(await screen.findByText("Agent Event Gateway")).toBeInTheDocument();
+  expect(screen.getByText("unconfirmed (discord_native_intake_unconfirmed)")).toBeInTheDocument();
+  expect(screen.getByText("Last confirmed inbound")).toBeInTheDocument();
+  expect(screen.queryByText("Healthy")).not.toBeInTheDocument();
+  expect(screen.queryByText("Webhook", {exact:true})).not.toBeInTheDocument();
+});
+
+it("shows the relay block reason instead of implying a missing webhook", async () => {
+  mockGet.mockResolvedValue(health({platform:"discord",recommended_action:"contact_admin",recommended_action_text:"Relay intake blocked.",
+    discord_intake:{receiving_side:"nyxid_relay",state:"stopped",code:"discord_relay_blocked",block_reason:"release_unresolved",handed_over_at:null,last_inbound_at:null}}));
+  renderCard();
+  expect(await screen.findByText("NyxID relay")).toBeInTheDocument();
+  expect(screen.getByText("release_unresolved")).toBeInTheDocument();
+  expect(screen.queryByText("Healthy")).not.toBeInTheDocument();
+});
+
+
+it("keeps interactions-only Discord bots healthy without requesting relay verification", async () => {
+  mockGet.mockResolvedValue(health({platform:"discord", recommended_action:"none", recommended_action_text:"Healthy.",
+    discord_intake:{receiving_side:"interactions_only",state:"not_enabled",code:null,block_reason:null,handed_over_at:null,last_inbound_at:null}}));
+  renderCard();
+  expect(await screen.findByText("Discord interactions")).toBeInTheDocument();
+  expect(screen.getByText("Healthy", {exact:true})).toBeInTheDocument();
+  expect(screen.getByText("Interactions", {exact:true})).toBeInTheDocument();
+  expect(screen.queryByRole("button", {name:"Verify"})).not.toBeInTheDocument();
+  expect(screen.queryByText("Needs attention")).not.toBeInTheDocument();
 });

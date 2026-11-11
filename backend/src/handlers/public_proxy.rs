@@ -164,6 +164,7 @@ fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTa
     service.inject_delegation_token = false;
 
     proxy_service::ProxyTarget {
+        catalog_slug: Some(service.slug.clone()),
         execution_request: None,
         execution_permission: None,
         credential_deferred: false,

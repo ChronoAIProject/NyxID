@@ -38,7 +38,7 @@ describe("WizardShell", () => {
       </WizardShell>,
     )
     const column = () => screen.getByTestId("step-body").closest("main")?.parentElement
-    expect(column()).toHaveClass("max-w-[1040px]")
+    expect(column()).toHaveClass("max-w-[800px]")
 
     rerender(
       <WizardShell context="local" narrow>
@@ -46,7 +46,7 @@ describe("WizardShell", () => {
       </WizardShell>,
     )
     expect(column()).toHaveClass("max-w-[640px]")
-    expect(column()).not.toHaveClass("max-w-[1040px]")
+    expect(column()).not.toHaveClass("max-w-[800px]")
   })
 
   it("renders the formatted step indicator in the header when a step is given", () => {

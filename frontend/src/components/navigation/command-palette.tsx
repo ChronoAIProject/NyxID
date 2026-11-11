@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useCallback, useState, useMemo } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -104,6 +106,7 @@ export function CommandPalette({
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
 }) {
+  useUiTranslation();
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
   const [query, setQueryRaw] = useState("");
@@ -201,7 +204,7 @@ export function CommandPalette({
         onClick={() => { onOpenChange(false); setQuery(""); setSelectedIndex(0); }}
         role="button"
         tabIndex={-1}
-        aria-label="Close search"
+        aria-label={translateUi("Close search")}
         onKeyDown={(e) => { if (e.key === "Escape") { onOpenChange(false); setQuery(""); } }}
       />
 
@@ -213,13 +216,11 @@ export function CommandPalette({
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search pages, actions, or keywords..."
+            placeholder={translateUi("Search pages, actions, or keywords...")}
             className="flex-1 bg-transparent text-15 text-foreground placeholder:text-text-tertiary outline-none"
             autoFocus
           />
-          <kbd className="flex h-7 items-center rounded-lg border border-hairline bg-overlay px-2 type-row-title text-text-tertiary">
-            esc
-          </kbd>
+          <kbd className="flex h-7 items-center rounded-lg border border-hairline bg-overlay px-2 type-row-title text-text-tertiary">{translateUi("esc")}</kbd>
         </div>
 
         {/* Results */}
@@ -244,9 +245,9 @@ export function CommandPalette({
                     i === selectedIndex ? "text-nyx-secondary-400" : "text-text-tertiary",
                   )}
                 />
-                <span className="flex-1">{item.label}</span>
+                <span className="flex-1">{translateUi(item.label)}</span>
                 {item.group === "action" && (
-                  <span className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">Action</span>
+                  <span className="type-secondary-strong uppercase tracking-[1.5px] text-text-tertiary">{translateUi("Action")}</span>
                 )}
               </button>
             ))}
@@ -254,8 +255,7 @@ export function CommandPalette({
         )}
 
         {query.trim() && filtered.length === 0 && (
-          <div className="mt-2 rounded-2xl border border-hairline bg-[#1a1a1a] py-8 text-center text-14 text-text-tertiary">
-            No results for &ldquo;{query}&rdquo;
+          <div className="mt-2 rounded-2xl border border-hairline bg-[#1a1a1a] py-8 text-center text-14 text-text-tertiary">{translateUi("No results for “")}{query}&rdquo;
           </div>
         )}
       </div>

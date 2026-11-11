@@ -2337,7 +2337,20 @@ pub(crate) async fn update_service_inner(
     auth_user: AuthUser,
     tele: TelemetryContext,
     service_id: String,
+    body: UpdateServiceRequest,
+) -> AppResult<Json<ServiceResponse>> {
+    update_service_at_revision(state, auth_user, tele, service_id, body, None).await
+}
+
+/// Optional caller revision uses the existing catalog transaction's update predicate.
+/// Ordinary catalog callers retain their existing behavior.
+pub(crate) async fn update_service_at_revision(
+    state: AppState,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    service_id: String,
     mut body: UpdateServiceRequest,
+    expected_updated_at: Option<chrono::DateTime<Utc>>,
 ) -> AppResult<Json<ServiceResponse>> {
     // Keep large transaction and billing futures out of this handler's state.
     // Direct callers and debug tests must fit the default thread stack too.
@@ -2357,6 +2370,13 @@ pub(crate) async fn update_service_inner(
             .map_err(|_| AppError::Internal("Cannot fingerprint service update".into()))?,
     );
     let service = fetch_service(&state, &service_id).await?;
+    if expected_updated_at.is_some_and(|expected| {
+        expected.timestamp_millis() != service.updated_at.timestamp_millis()
+    }) {
+        return Err(AppError::Conflict(
+            "Credential changed; reload before retrying".into(),
+        ));
+    }
     let ingress_admin = super::services_helpers::is_admin(&state, &auth_user).await?;
     if crate::services::platform_key_service::model_only(&service) {
         super::login_client_context::require_first_party_human(&auth_user)?;
@@ -3366,7 +3386,9 @@ pub(crate) async fn update_service_inner(
     let identity_fields = identity_update_fields(&body);
     let identity_changed = !identity_fields.is_empty();
     let mut now = Utc::now();
-    if identity_changed && now.timestamp_millis() <= service.updated_at.timestamp_millis() {
+    if (identity_changed || expected_updated_at.is_some())
+        && now.timestamp_millis() <= service.updated_at.timestamp_millis()
+    {
         now = service.updated_at + chrono::Duration::milliseconds(1);
     }
     set_doc.insert("updated_at", bson::DateTime::from_chrono(now));
@@ -3415,6 +3437,10 @@ pub(crate) async fn update_service_inner(
     // Always unset the legacy api_spec_url alias to prevent duplicate-field
     // deserialization errors on documents created before the field was renamed.
     let mut catalog_filter = doc! { "_id": &service_id };
+    if let Some(expected) = expected_updated_at {
+        catalog_filter.insert("updated_at", bson::DateTime::from_chrono(expected));
+    }
+
     if body.platform_key.is_some() {
         // Fence a stale ordinary update against a concurrent route-only cutover.
         let purpose = service

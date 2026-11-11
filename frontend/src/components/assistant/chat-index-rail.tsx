@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { useScrollFades } from "@/hooks/use-scroll-fades";
 import type { ChatMessage } from "@/lib/assistant/chat-types";
@@ -29,6 +31,7 @@ interface RailDrag {
 }
 
 export function ChatIndexRail({ messages, ...props }: ChatIndexRailProps) {
+  useUiTranslation();
   const entries = useMemo(() => messages.flatMap<IndexEntry>((message, messageIndex) => {
     if (message.role !== "user" && message.role !== "assistant") return [];
     const firstLine = sanitizeAssistantMessageContent(message.content)
@@ -43,6 +46,7 @@ export function ChatIndexRail({ messages, ...props }: ChatIndexRailProps) {
 }
 
 function IndexRail({ entries, scrollRef, bottomInset, onNavigate }: Omit<ChatIndexRailProps, "messages"> & { readonly entries: readonly IndexEntry[] }) {
+  useUiTranslation();
   const container = useRef<HTMLDivElement>(null);
   const pitchMeasure = useRef<HTMLSpanElement>(null);
   const rail = useRef<HTMLElement>(null);
@@ -199,7 +203,7 @@ function IndexRail({ entries, scrollRef, bottomInset, onNavigate }: Omit<ChatInd
         ref={rail}
         data-chat-index-rail=""
         data-scroll-fade=""
-        aria-label="Conversation index"
+        aria-label={translateUi("Conversation index")}
         className="pointer-events-auto scrollbar-none h-full w-full touch-none select-none overflow-x-hidden overflow-y-auto overscroll-contain scroll-auto"
         onScroll={(event) => { setViewportScroll(event.currentTarget.scrollTop); setHover(null); }}
         onPointerLeave={() => { if (!dragging.current) setHover(null); }}
@@ -272,7 +276,7 @@ function IndexRail({ entries, scrollRef, bottomInset, onNavigate }: Omit<ChatInd
                 data-chat-index-target={index}
                 data-message-id={entry.id}
                 data-message-role={entry.role}
-                aria-label={`Jump to message ${index + 1}: ${entry.author} — ${entry.title}`}
+                aria-label={translateUi("Jump to message {{value1}}: {{value2}} — {{value3}}", { value1: index + 1, value2: entry.author, value3: entry.title })}
                 aria-current={selected ? "location" : undefined}
                 tabIndex={index === focusIndex ? 0 : -1}
                 className="group absolute left-0 flex w-full cursor-pointer items-center justify-end pr-[calc(var(--chat-index-tick-width)/4)] outline-none focus-visible:rounded-sm focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-muted-foreground"

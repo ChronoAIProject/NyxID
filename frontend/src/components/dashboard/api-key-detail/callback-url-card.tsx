@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { isValidHttpUrl } from "@/schemas/http-url";
 import { useState } from "react";
 import { useUpdateApiKey } from "@/hooks/use-api-keys";
@@ -22,6 +25,7 @@ export function CallbackUrlCard({
   readonly keyId: string;
   readonly callbackUrl: string | null;
 }) {
+  useUiTranslation();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(callbackUrl ?? "");
   const updateApiKey = useUpdateApiKey();
@@ -29,14 +33,14 @@ export function CallbackUrlCard({
   function handleSave() {
     const trimmed = value.trim();
     if (trimmed !== "" && !isValidHttpUrl(trimmed)) {
-      toast.error("Must be a full URL with a domain, e.g. https://agent.example.com/callback");
+      toast.error(translateErrorMessage("Must be a full URL with a domain, e.g. https://agent.example.com/callback"));
       return;
     }
     updateApiKey.mutate(
       { keyId, callback_url: trimmed.length > 0 ? trimmed : null },
       {
         onSuccess: () => {
-          toast.success("Callback URL updated");
+          toast.success(translateUi("Callback URL updated"));
           setEditing(false);
         },
         onError: (err) => {
@@ -44,7 +48,7 @@ export function CallbackUrlCard({
             err instanceof ApiError
               ? err.message
               : "Failed to update callback URL";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -55,7 +59,7 @@ export function CallbackUrlCard({
       { keyId, callback_url: null },
       {
         onSuccess: () => {
-          toast.success("Callback URL removed");
+          toast.success(translateUi("Callback URL removed"));
           setValue("");
           setEditing(false);
         },
@@ -64,7 +68,7 @@ export function CallbackUrlCard({
             err instanceof ApiError
               ? err.message
               : "Failed to remove callback URL";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -75,11 +79,9 @@ export function CallbackUrlCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Link2 className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">Callback URL</CardTitle>
+          <CardTitle className="text-15">{translateUi("Callback URL")}</CardTitle>
         </div>
-        <CardDescription>
-          Where NyxID sends channel relay messages for this agent
-        </CardDescription>
+        <CardDescription>{translateUi("Where NyxID sends channel relay messages for this agent")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {editing ? (
@@ -90,10 +92,7 @@ export function CallbackUrlCard({
               value={value}
               onChange={(e) => setValue(e.target.value)}
             />
-            <p className="text-13 text-muted-foreground">
-              Must be HTTPS in production. Used by Channel Bot Relay to forward
-              platform messages to this agent.
-            </p>
+            <p className="text-13 text-muted-foreground">{translateUi("Must be HTTPS in production. Used by Channel Bot Relay to forward platform messages to this agent.")}</p>
             <div className="flex justify-end gap-2">
               <Button
                 variant="outline"
@@ -101,16 +100,12 @@ export function CallbackUrlCard({
                   setValue(callbackUrl ?? "");
                   setEditing(false);
                 }}
-              >
-                Cancel
-              </Button>
+              >{translateUi("Cancel")}</Button>
               <Button
                 variant="primary"
                 onClick={handleSave}
                 disabled={updateApiKey.isPending}
-              >
-                Save
-              </Button>
+              >{translateUi("Save")}</Button>
             </div>
           </div>
         ) : (
@@ -120,7 +115,7 @@ export function CallbackUrlCard({
                 {callbackUrl}
               </code>
             ) : (
-              <Badge variant="secondary">Not set</Badge>
+              <Badge variant="secondary">{translateUi("Not set")}</Badge>
             )}
             <div className="flex shrink-0 gap-1">
               <Button

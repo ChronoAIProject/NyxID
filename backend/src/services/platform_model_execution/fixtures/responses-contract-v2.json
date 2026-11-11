@@ -1,0 +1,146 @@
+{
+  "certification_version": 2,
+  "family": "openai",
+  "transports": [
+    "direct.responses"
+  ],
+  "provenance": "Synthetic contract fixture, official documentation reviewed 2026-11-10. Admin attests each configured model; no live provider calls.",
+  "image_fixture": {
+    "certification_version": 1,
+    "provenance": "Synthetic sanitized protocol fixture; no live provider certification call.",
+    "native_model": "gpt-5",
+    "transport": "direct_openai",
+    "request": {
+      "model": "nyxid/gpt-5",
+      "max_tokens": 128,
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "Describe this image."
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGMwSJgAAAHkASHKbNIyAAAAAElFTkSuQmCC",
+                "detail": "auto"
+              }
+            },
+            {
+              "type": "text",
+              "text": "Be brief."
+            }
+          ]
+        }
+      ]
+    },
+    "response": {
+      "status": "completed",
+      "model": "private-native",
+      "id": "private-response",
+      "output": [
+        {
+          "type": "message",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "Hello"
+            }
+          ]
+        }
+      ],
+      "usage": {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "total_tokens": 120,
+        "input_tokens_details": {
+          "cached_tokens": 10,
+          "cache_write_tokens": 0
+        },
+        "output_tokens_details": {
+          "reasoning_tokens": 5
+        }
+      }
+    },
+    "stream_events": [
+      {
+        "type": "response.output_text.delta",
+        "sequence_number": 1,
+        "delta": "Hello"
+      },
+      {
+        "type": "response.completed",
+        "sequence_number": 2,
+        "response": {
+          "status": "completed",
+          "model": "private-native",
+          "id": "private-response",
+          "output": [
+            {
+              "type": "message",
+              "content": [
+                {
+                  "type": "output_text",
+                  "text": "Hello"
+                }
+              ]
+            }
+          ],
+          "usage": {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "input_tokens_details": {
+              "cached_tokens": 10,
+              "cache_write_tokens": 0
+            },
+            "output_tokens_details": {
+              "reasoning_tokens": 5
+            }
+          }
+        }
+      }
+    ],
+    "missing_evidence_response": {
+      "status": "completed",
+      "model": "private-native",
+      "id": "private-response",
+      "output": [
+        {
+          "type": "message",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "Hello"
+            }
+          ]
+        }
+      ]
+    },
+    "zero_refusal": {
+      "error": {
+        "type": "rate_limit_error",
+        "code": "rate_limit_exceeded"
+      }
+    }
+  },
+  "usage": {
+    "input_tokens": 12000,
+    "output_tokens": 100,
+    "total_tokens": 12100,
+    "input_tokens_details": {
+      "cached_tokens": 4000,
+      "cache_write_tokens": 7000,
+      "cache_write_tokens_details": {
+        "ttl_30m_tokens": 3000,
+        "ttl_12h_tokens": 4000
+      }
+    },
+    "output_tokens_details": {
+      "reasoning_tokens": 40
+    }
+  },
+  "usage_contract_version": "openai.responses.v2"
+}

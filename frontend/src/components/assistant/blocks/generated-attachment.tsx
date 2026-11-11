@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useEffect, useRef, useState } from "react";
 import { Download } from "lucide-react";
 import { attachmentFailure } from "@/lib/assistant/attachment-errors";
@@ -11,6 +14,7 @@ export function GeneratedAttachment({
 }: {
   readonly attachment: ChatImage;
 }) {
+  useUiTranslation();
   const container = useRef<HTMLDivElement>(null);
   const downloaded = useRef(false);
   const [visible, setVisible] = useState(
@@ -119,16 +123,12 @@ export function GeneratedAttachment({
       <p className="break-words type-group-label">{name}</p>
       <p className="text-12 text-muted-foreground">
         {attachment.contentType} ·{" "}
-        {attachment.size?.toLocaleString() ?? "Unknown"} bytes
-        {attachment.resultVersion
-          ? ` · Revision ${attachment.resultVersion}`
+        {attachment.size?.toLocaleString(getFormattingLocale()) ?? translateUi("Unknown")}{translateUi(" bytes")}{attachment.resultVersion
+          ? translateUi(" · Revision {{value1}}", { value1: attachment.resultVersion })
           : ""}
       </p>
       {expired ? (
-        <p role="status" className="text-12 text-muted-foreground">
-          This generated file has expired. Ask for a new result to generate it
-          again.
-        </p>
+        <p role="status" className="text-12 text-muted-foreground">{translateUi("This generated file has expired. Ask for a new result to generate it again.")}</p>
       ) : error ? (
         <div role="status" className="space-y-1 text-12 text-muted-foreground">
           <p>{error}</p>
@@ -140,36 +140,29 @@ export function GeneratedAttachment({
               setError(undefined);
               setAttempt((n) => n + 1);
             }}
-          >
-            Load attachment again
-          </Button>
+          >{translateUi("Load attachment again")}</Button>
         </div>
       ) : !inline && !downloadRequested ? (
         <>
-          <p role="status" className="text-12 text-muted-foreground">
-            Preview unavailable for this type. Download the file to open it.
-          </p>
+          <p role="status" className="text-12 text-muted-foreground">{translateUi("Preview unavailable for this type. Download the file to open it.")}</p>
           <Button
             variant="link"
             size="sm"
             type="button"
             onClick={() => setDownloadRequested(true)}
           >
-            <Download className="h-3.5 w-3.5" aria-hidden="true" />
-            Download {name}
+            <Download className="h-3.5 w-3.5" aria-hidden="true" />{translateUi("Download ")}{name}
           </Button>
         </>
       ) : !url ? (
-        <p role="status" className="text-12 text-muted-foreground">
-          Loading generated file…
-        </p>
+        <p role="status" className="text-12 text-muted-foreground">{translateUi("Loading generated file…")}</p>
       ) : (
         <>
           {preview === "video" && !decodeFailed && (
             <video
               controls
               preload="metadata"
-              aria-label={`Preview ${name}`}
+              aria-label={translateUi("Preview {{value1}}", { value1: name })}
               src={url}
               onError={() => setDecodeFailed(true)}
               className="max-h-80 max-w-full rounded-lg"
@@ -180,7 +173,7 @@ export function GeneratedAttachment({
               href={url}
               target="_blank"
               rel="noopener noreferrer"
-              aria-label={`Open full preview of ${name}`}
+              aria-label={translateUi("Open full preview of {{value1}}", { value1: name })}
             >
               <img
                 src={url}
@@ -193,21 +186,19 @@ export function GeneratedAttachment({
           {(!inline || decodeFailed) && (
             <p role="status" className="text-12 text-muted-foreground">
               {decodeFailed
-                ? "Your browser could not decode this preview. You can still download the verified file."
-                : "Preview unavailable for this type. Download the file to open it."}
+                ? translateUi("Your browser could not decode this preview. You can still download the verified file.")
+                : translateUi("Preview unavailable for this type. Download the file to open it.")}
             </p>
           )}
           <Button asChild variant="link" size="sm">
             <a href={url} download={name}>
-              <Download className="h-3.5 w-3.5" aria-hidden="true" />
-              Download {name}
+              <Download className="h-3.5 w-3.5" aria-hidden="true" />{translateUi("Download ")}{name}
             </a>
           </Button>
         </>
       )}
       {attachment.expiresAt && (
-        <p className="text-12 text-muted-foreground">
-          Available until {new Date(attachment.expiresAt).toLocaleString()}
+        <p className="text-12 text-muted-foreground">{translateUi("Available until ")}{new Date(attachment.expiresAt).toLocaleString(getFormattingLocale())}
         </p>
       )}
     </div>

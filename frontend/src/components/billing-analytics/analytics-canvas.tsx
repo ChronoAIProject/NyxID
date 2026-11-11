@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useId, useState } from "react";
 import {
   DndContext,
@@ -80,6 +83,7 @@ function AnalyticsPanelCard({
   sample?: AnalyticsSample;
   children?: React.ReactNode;
 }) {
+  useUiTranslation();
   const { ref, visible, hasEntered } = usePanelVisibility();
   const query = useUsageAnalytics(view.filters, panel, sample, visible);
   const compact = view.layout === "operations";
@@ -108,12 +112,12 @@ function AnalyticsPanelCard({
             className="truncate font-display type-card-title tracking-tight"
             title={panel.title}
           >
-            {panel.title || "Untitled panel"}
+            {panel.title || translateUi("Untitled panel")}
           </h3>
           <p className="mt-1 text-14 text-muted-foreground">
             {MEASURE_LABELS[panel.measure]} ·{" "}
             {panel.top === 0
-              ? "All selected usage"
+              ? translateUi("All selected usage")
               : BREAKDOWN_LABELS[panel.breakdown]}
           </p>
         </div>
@@ -121,8 +125,8 @@ function AnalyticsPanelCard({
       </div>
       <div className="mb-3">
         <AnalyticsSelect
-          label="Group by"
-          ariaLabel={`Break down ${panel.title || "panel"} by`}
+          label={translateUi("Group by")}
+          ariaLabel={translateUi("Break down {{value1}} by", { value1: panel.title || translateUi("panel") })}
           value={panel.breakdown}
           options={Object.entries(BREAKDOWN_LABELS).map(([value, label]) => ({
             value,
@@ -143,10 +147,7 @@ function AnalyticsPanelCard({
           }
         />
         {panel.breakdown === "model" && (
-          <p className="mt-1 text-13 text-muted-foreground">
-            Recorded model. Filter a service to inspect its models.
-            Older usage without a model appears as Unattributed.
-          </p>
+          <p className="mt-1 text-13 text-muted-foreground">{translateUi("Recorded model. Filter a service to inspect its models. Older usage without a model appears as Unattributed.")}</p>
         )}
       </div>
       {filterError(view.filters) ? (
@@ -155,9 +156,7 @@ function AnalyticsPanelCard({
             "flex items-center justify-center text-14 text-muted-foreground",
             compact ? "h-[260px]" : "h-[330px]",
           )}
-        >
-          Choose a valid time range to query usage.
-        </div>
+        >{translateUi("Choose a valid time range to query usage.")}</div>
       ) : !hasEntered || query.isPending ? (
         <Skeleton className={compact ? "h-[260px]" : "h-[330px]"} />
       ) : query.isError ? (
@@ -170,7 +169,7 @@ function AnalyticsPanelCard({
           <ErrorBanner
             message={
               query.error.message ||
-              "Could not load analytics. Try a narrower range."
+              translateUi("Could not load analytics. Try a narrower range.")
             }
             onRetry={() => void query.refetch()}
           />
@@ -198,6 +197,7 @@ function Summary({
   view: AnalyticsView;
   sample?: AnalyticsSample;
 }) {
+  useUiTranslation();
   const [tokenTypes, setTokenTypes] = useState<TokenMetric[]>(["total_tokens"]);
   const query = useUsageAnalytics(
     view.filters,
@@ -252,9 +252,11 @@ function Summary({
     },
     {
       label: "Active users",
-      value: data.totals.unique_users.toLocaleString(),
+      value: data.totals.unique_users.toLocaleString(getFormattingLocale()),
       suffix: "users",
-      note: `${data.totals.unique_services.toLocaleString()} services in this selection`,
+      note: translateUi("{{value}} services in this selection", {
+        value: data.totals.unique_services.toLocaleString(getFormattingLocale()),
+      }),
     },
   ];
   return (
@@ -268,14 +270,14 @@ function Summary({
         <Card key={stat.label} className="min-w-0 px-4 py-4">
           {stat.tokenControl ? (
             <TokenMetricPicker
-              label="Summary token types"
+              label={translateUi("Summary token types")}
               selected={tokenTypes}
               onChange={setTokenTypes}
               compact
             />
           ) : (
             <p className="type-group-label uppercase tracking-[1.5px] text-muted-foreground">
-              {stat.label}
+              {translateUi(stat.label)}
             </p>
           )}
           <div className="mt-3 flex flex-wrap items-baseline gap-x-2">
@@ -286,14 +288,14 @@ function Summary({
                 {stat.value}
               </span>
             )}
-            <span className="text-12 text-muted-foreground">{stat.suffix}</span>
+            <span className="text-12 text-muted-foreground">{translateUi(stat.suffix)}</span>
           </div>
           {stat.tokenControl ? (
             <TokenMetricCaption selected={tokenTypes} />
           ) : (
             stat.note && (
               <p className="mt-2 text-12 text-muted-foreground">
-                {stat.note}
+                {translateUi(stat.note)}
               </p>
             )
           )}
@@ -313,6 +315,7 @@ export function AnalyticsCanvas({
   sample?: AnalyticsSample;
   disabled?: boolean;
 }) {
+  useUiTranslation();
   const operations = view.layout === "operations";
   const dragId = useId();
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -355,10 +358,8 @@ export function AnalyticsCanvas({
       <div className="grid items-start gap-4 lg:grid-cols-[260px_minmax(0,1fr)]">
         <aside className="rounded-xl border border-border bg-card p-4 text-card-foreground shadow-sm">
           <div className="mb-5 border-b border-border/50 pb-4">
-            <h3 className="type-card-title">Build an insight</h3>
-            <p className="mt-1 text-13 text-muted-foreground">
-              Choose what to measure and how to see it.
-            </p>
+            <h3 className="type-card-title">{translateUi("Build an insight")}</h3>
+            <p className="mt-1 text-13 text-muted-foreground">{translateUi("Choose what to measure and how to see it.")}</p>
           </div>
           <PanelControls panel={panel} onChange={updatePanel} />
           <Button
@@ -379,9 +380,7 @@ export function AnalyticsCanvas({
               })
             }
           >
-            <Plus className="size-3" />
-            Use in Operations
-          </Button>
+            <Plus className="size-3" />{translateUi("Use in Operations")}</Button>
         </aside>
         <AnalyticsPanelCard
           panel={panel}
@@ -399,17 +398,15 @@ export function AnalyticsCanvas({
         operations && "analytics-operations",
       )}
     >
-      <span className="sr-only" aria-label="Panel order" aria-live="polite">
+      <span className="sr-only" aria-label={translateUi("Panel order")} aria-live="polite">
         {announcement}
       </span>
       <Summary view={view} sample={sample} />
       {operations && (
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="type-table-header uppercase tracking-[1.5px] text-muted-foreground">
-            Usage monitors{" "}
+          <p className="type-table-header uppercase tracking-[1.5px] text-muted-foreground">{translateUi("Usage monitors")}{" "}
             <span className="ml-2 font-mono font-normal">
-              {view.panels.length} panels
-            </span>
+              {view.panels.length}{translateUi(" panels")}</span>
           </p>
           <Button
             variant="outline"
@@ -418,9 +415,7 @@ export function AnalyticsCanvas({
               onChange({ ...view, panels: [...view.panels, newPanel()] })
             }
           >
-            <Plus className="size-3" />
-            Add panel
-          </Button>
+            <Plus className="size-3" />{translateUi("Add panel")}</Button>
         </div>
       )}
       <DndContext
@@ -497,7 +492,7 @@ export function AnalyticsCanvas({
                                 variant="ghost"
                                 size="icon"
                                 className="size-7 shrink-0"
-                                aria-label={`Configure ${panel.title}`}
+                                aria-label={translateUi("Configure {{value1}}", { value1: panel.title })}
                               >
                                 {operations ? (
                                   <Ellipsis className="size-3.5" />
@@ -507,9 +502,7 @@ export function AnalyticsCanvas({
                               </Button>
                             </PopoverTrigger>
                           </TooltipTrigger>
-                          <TooltipContent side="top">
-                            Panel options
-                          </TooltipContent>
+                          <TooltipContent side="top">{translateUi("Panel options")}</TooltipContent>
                         </Tooltip>
                         <PopoverContent
                           align="end"
@@ -518,7 +511,7 @@ export function AnalyticsCanvas({
                         >
                           <PanelControls panel={panel} onChange={updatePanel} />
                           <AnalyticsSelect
-                            label="Panel width"
+                            label={translateUi("Panel width")}
                             value={String(panelSpan(panel))}
                             onChange={(value) =>
                               updatePanel({
@@ -534,7 +527,7 @@ export function AnalyticsCanvas({
                             ]}
                           />
                           <AnalyticsSelect
-                            label="Chart height"
+                            label={translateUi("Chart height")}
                             value={
                               panel.height ??
                               (operations ? "compact" : "standard")
@@ -565,13 +558,11 @@ export function AnalyticsCanvas({
                                 })
                               }
                             >
-                              <Copy className="size-3" />
-                              Duplicate
-                            </Button>
+                              <Copy className="size-3" />{translateUi("Duplicate")}</Button>
                             <Button
                               variant="ghost"
                               size="icon"
-                              aria-label={`Move ${panel.title} up`}
+                              aria-label={translateUi("Move {{value1}} up", { value1: panel.title })}
                               disabled={index === 0}
                               onClick={() => move(index, -1)}
                             >
@@ -580,7 +571,7 @@ export function AnalyticsCanvas({
                             <Button
                               variant="ghost"
                               size="icon"
-                              aria-label={`Move ${panel.title} down`}
+                              aria-label={translateUi("Move {{value1}} down", { value1: panel.title })}
                               disabled={index === view.panels.length - 1}
                               onClick={() => move(index, 1)}
                             >
@@ -589,7 +580,7 @@ export function AnalyticsCanvas({
                             <Button
                               variant="ghost"
                               size="icon"
-                              aria-label={`Remove ${panel.title}`}
+                              aria-label={translateUi("Remove {{value1}}", { value1: panel.title })}
                               disabled={view.panels.length === 1}
                               onClick={() =>
                                 onChange({
@@ -617,18 +608,14 @@ export function AnalyticsCanvas({
                 onChange({ ...view, panels: [...view.panels, newPanel()] })
               }
             >
-              <Plus className="size-4" />
-              Add a panel
-            </Button>
+              <Plus className="size-4" />{translateUi("Add a panel")}</Button>
           </div>
         </SortableContext>
         <DragOverlay dropAnimation={null}>
           {activePanel && (
             <Card className="border-primary p-4 shadow-xl">
               <p className="type-card-title">{activePanel.title}</p>
-              <p className="mt-1 text-14 text-muted-foreground">
-                Move to a new position
-              </p>
+              <p className="mt-1 text-14 text-muted-foreground">{translateUi("Move to a new position")}</p>
             </Card>
           )}
         </DragOverlay>

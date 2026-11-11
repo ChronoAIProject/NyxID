@@ -53,7 +53,7 @@ The following paths are relative to that service URL:
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/voice/agents` | The one Bot fixed by this connection, with saved preferences |
-| GET | `/voice/options` | Existing voice provider options; optional `conversation_id` must belong to this Bot |
+| GET | `/voice/options` | Voice provider options, saved preferences and greeting capability; optional `conversation_id` must belong to this Bot |
 | POST | `/voice/sessions` | Existing startup preferences, `client_request_id` and `sdp_offer` |
 | GET | `/voice/sessions/{sid}` | Exact caller's call state |
 | POST | `/voice/sessions/{sid}/control` | Existing revision/command controls |
@@ -67,6 +67,13 @@ The following paths are relative to that service URL:
 `description` for device presentation. These are display metadata; the exact
 service and Bot binding still determine access. Older clients can ignore
 `description`, and devices should accept its absence from older servers.
+
+Options also includes `preferences` (nullable) and `greetings:true`, so a device
+with a saved binding can prepare a call with one settings request. These are
+fresh account settings, not a cached authorization result. Session creation
+still checks the exact current Bot connection, Key grant and provider access.
+Older servers omit `preferences` from options; clients can then load discovery
+for those settings. A present `preferences:null` means no voice was selected.
 
 The endpoint requires ordinary `proxy` scope. A supplied Origin must pass the
 existing allowlist; devices may omit Origin. B1 operation-scoped Keys retain

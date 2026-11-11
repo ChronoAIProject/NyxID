@@ -916,7 +916,7 @@ pub(crate) async fn proxy_request_inner(
                 state.platform_user_rate_limit,
             )
             .await?;
-            let slug = target.service.slug.clone();
+            let catalog_service_slug = target.catalog_slug.clone();
             return Box::pin(execute_proxy_inner(
                 state,
                 auth_user,
@@ -925,7 +925,7 @@ pub(crate) async fn proxy_request_inner(
                 request,
                 Some(PreResolved {
                     target,
-                    catalog_service_slug: Some(slug),
+                    catalog_service_slug,
                     node_id: None,
                     user_service_id: None,
                     has_server_credential: true,
@@ -3232,41 +3232,69 @@ async fn execute_proxy_inner(
     extra_outbound_headers: Vec<(String, String)>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
-    crate::services::key_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
-    if let Some(pre) = &pre_resolved {
+    let connect = request.method() == http::Method::CONNECT;
+    let tracked = auth_user.assistant_chat.as_deref().filter(|_| {
+        crate::services::machine_activity_service::activity_id().is_none()
+            && crate::services::assistant_activity_decision::PROXY_ACTIVITY
+                .try_with(|_| ())
+                .is_err()
+    });
+    let run = async {
+        crate::services::key_service::require_ordinary_purpose(auth_user.api_key_purpose)?;
+        if let Some(pre) = &pre_resolved {
+            super::invocation_diagnostics::Target::record_request(
+                &request,
+                pre.user_service_id.as_deref(),
+            );
+        }
+        // Poll resolution and forwarding sequentially so their debug frames never
+        // stack, including when a machine request is nested in pool dispatch.
+        let (resolved, extra_outbound_headers) = resolve_proxy_execution(
+            state,
+            auth_user,
+            service_id,
+            path,
+            &mut request,
+            pre_resolved,
+            target_mode,
+            extra_outbound_headers,
+        )
+        .await?;
         super::invocation_diagnostics::Target::record_request(
             &request,
-            pre.user_service_id.as_deref(),
+            resolved.resolved_user_service_id.as_deref(),
         );
+        execute_resolved_proxy(
+            state,
+            auth_user,
+            service_id,
+            path,
+            request,
+            extra_outbound_headers,
+            resolved_slug,
+            resolved,
+        )
+        .await
+    };
+    if let Some(chat) = tracked {
+        let id = uuid::Uuid::new_v4().to_string();
+        let activity = crate::services::assistant_activity_decision::ProxyActivity::new(id.clone());
+        let used = activity.used.clone();
+        let result = crate::services::assistant_activity_decision::PROXY_ACTIVITY
+            .scope(activity, run)
+            .await;
+        if used.load(std::sync::atomic::Ordering::Relaxed)
+            && let Some(turn) = chat.turn_id.as_deref()
+        {
+            return crate::services::assistant_activity_decision::proxy_response(
+                &state.db, chat, turn, &id, connect, result,
+            )
+            .await;
+        }
+        result
+    } else {
+        run.await
     }
-    // Poll resolution and forwarding sequentially so their debug frames never
-    // stack, including when a machine request is nested in pool dispatch.
-    let (resolved, extra_outbound_headers) = resolve_proxy_execution(
-        state,
-        auth_user,
-        service_id,
-        path,
-        &mut request,
-        pre_resolved,
-        target_mode,
-        extra_outbound_headers,
-    )
-    .await?;
-    super::invocation_diagnostics::Target::record_request(
-        &request,
-        resolved.resolved_user_service_id.as_deref(),
-    );
-    execute_resolved_proxy(
-        state,
-        auth_user,
-        service_id,
-        path,
-        request,
-        extra_outbound_headers,
-        resolved_slug,
-        resolved,
-    )
-    .await
 }
 
 // Construct the boxed future outside the caller's poll frame: Box::pin at
@@ -3639,7 +3667,7 @@ async fn resolve_proxy_execution_inner(
             service_id,
         )
         .await?;
-        let catalog_service_slug = Some(target.service.slug.clone());
+        let catalog_service_slug = target.catalog_slug.clone();
         let has_server_credential = true;
         (
             None,
@@ -3700,7 +3728,7 @@ async fn resolve_proxy_execution_inner(
             service_id,
         ))
         .await?;
-        let catalog_service_slug = Some(target.service.slug.clone());
+        let catalog_service_slug = target.catalog_slug.clone();
         // Legacy path resolution succeeded — this is still personal
         // routing (caller's own DownstreamService + provider token), so
         // attribute it the same way the UserService path is attributed.
@@ -4978,6 +5006,15 @@ async fn execute_resolved_proxy_inner<'a>(
             })
             .await?;
 
+            if let Some(chat) = auth_user.assistant_chat.as_deref() {
+                crate::services::assistant_activity_decision::approval(
+                    &state.db,
+                    chat,
+                    &approval_request.id,
+                    false,
+                )
+                .await?;
+            }
             // Block until the user approves/rejects or timeout expires
             let req_id = approval_request.id.clone();
             approval_service::wait_for_decision(&state.db, &approval_request.id, timeout_secs)
@@ -4990,6 +5027,13 @@ async fn execute_resolved_proxy_inner<'a>(
                     )
                 })?;
             if let Some(chat) = auth_user.assistant_chat.as_deref() {
+                crate::services::assistant_activity_decision::approval(
+                    &state.db,
+                    chat,
+                    &approval_request.id,
+                    true,
+                )
+                .await?;
                 crate::services::assistant_invocation_service::revalidate_after_approval(
                     &state.db, chat,
                 )
@@ -5358,6 +5402,49 @@ async fn execute_resolved_proxy_inner<'a>(
             }
         }
     }
+
+    let dispatch_admission = {
+        let dispatch_caller = crate::services::service_dispatch_registry::DispatchCaller {
+            actor_user_id: &user_id_str,
+            resource_owner_id: service_owner_for_approval,
+            user_service_id: resolved_user_service_id.as_deref(),
+        };
+        crate::services::service_dispatch_registry::admit(
+            &state.db,
+            &state.encryption_keys,
+            &state.jwt_keys,
+            &state.config,
+            &dispatch_caller,
+            auth_user.auth_method != AuthMethod::ServiceAccount
+                && !operation_guest
+                && auth_user.org_agent_access.is_none()
+                && auth_user
+                    .assistant_agent_owner_id
+                    .as_deref()
+                    .is_none_or(|owner| owner == user_id_str)
+                && effective_owner_for_approval
+                    .as_deref()
+                    .is_none_or(|owner| owner == user_id_str),
+            &target,
+            method.as_str(),
+            path,
+            query.as_deref(),
+            body.as_deref().unwrap_or_default(),
+            || {
+                let prepared =
+                    proxy_service::prepare_delegated_request(path, query.as_deref(), &delegated)?;
+                Ok(proxy_service::build_effective_outbound_headers(
+                    &target,
+                    node_forward_headers.clone(),
+                    &identity_headers,
+                    &prepared.delegated_headers,
+                    &extra_outbound_headers,
+                ))
+            },
+            node_route.is_some() || is_ws || streaming_body.is_some() || shared_connect,
+        )
+        .await?
+    };
 
     let mut billing_ctx = billing_ctx.with_request_body(body.as_deref());
     billing_ctx.pool_attempt = pool_accounting.as_ref().map(|ctx| ctx.metadata.clone());
@@ -7102,6 +7189,11 @@ async fn execute_resolved_proxy_inner<'a>(
             if shared_connect {
                 require_shared_stream_guard(auth_user, egress_guard.as_ref())?;
             }
+            let dispatch_caller = crate::services::service_dispatch_registry::DispatchCaller {
+                actor_user_id: &user_id_str,
+                resource_owner_id: service_owner_for_approval,
+                user_service_id: resolved_user_service_id.as_deref(),
+            };
             let downstream_result = until_client_disconnect(
                 &downstream_cancellation,
                 box_proxy_future(|| {
@@ -7135,6 +7227,8 @@ async fn execute_resolved_proxy_inner<'a>(
                         billing_egress_permit,
                         egress_guard.as_ref(),
                         resource_proof.as_ref(),
+                        Some(&dispatch_admission),
+                        Some(&dispatch_caller),
                     )
                 }),
             )
@@ -10215,6 +10309,7 @@ mod tests {
 
     pub(super) fn make_target(base_url: &str) -> proxy_service::ProxyTarget {
         proxy_service::ProxyTarget {
+            catalog_slug: None,
             execution_request: None,
             execution_permission: None,
             credential_deferred: false,

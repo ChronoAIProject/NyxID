@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Check, FlaskConical, RotateCcw, TriangleAlert, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -167,7 +168,7 @@ export function MockScenariosAction() {
                     onCheckedChange={(checked) =>
                       setScenarioEnabled(entry.id, checked)
                     }
-                    aria-label={`Enable ${entry.id} scenario`}
+                    aria-label={translateUi("Enable {{id}} scenario", { id: entry.id })}
                   />
                 </div>
               );
@@ -223,7 +224,7 @@ export function MockScenariosAction() {
                   <button data-icon-button=""
                     type="button"
                     onClick={() => disconnectService(serviceSlug)}
-                    aria-label={`Remove ${serviceSlug} from mock world`}
+                    aria-label={translateUi("Remove {{serviceSlug}} from mock world", { serviceSlug: serviceSlug })}
                     className="flex shrink-0 items-center justify-center rounded-[4px] hover:bg-success/15 focus-visible:outline-none"
                   >
                     <X className="h-3 w-3" />

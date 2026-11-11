@@ -106,6 +106,7 @@ async fn external_proxy_uuid_and_slug_save_resume_readback_without_task_or_dupli
         assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
         let completed = row(&f).await;
         assert_eq!(v2::proposal(&completed).unwrap().state, "completed");
+        assert_eq!(completed.activity_outcome.as_deref(), Some("completed"));
         let auth = f.auth().await;
         let view = v2::readback(&f.state, &auth, &completed).await.unwrap();
         assert!(view.result_available);
@@ -1610,4 +1611,64 @@ async fn v2_notifies_inline_before_first_wait_poll_once_and_polls_at_legacy_cade
     assert!(f.server.received_requests().await.unwrap().is_empty());
     telegram.abort();
     f.cleanup().await;
+}
+
+#[tokio::test]
+async fn permission_mcp_receipt_uses_trusted_tool_outcome_without_changing_response() {
+    for is_error in [true, false] {
+        let f = Fixture::new("proposal_v2_mcp_outcome").await;
+        f.enroll(true).await;
+        call(&f, "/proxy/s/execution-fixture/status", "mcp-outcome").await;
+        let requested = row(&f).await;
+        let approved = proposals::decide(
+            &f.state,
+            &f.owner,
+            &requested.id,
+            &choice(&requested, "operation"),
+        )
+        .await
+        .unwrap();
+        let (resume, _) = v2::claim_for_test(&f.state, &approved)
+            .await
+            .unwrap()
+            .unwrap();
+        f.state
+            .db
+            .collection::<Document>("approval_requests")
+            .update_one(
+                doc! {"_id": &approved.id, "execution_proposal.v2.claim_id": &resume.claim_id},
+                doc! {"$set": {"execution_proposal.v2.state": "dispatched"}},
+            )
+            .await
+            .unwrap();
+        let original =
+            json!({"jsonrpc":"2.0","id":1,"result":{"isError":is_error,"content":[]}}).to_string();
+        let mut response = axum::response::Response::new(Body::from(original.clone()));
+        response
+            .extensions_mut()
+            .insert(nyxid_permissions::server::McpToolOutcome { is_error });
+        let response = v2::complete_response_for_test(&f.state, &approved, &resume, response)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap()
+                .as_ref(),
+            original.as_bytes(),
+        );
+        let completed = row(&f).await;
+        assert_eq!(v2::proposal(&completed).unwrap().state, "completed");
+        assert_eq!(
+            completed.activity_outcome.as_deref(),
+            Some(if is_error { "failed" } else { "completed" })
+        );
+        let view = v2::readback(&f.state, &f.auth().await, &completed)
+            .await
+            .unwrap();
+        assert_eq!(view.result.unwrap().body, original);
+        f.cleanup().await;
+    }
 }

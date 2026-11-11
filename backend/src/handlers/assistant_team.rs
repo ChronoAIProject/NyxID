@@ -206,7 +206,7 @@ fn event_turn(conversation_id: &str) -> TurnStart {
 
 /// Start an event turn draining a thread's queue when it is idle. Loop
 /// guards: a NyxBot thread stops after `MAX_EVENT_STREAK` consecutive event
-/// turns without a user message, and an owner runs at most
+/// turns without a user message or bound desktop decision, and an owner runs at most
 /// `EVENT_TURNS_PER_HOUR` event turns per hour. Events stay queued otherwise
 /// and reach the agent with its next turn.
 pub(crate) async fn wake(state: &AppState, owner: &str, id: &str) {
@@ -927,11 +927,12 @@ fn skill_request_allowed_note(
         Attach it now: resolve names with search_agent_skills and agent_skill_versions, \
         then preview each root with preview_agent_skill to obtain complete pins. \
         Call nyxid__set_agent_skills for this agent at its current revision. \
-        Respect the effective permission mode; Full access bypasses all confirmations with receipts. Do not ask for another permission decision. Then tell the user in one or two plain sentences what you did and the result.",
+        Respect the effective permission mode; Full access bypasses all confirmations with receipts. Do not ask for another permission decision. {}",
         excerpt(&agent.name, 80),
         agent.id,
         request.id,
         excerpt(&request.summary, 2000),
+        acks::DECISION_NARRATION,
     )
 }
 
@@ -1455,11 +1456,17 @@ async fn execute_authorized_tool_impl(
             };
             let gate = acks::confirmation_needed(&state.db, chat, facts, false).await?;
             auto_allowed = gate.auto_allowed();
-            let summary = sharing_preview
+            let mut summary = sharing_preview
                 .as_ref()
                 .filter(|preview| preview.widening)
                 .map(|preview| preview.summary.clone())
                 .unwrap_or_else(|| if group_delegation { format!("Enable guest access for agent {} in group {}. Current and future participants without use rights may use the owner’s guest service policy; the owner pays. Membership revision {}, guest revision {}.",text_arg(&args["change"],"agent_id"),text_arg(args,"group"),args["expected_revision"],args["change"]["guest_revision"]) } else {action_summary(name,args)});
+            let audience_readiness = if name == "update_channel_access" && args["private_chats"] == "everyone" {
+                let facts = super::nyxbot::chats::audience_readiness(state, &chat.user_id, text_arg(args, "channel_agent_id")).await?;
+                summary.push('\n');
+                summary.push_str(&facts.summary());
+                Some(facts)
+            } else { None };
             if let Some(need) = gate.ask() {
                 if (group_delegation || sharing_preview
                     .as_ref()
@@ -1476,10 +1483,13 @@ async fn execute_authorized_tool_impl(
                     .await?;
                 }
                 if !delegation_approved
-                    && let Some(refusal) =
+                    && let Some(mut refusal) =
                         acks::confirm_action(&state.db, chat, tool_name, args, &need, &summary)
                             .await?
                 {
+                    if let Some(facts) = &audience_readiness {
+                        refusal["audience_readiness"] = json!(facts);
+                    }
                     return Ok((refusal, true));
                 }
             }
@@ -2951,7 +2961,9 @@ async fn dispatch_channels(
                 text_arg(args, "platform"),
                 args["label"].as_str(),
                 &agent,
-                crate::services::nyxbot_watch_service::ReportProvenance::from_chat(chat),
+                crate::services::nyxbot_watch_service::ReportProvenance::from_channel_setup_chat(
+                    chat,
+                ),
             )
             .await?
         }

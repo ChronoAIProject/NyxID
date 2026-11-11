@@ -1,3 +1,4 @@
+import "@/i18n";
 import { confirmChanges } from "@/test-helpers/confirm-changes";
 import type { ComponentProps } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";

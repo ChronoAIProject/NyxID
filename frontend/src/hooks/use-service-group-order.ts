@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
@@ -239,7 +240,7 @@ export function useServiceGroupOrder(inventory: readonly KeyInfo[]) {
       if (!valid(captured)) return;
       await mutation.save(captured.group, parsed);
       if (!valid(captured)) return;
-      toast.success(`Agent order saved for ${captured.name}`);
+      toast.success(translateUi("Agent order saved for {{name}}", { name: captured.name }));
       close(captured);
     } catch (error) {
       if (!valid(captured)) return;

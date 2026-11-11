@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { RotateCcw, SlidersHorizontal, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,8 +43,8 @@ const LAST_ACTIVE_ADMIN_TOOLTIP =
  */
 function scopeSummary(member: MemberResponse): string {
   const list = member.effective_allowed_service_ids;
-  if (list == null) return "All services";
-  if (list.length === 0) return "No services";
+  if (list == null) return translateUi("All services");
+  if (list.length === 0) return translateUi("No services");
   return `${String(list.length)} service${list.length === 1 ? "" : "s"}`;
 }
 
@@ -62,6 +64,7 @@ export function MemberRow({
   onEditScope,
   onResetScope,
 }: MemberRowProps) {
+  useUiTranslation();
   const displayName =
     member.display_name ?? member.email ?? member.user_id;
   const scopeLabel = scopeSummary(member);
@@ -75,12 +78,10 @@ export function MemberRow({
           <span className="type-row-title text-foreground">
             {displayName}
             {isSelf && (
-              <span className="ml-2 text-13 text-muted-foreground">(you)</span>
+              <span className="ml-2 text-13 text-muted-foreground">{translateUi("(you)")}</span>
             )}
             {hasCustomScope && (
-              <Badge variant="info" className="ml-2 align-middle text-12">
-                Custom scope
-              </Badge>
+              <Badge variant="info" className="ml-2 align-middle text-12">{translateUi("Custom scope")}</Badge>
             )}
           </span>
           {member.email && member.display_name && (
@@ -158,8 +159,8 @@ export function MemberRow({
               className="h-8 w-8 text-muted-foreground"
               onClick={() => onEditScope(member)}
               disabled={isUpdating}
-              aria-label={`Edit service access for ${displayName}`}
-              title="Edit service access"
+              aria-label={translateUi("Edit service access for {{value1}}", { value1: displayName })}
+              title={translateUi("Edit service access")}
             >
               <SlidersHorizontal className="h-4 w-4" />
             </Button>
@@ -170,8 +171,8 @@ export function MemberRow({
                 className="h-8 w-8 text-muted-foreground"
                 onClick={() => onResetScope(member)}
                 disabled={isUpdating}
-                aria-label={`Reset ${displayName} to role defaults`}
-                title="Reset to role defaults"
+                aria-label={translateUi("Reset {{value1}} to role defaults", { value1: displayName })}
+                title={translateUi("Reset to role defaults")}
               >
                 <RotateCcw className="h-4 w-4" />
               </Button>
@@ -186,7 +187,7 @@ export function MemberRow({
                       className="h-8 w-8 text-muted-foreground hover:text-destructive"
                       onClick={() => onRevoke(member)}
                       disabled
-                      aria-label={`Remove ${displayName}`}
+                      aria-label={translateUi("Remove {{value1}}", { value1: displayName })}
                     >
                       <Trash2 className="h-4 w-4 text-destructive" />
                     </Button>
@@ -203,7 +204,7 @@ export function MemberRow({
                 className="h-8 w-8 text-muted-foreground hover:text-destructive"
                 onClick={() => onRevoke(member)}
                 disabled={isUpdating}
-                aria-label={`Remove ${displayName}`}
+                aria-label={translateUi("Remove {{value1}}", { value1: displayName })}
               >
                 <Trash2 className="h-4 w-4 text-destructive" />
               </Button>

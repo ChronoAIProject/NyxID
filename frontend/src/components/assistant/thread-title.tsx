@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import { Check, PencilLine, X } from "lucide-react";
 import { useAppForm } from "@/components/ui/form";
@@ -16,6 +18,7 @@ export function ThreadTitle({
   /** Shown as the page's heading rather than a muted label. */
   readonly heading?: boolean;
 }) {
+  useUiTranslation();
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string>();
   const form = useAppForm({ defaultValues: { title } });
@@ -23,7 +26,7 @@ export function ThreadTitle({
     return (
       <button
         type="button"
-        aria-label="Rename chat"
+        aria-label={translateUi("Rename chat")}
         title={title}
         className={cn(
           "group flex min-w-0 max-w-full items-center gap-2 text-left",
@@ -49,7 +52,7 @@ export function ThreadTitle({
     );
   return (
     <form
-      aria-label="Rename chat title"
+      aria-label={translateUi("Rename chat title")}
       className={heading ? "min-w-0 w-full max-w-2xl" : "min-w-0 max-w-sm"}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
@@ -70,7 +73,7 @@ export function ThreadTitle({
       <div className="flex items-center gap-1">
         <Input
           autoFocus
-          aria-label="Chat title"
+          aria-label={translateUi("Chat title")}
           className={heading ? "h-8 min-w-0 flex-1 type-body " : undefined}
           maxLength={200}
           {...form.register("title")}
@@ -79,7 +82,7 @@ export function ThreadTitle({
           type="submit"
           size="icon"
           variant="ghost"
-          aria-label="Save title"
+          aria-label={translateUi("Save title")}
           disabled={
             !form.formState.isDirty ||
             !form.watch("title").trim() ||
@@ -92,7 +95,7 @@ export function ThreadTitle({
           type="button"
           size="icon"
           variant="ghost"
-          aria-label="Cancel rename"
+          aria-label={translateUi("Cancel rename")}
           onClick={() => setEditing(false)}
         >
           <X />
@@ -100,7 +103,7 @@ export function ThreadTitle({
       </div>
       {error && (
         <p role="alert" className="text-13 text-destructive">
-          {error}
+          {translateUi(error)}
         </p>
       )}
     </form>

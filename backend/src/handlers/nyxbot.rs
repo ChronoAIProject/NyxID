@@ -776,6 +776,7 @@ async fn connect_inner(
         gateway_native_activation_detail: None,
         gateway_native_activation_operation: None,
         gateway_native_delivery: None,
+        gateway_intake: None,
         gateway_bot_mentions: Default::default(),
         gateway_threads: Default::default(),
         follow_capacity_revision: 0,
@@ -1716,6 +1717,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         }
         Err(_) => return Err("storage_unavailable"),
     }
+    let outcome = async {
     let mut next = row.clone();
     next.gateway_source = source;
     next.route_api_key_id = route_key.id.clone();
@@ -1995,6 +1997,16 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         tracing::debug!(code, "NyxBot gateway group admission pending after move");
     }
     Ok(())
+    }.await;
+    if outcome.is_err() {
+        // Includes early `?` failures before/after reservation. Keep uncertain
+        // remote effects fenced; cleanup only this attempt's temporary keys.
+        if let Err(error) = releases::retire_failed_move(state, row, &agent.id, &route_key.id).await
+        {
+            tracing::warn!(channel_agent_id = %row.id, %error, "Discord/native setup cleanup deferred to sweep");
+        }
+    }
+    outcome
 }
 
 async fn connect_direct(
@@ -2300,9 +2312,11 @@ pub(crate) async fn setup_link_tool(
     let now = Utc::now();
     let family = canonical_platform(&platform).to_owned();
     let mut set = provenance.fields();
+    set.insert("source_turn_id", provenance.source_turn_id.clone());
     set.insert("agent_id", agent.id.clone());
     set.insert("conversation_id", source_conversation_id);
     set.insert("connect_link_id", &created.link.id);
+    set.insert("source_connect_link_id", &created.link.id);
     set.insert("created_at", bson::DateTime::from_chrono(now));
     set.insert(
         "expires_at",
@@ -2338,7 +2352,7 @@ pub(crate) async fn setup_link_tool(
             "expires_at": created.link.expires_at,
             "note": "Give the user this link and end your turn. Do not ask them to reply when \
                 done: once the bot exists NyxID links it and wakes you with the \
-                owner-verification step to pass on.",
+                owner-verification step to pass on. Keep unanswered onboarding questions pending; creating or linking a bot does not answer them or authorize opening to customers. A new bot stays owner-only.",
         }),
         false,
     ))
@@ -2371,6 +2385,8 @@ pub(crate) async fn watch_connect_link(
     let now = Utc::now();
     let invocation_id = provenance.invocation_id.clone();
     let watch = NyxbotWatch {
+        source_connect_link_id: None,
+        source_turn_id: None,
         invocation_id: provenance.invocation_id.clone(),
         trigger_prefill: None,
         trigger_id: None,
@@ -2404,6 +2420,13 @@ fn watch_snapshot(watch: &NyxbotWatch) -> bson::Document {
     "created_at":bson::DateTime::from_chrono(watch.created_at),
     "expires_at":bson::DateTime::from_chrono(watch.expires_at),
     "report_to":&watch.report_to,"report_provenance":watch.report_provenance as i32};
+    if watch.kind == "channel_bot" {
+        filter.insert("source_turn_id", watch.source_turn_id.clone());
+        filter.insert(
+            "source_connect_link_id",
+            watch.source_connect_link_id.clone(),
+        );
+    }
     if watch.report_provenance == 0 {
         // Pre-provenance rows deserialize as legacy version zero.
         filter.insert("report_provenance", doc! {"$in":[0,bson::Bson::Null]});
@@ -2697,6 +2720,8 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
     let Some(bot) = candidate else {
         return Ok(());
     };
+    let context =
+        crate::services::nyxbot_watch_service::onboarding_context(&state.db, watch).await?;
     if !claim(state, watch, doc! {"channel_bot_id": &bot.id}).await? {
         return Ok(());
     }
@@ -2713,7 +2738,7 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
         // Created in Telegram through NyxID: the account that created it is
         // already the owner's, so nothing is left to verify.
         Ok((agent, value)) if value["channel_agent"]["owner_linked"] == true => format!(
-            "The {} channel bot {} the user just created is now linked to {}, and their \
+            "The {} channel bot {} the user just created is now linked to {}. Their \
             account there is already verified. Tell them to open the bot and press Start (or \
             send a message) to check the first reply. A reply has not been verified yet. Only if they chat from a different account, \
             give them this verification step: {}",
@@ -2744,7 +2769,7 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
         state,
         watch,
         "channel_bot_linked",
-        text,
+        format!("{}\n{context}", text.chars().take(1200).collect::<String>()),
         outcome.as_ref().err().map(error_code),
     )
     .await?;
@@ -2943,6 +2968,24 @@ pub(super) async fn prepare_guest_model(
 
 async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) -> AppResult<Value> {
     let rows = list(state, owner).await?;
+    let discord_ids: Vec<_> = rows
+        .iter()
+        .filter(|r| r.platform == "discord")
+        .map(|r| &r.channel_bot_id)
+        .collect();
+    let discord_bots: Vec<ChannelBot> = if discord_ids.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .db
+            .collection(crate::models::channel_bot::COLLECTION_NAME)
+            .find(doc! {"_id":{"$in":discord_ids}})
+            .await?
+            .try_collect()
+            .await?
+    };
+    let intake =
+        crate::services::channel_bot_health::discord::load(&state.db, &discord_bots).await?;
     let mut open_chats = std::collections::HashSet::new();
     let mut nyxbot_id = None;
     if with_readiness && !rows.is_empty() {
@@ -2975,6 +3018,34 @@ async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) ->
     for row in &rows {
         let mut value = serde_json::to_value(ChannelAgentResponse::from(row))
             .map_err(|error| AppError::Internal(error.to_string()))?;
+        if let Some(intake) = intake.get(&row.channel_bot_id) {
+            value["discord_intake"] = json!(intake);
+            if let Some(advice) = crate::services::channel_bot_health::discord::advice(intake) {
+                value["delivery_status"] = json!(if intake.receiving_side == "native_gateway" {
+                    "unconfirmed"
+                } else {
+                    "failing"
+                });
+                value["delivery_error"] = json!(intake.code);
+                value["delivery_reason"] = json!(advice.text);
+                if row.transport == "direct" {
+                    value["gateway_fallback_reason"] = json!(
+                        "NyxID relay selected; intake is not confirmed. Check channel health."
+                    );
+                }
+            } else if row
+                .delivery_error
+                .as_deref()
+                .is_some_and(crate::services::channel_bot_health::discord::is_intake_code)
+            {
+                // Live evidence wins over an old intake-only diagnostic, e.g.
+                // after disabling relay or observing the first native event.
+                // The sweep repairs storage; a real delivery error is retained.
+                value["delivery_status"] = json!("unknown");
+                value["delivery_error"] = Value::Null;
+                value["delivery_reason"] = Value::Null;
+            }
+        }
         if with_readiness
             && row.org_specialist.is_none()
             && (row.private_chats.as_deref() == Some("everyone") || open_chats.contains(&row.id))
@@ -3130,7 +3201,26 @@ pub async fn link_channel(
     }
     if let Some(agent_id) = body.agent_id.as_deref() {
         let agent = requested_agent(&state, &owner, Some(agent_id)).await?;
-        result = link(&state, &owner, &id, &agent).await?;
+        let linked = link(&state, &owner, &id, &agent).await?;
+        if let (Some(result), Some(linked)) = (result.as_object_mut(), linked.as_object()) {
+            result.extend(linked.clone());
+        }
+        // A combined relink/audience PATCH must describe the final target, not
+        // the agent loaded before linking. Diagnostics cannot undo a saved change.
+        if settings.private_chats.as_deref() == Some("everyone") {
+            match chats::audience_readiness(&state, &owner, &id).await {
+                Ok(facts) => {
+                    result["guest_readiness"] = json!(&facts.guest_readiness);
+                    result["audience_readiness"] = json!(facts);
+                }
+                Err(_) => {
+                    result["guest_readiness"] = json!({"status":"not_ready","reason":"readiness_unavailable",
+                        "fix":"Access and agent were saved. Refresh customer model readiness before relying on replies."});
+                    result["audience_readiness"] = json!({"guest_readiness":result["guest_readiness"],"configuration":null,
+                        "note":crate::services::assistant_service_execution::readiness::AUDIENCE_READINESS_NOTE});
+                }
+            }
+        }
     }
     Ok(Json(result))
 }
@@ -6359,7 +6449,9 @@ async fn direct_reply(
             message_id: message_id.to_owned(),
             reply: super::channel_relay::AsyncReplyBody {
                 text: Some(text.to_owned()),
-                metadata: None,
+                metadata: crate::services::channel_reply_plan::assistant_metadata(
+                    &channel.platform,
+                ),
                 attachments: Vec::new(),
             },
         }),
@@ -7197,6 +7289,8 @@ pub(crate) async fn trigger_setup_link(
     let id = Uuid::new_v4().to_string();
     let invocation_id = provenance.invocation_id.clone();
     let watch = NyxbotWatch {
+        source_connect_link_id: None,
+        source_turn_id: None,
         invocation_id: provenance.invocation_id.clone(),
         agent_id: Some(prefill.agent_id.clone()),
         trigger_prefill: Some(prefill),

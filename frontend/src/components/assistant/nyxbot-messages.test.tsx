@@ -168,3 +168,11 @@ it("shows a queued channel event's retained image and download without opening i
     globalThis.__nyxidAssistantHttpMock = undefined;
   }
 });
+
+it("keeps setup resume context out of the visible status label", () => {
+  render(<NyxBotEventNotice message={message("event", `${HEADER}\n- The telegram channel bot Shop the user just created is now linked to merchant. Their account there is already verified.\n  Creating or linking a bot is only a transport setup step. Keep unanswered questions pending. Historical context: [{"role":"assistant","text":"What is your menu?"},{"role":"user","text":"Telegram"}]`)} />);
+  const notice = screen.getByRole("note", { name: "NyxID event: Telegram bot Shop linked to merchant" });
+  expect(notice).not.toHaveTextContent("Keep unanswered questions");
+  expect(notice).not.toHaveTextContent("What is your menu?");
+  expect(within(notice).queryByRole("button")).not.toBeInTheDocument();
+});

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { MachineGrantCard } from "@/components/shared/machine-grant-card";
 import { useSearch } from "@tanstack/react-router";
 import { ServiceScopeCard } from "@/components/dashboard/api-key-detail/service-scope-card";
@@ -26,6 +28,7 @@ import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { LoginCredentialsSection } from "@/components/dashboard/api-key-detail/login-credentials-section";
 
 export function ApiKeyDetailPage() {
+  useUiTranslation();
   const { grant_service } = useSearch({ strict: false }) as {
     grant_service?: string;
   };
@@ -55,13 +58,13 @@ export function ApiKeyDetailPage() {
     return (
       <div className="space-y-8">
         <PageHeader
-          title="Key Not Found"
+          title={translateUi("Key Not Found")}
         />
         <ErrorBanner
           message={
             error instanceof ApiError
               ? error.message
-              : "Failed to load key details."
+              : translateUi("Failed to load key details.")
           }
           onRetry={refetch}
         />
@@ -74,7 +77,7 @@ export function ApiKeyDetailPage() {
       <PageHeader
         title={apiKey.name}
         description={
-          apiKey.description ?? `API key ${maskApiKey(apiKey.key_prefix)}`
+          apiKey.description ?? translateUi("API key {{value1}}", { value1: maskApiKey(apiKey.key_prefix) })
         }
         actions={
           canWrite &&
@@ -85,30 +88,23 @@ export function ApiKeyDetailPage() {
               onClick={() => setRotateOpen(true)}
               disabled={!apiKey.is_active}
             >
-              <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
-              Rotate Key
-            </Button>
+              <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>{translateUi("Rotate Key")}</Button>
             <Button
               variant="destructive"
               onClick={() => setDeleteOpen(true)}
             >
-              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>
-              Revoke
-            </Button>
+              <ButtonIcon variant="destructive"><Trash2 className="h-3 w-3 text-destructive" /></ButtonIcon>{translateUi("Revoke")}</Button>
           </div>
         }
       />
 
       {apiKey.assistant_conversation_id ? (
-        <p className="text-14 text-muted-foreground">
-          Used by assistant chat · {" "}
+        <p className="text-14 text-muted-foreground">{translateUi("Used by assistant chat · ")}{" "}
           <Link
             to="/assistant"
             search={{ c: apiKey.assistant_conversation_id }}
             className="text-primary-text hover:underline"
-          >
-            Open chat
-          </Link>
+          >{translateUi("Open chat")}</Link>
         </p>
       ) : null}
       <div className="grid gap-4 md:grid-cols-2">

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState, useRef, useCallback } from "react";
 import { useRouterState, useNavigate } from "@tanstack/react-router";
 import { useLogout } from "@/hooks/use-auth";
@@ -41,6 +43,7 @@ function getInitials(name: string | null, email: string): string {
 export function Header({
   onMenuClick,
 }: { readonly onMenuClick?: () => void } = {}) {
+  useUiTranslation();
   const routerState = useRouterState();
   const navigate = useNavigate();
   const logoutMutation = useLogout();
@@ -83,7 +86,7 @@ export function Header({
           type="button"
           onClick={onMenuClick}
           className="flex h-9 w-9 items-center justify-center rounded-lg transition-colors duration-300 hover:bg-accent md:hidden"
-          aria-label="Open menu"
+          aria-label={translateUi("Open menu")}
         >
           <Menu className="h-5 w-5 text-muted-foreground" />
         </button>
@@ -101,11 +104,11 @@ export function Header({
             <button
               type="button"
               className="flex items-center gap-3 rounded-lg p-1.5 transition-colors duration-300 hover:bg-accent"
-              aria-label="User menu"
+              aria-label={translateUi("User menu")}
             >
               <div className="hidden flex-col items-end gap-0.5 sm:flex">
                 <span className="type-card-title text-foreground">
-                  {user?.display_name ?? user?.email ?? "User"}
+                  {user?.display_name ?? user?.email ?? translateUi("User")}
                 </span>
                 {user?.display_name && (
                   <span className="text-13 text-text-tertiary">
@@ -128,28 +131,22 @@ export function Header({
           onMouseEnter={cancelClose}
           onMouseLeave={scheduleClose}
         >
-          <DropdownMenuLabel>My Account</DropdownMenuLabel>
+          <DropdownMenuLabel>{translateUi("My Account")}</DropdownMenuLabel>
 
           <DropdownMenuItem
             onClick={() => void navigate({ to: "/settings" })}
           >
-            <User className="h-4 w-4" aria-hidden="true" />
-            Profile
-          </DropdownMenuItem>
+            <User className="h-4 w-4" aria-hidden="true" />{translateUi("Profile")}</DropdownMenuItem>
           <DropdownMenuItem
             onClick={() => void navigate({ to: "/settings" })}
           >
-            <Settings className="h-4 w-4" aria-hidden="true" />
-            Settings
-          </DropdownMenuItem>
+            <Settings className="h-4 w-4" aria-hidden="true" />{translateUi("Settings")}</DropdownMenuItem>
 
           <DropdownMenuItem
             onClick={() => void handleLogout()}
             className="text-destructive focus:text-destructive"
           >
-            <LogOut className="h-4 w-4" aria-hidden="true" />
-            Log out
-          </DropdownMenuItem>
+            <LogOut className="h-4 w-4" aria-hidden="true" />{translateUi("Log out")}</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
     </header>

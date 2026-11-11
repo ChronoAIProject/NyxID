@@ -106,7 +106,16 @@ pub(crate) async fn resolve_machine_names(
 }
 
 #[derive(Serialize)]
+struct ActivityDecisionResponse {
+    kind: String,
+    id: String,
+    state: String,
+}
+
+#[derive(Serialize)]
 pub struct ActivityResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision: Option<ActivityDecisionResponse>,
     pub(crate) machine: Option<MachineReceiptResponse>,
     id: String,
     label: String,
@@ -119,6 +128,11 @@ pub struct ActivityResponse {
 impl From<crate::models::assistant_conversation::TurnActivity> for ActivityResponse {
     fn from(row: crate::models::assistant_conversation::TurnActivity) -> Self {
         Self {
+            decision: row.decision.map(|d| ActivityDecisionResponse {
+                kind: d.kind,
+                id: d.id,
+                state: d.state,
+            }),
             machine: row.machine.map(|m| (*m).into()),
             id: row.id,
             label: row.label,
@@ -604,12 +618,26 @@ impl ActionOutcomeResponse {
             .activities
             .iter()
             .map(|activity| {
-                let completed = activity.status == "completed";
+                let decision = activity.decision.as_ref().map(|d| d.state.as_str());
+                let completed =
+                    decision.map_or(activity.status == "completed", |state| state == "completed");
                 let duplicate = activity
                     .failure
                     .as_ref()
                     .is_some_and(|failure| failure.kind == engine::RETRY_DUPLICATE_ACTION);
-                let summary = if duplicate {
+                let summary = if let Some(
+                    state @ ("waiting" | "allowed" | "denied" | "expired" | "cancelled"),
+                ) = decision
+                {
+                    let label = match state {
+                        "waiting" => "Waiting for approval",
+                        "allowed" => "Allowed; completion unconfirmed",
+                        "denied" => "Declined",
+                        "expired" => "Approval expired",
+                        _ => "Cancelled; completion unconfirmed",
+                    };
+                    format!("{label}: {}", activity.label)
+                } else if duplicate {
                     format!("Previously completed; not repeated: {}", activity.label)
                 } else if completed && activity.label == "nyxid__create_schedule" {
                     "Created a scheduled automation".into()
@@ -1008,9 +1036,12 @@ pub struct HistoryResponse {
 pub struct CmaOperationResponse {
     id: String,
     turn_id: String,
+    service_id: String,
     kind: crate::models::async_service_operation::CmaOperationKind,
     operation_id: Option<String>,
     agent_id: Option<String>,
+    agent_ref_id: Option<String>,
+    response_id: Option<String>,
     idempotency_key: Option<String>,
     status: Option<String>,
     phase: Option<String>,
@@ -1108,6 +1139,20 @@ pub async fn history(
         )
         .await?;
     }
+    let mut linked_activities: Vec<_> = rows
+        .iter_mut()
+        .flat_map(|row| row.activities.iter_mut())
+        .collect();
+    if let Some(turn) = conversation.active_turn.as_mut() {
+        linked_activities.extend(turn.activities.iter_mut());
+    }
+    crate::services::assistant_activity_decision::refresh(
+        &state.db,
+        &user_id,
+        &id,
+        linked_activities,
+    )
+    .await?;
     // Best effort: the transcript never fails because of the waiting list.
     let waiting = super::nyxbot::waiting(&state, &user_id, &conversation.id)
         .await
@@ -1153,9 +1198,12 @@ pub async fn history(
                 cma_url: crate::services::cma_operation::card_url(&cma),
                 id: row.id,
                 turn_id: row.turn_id,
+                service_id: row.service_id,
                 kind: cma.kind,
                 operation_id: row.operation_id,
                 agent_id: cma.agent_id,
+                agent_ref_id: cma.agent_ref_id,
+                response_id: cma.response_id,
                 idempotency_key: cma.idempotency_key,
                 status: cma.status,
                 phase: cma.phase,
