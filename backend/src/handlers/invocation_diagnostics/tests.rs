@@ -36,7 +36,7 @@ fn request() -> Request<Body> {
 }
 
 #[tokio::test]
-async fn proxy_only_agent_key_reaches_redemption_and_returns_non_delegable() {
+async fn proxy_only_agent_key_cannot_reach_redemption() {
     let (state, actor, id, server) = fixture().await;
     let key = crate::services::key_service::create_api_key(
         &state.db,
@@ -84,12 +84,7 @@ async fn proxy_only_agent_key_reaches_redemption_and_returns_non_delegable() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
-    assert_eq!(body["outcome"], "non_delegable");
-    assert_eq!(body["observation"], "unknown");
-    assert_eq!(body["assessment"], "unknown");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert!(server.received_requests().await.unwrap().is_empty());
     state.db.drop().await.unwrap();
 }

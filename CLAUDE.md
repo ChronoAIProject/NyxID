@@ -65,6 +65,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 12900 `OAuthAuthorityUnavailable` (HTTP 503, `oauth_authority_unavailable`): a live OAuth authority read could not complete; retry the request without discarding tokens or reauthorizing. `SecurityReadinessUnavailable` also uses 12900 (HTTP 503, `security_readiness_unavailable`); clients must distinguish these errors by the response `error` key.
 - 13300 `MonitoringUnavailable` (HTTP 503, `monitoring_unavailable`): configured chrono-probe failed or returned an unusable response.
 - 13301 `MonitoringNotConfigured` (HTTP 404, `monitoring_not_configured`): `CHRONO_PROBE_URL` is unset or invalid; monitoring UI stays hidden.
+- 13302 `DiagnosticNotReady` (HTTP 409, `diagnostic_not_ready`, `Retry-After: 1`): a diagnostic handle is not ready for redemption; retry without treating it as a server fault.
 - 12500-12502 assistant voice: 12500 `VoiceQueueFull` (HTTP 429), 12501 `VoiceProviderUnavailable` (HTTP 503), 12502 `VoiceApprovalUnsupported` (HTTP 403).
 
 ### 4. Frontend Patterns

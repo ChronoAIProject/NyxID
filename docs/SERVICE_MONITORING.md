@@ -138,12 +138,28 @@ actor, exact UserService ID, optional revision, and existing request metadata;
 never body substrings, response bodies, or tokens.
 
 ## Automatic failure diagnostics
- Automatic handle issuance is disabled by default, even when `CHRONO_PROBE_URL`
+
+Automatic handle issuance is disabled by default, even when `CHRONO_PROBE_URL`
 is configured. Operators must explicitly set
 `INVOCATION_DIAGNOSTICS_ENABLED=true` and restart the API process to enable it.
 Issuance reads only that startup configuration snapshot, with no feature-flag
 database lookup on the invocation path. Redemption separately revalidates the
 live `services:monitoring` flag for the acting person before probing.
+
+For a rolling deployment, upgrade **every API replica** before enabling
+`INVOCATION_DIAGNOSTICS_ENABLED`: a handle issued by one replica can be redeemed
+on any replica. Enable the flag only after all replicas support issuance and
+redemption. Before rolling back, unset the flag on **every replica** and restart
+those processes so they stop issuing handles; allow the 60-second handle lifetime
+to elapse before rolling back any replica.
+
+Before enabling, verify that the **deployed** chrono-probe returns an explicit
+boolean `reachable` for each completed health/readiness check from
+chrono-probe's `POST /api/v1/monitoring/services/{user_service_id}/probes`. A healthy reachable
+check must include `"reachable": true`. Source compatibility alone does not
+verify the deployed version. NyxID requires `health.reachable == true` for a
+caller observation; a missing field leaves the diagnostic assessment `unknown`.
+Keep diagnostics disabled until this deployment check passes.
 
 When enabled and configured, downstream 5xx responses and eligible transport or
 broker failures from REST proxy, provider LLM, LLM gateway and MCP service-tool
@@ -273,8 +289,10 @@ Monitoring timeout, outage, throttling and missing health paths also retain
 `timeout`, `unavailable`, `rate_limited` or `no_health_path`. The original
 invocation error always remains authoritative. A healthy check suggests an
 operation/path/input/permission-specific failure; it does not establish that
-the operation is valid or authorized. An unhealthy check does not erase that
-operation's error.
+the operation is valid or authorized. Eligible errors include `AppError::Internal`,
+which can originate inside NyxID. A healthy probe and
+`operation_specific_likely` never rule out a NyxID-side fault. An unhealthy check
+does not erase that operation's error.
 
 Operational log counter `service_invocation_diagnostics_total` is emitted only
 when a handle is freshly completed and has finite outcome, observation and
