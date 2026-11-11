@@ -18,6 +18,8 @@ export function AssistantCmaOperation({
 }) {
   const { colors } = useTheme();
   const { label, tone } = cmaPresentation(operation);
+  if (!["cma_response", "cma_agent", "cma_provisioning"].includes(operation.kind))
+    return <Label muted>{label}</Label>;
   const pending = isCmaOperationPending(operation);
   const complete = tone === "success";
   const accepted =

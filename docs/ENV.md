@@ -713,7 +713,7 @@ Invitation codes are controlled by the global `auth:invitation-code` feature fla
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMAIL_AUTH_ENABLED` | `false` | Show the email/password auth UI on `/login` and `/register` and accept `POST /api/v1/auth/register`. Defaults to **false** (SSO-only). The self-host quickstart in `README.md` writes this to `true` automatically. The login API is never gated — existing users can always authenticate via direct API call even when the UI is hidden. Accepts: `true`/`1`/`yes`/`on` → enabled; anything else → disabled. |
+| `EMAIL_AUTH_ENABLED` | `false` | Show the email/password auth UI on `/login` and `/register` and accept `POST /api/v1/auth/register`. Defaults to **false**. Existing accounts, including prepared reviewer accounts, can use `/login?enable_email=true` to display the existing email/password login form without enabling email registration. This query parameter only controls form visibility; normal password, MFA and session checks apply. The self-host quickstart in `README.md` writes this to `true` automatically. The login API is never gated. Accepts: `true`/`1`/`yes`/`on` → enabled; anything else → disabled. |
 
 ## Channel Bot Relay
 

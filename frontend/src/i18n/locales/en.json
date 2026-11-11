@@ -12033,5 +12033,14 @@
   "Affected bots": "Affected bots",
   "Selected operations only": "Selected operations only",
   "Apply reviewed guest settings": "Apply reviewed guest settings",
-  "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.": "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests."
+  "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.": "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.",
+  "Already done in the previous attempt; skipped this time.": "Already done in the previous attempt; skipped this time.",
+  "A resource needed for this step is unavailable.": "A resource needed for this step is unavailable.",
+  "Activity details unavailable in this app version.": "Activity details unavailable in this app version.",
+  "Status unavailable": "Status unavailable",
+  "Skipped": "Skipped",
+  "Workspace details unavailable": "Workspace details unavailable",
+  "Conversation history could not be loaded. Please try again.": "Conversation history could not be loaded. Please try again.",
+  "Some activity or confirmation details are unavailable in this app version. Refresh history or update the app.": "Some activity or confirmation details are unavailable in this app version. Refresh history or update the app.",
+  "Refresh history": "Refresh history"
 }

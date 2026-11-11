@@ -209,6 +209,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             m::assistant_attachment::COLLECTION_NAME,
             doc! {"user_id":owner},
         ),
+        (
+            m::assistant_tool_result::COLLECTION_NAME,
+            doc! {"$or":[{"user_id":owner},{"actor_id":owner}]},
+        ),
         (m::lark_base_write::COLLECTION_NAME, doc! {"user_id":owner}),
         (
             m::lark_base_write_photo::COLLECTION_NAME,

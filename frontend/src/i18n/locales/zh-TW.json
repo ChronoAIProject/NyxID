@@ -12033,5 +12033,14 @@
   "Affected bots": "受影響的機器人",
   "Selected operations only": "僅限所選操作",
   "Apply reviewed guest settings": "套用已檢視的訪客設定",
-  "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.": "訪客使用你的計費方式。專家代理程式的每項服務訪客存取權限決定訪客可使用哪些服務。NyxBot 不會為訪客使用你的服務。"
+  "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.": "訪客使用你的計費方式。專家代理程式的每項服務訪客存取權限決定訪客可使用哪些服務。NyxBot 不會為訪客使用你的服務。",
+  "Already done in the previous attempt; skipped this time.": "上次嘗試中已完成；本次已略過。",
+  "A resource needed for this step is unavailable.": "此步驟所需的資源無法使用。",
+  "Activity details unavailable in this app version.": "此應用程式版本無法顯示此操作的詳細資訊。",
+  "Status unavailable": "狀態無法取得",
+  "Skipped": "已略過",
+  "Workspace details unavailable": "工作區詳細資訊無法取得",
+  "Conversation history could not be loaded. Please try again.": "無法載入對話記錄，請再試一次。",
+  "Some activity or confirmation details are unavailable in this app version. Refresh history or update the app.": "此應用程式版本無法顯示部分操作或確認資訊。請重新整理對話記錄或更新應用程式。",
+  "Refresh history": "重新整理對話記錄"
 }
