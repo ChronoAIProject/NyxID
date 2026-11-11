@@ -17,6 +17,7 @@ class BuildDependencyTests(unittest.TestCase):
         self.arguments = self.root / "arguments"
         self.sources = self.root / "sources"
         self.sources_path = self.root / "sources-path"
+        self.timeouts = self.root / "timeouts"
         self.harness = self.root / "commands.sh"
         # Exercise failure propagation without modifying the developer's system.
         self.harness.write_text('''
@@ -28,6 +29,16 @@ source() {
 dpkg() {
   [[ "$1" == --print-architecture ]] || return 99
   printf '%s\\n' "$TEST_ARCH"
+}
+timeout() {
+  [[ "$1" == --kill-after=5s && ( "$2" == 60s || "$2" == 90s ) ]] || return 99
+  printf '%s\\n' "$2" >> "$TEST_TIMEOUTS"
+  shift 2
+  if [[ "$TEST_FAIL" == first_timeout && ! -f "$TEST_CALLS.timed-out" ]]; then
+    touch "$TEST_CALLS.timed-out"
+    return 124
+  fi
+  "$@"
 }
 sudo() {
   [[ "$1" == -n && "$2" == env && "$3" == DEBIAN_FRONTEND=noninteractive && "$4" == apt-get ]] || return 99
@@ -61,7 +72,8 @@ sudo() {
             ["bash", str(SCRIPT)], env={**os.environ, "BASH_ENV": str(self.harness),
                 "TEST_CALLS": str(self.calls), "TEST_ARGUMENTS": str(self.arguments), "TEST_FAIL": failure,
                 "TEST_DISTRO": distro, "TEST_CODENAME": codename, "TEST_ARCH": arch,
-                "TEST_SOURCES": str(self.sources), "TEST_SOURCES_PATH": str(self.sources_path)},
+                "TEST_SOURCES": str(self.sources), "TEST_SOURCES_PATH": str(self.sources_path),
+                "TEST_TIMEOUTS": str(self.timeouts)},
             capture_output=True, text=True, timeout=10,
         )
 
@@ -123,15 +135,23 @@ sudo() {
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.calls.read_text().splitlines(), ["update", "update", "install"])
         sources = self.sources.read_text()
-        self.assertEqual(sources.count("URIs: https://azure.archive.ubuntu.com/ubuntu\n"), 4)
+        self.assertEqual(sources.count("URIs: https://mirrors.edge.kernel.org/ubuntu\n"), 4)
         self.assertEqual(sources.count("Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"), 6)
         self.assertEqual(self.arguments.read_text().splitlines().count("APT::Update::Error-Mode=any"), 3)
+        self.assertEqual(self.timeouts.read_text().splitlines(), ["60s", "90s"])
+
+    def test_primary_dns_timeout_reaches_fallback_before_install(self):
+        result = self.invoke("first_timeout")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.timeouts.read_text().splitlines(), ["60s", "90s"])
+        self.assertEqual(self.calls.read_text().splitlines(), ["update", "install"])
+        self.assertIn("URIs: https://mirrors.edge.kernel.org/ubuntu\n", self.sources.read_text())
 
     def test_ports_update_failure_does_not_use_an_incompatible_mirror(self):
         result = self.invoke("update", arch="arm64")
         self.assertEqual(result.returncode, 17, result.stderr)
         self.assertEqual(self.calls.read_text().splitlines(), ["update"])
-        self.assertNotIn("azure.archive", self.sources.read_text())
+        self.assertNotIn("mirrors.edge.kernel.org", self.sources.read_text())
 
     def test_install_failure_is_not_ignored(self):
         result = self.invoke("install")

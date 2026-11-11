@@ -57,17 +57,21 @@ apt_options=(
 )
 
 update_status=0
-sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update || update_status=$?
+# Bound the whole update, including DNS lookup, so fallback and installation
+# still fit within the caller's five-minute step timeout.
+timeout --kill-after=5s 60s sudo -n env DEBIAN_FRONTEND=noninteractive \
+  apt-get "${apt_options[@]}" -o Acquire::Retries=0 update || update_status=$?
 if (( update_status != 0 )); then
   case "$architecture" in
     amd64|i386)
-      # Azure-hosted runners can lose DNS for the primary Canonical mirrors.
-      # Keep the same release suites and Ubuntu signing key on the fallback.
-      echo 'Primary Ubuntu index update failed; trying the Azure Ubuntu mirror.' >&2
-      archive=https://azure.archive.ubuntu.com/ubuntu
+      # Both Canonical and Azure mirror DNS failed on hosted runners. Use an
+      # independent mirror with the same suites and Ubuntu signing key.
+      echo 'Primary Ubuntu index update failed; trying the kernel.org Ubuntu mirror.' >&2
+      archive=https://mirrors.edge.kernel.org/ubuntu
       security=$archive
       write_sources
-      sudo -n env DEBIAN_FRONTEND=noninteractive apt-get "${apt_options[@]}" update
+      timeout --kill-after=5s 90s sudo -n env DEBIAN_FRONTEND=noninteractive \
+        apt-get "${apt_options[@]}" -o Acquire::Retries=0 update
       ;;
     *) exit "$update_status" ;;
   esac
