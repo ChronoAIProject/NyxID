@@ -1948,6 +1948,7 @@ async fn auto_provision_owner_services(
     // method, gained a blocking SPR, went private without consent, etc). This is
     // fully independent of the provisioning pipeline below.
     reconcile_stale_auto_provisions(db, user_id, grants, providers).await;
+    super::catalog_endpoint_service::reconcile_owner(db, user_id).await;
 
     // Find all active catalog services that could be user-callable without a
     // user-owned credential. The finer auth/provider-requirement predicate is

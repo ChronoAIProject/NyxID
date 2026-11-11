@@ -1456,3 +1456,208 @@ mod private_conversations;
 
 #[path = "proposal_channel_tests.rs"]
 mod channel;
+
+/// #2354: six genuinely different effects must not look like six deliveries
+/// of one failed request. Repeated calls still join their exact receipt.
+#[tokio::test]
+async fn retained_review_batch_reports_distinct_denials_and_expiries_once_after_reload() {
+    use futures::TryStreamExt;
+    let (f, row) = assistant("retained_review_batch_2354").await;
+    let mut ids = Vec::new();
+    for index in 0..6 {
+        let path = format!("/proxy/s/execution-fixture/status?item={index}");
+        for _ in 0..2 {
+            let (status, _) = f.call(&path).await;
+            assert_ne!(status, StatusCode::OK);
+        }
+        assert_eq!(count(&f, "approval_requests").await, index + 1);
+        let request = f
+            .state
+            .db
+            .collection::<ApprovalRequest>("approval_requests")
+            .find_one(doc! {"_id":{"$nin":&ids}})
+            .await
+            .unwrap()
+            .unwrap();
+        ids.push(request.id.clone());
+        if index < 3 {
+            proposals::decide(
+                &f.state,
+                &f.owner,
+                &request.id,
+                &Decision {
+                    approved: false,
+                    expected_revision: 1,
+                    choice_id: None,
+                    choice_digest: None,
+                    idempotency_key: Uuid::new_v4().to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            // Denial is a decision on this exact effect, not a new card.
+            let _ = f.call(&path).await;
+            assert_eq!(count(&f, "approval_requests").await, index + 1);
+        }
+    }
+    finish(&f, &row, "Waiting for the decisions").await;
+    f.state.db.collection::<Document>("approval_requests").update_many(
+        doc! {"status":"pending"}, doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}},
+    ).await.unwrap();
+    let (a, b) = tokio::join!(proposals::sweep(&f.state), proposals::sweep(&f.state));
+    a.unwrap();
+    b.unwrap();
+    // Assert the durable contract before presentation: request denials use
+    // "rejected", while the retained proposal itself uses "denied".
+    for status in ["rejected", "expired"] {
+        assert_eq!(
+            f.state
+                .db
+                .collection::<ApprovalRequest>("approval_requests")
+                .count_documents(doc! {"_id":{"$in":&ids},"status":status})
+                .await
+                .unwrap(),
+            3,
+            "unexpected durable request status: {status}",
+        );
+    }
+    let resumed = event_turn(&f, &row).await;
+    assert_eq!(resumed.active_turn.as_ref().unwrap().events.len(), 6);
+    let event_text = engine::events_text(&resumed.active_turn.as_ref().unwrap().events);
+    assert_eq!(event_text.matches("\n- ").count(), 1);
+    assert!(event_text.contains("6 distinct permission requests"));
+    // Reload a live turn, as recovery/history polling would: durable identities
+    // and state, rather than client-side deduplication, determine the result.
+    let reloaded = f
+        .state
+        .db
+        .collection::<AssistantConversation>("assistant_conversations")
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let text = resume(&f, &reloaded).await;
+    assert_eq!(
+        text.matches("Permission requests denied: 3.").count(),
+        1,
+        "{text}"
+    );
+    assert_eq!(
+        text.matches("Permission requests expired: 3.").count(),
+        1,
+        "{text}"
+    );
+    for id in &ids {
+        assert_eq!(text.matches(id).count(), 1);
+    }
+    assert!(!text.contains("not approved"));
+    assert!(!text.contains("item="));
+    assert_eq!(resume(&f, &reloaded).await, text);
+    let mut replayed = reloaded.clone();
+    let events = &mut replayed.active_turn.as_mut().unwrap().events;
+    events.push(events[0].clone());
+    assert_eq!(
+        resume(&f, &replayed).await,
+        text,
+        "a repeated wake ID is one receipt"
+    );
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    finish(&f, &reloaded, &text).await;
+    let requests: Vec<ApprovalRequest> = f
+        .state
+        .db
+        .collection("approval_requests")
+        .find(doc! {})
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(requests.len(), 6);
+    for request in &requests {
+        assert_eq!(
+            proposals::proposal(request)
+                .unwrap()
+                .delivered_turn_id
+                .as_deref(),
+            Some(reloaded.active_turn.as_ref().unwrap().turn_id.as_str())
+        );
+        let version = proposals::v3::AssistantVersion::of(request).unwrap();
+        f.state.db.collection::<Document>("approval_requests").update_one(
+            doc! {"_id":&request.id}, version.update(doc! {"$unset":{"execution_proposal.v1.maintenance_at":"","execution_proposal.v1.wake_at":""}}),
+        ).await.unwrap();
+    }
+    proposals::sweep(&f.state).await.unwrap();
+    let current = f
+        .state
+        .db
+        .collection::<AssistantConversation>("assistant_conversations")
+        .find_one(doc! {"_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        current.pending_events.is_empty(),
+        "delivered receipts must not wake again"
+    );
+    let replies: Vec<Document> = f.state.db.collection("assistant_messages")
+        .find(doc! {"conversation_id":&row.id,"turn_id":&reloaded.active_turn.as_ref().unwrap().turn_id,"role":"assistant"})
+        .await.unwrap().try_collect().await.unwrap();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].get_str("text").unwrap(), text);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn expired_retained_request_is_not_reraised_by_same_turn_retry() {
+    let (f, row) = assistant("retained_expiry_retry_2354").await;
+    let _ = write_call(&f).await;
+    let request = proposal(&f).await;
+    f.state.db.collection::<Document>("approval_requests").update_one(
+        doc! {"_id":&request.id},
+        doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}},
+    ).await.unwrap();
+    for _ in 0..2 {
+        let (status, _) = write_call(&f).await;
+        assert_ne!(status, StatusCode::OK);
+    }
+    assert_eq!(count(&f, "approval_requests").await, 1);
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    finish(&f, &row, "The request expired").await;
+    // A later explicit owner request starts a new task and may ask again.
+    let request = engine::TurnRequest {
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: Vec::new(),
+        agent_id: None,
+        conversation_id: Some(row.id.clone()),
+        text: "Try the operation again".into(),
+        model: None,
+        access_mode: None,
+    };
+    let mut start: engine::TurnStart = (&request).into();
+    start.execution_enrollment = true;
+    let next = engine::begin_turn(&f.state.db, &f.owner, start, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    assert_ne!(
+        next.active_turn
+            .as_ref()
+            .unwrap()
+            .execution_task
+            .as_ref()
+            .unwrap()
+            .task,
+        row.active_turn
+            .as_ref()
+            .unwrap()
+            .execution_task
+            .as_ref()
+            .unwrap()
+            .task
+    );
+    let _ = write_call(&f).await;
+    assert_eq!(count(&f, "approval_requests").await, 2);
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    f.cleanup().await;
+}

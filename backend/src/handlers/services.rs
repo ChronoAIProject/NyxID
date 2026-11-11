@@ -3598,6 +3598,17 @@ pub(crate) async fn update_service_at_revision(
         .await?
     };
 
+    if body.base_url.is_some()
+        || body.openapi_spec_url.is_some()
+        || service.base_url != committed_service.base_url
+        || service.openapi_spec_url != committed_service.openapi_spec_url
+    {
+        crate::services::catalog_endpoint_service::spawn_reconcile(
+            state.db.clone(),
+            Some(service_id.clone()),
+        );
+    }
+
     if body.credential.is_some() || body.clear_credential {
         audit_service::log_for_user(
             state.db.clone(),
@@ -3774,6 +3785,12 @@ async fn complete_replayed_skill_update(
     current: &DownstreamService,
     body: &UpdateServiceRequest,
 ) -> AppResult<Json<ServiceResponse>> {
+    if body.base_url.is_some() || body.openapi_spec_url.is_some() {
+        crate::services::catalog_endpoint_service::spawn_reconcile(
+            state.db.clone(),
+            Some(current.id.clone()),
+        );
+    }
     if body.billing.is_some() {
         Box::pin(state.billing.sync_service_price(current)).await?;
     }

@@ -29,6 +29,7 @@ vi.mock("@/lib/api-client", async (importOriginal) => ({
   api: { post },
 }));
 import { appI18n } from "./instance";
+import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
 import { WizardShell } from "@/components/cli-wizard/shell";
 import { ApiKeyCreateConfirm } from "@/components/cli-wizard/confirm-panels";
 import { DisplayOncePanel } from "@/components/cli-wizard/display-once-panel";
@@ -105,4 +106,20 @@ it("keeps the same one-time secret masked when its screen changes language", asy
   fireEvent.click(screen.getByRole("button", { name: "顯示" }));
   expect(screen.getByText("nyx_example_verbatim")).toBeVisible();
   expect(onAcknowledge).not.toHaveBeenCalled();
+});
+
+
+it("localizes Projects permissions and blocked requests in the standalone wizard", async () => {
+  await appI18n.changeLanguage("zh-TW");
+  render(<UpstreamScopePicker
+    catalog={[{ scope: "read:project", label: "Projects (read)", description: "Read user and organization projects." }]}
+    defaultScopes={[]}
+    value={["read:project", "future:scope"]}
+    platformAllowlist={["read:project"]}
+    onChange={vi.fn()}
+  />);
+  expect(screen.getByRole("button", { name: "專案（唯讀）" })).toHaveAttribute("title", "讀取使用者與組織的專案。");
+  expect(screen.getByRole("alert")).toHaveTextContent("共用應用程式不提供所要求的權限：future:scope");
+  expect(screen.getByRole("button", { name: "移除要求的權限：future:scope" })).toBeVisible();
+  expect(appI18n.hasResourceBundle("en", "app")).toBe(false);
 });
