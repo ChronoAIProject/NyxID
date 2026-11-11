@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
 import { AutomationsPage } from "@/pages/automations";
 import { MachinesPage } from "@/pages/machines";
@@ -73,6 +76,7 @@ export function AssistantHeaderActions({
   readonly scenarioAction?: ScenarioActionComponent | null;
   readonly activeConversationId?: string | null;
 } = {}) {
+  useUiTranslation();
   const ScenarioAction = scenarioAction;
   return (
     <>
@@ -142,6 +146,7 @@ function workspaceActiveView(view: WorkspaceView) {
 }
 
 function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
+  useUiTranslation();
   return (
     <div
       className={`h-full shell-page-content ${view === "cma-agent" ? "overflow-hidden" : "overflow-y-auto"}`}
@@ -149,8 +154,7 @@ function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
     >
       <Suspense
         fallback={
-          <p role="status" className="text-14 text-text-tertiary">
-            Loading {workspaceTitles[view]}...
+          <p role="status" className="text-14 text-text-tertiary">{translateUi("Loading ")}{workspaceTitles[view]}...
           </p>
         }
       >
@@ -185,6 +189,7 @@ function AssistantWorkspacePage({
   readonly view: WorkspaceView;
   readonly directEnabled: boolean;
 }) {
+  useUiTranslation();
   const navigate = useNavigate();
   const noopAdoption = useCallback(() => undefined, []);
   const actorChat = useAssistantChat({
@@ -230,7 +235,7 @@ function AssistantWorkspacePage({
         await actorChat.deleteConversation(conversationId);
       }
     } catch (error) {
-      toast.error("Could not delete the chat", {
+      toast.error(translateErrorMessage("Could not delete the chat"), {
         description:
           error instanceof Error
             ? error.message
@@ -274,6 +279,7 @@ function AssistantWorkspacePage({
  * groups), and none of the earlier engines' chat lists are fetched.
  */
 function NyxAgentWorkspacePage({ view }: { readonly view: WorkspaceView }) {
+  useUiTranslation();
   const navigate = useNavigate();
   function openAssistant(search: { c?: string } = {}) {
     void navigateWithBuildUpdate(() => navigate({ to: "/assistant", search: search }));
@@ -304,6 +310,7 @@ export function AssistantPage({
 }: {
   readonly view?: "chat" | WorkspaceView;
 }) {
+  useUiTranslation();
   const directEnabled = useFeature(FEATURE_FLAG.DIRECT_CHAT_ENGINE);
   const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
   const selectedConversationId = useRouterState({

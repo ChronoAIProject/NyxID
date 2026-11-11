@@ -1,3 +1,5 @@
+import { useUiTranslation, translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useState } from "react";
 import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -30,6 +32,7 @@ function CredentialForm({
   readonly record?: ModelCredential;
   readonly close: () => void;
 }) {
+  useUiTranslation();
   const form = useAppForm<z.infer<typeof formSchema>>({
     resolver: zodResolver(formSchema),
     defaultValues: {
@@ -86,16 +89,16 @@ function CredentialForm({
       >
         <h3 className="type-card-title">
           {record
-            ? `Replace credential: ${record.name}`
-            : "Add provider credential"}
+            ? translateUi("Replace credential: {{name}}", { name: record.name })
+            : translateUi("Add provider credential")}
         </h3>
         <fieldset disabled={change.pending} className="space-y-4">
           {!record && (
             <>
-              <Field title="Credential name">
+              <Field title={translateUi("Credential name")}>
                 <Input {...form.register("name")} autoComplete="off" />
               </Field>
-              <Field title="Credential kind">
+              <Field title={translateUi("Credential kind")}>
                 <NativeSelect
                   {...form.register("kind")}
                   onChange={(e) => {
@@ -106,7 +109,7 @@ function CredentialForm({
                 >
                   {Object.entries(credentialKinds).map(([value, label]) => (
                     <option key={value} value={value}>
-                      {label}
+                      {translateUi(label)}
                     </option>
                   ))}
                 </NativeSelect>
@@ -114,7 +117,7 @@ function CredentialForm({
             </>
           )}
           {(kind === "gcp-service-account" || kind === null) && (
-            <Field title="Service account JSON file">
+            <Field title={translateUi("Service account JSON file")}>
               <Input
                 type="file"
                 accept=".json,application/json"
@@ -128,8 +131,8 @@ function CredentialForm({
           <Field
             title={
               kind === "gcp-service-account"
-                ? "Service account JSON (paste)"
-                : "Provider credential"
+                ? translateUi("Service account JSON (paste)")
+                : translateUi("Provider credential")
             }
           >
             <Input
@@ -140,13 +143,12 @@ function CredentialForm({
             />
           </Field>
           <p className="type-secondary text-muted-foreground">
-            Encrypted on save. Existing secrets cannot be viewed. Saving does
-            not contact the provider.
+            {translateUi("Encrypted on save. Existing secrets cannot be viewed. Saving does not contact the provider.")}
           </p>
         </fieldset>
         {(inputError || change.error) && (
           <p role="alert" className="type-validation-error text-destructive">
-            {inputError || change.error}
+            {translateUi(inputError || change.error!)}
           </p>
         )}
         <EditErrors />
@@ -160,13 +162,13 @@ function CredentialForm({
               close();
             }}
           >
-            Cancel
+            {translateUi("Cancel")}
           </Button>
           <Button
             variant="primary"
             disabled={change.pending || !form.formState.isValid}
           >
-            {record ? "Replace credential" : "Save credential"}
+            {record ? translateUi("Replace credential") : translateUi("Save credential")}
           </Button>
         </div>
       </form>
@@ -178,6 +180,7 @@ export function ProviderCredentials({
 }: {
   readonly readOnly: boolean;
 }) {
+  useUiTranslation();
   const query = useModelCredentials();
   const [editing, setEditing] = useState<ModelCredential | "new">();
   const [disable, setDisable] = useState<ModelCredential>();
@@ -186,14 +189,14 @@ export function ProviderCredentials({
     <section className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h2 className="type-section-title">Provider credentials</h2>
+          <h2 className="type-section-title">{translateUi("Provider credentials")}</h2>
           <p className="type-secondary text-muted-foreground">
-            Private credentials used by platform model routes.
+            {translateUi("Private credentials used by platform model routes.")}
           </p>
         </div>
         {!readOnly && (
           <Button variant="primary" onClick={() => setEditing("new")}>
-            Add credential
+            {translateUi("Add credential")}
           </Button>
         )}
       </div>
@@ -205,10 +208,10 @@ export function ProviderCredentials({
         />
       )}
       <SaveError error={query.error} />
-      {query.isLoading && <p className="type-body">Loading credentials…</p>}
+      {query.isLoading && <p className="type-body">{translateUi("Loading credentials…")}</p>}
       {query.data?.pages[0]?.records.length === 0 && (
         <p className="type-body text-muted-foreground">
-          No provider credentials configured.
+          {translateUi("No provider credentials configured.")}
         </p>
       )}
       <div className="divide-y divide-border/30 rounded-xl border border-border/50">
@@ -220,9 +223,9 @@ export function ProviderCredentials({
                   <h3 className="type-card-title">{record.name}</h3>
                   <p className="type-secondary text-muted-foreground">
                     {record.kind
-                      ? credentialKinds[record.kind]
-                      : "Provider credential (legacy endpoint)"}{" "}
-                    · {record.enabled ? "Enabled" : "Disabled"}
+                      ? translateUi(credentialKinds[record.kind])
+                      : translateUi("Provider credential (legacy endpoint)")}{" "}
+                    · {record.enabled ? translateUi("Enabled") : translateUi("Disabled")}
                   </p>
                 </div>
                 {!readOnly && (
@@ -231,7 +234,7 @@ export function ProviderCredentials({
                       variant="outline"
                       onClick={() => setEditing(record)}
                     >
-                      Rotate / replace
+                      {translateUi("Rotate / replace")}
                     </Button>
                     <Button
                       variant="outline"
@@ -241,29 +244,27 @@ export function ProviderCredentials({
                       }
                       onClick={() => setDisable(record)}
                     >
-                      Disable
+                      {translateUi("Disable")}
                     </Button>
                   </div>
                 )}
               </div>
               <p className="type-caption text-muted-foreground">
-                Created {new Date(record.created_at).toLocaleString()} · Updated{" "}
-                {new Date(record.updated_at).toLocaleString()}
+                {translateUi("Created {{created}} · Updated {{updated}}", { created: new Date(record.created_at).toLocaleString(getFormattingLocale()), updated: new Date(record.updated_at).toLocaleString(getFormattingLocale()) })}
               </p>
               <p className="type-secondary">
                 {record.references.length
                   ? record.references
                       .map(
                         (r) =>
-                          `${r.display_name}${r.route_id ? ` / route ${r.route_id}` : ""}${r.enabled ? " (enabled)" : " (disabled)"}`,
+                          translateUi("{{name}}{{route}} ({{status}})", { name: r.display_name, route: r.route_id ? translateUi(" / route {{id}}", { id: r.route_id }) : "", status: r.enabled ? translateUi("Enabled") : translateUi("Disabled") }),
                       )
                       .join(", ")
-                  : "No current routes reference this credential."}
+                  : translateUi("No current routes reference this credential.")}
               </p>
               {record.references.some((r) => r.enabled) && (
                 <p className="type-secondary text-muted-foreground">
-                  Disable the referencing routes before disabling this
-                  credential.
+                  {translateUi("Disable the referencing routes before disabling this credential.")}
                 </p>
               )}
             </div>
@@ -276,14 +277,13 @@ export function ProviderCredentials({
           disabled={query.isFetchingNextPage}
           onClick={() => void query.fetchNextPage()}
         >
-          Load more credentials
+          {translateUi("Load more credentials")}
         </Button>
       )}
       {!readOnly && disable && (
         <div className="space-y-3 rounded-lg border border-border p-4">
           <p className="type-body">
-            Disable {disable.name}? Routes using it will be unavailable until an
-            administrator re-enables it.
+            {translateUi("Disable {{name}}? Routes using it will be unavailable until an administrator re-enables it.", { name: disable.name })}
           </p>
           <div className="flex gap-2">
             <Button
@@ -291,7 +291,7 @@ export function ProviderCredentials({
               disabled={change.pending}
               onClick={() => setDisable(undefined)}
             >
-              Cancel
+              {translateUi("Cancel")}
             </Button>
             <Button
               variant="destructive"
@@ -307,14 +307,14 @@ export function ProviderCredentials({
                   setDisable(undefined);
               }}
             >
-              Confirm disable
+              {translateUi("Confirm disable")}
             </Button>
           </div>
         </div>
       )}
       {change.error && (
         <p role="alert" className="type-validation-error text-destructive">
-          {change.error}
+          {translateUi(change.error)}
         </p>
       )}
       <Button
@@ -325,7 +325,7 @@ export function ProviderCredentials({
           void query.refetch();
         }}
       >
-        Reload credential inventory
+        {translateUi("Reload credential inventory")}
       </Button>
     </section>
   );

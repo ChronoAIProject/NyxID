@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { Label } from "@/components/ui/label";
 import { withErasurePreparation } from "@/lib/erasure-preparation";
 import { OwnedOnboardingBindings } from "@/pages/platform-onboarding";
@@ -37,6 +40,7 @@ import { usePublicConfig } from "@/hooks/use-public-config";
 import { MfaSetupDialog } from "@/components/auth/mfa-setup-dialog";
 import { ApprovedSignInPolicy } from "@/components/settings/approved-sign-in-policy";
 import { DisplaySettings } from "@/components/settings/display-settings";
+import { LanguageSettings } from "@/components/settings/language-settings";
 import {
   SegmentedControl,
   SegmentedControlContent,
@@ -108,6 +112,7 @@ interface DeleteAccountResponse {
 export function SettingsPage({
   presentation = "page",
 }: { readonly presentation?: "page" | "panel" } = {}) {
+  useUiTranslation();
   const content = <SettingsContent presentation={presentation} />;
   return presentation === "page" ? (
     <GroupedPage>{content}</GroupedPage>
@@ -121,6 +126,7 @@ function SettingsContent({
 }: {
   readonly presentation: "page" | "panel";
 }) {
+  useUiTranslation();
   const searchParams = useRouterState({
     select: (s) => s.location.search as Record<string, unknown>,
   });
@@ -153,7 +159,7 @@ function SettingsContent({
   return (
     <GroupedFormScope viewport={presentation === "panel"}>
       <section
-        aria-label="Account settings"
+        aria-label={translateUi("Account settings")}
         className={
           presentation === "panel"
             ? "flex min-h-0 flex-1 flex-col"
@@ -162,8 +168,8 @@ function SettingsContent({
       >
         {presentation === "page" && (
           <PageHeader
-            title="Account Settings"
-            description="Manage your account settings and preferences."
+            title={translateUi("Account Settings")}
+            description={translateUi("Manage your account settings and preferences.")}
           />
         )}
         <SegmentedControl
@@ -172,12 +178,12 @@ function SettingsContent({
           className="flex min-h-0 flex-1 flex-col gap-6"
         >
           <CompactChrome>
-            <SegmentedControlList aria-label="Account settings">
+            <SegmentedControlList aria-label={translateUi("Account settings")}>
               {SETTINGS_TABS.map((tab) => (
                 <SegmentedControlTrigger key={tab} value={tab}>
                   {tab === "mcp"
-                    ? "MCP"
-                    : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                    ? translateUi("MCP")
+                    : translateUi(tab.charAt(0).toUpperCase() + tab.slice(1))}
                 </SegmentedControlTrigger>
               ))}
             </SegmentedControlList>
@@ -201,8 +207,8 @@ function SettingsContent({
               >
                 <h2 tabIndex={-1} className="sr-only outline-none">
                   {tab === "mcp"
-                    ? "MCP"
-                    : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                    ? translateUi("MCP")
+                    : translateUi(tab.charAt(0).toUpperCase() + tab.slice(1))}
                 </h2>
                 <FormViewport className="flex min-h-0 flex-1 flex-col">
                   <CompactScroll
@@ -210,7 +216,10 @@ function SettingsContent({
                     className="assistant-scrollbar flex-1 space-y-6 pb-6"
                   >
                     {tab === "profile" ? (
-                      <ProfileTab />
+                      <>
+                        <ProfileTab />
+                        <LanguageSettings />
+                      </>
                     ) : tab === "security" ? (
                       <>
                         <SecurityTab />
@@ -238,12 +247,14 @@ function SettingsContent({
 }
 
 function ProfileTab() {
+  useUiTranslation();
   const { data: user, isLoading } = useUser();
   if (isLoading || !user) return <Skeleton className="h-32 w-full" />;
   return <ProfileForm key={user.id} user={user} />;
 }
 
 function ProfileForm({ user }: { readonly user: User }) {
+  useUiTranslation();
   const form = useAppForm({
     defaultValues: { display_name: user.display_name ?? "" },
   });
@@ -258,7 +269,7 @@ function ProfileForm({ user }: { readonly user: User }) {
       const draft = form.getValues("display_name");
       form.reset({ display_name: updated.display_name ?? "" });
       if (draft !== values.display_name) form.setValue("display_name", draft);
-      toast.success("Profile updated successfully");
+      toast.success(translateUi("Profile updated successfully"));
     } catch (error) {
       form.setError("root", {
         message:
@@ -271,15 +282,15 @@ function ProfileForm({ user }: { readonly user: User }) {
   return (
     <Form {...form}>
       <form
-        aria-label="Profile"
+        aria-label={translateUi("Profile")}
         onSubmit={form.handleSubmit(save)}
         className="space-y-6"
       >
         <GroupedList
-          title="Profile"
+          title={translateUi("Profile")}
           footer={
             <>
-              <p>Update your personal information.</p>
+              <p>{translateUi("Update your personal information.")}</p>
               {form.formState.errors.root && (
                 <p role="alert" className="text-destructive">
                   {form.formState.errors.root.message}
@@ -294,13 +305,13 @@ function ProfileForm({ user }: { readonly user: User }) {
             rules={{ required: "Name is required" }}
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Name</FormLabel>
+                <FormLabel>{translateUi("Name")}</FormLabel>
                 <div className="relative">
                   <FormControl>
                     <Input
                       {...field}
                       className="pr-8"
-                      placeholder="Your name"
+                      placeholder={translateUi("Your name")}
                     />
                   </FormControl>
                   <Pencil
@@ -314,9 +325,9 @@ function ProfileForm({ user }: { readonly user: User }) {
           />
           <GroupedRow className="block space-y-0.5">
             <div className="flex items-center justify-between gap-3">
-              <Label htmlFor="profile-email">Email</Label>
+              <Label htmlFor="profile-email">{translateUi("Email")}</Label>
               <Badge variant={user.email_verified ? "success" : "warning"}>
-                {user.email_verified ? "Verified" : "Not verified"}
+                {user.email_verified ? translateUi("Verified") : translateUi("Not verified")}
               </Badge>
             </div>
             <Input
@@ -334,17 +345,15 @@ function ProfileForm({ user }: { readonly user: User }) {
                 type="button"
                 onClick={() =>
                   toast.info(
-                    "Email resend is not yet available on this server.",
+                    translateUi("Email resend is not yet available on this server."),
                   )
                 }
-              >
-                Resend verification email
-              </button>
+              >{translateUi("Resend verification email")}</button>
             </GroupedRow>
           )}
         </GroupedList>
         <GroupedFormActions
-          label="Profile"
+          label={translateUi("Profile")}
           dirty={form.formState.isDirty}
           pending={form.formState.isSubmitting}
           disabled={!form.watch("display_name")}
@@ -362,6 +371,7 @@ function ProfileForm({ user }: { readonly user: User }) {
 }
 
 function SecurityTab() {
+  useUiTranslation();
   const user = useAuthStore((s) => s.user);
   const logout = useAuthStore((s) => s.logout);
   const navigate = useNavigate();
@@ -410,13 +420,13 @@ function SecurityTab() {
         current_password: data.currentPassword,
         new_password: data.newPassword,
       });
-      toast.success("Password changed successfully");
+      toast.success(translateUi("Password changed successfully"));
       passwordForm.reset();
     } catch (error) {
       if (error instanceof ApiError) {
         passwordForm.setError("root", { message: error.message });
       } else {
-        toast.error("Failed to change password");
+        toast.error(translateErrorMessage("Failed to change password"));
       }
     }
   }
@@ -436,7 +446,7 @@ function SecurityTab() {
         code: disableMfaCode.trim(),
         ...(isPasswordUser ? { password: disableMfaPassword } : {}),
       });
-      toast.success("MFA disabled");
+      toast.success(translateUi("MFA disabled"));
       setDisableMfaDialogOpen(false);
       setDisableMfaCode("");
       setDisableMfaPassword("");
@@ -445,7 +455,7 @@ function SecurityTab() {
       if (error instanceof ApiError) {
         setDisableMfaError(error.message);
       } else {
-        setDisableMfaError("Failed to disable MFA");
+        setDisableMfaError(translateUi("Failed to disable MFA"));
       }
     }
   }
@@ -460,7 +470,7 @@ function SecurityTab() {
   async function handleDeleteAccount() {
     if (!user?.email) return;
     if (!deleteEmailMatches) {
-      toast.error("Please enter your email to confirm");
+      toast.error(translateErrorMessage("Please enter your email to confirm"));
       return;
     }
     setIsDeletingAccount(true);
@@ -474,9 +484,9 @@ function SecurityTab() {
         }),
       );
       toast.success(
-        result.status === "complete"
+        translateUi(result.status === "complete"
           ? "Account erasure complete"
-          : "Account deletion accepted. Cleanup continues until verified.",
+          : "Account deletion accepted. Cleanup continues until verified."),
       );
       try {
         await logout();
@@ -487,9 +497,9 @@ function SecurityTab() {
       void navigate({ to: "/login" });
     } catch (error) {
       if (error instanceof ApiError) {
-        toast.error(error.message);
+        toast.error(translateErrorMessage(error.message));
       } else {
-        toast.error("Failed to delete account");
+        toast.error(translateErrorMessage("Failed to delete account"));
       }
     } finally {
       setIsDeletingAccount(false);
@@ -506,15 +516,15 @@ function SecurityTab() {
   return (
     <div className="space-y-6">
       <GroupedList
-        title="Two-factor authentication"
+        title={translateUi("Two-factor authentication")}
         footer={
           user?.mfa_enabled
-            ? "Your account is protected with two-factor authentication."
-            : "Add an extra layer of security to your account."
+            ? translateUi("Your account is protected with two-factor authentication.")
+            : translateUi("Add an extra layer of security to your account.")
         }
       >
         <GroupedRow
-          title="Two-factor authentication"
+          title={translateUi("Two-factor authentication")}
           accessory={
             <Switch
               checked={user?.mfa_enabled ?? false}
@@ -523,10 +533,10 @@ function SecurityTab() {
                 if (checked) setMfaDialogOpen(true);
                 else setDisableMfaDialogOpen(true);
               }}
-              aria-label="Toggle two-factor authentication"
+              aria-label={translateUi("Toggle two-factor authentication")}
             />
           }
-          description={user?.mfa_enabled ? "Enabled" : "Disabled"}
+          description={user?.mfa_enabled ? translateUi("Enabled") : translateUi("Disabled")}
         />
       </GroupedList>
       <ApprovedSignInPolicy key={user?.id} />
@@ -545,33 +555,28 @@ function SecurityTab() {
             }}
           />
           <DialogHeader>
-            <DialogTitle>Disable Two-Factor Authentication</DialogTitle>
-            <DialogDescription>
-              Enter a current authenticator or recovery code to confirm.{" "}
-              {isPasswordUser && "Enter your password too. "}
-              This will make your account less secure.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Disable Two-Factor Authentication")}</DialogTitle>
+            <DialogDescription>{translateUi("Enter a current authenticator or recovery code to confirm.")}{" "}
+              {isPasswordUser && "Enter your password too. "}{translateUi("This will make your account less secure.")}</DialogDescription>
           </DialogHeader>
           <GroupedList
             aria-busy={disableMfa.isPending}
             footer={
               disableMfaError && (
                 <p role="alert" className="text-destructive">
-                  {disableMfaError}
+                  {translateUi(disableMfaError)}
                 </p>
               )
             }
           >
             <GroupedRow className="block space-y-1">
-              <Label htmlFor="disable-mfa-code">
-                Authenticator or recovery code
-              </Label>
+              <Label htmlFor="disable-mfa-code">{translateUi("Authenticator or recovery code")}</Label>
               <Input
                 id="disable-mfa-code"
                 disabled={disableMfa.isPending}
                 value={disableMfaCode}
                 onChange={(e) => setDisableMfaCode(e.target.value)}
-                placeholder="000000 or recovery code"
+                placeholder={translateUi("000000 or recovery code")}
                 autoComplete="one-time-code"
                 inputMode="text"
                 autoFocus
@@ -579,7 +584,7 @@ function SecurityTab() {
             </GroupedRow>
             {isPasswordUser && (
               <GroupedRow className="block space-y-1">
-                <Label htmlFor="disable-mfa-password">Password</Label>
+                <Label htmlFor="disable-mfa-password">{translateUi("Password")}</Label>
                 <Input
                   id="disable-mfa-password"
                   disabled={disableMfa.isPending}
@@ -587,30 +592,24 @@ function SecurityTab() {
                   autoComplete="current-password"
                   value={disableMfaPassword}
                   onChange={(e) => setDisableMfaPassword(e.target.value)}
-                  placeholder="Enter your password"
+                  placeholder={translateUi("Enter your password")}
                 />
               </GroupedRow>
             )}
           </GroupedList>
           {disableMfa.isPending && (
-            <p role="status" className="px-4 text-13 text-text-tertiary">
-              Disabling two-factor authentication…
-            </p>
+            <p role="status" className="px-4 text-13 text-text-tertiary">{translateUi("Disabling two-factor authentication…")}</p>
           )}
           <DialogFooter className="bg-background">
             <GroupedDialogCancel
               variant="outline"
               disabled={disableMfa.isPending}
-            >
-              Cancel
-            </GroupedDialogCancel>
+            >{translateUi("Cancel")}</GroupedDialogCancel>
             <Button
               variant="destructive"
               onClick={() => void handleDisableMfa()}
               isLoading={disableMfa.isPending}
-            >
-              Disable MFA
-            </Button>
+            >{translateUi("Disable MFA")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -618,17 +617,15 @@ function SecurityTab() {
       {user?.has_password === true && (
         <Form {...passwordForm}>
           <form
-            aria-label="Change password"
+            aria-label={translateUi("Change password")}
             onSubmit={passwordForm.handleSubmit(handleChangePassword)}
             className="space-y-6"
           >
             <GroupedList
-              title="Change password"
+              title={translateUi("Change password")}
               footer={
                 <>
-                  <p>
-                    Use 8–128 UTF-8 bytes. Existing sessions remain signed in.
-                  </p>
+                  <p>{translateUi("Use 8–128 UTF-8 bytes. Existing sessions remain signed in.")}</p>
                   {passwordForm.formState.errors.root && (
                     <p role="alert" className="text-destructive">
                       {passwordForm.formState.errors.root.message}
@@ -677,10 +674,10 @@ function SecurityTab() {
                             autoComplete={autoComplete}
                             placeholder={
                               name === "currentPassword"
-                                ? "Enter current password"
+                                ? translateUi("Enter current password")
                                 : name === "newPassword"
-                                  ? "Enter new password"
-                                  : "Re-enter new password"
+                                  ? translateUi("Enter new password")
+                                  : translateUi("Re-enter new password")
                             }
                             className="pr-10"
                           />
@@ -705,7 +702,7 @@ function SecurityTab() {
               ))}
             </GroupedList>
             <GroupedFormActions
-              label="Password"
+              label={translateUi("Password")}
               dirty={passwordForm.formState.isDirty}
               pending={passwordForm.formState.isSubmitting}
               save={passwordForm.handleSubmit(handleChangePassword)}
@@ -727,8 +724,8 @@ function SecurityTab() {
       )}
 
       <GroupedList
-        title="Delete account"
-        footer="Permanently delete your account and queue managed Machine workspace cleanup. Necessary security and financial records are retained."
+        title={translateUi("Delete account")}
+        footer={translateUi("Permanently delete your account and queue managed Machine workspace cleanup. Necessary security and financial records are retained.")}
       >
         <GroupedRow asChild interactive>
           <button
@@ -736,9 +733,7 @@ function SecurityTab() {
             className="text-destructive"
             onClick={() => setDeleteAccountOpen(true)}
           >
-            <Trash2 aria-hidden className="size-[1.125em]" />
-            Delete My Account
-          </button>
+            <Trash2 aria-hidden className="size-[1.125em]" />{translateUi("Delete My Account")}</button>
         </GroupedRow>
       </GroupedList>
 
@@ -750,11 +745,8 @@ function SecurityTab() {
             discard={() => setDeleteConfirmEmail("")}
           />
           <DialogHeader>
-            <DialogTitle>Delete Account</DialogTitle>
-            <DialogDescription>
-              Enter your email address to confirm deletion of your account and
-              the Machine data described below.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Delete Account")}</DialogTitle>
+            <DialogDescription>{translateUi("Enter your email address to confirm deletion of your account and the Machine data described below.")}</DialogDescription>
           </DialogHeader>
 
           <AccountDeletionDisclosure />
@@ -762,17 +754,17 @@ function SecurityTab() {
           <GroupedList
             footer={
               deleteEmailError && (
-                <p className="text-destructive">{deleteEmailError}</p>
+                <p className="text-destructive">{translateUi(deleteEmailError)}</p>
               )
             }
           >
             <GroupedRow className="block space-y-1">
-              <Label htmlFor="delete-account-email">Email</Label>
+              <Label htmlFor="delete-account-email">{translateUi("Email")}</Label>
               <Input
                 id="delete-account-email"
                 value={deleteConfirmEmail}
                 onChange={(e) => setDeleteConfirmEmail(e.target.value)}
-                placeholder={user?.email ?? "your@email.com"}
+                placeholder={user?.email ?? translateUi("your@email.com")}
                 aria-invalid={deleteEmailError ? true : undefined}
                 autoFocus
               />
@@ -780,17 +772,13 @@ function SecurityTab() {
           </GroupedList>
 
           <DialogFooter className="bg-background">
-            <GroupedDialogCancel variant="outline" disabled={isDeletingAccount}>
-              Cancel
-            </GroupedDialogCancel>
+            <GroupedDialogCancel variant="outline" disabled={isDeletingAccount}>{translateUi("Cancel")}</GroupedDialogCancel>
             <Button
               variant="destructive"
               isLoading={isDeletingAccount}
               disabled={!deleteEmailMatches || isDeletingAccount}
               onClick={() => void handleDeleteAccount()}
-            >
-              Permanently Delete
-            </Button>
+            >{translateUi("Permanently Delete")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -809,16 +797,17 @@ function CopyInlineButton({
   readonly text: string;
   readonly label: string;
 }) {
+  useUiTranslation();
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
     try {
       await copyToClipboard(text);
       setCopied(true);
-      toast.success(`${label} copied to clipboard`);
+      toast.success(translateUi("{{value1}} copied to clipboard", { value1: label }));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error("Failed to copy to clipboard");
+      toast.error(translateErrorMessage("Failed to copy to clipboard"));
     }
   }
 
@@ -834,12 +823,13 @@ function CopyInlineButton({
       ) : (
         <Copy className="h-3 w-3" aria-hidden="true" />
       )}
-      <span className="sr-only">Copy {label}</span>
+      <span className="sr-only">{translateUi("Copy ")}{label}</span>
     </Button>
   );
 }
 
 function McpTab() {
+  useUiTranslation();
   const { data: config, isLoading } = usePublicConfig();
 
   if (isLoading) {
@@ -856,62 +846,57 @@ function McpTab() {
 
   return (
     <div className="space-y-6">
-      <p className="px-4 text-13 text-text-tertiary">
-        Install NyxID as an MCP (Model Context Protocol) server in your client
-        of choice.
-      </p>
+      <p className="px-4 text-13 text-text-tertiary">{translateUi("Install NyxID as an MCP (Model Context Protocol) server in your client of choice.")}</p>
       <GroupedList
-        title="Install to Cursor"
-        footer="One-click install via Cursor's deeplink protocol. Cursor will open and prompt you to confirm the MCP server installation."
+        title={translateUi("Install to Cursor")}
+        footer={translateUi("One-click install via Cursor's deeplink protocol. Cursor will open and prompt you to confirm the MCP server installation.")}
       >
         <GroupedRow asChild interactive>
           <button
             type="button"
             onClick={() => void openExternal(cursorDeeplink)}
           >
-            <ExternalLink aria-hidden className="size-[1.125em]" />
-            Install to Cursor
-          </button>
+            <ExternalLink aria-hidden className="size-[1.125em]" />{translateUi("Install to Cursor")}</button>
         </GroupedRow>
         <McpCode
-          title="Or copy manually · .cursor/mcp.json"
+          title={translateUi("Or copy manually · .cursor/mcp.json")}
           text={cursorConfig}
-          label="Cursor config"
+          label={translateUi("Cursor config")}
         />
       </GroupedList>
       <GroupedList
-        title="Install to Claude Code"
-        footer="Run this command in your terminal to add NyxID as an MCP server in Claude Code."
+        title={translateUi("Install to Claude Code")}
+        footer={translateUi("Run this command in your terminal to add NyxID as an MCP server in Claude Code.")}
       >
         <McpCode
-          title="Terminal command"
+          title={translateUi("Terminal command")}
           text={claudeCommand}
-          label="CLI command"
+          label={translateUi("CLI command")}
         />
         <McpCode
-          title="Or add manually · .claude/settings.json or .mcp.json"
+          title={translateUi("Or add manually · .claude/settings.json or .mcp.json")}
           text={claudeConfig}
-          label="Claude Code config"
+          label={translateUi("Claude Code config")}
         />
       </GroupedList>
       <GroupedList
-        title="Install to Codex"
-        footer="Run this command in your terminal to add NyxID as an MCP server in Codex CLI."
+        title={translateUi("Install to Codex")}
+        footer={translateUi("Run this command in your terminal to add NyxID as an MCP server in Codex CLI.")}
       >
         <McpCode
-          title="Terminal command"
+          title={translateUi("Terminal command")}
           text={codexCommand}
-          label="CLI command"
+          label={translateUi("CLI command")}
         />
         <McpCode
-          title="Or add manually · ~/.codex/config.toml"
+          title={translateUi("Or add manually · ~/.codex/config.toml")}
           text={codexConfig}
-          label="Codex config"
+          label={translateUi("Codex config")}
         />
       </GroupedList>
       <GroupedList
-        title="How it works"
-        footer="When your MCP client connects for the first time, NyxID will open an OAuth flow in your browser to authenticate. Once authenticated, the proxy exposes tools from all your connected services. Tool calls are forwarded to each service's API with your credentials injected automatically."
+        title={translateUi("How it works")}
+        footer={translateUi("When your MCP client connects for the first time, NyxID will open an OAuth flow in your browser to authenticate. Once authenticated, the proxy exposes tools from all your connected services. Tool calls are forwarded to each service's API with your credentials injected automatically.")}
       />
     </div>
   );
@@ -926,6 +911,7 @@ function McpCode({
   readonly text: string;
   readonly label: string;
 }) {
+  useUiTranslation();
   return (
     <GroupedRow className="relative block space-y-1 pr-12">
       <p className="text-13 text-text-tertiary">{title}</p>
@@ -942,6 +928,7 @@ function McpCode({
 // ---------------------------------------------------------------------------
 
 function SessionsTab() {
+  useUiTranslation();
   const { data: sessions, isLoading } = useQuery({
     queryKey: ["sessions"],
     queryFn: async (): Promise<readonly Session[]> => {
@@ -962,13 +949,13 @@ function SessionsTab() {
     try {
       await revokeMutation.mutateAsync(revokeTarget.id);
       toast.success(
-        revokeTarget.is_current
+        translateUi(revokeTarget.is_current
           ? "Session revoked. Signing you out…"
-          : "Session revoked",
+          : "Session revoked"),
       );
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to revoke session",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to revoke session"),
       );
     } finally {
       setRevokeTarget(null);
@@ -982,16 +969,16 @@ function SessionsTab() {
   return (
     <div className="space-y-6">
       <GroupedList
-        title="Active sessions"
-        footer="Manage your active sessions across devices."
+        title={translateUi("Active sessions")}
+        footer={translateUi("Manage your active sessions across devices.")}
       >
         <GroupedRow asChild interactive>
-          <Link to="/login/code">Generate terminal login code</Link>
+          <Link to="/login/code">{translateUi("Generate terminal login code")}</Link>
         </GroupedRow>
         {!sessions?.length ? (
           <GroupedRow
-            title="No Active Sessions"
-            description="Your active sessions across devices will appear here."
+            title={translateUi("No Active Sessions")}
+            description={translateUi("Your active sessions across devices will appear here.")}
           />
         ) : (
           sessions.map((session) => {
@@ -1004,15 +991,15 @@ function SessionsTab() {
                   <span className="flex flex-wrap items-center gap-2">
                     {deviceLabel}
                     {session.is_current && (
-                      <Badge variant="success">Current</Badge>
+                      <Badge variant="success">{translateUi("Current")}</Badge>
                     )}
                   </span>
                 }
                 description={
                   <div className="space-y-1">
-                    <p>IP Address: {humanizeIpAddress(session.ip_address)}</p>
-                    <p>Signed in: {formatDate(session.created_at)}</p>
-                    <p>Expires: {formatDate(session.expires_at)}</p>
+                    <p>{translateUi("IP Address: ")}{humanizeIpAddress(session.ip_address)}</p>
+                    <p>{translateUi("Signed in: ")}{formatDate(session.created_at)}</p>
+                    <p>{translateUi("Expires: ")}{formatDate(session.expires_at)}</p>
                   </div>
                 }
                 accessory={
@@ -1023,8 +1010,8 @@ function SessionsTab() {
                     onClick={() => setRevokeTarget(session)}
                     aria-label={
                       session.is_current
-                        ? "Revoke current session and sign out"
-                        : `Revoke session on ${deviceLabel}`
+                        ? translateUi("Revoke current session and sign out")
+                        : translateUi("Revoke session on {{value1}}", { value1: deviceLabel })
                     }
                   >
                     <Trash2 className="h-4 w-4" />
@@ -1046,41 +1033,33 @@ function SessionsTab() {
           <DialogHeader>
             <DialogTitle>
               {revokeTarget?.is_current
-                ? "Sign out of this session?"
-                : "Revoke session?"}
+                ? translateUi("Sign out of this session?")
+                : translateUi("Revoke session?")}
             </DialogTitle>
             <DialogDescription>
               {revokeTarget?.is_current ? (
-                <>
-                  This is the session you&apos;re currently using on{" "}
+                <>{translateUi("This is the session you're currently using on")}{" "}
                   <span className="font-medium">
                     {humanizeUserAgent(revokeTarget?.user_agent)}
                   </span>
-                  . Revoking it will sign you out immediately and you&apos;ll
-                  need to sign in again.
-                </>
+                  {translateUi(". Revoking it will sign you out immediately and you'll need to sign in again. ")}</>
               ) : (
-                <>
-                  This will immediately invalidate the session on{" "}
+                <>{translateUi("This will immediately invalidate the session on")}{" "}
                   <span className="font-medium">
                     {humanizeUserAgent(revokeTarget?.user_agent)}
                   </span>
-                  . The person using it will be signed out next time they load a
-                  page.
-                </>
+                  {translateUi(". The person using it will be signed out next time they load a page. ")}</>
               )}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="bg-background">
-            <Button variant="outline" onClick={() => setRevokeTarget(null)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setRevokeTarget(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleRevoke()}
               isLoading={revokeMutation.isPending}
             >
-              {revokeTarget?.is_current ? "Revoke and sign out" : "Revoke"}
+              {revokeTarget?.is_current ? translateUi("Revoke and sign out") : translateUi("Revoke")}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1090,6 +1069,7 @@ function SessionsTab() {
 }
 
 function PrivacyTab() {
+  useUiTranslation();
   const consentEnabled = useConsentStore((s) => s.enabled);
   const persistenceError = useConsentStore((s) => s.persistenceError);
   const setConsent = useConsentStore((s) => s.setConsent);
@@ -1109,7 +1089,7 @@ function PrivacyTab() {
       await permission.refetch();
     } catch {
       toast.error(
-        "Could not save account analytics permission. This browser remains off; retry to withdraw across devices.",
+        translateErrorMessage("Could not save account analytics permission. This browser remains off; retry to withdraw across devices."),
       );
     } finally {
       setSaving(false);
@@ -1118,55 +1098,41 @@ function PrivacyTab() {
 
   return (
     <GroupedList
-      title="Usage analytics"
+      title={translateUi("Usage analytics")}
       footer={
         <>
-          <p>
-            Optional usage events are linked to your account. Account permission
-            applies across devices. Each device must also opt in locally; Do Not
-            Track always disables collection. Security audit and billing records
-            have separate retention rules.
-          </p>
+          <p>{translateUi("Optional usage events are linked to your account. Account permission applies across devices. Each device must also opt in locally; Do Not Track always disables collection. Security audit and billing records have separate retention rules.")}</p>
           {persistenceError && (
             <div role="alert" className="space-y-2">
-              <p>
-                This browser's choice could not be saved. Analytics is off in
-                this session; retry before closing this page.
-              </p>
+              <p>{translateUi("This browser's choice could not be saved. Analytics is off in this session; retry before closing this page.")}</p>
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => setConsent(false)}
-              >
-                Retry saving browser choice
-              </Button>
+              >{translateUi("Retry saving browser choice")}</Button>
             </div>
           )}
-          <p>
-            For the full disclosure of what we collect, how it's stored, and
-            retention windows, see the{" "}
+          <p>{translateUi("For the full disclosure of what we collect, how it's stored, and retention windows, see the")}{" "}
             <a
               href="/privacy"
               className="underline underline-offset-2 hover:text-foreground"
-            >
-              privacy policy
-            </a>
+            >{translateUi("privacy policy")}</a>
             .
           </p>
         </>
       }
     >
       <GroupedRow
-        title="Allow account usage analytics"
+        title={translateUi("Allow account usage analytics")}
         description={
           <span role="status">
             {permission.isFetching
-              ? "Loading account permission…"
+              ? translateUi("Loading account permission…")
               : permission.isError
-                ? "Account permission unavailable"
+                ? translateUi("Account permission unavailable")
                 : permission.data?.enabled
-                  ? "Account permission enabled"
-                  : "Account permission disabled"}
+                  ? translateUi("Account permission enabled")
+                  : translateUi("Account permission disabled")}
           </span>
         }
         accessory={
@@ -1177,9 +1143,7 @@ function PrivacyTab() {
                 size="sm"
                 isLoading={permission.isFetching}
                 onClick={() => void permission.refetch()}
-              >
-                Retry
-              </Button>
+              >{translateUi("Retry")}</Button>
             )}
             <Switch
               checked={permission.data?.enabled === true}
@@ -1191,13 +1155,13 @@ function PrivacyTab() {
                 permission.isFetching
               }
               onCheckedChange={(next) => void handleToggle(next)}
-              aria-label="Allow account usage analytics"
+              aria-label={translateUi("Allow account usage analytics")}
             />
           </>
         }
       />
       <GroupedRow
-        title="Allow on this browser"
+        title={translateUi("Allow on this browser")}
         accessory={
           <Switch
             checked={consentEnabled}
@@ -1211,7 +1175,7 @@ function PrivacyTab() {
               setConsent(next);
               if (!next) disableTelemetry();
             }}
-            aria-label="Allow usage analytics on this browser"
+            aria-label={translateUi("Allow usage analytics on this browser")}
           />
         }
       />

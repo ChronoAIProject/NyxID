@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { GroupAgentAccessRequest } from "./group-agent-access";
 import { groupAgentUnavailableReason } from "@/lib/assistant/nyxbot-labels";
 import { CollaborationSettings, CollaborationCards } from "./collaboration-group-controls";
@@ -86,6 +89,7 @@ export const COLLABORATION_COMPOSER_PLACEHOLDER =
   "Message the group — @mention a person or agent";
 
 function WorkingDots() {
+  useUiTranslation();
   return (
     <span aria-hidden="true" className="flex items-center gap-1">
       {[0, 120, 240].map((delay) => (
@@ -104,6 +108,7 @@ function UserText({ text, names, mentions = [] }: {
   readonly names: readonly string[];
   readonly mentions?: readonly InlineMention[];
 }) {
+  useUiTranslation();
   return <>{mentionSegments(text, [...names, ...mentions.map((m) => m.handle)]).map((segment, index) => {
     const mention = segment.mention ? mentions.find((m) => m.handle.toLowerCase() === segment.text.slice(1).toLowerCase()) : undefined;
     return mention
@@ -139,6 +144,7 @@ export function GroupMessageRow({
   readonly participants?: readonly MentionPerson[];
   readonly onOpenAgent: (agentId: string) => void;
 }) {
+  useUiTranslation();
   const feedback = useReplyFeedback({
     scope: "group",
     parentId: groupId,
@@ -152,7 +158,7 @@ export function GroupMessageRow({
       <div className="min-w-0 px-8">
         <p
           role="note"
-          aria-label="Group notice"
+          aria-label={translateUi("Group notice")}
           className="text-center text-13 text-text-tertiary"
         >
           {/* Name the agent unless the notice already starts with it
@@ -210,7 +216,7 @@ export function GroupMessageRow({
   const handle = agentHandle(agent);
   return (
     <article
-      aria-label={`Message from ${title}`}
+      aria-label={translateUi("Message from {{value1}}", { value1: title })}
       className="grid grid-cols-[30px_minmax(0,1fr)] items-start"
     >
       <button
@@ -229,10 +235,10 @@ export function GroupMessageRow({
             <span className="text-13 text-text-tertiary">{handle}</span>
           ) : null}
           {agent.kind === "nyxbot" ? (
-            <span className="text-12 text-text-tertiary">Personal agent</span>
+            <span className="text-12 text-text-tertiary">{translateUi("Personal agent")}</span>
           ) : null}
           <MessageTime value={message.created_at} />
-          {message.requester_user_id ? <span className="text-13 text-text-tertiary">For {participants.find((p) => p.id === message.requester_user_id)?.display_name ?? "participant"}{message.execution_mode === "guest" ? " · Guest reply (owner pays)" : ""}</span> : null}
+          {message.requester_user_id ? <span className="text-13 text-text-tertiary">{translateUi("For ")}{participants.find((p) => p.id === message.requester_user_id)?.display_name ?? translateUi("participant")}{message.execution_mode === "guest" ? translateUi(" · Guest reply (owner pays)") : ""}</span> : null}
         </div>
         <div className="px-px text-foreground">
           {message.activities
@@ -283,6 +289,7 @@ function GroupTranscript({
   readonly onOpenAgent: (agentId: string) => void;
   readonly bottomInset: number;
 }) {
+  useUiTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
   const lastScrollTop = useRef(0);
@@ -348,7 +355,7 @@ function GroupTranscript({
     try {
       await onLoadOlder();
     } catch {
-      toast.error("Could not load earlier messages. Try again.");
+      toast.error(translateErrorMessage("Could not load earlier messages. Try again."));
     } finally {
       setLoadingOlder(false);
       // Keep the reader's place once older messages are prepended.
@@ -381,14 +388,10 @@ function GroupTranscript({
               className="self-center"
               isLoading={loadingOlder}
               onClick={() => void loadOlder()}
-            >
-              Load earlier messages
-            </Button>
+            >{translateUi("Load earlier messages")}</Button>
           ) : null}
           {!messages.length ? (
-            <p className="flex flex-1 items-center justify-center px-6 text-center text-14 text-text-tertiary">
-              Say hello. Mention an agent with @ to ask it directly.
-            </p>
+            <p className="flex flex-1 items-center justify-center px-6 text-center text-14 text-text-tertiary">{translateUi("Say hello. Mention an agent with @ to ask it directly.")}</p>
           ) : null}
           {messages.map((message) => (
             <GroupMessageRow
@@ -404,7 +407,7 @@ function GroupTranscript({
           {working.length ? (
             <div
               role="status"
-              aria-label="Agents working"
+              aria-label={translateUi("Agents working")}
               className="grid grid-cols-[30px_minmax(0,1fr)] items-center"
             >
               <span className="flex w-6 justify-center">
@@ -432,6 +435,7 @@ function MemberButton({
   readonly size: "sm" | "md";
   readonly onOpen: () => void;
 }) {
+  useUiTranslation();
   const handle = agentHandle(member);
   return (
     <Tooltip>
@@ -439,7 +443,7 @@ function MemberButton({
         <button
           type="button"
           onClick={onOpen}
-          aria-label={`${agentTitle(member)}${member.destroyed ? " (destroyed)" : member.unavailable ? " (unavailable)" : member.shared ? " (shared agent)" : ""} — agent details`}
+          aria-label={translateUi("{{value1}}{{value2}} — agent details", { value1: agentTitle(member), value2: member.destroyed ? translateUi(" (destroyed)") : member.unavailable ? translateUi(" (unavailable)") : member.shared ? translateUi(" (shared agent)") : "" })}
           className={cn(
             "relative rounded-full transition-opacity hover:opacity-80",
             (member.destroyed || member.unavailable) && "opacity-50",
@@ -457,7 +461,7 @@ function MemberButton({
       <TooltipContent side="bottom" className="text-13">
         <p className="font-medium">{agentTitle(member)}</p>
         {handle ? <p className="text-text-tertiary">{handle}</p> : null}
-        {member.unavailable ? <p>{groupAgentUnavailableReason(member)}</p> : member.shared ? <p>Shared agent{member.owner_name ? ` · ${member.owner_name}` : ""}</p> : null}
+        {member.unavailable ? <p>{groupAgentUnavailableReason(member)}</p> : member.shared ? <p>{translateUi("Shared agent")}{member.owner_name ? ` · ${member.owner_name}` : ""}</p> : null}
       </TooltipContent>
     </Tooltip>
   );
@@ -472,6 +476,7 @@ function GroupHeader({
   readonly onOpenAgent: (agentId: string) => void;
   readonly onOpenSettings: () => void;
 }) {
+  useUiTranslation();
   const lead = group?.members.find(
     (member) => member.id === group.lead_agent_id,
   );
@@ -483,11 +488,11 @@ function GroupHeader({
         <HeaderBar>
           <HeaderItem className="flex h-7 min-w-0 items-center">
             <h2 className={cn("truncate text-foreground", compact ? "type-secondary-strong" : "type-card-title")}>
-              {group?.name ?? "Loading group…"}
+              {group?.name ?? translateUi("Loading group…")}
             </h2>
           </HeaderItem>
           <HeaderItem
-            aria-label="Members"
+            aria-label={translateUi("Members")}
             role="group"
             className={cn("flex shrink-0 items-center", compact ? "gap-0.5" : "gap-1")}
           >
@@ -508,25 +513,24 @@ function GroupHeader({
                 aria-hidden="true"
                 className="h-1.5 w-1.5 animate-pulse rounded-full bg-success"
               />
-              {working} working
-            </HeaderItem>
+              {working}{translateUi(" working")}</HeaderItem>
           ) : null}
           {group ? <HeaderItem className="ml-auto">
             <Button
               size={compact ? "icon" : "sm"}
               variant="ghost"
-              aria-label="Group settings"
-              title="Group settings"
+              aria-label={translateUi("Group settings")}
+              title={translateUi("Group settings")}
               onClick={onOpenSettings}
             >
               <Settings2 aria-hidden="true" />
-              <span className={compact ? "sr-only" : undefined}>Settings</span>
+              <span className={compact ? "sr-only" : undefined}>{translateUi("Settings")}</span>
             </Button>
           </HeaderItem> : null}
         </HeaderBar>
         {compact ? null : (
           <p className="text-13 text-text-tertiary">
-            {group?.collaboration ? "Everyone in the group sees your messages. Select agents for a reply, or remove all recipients to chat with people only." : group ? `${lead ? `Messages go to ${agentTitle(lead)}` : "Messages go to the first agent"}; selected recipients stay active until changed. @mention someone to change them.` : "Loading members…"}
+            {group?.collaboration ? translateUi("Everyone in the group sees your messages. Select agents for a reply, or remove all recipients to chat with people only.") : group ? translateUi("{{value1}}; selected recipients stay active until changed. @mention someone to change them.", { value1: lead ? translateUi("Messages go to {{agent}}", { agent: agentTitle(lead) }) : translateUi("Messages go to the first agent") }) : translateUi("Loading members…")}
           </p>
         )}
       </div>
@@ -560,6 +564,7 @@ export function GroupPendingActions({
     decision: "allow" | "deny",
   ) => Promise<void>;
 }) {
+  useUiTranslation();
   const actorId = useAuthStore((state) => state.user?.id);
   if (!actions.length) return null;
   return (
@@ -572,7 +577,7 @@ export function GroupPendingActions({
       />
       <div
         className="mx-auto w-full max-w-3xl space-y-1.5 px-4 pb-2"
-        aria-label="Actions waiting for you"
+        aria-label={translateUi("Actions waiting for you")}
       >
         {actions.map((action) => {
           const member = members.find(
@@ -584,21 +589,20 @@ export function GroupPendingActions({
             <div
               key={action.acknowledgement_id ?? action.approval_request_id}
               role="region"
-              aria-label={`Confirm: ${action.summary}`}
+              aria-label={translateUi("Confirm: {{value1}}", { value1: action.summary })}
               className="flex items-center gap-3 rounded-lg border border-border bg-overlay px-3 py-2"
             >
               <p className="min-w-0 flex-1 text-14 text-foreground">
-                <span className="font-medium">{who}</span> wants to:{" "}
+                <span className="font-medium">{who}</span>{translateUi(" wants to:")}{" "}
                 {action.summary}
               </p>
               {action.authored_skill ? (
                 action.acknowledgement_id && (!action.triggering_person || action.triggering_person.id === actorId) ? (
-                  <Button size="sm" variant="outline" asChild><Link to="/assistant" search={{ c: action.conversation_id, card: action.acknowledgement_id }}>Review draft</Link></Button>
-                ) : <span className="text-13 text-muted-foreground">Awaiting {action.triggering_person?.display_name ?? "owner"} review</span>
+                  <Button size="sm" variant="outline" asChild><Link to="/assistant" search={{ c: action.conversation_id, card: action.acknowledgement_id }}>{translateUi("Review draft")}</Link></Button>
+                ) : <span className="text-13 text-muted-foreground">{translateUi("Awaiting ")}{action.triggering_person?.display_name ?? translateUi("owner")}{translateUi(" review")}</span>
               ) : action.triggering_person ? (
                 <>
-                  <span className="text-13 text-muted-foreground">
-                    Awaiting {action.triggering_person.display_name}
+                  <span className="text-13 text-muted-foreground">{translateUi("Awaiting ")}{action.triggering_person.display_name}
                   </span>
                   {action.can_decide ? (
                     <>
@@ -607,16 +611,12 @@ export function GroupPendingActions({
                         variant="outline"
                         disabled={sending}
                         onClick={() => void onDecide?.(action, "deny")}
-                      >
-                        Deny
-                      </Button>
+                      >{translateUi("Deny")}</Button>
                       <Button
                         size="sm"
                         disabled={sending}
                         onClick={() => void onDecide?.(action, "allow")}
-                      >
-                        Allow
-                      </Button>
+                      >{translateUi("Allow")}</Button>
                     </>
                   ) : null}
                 </>
@@ -627,16 +627,12 @@ export function GroupPendingActions({
                 variant="outline"
                 disabled={sending}
                 onClick={() => void onAnswer(`no ${code}`)}
-              >
-                Cancel
-              </Button>
+              >{translateUi("Cancel")}</Button>
                   <Button
                     size="sm"
                     disabled={sending}
                     onClick={() => void onAnswer(action.confirm_phrase!)}
-                  >
-                Confirm
-              </Button>
+                  >{translateUi("Confirm")}</Button>
                 </>
               ) : null}
             </div>
@@ -664,15 +660,16 @@ export function GroupRecipientPills({
   readonly onRemove: (id: string) => void;
   readonly onAdd: (id: string) => void;
 }) {
+  useUiTranslation();
   const live = members.filter((member) => !member.destroyed && !member.unavailable);
   const others = live.filter((member) => !recipientIds.includes(member.id));
   return (
     <div
       role="group"
-      aria-label="Message recipients"
+      aria-label={translateUi("Message recipients")}
       className="mb-2 flex flex-wrap items-center gap-1.5"
     >
-      <span className="text-13 text-muted-foreground">To</span>
+      <span className="text-13 text-muted-foreground">{translateUi("To")}</span>
       {recipientIds.flatMap((id) => {
         const member = live.find((row) => row.id === id);
         return member
@@ -683,17 +680,17 @@ export function GroupRecipientPills({
                 size="sm"
                 variant="secondary"
                 className="rounded-full"
-                aria-label={`Remove recipient ${agentTitle(member)}`}
+                aria-label={translateUi("Remove recipient {{value1}}", { value1: agentTitle(member) })}
                 onClick={() => onRemove(id)}
               >
-                {agentTitle(member)}{member.shared ? ` · Shared agent${member.owner_name ? ` · ${member.owner_name}` : ""}` : ""} ×
+                {agentTitle(member)}{member.shared ? translateUi(" · Shared agent{{value1}}", { value1: member.owner_name ? ` · ${member.owner_name}` : "" }) : ""} ×
               </Button>,
             ]
           : [];
       })}
       {recipientIds.length ? null : (
         <span role="status" className="text-13 text-muted-foreground">
-          {group?.collaboration ? "Everyone in the group · no agent reply" : "Choose at least one recipient."}
+          {group?.collaboration ? translateUi("Everyone in the group · no agent reply") : translateUi("Choose at least one recipient.")}
         </span>
       )}
       {others.length || (group?.collaboration && members.some((m) => m.unavailable || m.destroyed)) ? (
@@ -704,15 +701,13 @@ export function GroupRecipientPills({
               size="sm"
               variant="ghost"
               className="rounded-full"
-              aria-label="Add recipient"
-            >
-              + Add
-            </Button>
+              aria-label={translateUi("Add recipient")}
+            >{translateUi("+ Add")}</Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
             {others.map((member) => (
               <DropdownMenuItem key={member.id} onSelect={() => onAdd(member.id)}>
-                {agentTitle(member)}{member.shared ? " · Shared agent" : ""}
+                {agentTitle(member)}{member.shared ? translateUi(" · Shared agent") : ""}
               </DropdownMenuItem>
             ))}
             {group?.collaboration ? members.filter((m) => m.unavailable || m.destroyed).map((member) => (
@@ -736,6 +731,7 @@ export function NyxAgentGroupPage({
   readonly groupId: string;
   readonly mock: boolean;
 }) {
+  useUiTranslation();
   const navigate = useNavigate();
   const user = useAuthStore((state) => state.user);
   const agents = useNyxBotAgents();
@@ -745,7 +741,7 @@ export function NyxAgentGroupPage({
   function reportError(error: unknown, fallback: string) {
     const message = error instanceof Error ? error.message : fallback;
     setRequestError({ owner: user?.id, message });
-    toast.error(assistantErrorSummary(message));
+    toast.error(translateErrorMessage(assistantErrorSummary(message)));
   }
   const decideApproval = useDecideApproval();
   const composerRef = useRef<HTMLDivElement>(null);
@@ -820,7 +816,7 @@ export function NyxAgentGroupPage({
   return (
     <AssistantShell
       resizableContent
-      title={group?.name ?? "Group"}
+      title={group?.name ?? translateUi("Group")}
       contentTitle
       sidebar={
         <AssistantEngineSidebar
@@ -834,7 +830,7 @@ export function NyxAgentGroupPage({
       }
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
-        <AssistantErrorNotice message={transcript.error ? `Could not open this group. ${transcript.error.message}` : requestError?.owner === user?.id ? requestError?.message : undefined} />
+        <AssistantErrorNotice message={transcript.error ? translateUi("Could not open this group. {{value1}}", { value1: transcript.error.message }) : requestError?.owner === user?.id ? requestError?.message : undefined} />
         {group || !transcript.error ? (
           <GroupHeader
             group={group}
@@ -869,14 +865,10 @@ export function NyxAgentGroupPage({
           </>
         ) : transcript.error ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-            <Button variant="outline" size="sm" onClick={() => goTo()}>
-              Back to home
-            </Button>
+            <Button variant="outline" size="sm" onClick={() => goTo()}>{translateUi("Back to home")}</Button>
           </div>
         ) : (
-          <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">
-            Loading group...
-          </div>
+          <div className="flex flex-1 items-center justify-center text-14 text-text-tertiary">{translateUi("Loading group...")}</div>
         )}
         <AgentDetailsSheet
           agentId={detailsAgentId}
@@ -895,7 +887,7 @@ export function NyxAgentGroupPage({
           {group?.collaboration?.your_request_ids.length ? <div className="mx-auto flex max-w-3xl justify-end px-4"><Button size="sm" onClick={async () => {
             try {for (const request of group.collaboration!.your_request_ids) await collaborationApi.cancel(group.id, request); await transcript.refetch();}
             catch (cause) {reportError(cause,"Could not stop your group work.");}
-          }}>Stop my work</Button></div> : null}
+          }}>{translateUi("Stop my work")}</Button></div> : null}
           <GroupPendingActions
             actions={
               transcript.error ? [] : (transcript.data?.pending_actions ?? [])
@@ -952,7 +944,7 @@ export function NyxAgentGroupPage({
               setRequestError(undefined);
               if (!group?.collaboration && recipients.edited && !recipients.ids.length) {
                 const error = new Error("Choose at least one recipient.");
-                toast.error(error.message);
+                toast.error(translateErrorMessage(error.message));
                 throw error;
               }
               try {

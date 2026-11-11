@@ -1,3 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { Label, FieldHelp } from "@/components/ui/label";
 import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
@@ -75,6 +79,7 @@ export function DeveloperAppDetail({
   clientId,
   backTo,
 }: DeveloperAppDetailProps) {
+  useUiTranslation();
   const navigate = useNavigate();
   const { data: app, isLoading } = useDeveloperApp(clientId);
   useBreadcrumbLabel(app?.client_name);
@@ -115,12 +120,12 @@ export function DeveloperAppDetail({
     const parsedUris = parseRedirectUris(redirectUrisText);
 
     if (!name.trim()) {
-      toast.error("Name is required");
+      toast.error(translateErrorMessage("Name is required"));
       return;
     }
 
     if (parsedUris.error) {
-      toast.error(parsedUris.error);
+      toast.error(translateErrorMessage(parsedUris.error));
       return;
     }
 
@@ -134,10 +139,10 @@ export function DeveloperAppDetail({
           default_service_catalog_slugs: editDefaultSlugs,
         },
       });
-      toast.success("Application updated");
+      toast.success(translateUi("Application updated"));
       setEditOpen(false);
     } catch (error) {
-      toast.error(error instanceof ApiError ? error.message : "Update failed");
+      toast.error(translateErrorMessage(error instanceof ApiError ? error.message : "Update failed"));
     }
   }
 
@@ -148,9 +153,9 @@ export function DeveloperAppDetail({
       setRotatedSecret(result.client_secret);
       setRotateOpen(false);
       setSecretOpen(true);
-      toast.success("Client secret rotated");
+      toast.success(translateUi("Client secret rotated"));
     } catch (error) {
-      toast.error(error instanceof ApiError ? error.message : "Rotate failed");
+      toast.error(translateErrorMessage(error instanceof ApiError ? error.message : "Rotate failed"));
     }
   }
 
@@ -158,11 +163,11 @@ export function DeveloperAppDetail({
     if (!app) return;
     try {
       await deleteMutation.mutateAsync(app.id);
-      toast.success("Application deactivated");
+      toast.success(translateUi("Application deactivated"));
       setDeleteOpen(false);
       void navigate({ to: backTo.to, search: () => backTo.search ?? {} });
     } catch (error) {
-      toast.error(error instanceof ApiError ? error.message : "Delete failed");
+      toast.error(translateErrorMessage(error instanceof ApiError ? error.message : "Delete failed"));
     }
   }
 
@@ -179,17 +184,12 @@ export function DeveloperAppDetail({
   if (!app) {
     return (
       <div className="space-y-4">
-        <h2 className="type-metric md:type-metric tracking-tight">
-          Developer App
-        </h2>
-        <p className="text-muted-foreground">
-          App not found or you do not have access.
-        </p>
+        <h2 className="type-metric md:type-metric tracking-tight">{translateUi("Developer App")}</h2>
+        <p className="text-muted-foreground">{translateUi("App not found or you do not have access.")}</p>
         <Button
           variant="outline"
           onClick={() => void navigate({ to: backTo.to, search: () => backTo.search ?? {} })}
-        >
-          Back to {backTo.label}
+        >{translateUi("Back to ")}{backTo.label}
         </Button>
       </div>
     );
@@ -199,55 +199,43 @@ export function DeveloperAppDetail({
     <div className="space-y-8">
       <PageHeader
         title={app.client_name}
-        description="Client details, redirect URIs, and OAuth metadata."
+        description={translateUi("Client details, redirect URIs, and OAuth metadata.")}
         actions={
           <>
-            <Button variant="outline" onClick={openEditDialog}>
-              Edit
-            </Button>
+            <Button variant="outline" onClick={openEditDialog}>{translateUi("Edit")}</Button>
             {app.client_type === "confidential" && (
               <Button
                 variant="outline"
                 onClick={() => setRotateOpen(true)}
-              >
-                Rotate Secret
-              </Button>
+              >{translateUi("Rotate Secret")}</Button>
             )}
-            <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
-              Deactivate
-            </Button>
+            <Button variant="destructive" onClick={() => setDeleteOpen(true)}>{translateUi("Deactivate")}</Button>
           </>
         }
       />
 
       <Card>
         <CardHeader>
-          <CardTitle>Credentials</CardTitle>
-          <CardDescription>
-            These values identify your OAuth client.
-          </CardDescription>
+          <CardTitle>{translateUi("Credentials")}</CardTitle>
+          <CardDescription>{translateUi("These values identify your OAuth client.")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-wrap gap-2">
             <Badge variant="secondary">{app.client_type}</Badge>
             <Badge variant={app.is_active ? "success" : "secondary"}>
-              {app.is_active ? "Active" : "Inactive"}
+              {app.is_active ? translateUi("Active") : translateUi("Inactive")}
             </Badge>
           </div>
           <div className="space-y-1">
-            <p className="text-13 uppercase tracking-wide text-text-tertiary">
-              Client ID
-            </p>
+            <p className="text-13 uppercase tracking-wide text-text-tertiary">{translateUi("Client ID")}</p>
             <p className="break-all font-mono text-14 text-foreground">
               {app.id}
             </p>
           </div>
           <div className="space-y-1">
-            <p className="text-13 uppercase tracking-wide text-text-tertiary">
-              Created At
-            </p>
+            <p className="text-13 uppercase tracking-wide text-text-tertiary">{translateUi("Created At")}</p>
             <p className="text-14 text-foreground">
-              {new Date(app.created_at).toLocaleString()}
+              {new Date(app.created_at).toLocaleString(getFormattingLocale())}
             </p>
           </div>
         </CardContent>
@@ -255,10 +243,8 @@ export function DeveloperAppDetail({
 
       <Card>
         <CardHeader>
-          <CardTitle>Redirect URIs</CardTitle>
-          <CardDescription>
-            OAuth callback destinations configured for this client.
-          </CardDescription>
+          <CardTitle>{translateUi("Redirect URIs")}</CardTitle>
+          <CardDescription>{translateUi("OAuth callback destinations configured for this client.")}</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           {app.redirect_uris.map((uri) => (
@@ -270,20 +256,15 @@ export function DeveloperAppDetail({
             </div>
           ))}
           {app.redirect_uris.length === 0 && (
-            <p className="text-14 text-muted-foreground">
-              No redirect URIs configured.
-            </p>
+            <p className="text-14 text-muted-foreground">{translateUi("No redirect URIs configured.")}</p>
           )}
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>Allowed Scopes</CardTitle>
-          <CardDescription>
-            OIDC scopes this client can request. Determines what user data and
-            NyxID capabilities are included in tokens.
-          </CardDescription>
+          <CardTitle>{translateUi("Allowed Scopes")}</CardTitle>
+          <CardDescription>{translateUi("OIDC scopes this client can request. Determines what user data and NyxID capabilities are included in tokens.")}</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="flex flex-wrap gap-2">
@@ -301,12 +282,8 @@ export function DeveloperAppDetail({
 
       <Card>
         <CardHeader>
-          <CardTitle>Default Services</CardTitle>
-          <CardDescription>
-            Services this app requests by default. The consent screen
-            pre-selects the user&apos;s matching services; users can always
-            adjust before approving.
-          </CardDescription>
+          <CardTitle>{translateUi("Default Services")}</CardTitle>
+          <CardDescription>{translateUi("Services this app requests by default. The consent screen pre-selects the user's matching services; users can always adjust before approving.")}</CardDescription>
         </CardHeader>
         <CardContent>
           {(app.default_service_catalog_slugs ?? []).length > 0 ? (
@@ -318,10 +295,7 @@ export function DeveloperAppDetail({
               ))}
             </div>
           ) : (
-            <p className="text-14 text-muted-foreground">
-              No default services declared. Users see a sign-in-only consent
-              unless they customize.
-            </p>
+            <p className="text-14 text-muted-foreground">{translateUi("No default services declared. Users see a sign-in-only consent unless they customize.")}</p>
           )}
         </CardContent>
       </Card>
@@ -335,16 +309,12 @@ export function DeveloperAppDetail({
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Edit Developer App</DialogTitle>
-            <DialogDescription>
-              Update application name and redirect URIs.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Edit Developer App")}</DialogTitle>
+            <DialogDescription>{translateUi("Update application name and redirect URIs.")}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="edit-app-name">
-                Application Name
-              </Label>
+              <Label htmlFor="edit-app-name">{translateUi("Application Name")}</Label>
               <Input
                 id="edit-app-name"
                 value={name}
@@ -355,9 +325,7 @@ export function DeveloperAppDetail({
               <Label
 
                 htmlFor="edit-redirect-uris"
-              >
-                Redirect URIs (one per line)
-              </Label>
+              >{translateUi("Redirect URIs (one per line)")}</Label>
               <textarea
                 id="edit-redirect-uris"
                 value={redirectUrisText}
@@ -366,7 +334,7 @@ export function DeveloperAppDetail({
               />
             </div>
             <div className="space-y-3">
-              <Label>Allowed Scopes</Label>
+              <Label>{translateUi("Allowed Scopes")}</Label>
               <div className="space-y-2">
                 {OIDC_SCOPES.map((scope) => (
                   <div key={scope.id} className="flex items-start gap-2">
@@ -389,9 +357,7 @@ export function DeveloperAppDetail({
                       >
                         {scope.label}
                         {scope.required && (
-                          <FieldHelp className="ml-1 text-muted-foreground">
-                            (required)
-                          </FieldHelp>
+                          <FieldHelp className="ml-1 text-muted-foreground">{translateUi("(required)")}</FieldHelp>
                         )}
                       </Label>
                       {"hint" in scope && scope.hint && (
@@ -406,13 +372,8 @@ export function DeveloperAppDetail({
             </div>
             <div className="space-y-3">
               <div>
-                <Label>
-                  Default Services
-                </Label>
-                <p className="text-13 text-muted-foreground">
-                  Catalog services this app requests at consent time. Users
-                  keep the final say.
-                </p>
+                <Label>{translateUi("Default Services")}</Label>
+                <p className="text-13 text-muted-foreground">{translateUi("Catalog services this app requests at consent time. Users keep the final say.")}</p>
               </div>
               <div className="max-h-48 space-y-2 overflow-y-auto pr-1">
                 {(catalog ?? []).map((entry) => (
@@ -442,24 +403,18 @@ export function DeveloperAppDetail({
                   </div>
                 ))}
                 {(catalog ?? []).length === 0 && (
-                  <p className="text-13 text-muted-foreground">
-                    No catalog services available.
-                  </p>
+                  <p className="text-13 text-muted-foreground">{translateUi("No catalog services available.")}</p>
                 )}
               </div>
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setEditOpen(false)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setEditOpen(false)}>{translateUi("Cancel")}</Button>
             <Button
               variant="primary"
               onClick={() => void handleSave()}
               isLoading={updateMutation.isPending}
-            >
-              Save
-            </Button>
+            >{translateUi("Save")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -473,23 +428,16 @@ export function DeveloperAppDetail({
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Deactivate Application</DialogTitle>
-            <DialogDescription>
-              This will disable OAuth authorization for this app. Existing
-              tokens may stop working depending on downstream policy.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Deactivate Application")}</DialogTitle>
+            <DialogDescription>{translateUi("This will disable OAuth authorization for this app. Existing tokens may stop working depending on downstream policy.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteOpen(false)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleDelete()}
               isLoading={deleteMutation.isPending}
-            >
-              Deactivate
-            </Button>
+            >{translateUi("Deactivate")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -497,24 +445,16 @@ export function DeveloperAppDetail({
       <Dialog open={rotateOpen} onOpenChange={setRotateOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Rotate client secret?</DialogTitle>
-            <DialogDescription>
-              Your old client secret will stop working immediately. Every
-              deployment using it will fail to authenticate until you update
-              them with the new secret.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Rotate client secret?")}</DialogTitle>
+            <DialogDescription>{translateUi("Your old client secret will stop working immediately. Every deployment using it will fail to authenticate until you update them with the new secret.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRotateOpen(false)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setRotateOpen(false)}>{translateUi("Cancel")}</Button>
             <Button
               variant="primary"
               onClick={() => void handleRotateSecret()}
               isLoading={rotateMutation.isPending}
-            >
-              Rotate Secret
-            </Button>
+            >{translateUi("Rotate Secret")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

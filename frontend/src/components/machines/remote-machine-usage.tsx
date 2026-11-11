@@ -1,9 +1,14 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useRemoteMachineUsage } from "@/hooks/use-remote-machine-usage";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import type { RemoteMachineUsage as Usage } from "@/schemas/remote-machine-usage";
 
 function formatBytes(value: number) {
-  return `${value.toLocaleString()} bytes`;
+  return translateUi("{{value}} bytes", {
+    value: value.toLocaleString(getFormattingLocale()),
+  });
 }
 
 function Volume({
@@ -13,33 +18,31 @@ function Volume({
   readonly label: string;
   readonly volume: Usage["workspace"] | Usage["temporary"];
 }) {
+  useUiTranslation();
   return (
     <div className="space-y-1">
       <p className="font-medium">{label}</p>
       {volume ? (
         <>
           <p>
-            {formatBytes(volume.used_bytes)} used
-            {volume.capacity_bytes == null
-              ? ". Capacity: Unknown; no fixed capacity declared."
-              : ` / ${formatBytes(volume.capacity_bytes)} capacity.`}
+            {formatBytes(volume.used_bytes)}{translateUi(" used")}{volume.capacity_bytes == null
+              ? translateUi(". Capacity: Unknown; no fixed capacity declared.")
+              : translateUi(" / {{value1}} capacity.", { value1: formatBytes(volume.capacity_bytes) })}
           </p>
-          <p>
-            Available:{" "}
+          <p>{translateUi("Available:")}{" "}
             {volume.available_bytes == null
-              ? "Unknown"
+              ? translateUi("Unknown")
               : formatBytes(volume.available_bytes)}
             .
           </p>
-          <p className="text-muted-foreground">
-            Measurement: {volume.measurement}.{" "}
+          <p className="text-muted-foreground">{translateUi("Measurement: ")}{volume.measurement}.{" "}
             {volume.complete
-              ? "Complete observation."
-              : "Partial observation; usage may be higher."}
+              ? translateUi("Complete observation.")
+              : translateUi("Partial observation; usage may be higher.")}
           </p>
         </>
       ) : (
-        <p>Usage unknown; no current measurement was returned.</p>
+        <p>{translateUi("Usage unknown; no current measurement was returned.")}</p>
       )}
     </div>
   );
@@ -50,6 +53,7 @@ export function RemoteMachineUsage({
 }: {
   readonly machineId: string;
 }) {
+  useUiTranslation();
   const query = useRemoteMachineUsage(machineId);
   const usage = query.data;
   // Older servers may expose a partial component sum as used_bytes. It cannot
@@ -63,82 +67,70 @@ export function RemoteMachineUsage({
       : null;
   return (
     <section
-      aria-label="Observed storage usage"
+      aria-label={translateUi("Observed storage usage")}
       className="space-y-3 px-4 py-3 text-14"
     >
       {query.isPending ? (
-        <p role="status">Loading storage observations…</p>
+        <p role="status">{translateUi("Loading storage observations…")}</p>
       ) : query.error ? (
         <ErrorBanner
-          message="Storage observations are unavailable. No empty-disk or free-space reading can be inferred."
+          message={translateUi("Storage observations are unavailable. No empty-disk or free-space reading can be inferred.")}
           onRetry={() => void query.refetch()}
         />
       ) : usage ? (
         <>
           {!usage.available ? (
-            <p>
-              No usage has been reported by the current runtime. Disk usage is
-              unknown.
-            </p>
+            <p>{translateUi("No usage has been reported by the current runtime. Disk usage is unknown.")}</p>
           ) : (
             <>
               <p className="text-muted-foreground">
                 {usage.stale
-                  ? "Stale observation — current usage may differ."
-                  : "Latest reported observation."}{" "}
-                Measured:{" "}
+                  ? translateUi("Stale observation — current usage may differ.")
+                  : translateUi("Latest reported observation.")}{" "}{translateUi("Measured:")}{" "}
                 {usage.sampled_at
-                  ? new Date(usage.sampled_at).toLocaleString()
-                  : "Unknown"}
-                . Received:{" "}
+                  ? new Date(usage.sampled_at).toLocaleString(getFormattingLocale())
+                  : translateUi("Unknown")}
+                {translateUi(". Received:")}{" "}
                 {usage.received_at
-                  ? new Date(usage.received_at).toLocaleString()
-                  : "Unknown"}
+                  ? new Date(usage.received_at).toLocaleString(getFormattingLocale())
+                  : translateUi("Unknown")}
                 .
               </p>
-              <Volume label="Workspace" volume={usage.workspace} />
-              <Volume label="Observed temporary paths" volume={usage.temporary} />
+              <Volume label={translateUi("Workspace")} volume={usage.workspace} />
+              <Volume label={translateUi("Observed temporary paths")} volume={usage.temporary} />
               {usage.temporary?.complete === false && (
-                <p className="text-muted-foreground">
-                  Temporary usage is a lower bound from the reported paths, not
-                  complete Pod storage accounting. Unmeasured files can consume
-                  more space; remaining Pod quota cannot be inferred.
-                </p>
+                <p className="text-muted-foreground">{translateUi("Temporary usage is a lower bound from the reported paths, not complete Pod storage accounting. Unmeasured files can consume more space; remaining Pod quota cannot be inferred.")}</p>
               )}
               {usage.disk_full ? (
-                <p role="alert" className="text-destructive">
-                  The runtime reported a full disk. Writes and jobs may fail.
-                </p>
+                <p role="alert" className="text-destructive">{translateUi("The runtime reported a full disk. Writes and jobs may fail.")}</p>
               ) : null}
             </>
           )}
           <section
-            aria-label="Platform temporary storage"
+            aria-label={translateUi("Platform temporary storage")}
             className="space-y-1"
           >
-            <p className="font-medium">Platform temporary storage</p>
+            <p className="font-medium">{translateUi("Platform temporary storage")}</p>
             {usage.platform_storage ? (
               <>
                 <p>
                   {podUsedBytes == null
-                    ? "Total Pod usage unknown"
-                    : `${formatBytes(podUsedBytes)} reported used`}
-                  . No fixed capacity declared. Available: Unknown.
-                </p>
+                    ? translateUi("Total Pod usage unknown")
+                    : translateUi("{{value1}} reported used", { value1: formatBytes(podUsedBytes) })}
+                  {translateUi(". No fixed capacity declared. Available: Unknown. ")}</p>
                 <p>
                   {usage.platform_storage.stale
-                    ? "Stale platform observation; fresh Node reports do not refresh this reading."
-                    : "Latest platform observation."}{" "}
-                  Source: {usage.platform_storage.source}. Received:{" "}
+                    ? translateUi("Stale platform observation; fresh Node reports do not refresh this reading.")
+                    : translateUi("Latest platform observation.")}{" "}{translateUi("Source: ")}{usage.platform_storage.source}{translateUi(". Received:")}{" "}
                   {new Date(
                     usage.platform_storage.received_at,
-                  ).toLocaleString()}
+                  ).toLocaleString(getFormattingLocale())}
                   .
                 </p>
                 <p>
                   {usage.platform_storage.complete
-                    ? "Expected accounting components are covered; this does not guarantee quota enforcement."
-                    : "Partial accounting; temporary usage may be higher."}
+                    ? translateUi("Expected accounting components are covered; this does not guarantee quota enforcement.")
+                    : translateUi("Partial accounting; temporary usage may be higher.")}
                 </p>
                 {usage.platform_storage.components.length > 0 && (
                   <ul className="list-disc pl-5">
@@ -146,8 +138,8 @@ export function RemoteMachineUsage({
                       (component, index) => (
                         <li key={`${component.kind}:${index}`}>
                           {component.kind.replaceAll("_", " ")}:{" "}
-                          {formatBytes(component.used_bytes)}, measured{" "}
-                          {new Date(component.sampled_at).toLocaleString()}.
+                          {formatBytes(component.used_bytes)}{translateUi(", measured")}{" "}
+                          {new Date(component.sampled_at).toLocaleString(getFormattingLocale())}.
                         </li>
                       ),
                     )}
@@ -156,50 +148,25 @@ export function RemoteMachineUsage({
                 {usage.platform_storage.missing_reasons.map((reason) => (
                   <p key={reason}>{reason.replaceAll("_", " ")}</p>
                 ))}
-                <p className="text-muted-foreground">
-                  The reported Pod aggregate is shown once. Component readings
-                  and the Node path scan are separate observations and are not
-                  added to it. Workspace storage and memory-backed volumes are
-                  excluded.
-                </p>
+                <p className="text-muted-foreground">{translateUi("The reported Pod aggregate is shown once. Component readings and the Node path scan are separate observations and are not added to it. Workspace storage and memory-backed volumes are excluded.")}</p>
               </>
             ) : (
-              <p>
-                Optional Pod monitoring is unavailable. Total Pod temporary
-                usage is unknown; Node path scans cannot establish total Pod
-                usage or remaining temporary allocation. Workspace reporting
-                and normal Machine operations remain available.
-              </p>
+              <p>{translateUi("Optional Pod monitoring is unavailable. Total Pod temporary usage is unknown; Node path scans cannot establish total Pod usage or remaining temporary allocation. Workspace reporting and normal Machine operations remain available.")}</p>
             )}
           </section>
-          <p>
-            Node decoded file-write limit:{" "}
-            {formatBytes(usage.write_limit_bytes)}. This limits decoded content,
-            not the size of the complete request.
-          </p>
-          <p>
-            NyxBot whole-JSON argument limit:{" "}
+          <p>{translateUi("Node decoded file-write limit:")}{" "}
+            {formatBytes(usage.write_limit_bytes)}{translateUi(". This limits decoded content, not the size of the complete request. ")}</p>
+          <p>{translateUi("NyxBot whole-JSON argument limit:")}{" "}
             {usage.assistant_arguments_json_limit_bytes === undefined
-              ? "Not reported by this server"
+              ? translateUi("Not reported by this server")
               : formatBytes(usage.assistant_arguments_json_limit_bytes)}
-            . Escaped content and every other argument count toward this smaller
-            transport limit, so a write below the Node limit can still be too
-            large for NyxBot.
-          </p>
-          <p>
-            Exact-edit original and result file limit:{" "}
+            {translateUi(". Escaped content and every other argument count toward this smaller transport limit, so a write below the Node limit can still be too large for NyxBot. ")}</p>
+          <p>{translateUi("Exact-edit original and result file limit:")}{" "}
             {usage.edit_file_limit_bytes === undefined
-              ? "Not reported by this server"
+              ? translateUi("Not reported by this server")
               : formatBytes(usage.edit_file_limit_bytes)}
-            . This does not mean an equally large edit request fits the
-            transport; request and protocol limits still apply.
-          </p>
-          <p className="text-muted-foreground">
-            Temporary storage is managed by the deployment environment, with no
-            fixed capacity commitment. Temporary data may be lost after pause
-            or Pod recreation. Disk pressure can evict the Pod; full disks can
-            cause writes and jobs to fail.
-          </p>
+            {translateUi(". This does not mean an equally large edit request fits the transport; request and protocol limits still apply. ")}</p>
+          <p className="text-muted-foreground">{translateUi("Temporary storage is managed by the deployment environment, with no fixed capacity commitment. Temporary data may be lost after pause or Pod recreation. Disk pressure can evict the Pod; full disks can cause writes and jobs to fail.")}</p>
           <p className="text-muted-foreground">{usage.recovery}</p>
         </>
       ) : null}

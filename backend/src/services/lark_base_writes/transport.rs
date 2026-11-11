@@ -44,7 +44,9 @@ impl Transport<'_> {
             &canonical,
         )?;
         if selected != self.target.target_id {
-            return Err(attachment::refused().into());
+            return Err(attachment::eligibility::Reason::DestinationChanged
+                .error()
+                .into());
         }
         guard.revalidate_effect(row, phase).await?;
         let mut headers = reqwest::header::HeaderMap::new();

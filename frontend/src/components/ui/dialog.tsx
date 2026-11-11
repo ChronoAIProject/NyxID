@@ -1,3 +1,4 @@
+import { translateUi } from "@/i18n/use-ui-translation";
 import { TEXT_STYLES } from "@/lib/typography";
 import { DialogFocusReturnContext } from "./dialog-focus-return";
 import { restorePanelFocus } from "@/lib/assistant/panel-focus";
@@ -98,7 +99,7 @@ const DialogContent = React.forwardRef<
         style={{ top: "max(1rem, var(--sat, env(safe-area-inset-top, 0px)))" }}
       >
         <X className="h-4 w-4" />
-        <span className="sr-only">Close</span>
+        <span className="sr-only">{translateUi("Close")}</span>
       </DialogPrimitive.Close>
     </DialogPrimitive.Content>
   </DialogPortal>

@@ -1,3 +1,6 @@
+import { translateErrorMessage } from "@/lib/error-messages";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+
 import { useState } from "react";
 import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { ApiError } from "@/lib/api-client";
@@ -31,6 +34,7 @@ export function PlatformCard({
   readonly keyId: string;
   readonly platform: string | null;
 }) {
+  const { t } = useUiTranslation();
   const [editing, setEditing] = useState(false);
   const [selected, setSelected] = useState(platform ?? NO_PLATFORM);
   const updateApiKey = useUpdateApiKey();
@@ -41,13 +45,13 @@ export function PlatformCard({
       { keyId, platform: value },
       {
         onSuccess: () => {
-          toast.success("Platform updated");
+          toast.success(translateUi("Platform updated"));
           setEditing(false);
         },
         onError: (err) => {
           const message =
             err instanceof ApiError ? err.message : "Failed to update platform";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -58,21 +62,19 @@ export function PlatformCard({
       <CardHeader className="pb-3">
         <div className="flex items-center gap-2">
           <Monitor className="h-4 w-4 text-primary-text" />
-          <CardTitle className="text-15">Platform</CardTitle>
+          <CardTitle className="text-15">{t("Platform")}</CardTitle>
         </div>
-        <CardDescription>
-          Agent platform using this key
-        </CardDescription>
+        <CardDescription>{t("Agent platform using this key")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {editing ? (
           <div className="space-y-2">
             <Select value={selected} onValueChange={setSelected}>
               <SelectTrigger>
-                <SelectValue placeholder="Select platform" />
+                <SelectValue placeholder={t("Select platform")} />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={NO_PLATFORM}>None</SelectItem>
+                <SelectItem value={NO_PLATFORM}>{t("None")}</SelectItem>
                 {PLATFORM_OPTIONS.map((p) => (
                   <SelectItem key={p} value={p}>
                     <span className="inline-flex items-center gap-2">
@@ -90,23 +92,19 @@ export function PlatformCard({
                   setSelected(platform ?? NO_PLATFORM);
                   setEditing(false);
                 }}
-              >
-                Cancel
-              </Button>
+              >{t("Cancel")}</Button>
               <Button
                 variant="primary"
                 onClick={handleSave}
                 disabled={updateApiKey.isPending || selected === (platform ?? NO_PLATFORM)}
-              >
-                Save
-              </Button>
+              >{t("Save")}</Button>
             </div>
           </div>
         ) : (
           <div className="flex items-center justify-between">
             <Badge variant="secondary" className="gap-1.5">
               <PlatformIcon platform={platform} size="xs" />
-              {platform ?? "Not set"}
+              {platform ?? t("Not set")}
             </Badge>
             <Button
               size="icon"

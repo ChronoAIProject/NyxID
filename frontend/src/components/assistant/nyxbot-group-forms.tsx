@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label, FieldHelp } from "@/components/ui/label";
 import { describeChanges, changeList } from "@/lib/grouped-form-changes";
 import { flushSync } from "react-dom";
@@ -143,25 +145,26 @@ function AgentPicker({
   readonly value: readonly string[];
   readonly onChange: (ids: string[]) => void;
 }) {
+  useUiTranslation();
   const full = value.length >= ASSISTANT_GROUP_MAX_MEMBERS;
   const [search, setSearch] = useState("");
   return (
     <GroupedList
-      title={`Agents (${value.length} of ${ASSISTANT_GROUP_MAX_MEMBERS})`}
+      title={translateUi("Agents ({{value1}} of {{value2}})", { value1: value.length, value2: ASSISTANT_GROUP_MAX_MEMBERS })}
       footer={footer}
     >
       {rows.length > 8 && (
         <GroupedRow>
           <Input
-            aria-label="Search agents"
-            placeholder="Search agents"
+            aria-label={translateUi("Search agents")}
+            placeholder={translateUi("Search agents")}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </GroupedRow>
       )}
       <ul
-        aria-label="Agents"
+        aria-label={translateUi("Agents")}
         className="assistant-scrollbar max-h-72 overflow-y-auto"
       >
         {rows
@@ -220,24 +223,23 @@ function GroupOwnerPicker({
   readonly value?: string;
   readonly onChange: (id: string | undefined) => void;
 }) {
+  useUiTranslation();
   const orgs = useOrgs();
   const enabled = useFeature(FEATURE_FLAG.ORG_AGENTS);
   return (
     <GroupedList
       footer={
         !enabled && (orgs.data?.length ?? 0) > 0
-          ? "Organization groups are not enabled yet."
+          ? translateUi("Organization groups are not enabled yet.")
           : undefined
       }
     >
       <GroupedRow>
-        <Label htmlFor="group-owner" className="flex-1">
-          Ownership
-        </Label>
+        <Label htmlFor="group-owner" className="flex-1">{translateUi("Ownership")}</Label>
         <Select value={value ?? "personal"} onValueChange={(id) => onChange(id === "personal" ? undefined : id)}>
           <SelectTrigger id="group-owner"><SelectValue /></SelectTrigger>
           <SelectContent>
-            <SelectItem value="personal">Personal</SelectItem>
+            <SelectItem value="personal">{translateUi("Personal")}</SelectItem>
             {(orgs.data ?? []).filter((org) => ["admin", "member"].includes(org.your_role)).map((org) =>
               <SelectItem key={org.id} value={org.id} disabled={!enabled}>{org.display_name ?? org.slug}</SelectItem>)}
           </SelectContent>
@@ -256,38 +258,34 @@ export function GroupParticipantPicker({
   readonly value: readonly string[];
   readonly onChange: (ids: string[]) => void;
 }) {
+  useUiTranslation();
   const members = useOrgMembers(org);
   const eligible = (members.data ?? []).filter((member) => !member.revoked_at && ["admin", "member"].includes(member.role));
   const [search, setSearch] = useState("");
   return (
     <GroupedList
-      title={`Participants (${value.length} of 16)`}
+      title={translateUi("Participants ({{value1}} of 16)", { value1: value.length })}
       footer={
         <>
           {members.isError && (
-            <p role="alert" className="text-destructive">
-              Could not load organization members.
-            </p>
+            <p role="alert" className="text-destructive">{translateUi("Could not load organization members.")}</p>
           )}
-          <p>
-            Only selected Admins and Members can read and participate. The
-            creator is included when creating a group.
-          </p>
+          <p>{translateUi("Only selected Admins and Members can read and participate. The creator is included when creating a group.")}</p>
         </>
       }
     >
       {eligible.length > 8 && (
         <GroupedRow>
           <Input
-            aria-label="Search participants"
-            placeholder="Search participants"
+            aria-label={translateUi("Search participants")}
+            placeholder={translateUi("Search participants")}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </GroupedRow>
       )}
       <ul
-        aria-label="Participants"
+        aria-label={translateUi("Participants")}
         className="assistant-scrollbar max-h-64 overflow-y-auto"
       >
         {eligible
@@ -302,7 +300,7 @@ export function GroupParticipantPicker({
                 <Label>
                   <Checkbox checked={value.includes(member.user_id)} disabled={value.length >= 16 && !value.includes(member.user_id)}
                     onCheckedChange={(checked) => onChange(checked ? [...value, member.user_id] : value.filter((id) => id !== member.user_id))} />
-                  {member.display_name ?? "Member"}
+                  {member.display_name ?? translateUi("Member")}
                 </Label>
               </GroupedRow>
             </li>
@@ -321,18 +319,19 @@ function GroupFields({
   readonly rows: readonly PickerRow[];
   readonly memberFooter?: React.ReactNode;
 }) {
+  useUiTranslation();
   return (
     <>
       <FormField
         control={form.control}
         name="name"
         render={({ field }) => (
-          <GroupedList title="Profile">
+          <GroupedList title={translateUi("Profile")}>
             <GroupedField>
-              <GroupedLabel>Name</GroupedLabel>
+              <GroupedLabel>{translateUi("Name")}</GroupedLabel>
               <FormControl>
                 <Input
-                  placeholder="Launch crew"
+                  placeholder={translateUi("Launch crew")}
                   autoComplete="off"
                   maxLength={ASSISTANT_GROUP_NAME_MAX}
                   {...field}
@@ -376,6 +375,7 @@ export function NewGroupDialog({
   readonly onClose: () => void;
   readonly onCreated: (group: AssistantGroup) => void;
 }) {
+  useUiTranslation();
   const create = useCreateNyxBotGroup();
   const collaborationAvailable = useCollaborationAvailable();
   const userId = useAuthStore((state) => state.user?.id);
@@ -402,7 +402,7 @@ export function NewGroupDialog({
       flushSync(() => form.reset(values));
       onCreated(created);
     } catch (cause) {
-      setError(errorMessage(cause, "Could not create the group. Try again."));
+      setError(errorMessage(cause, translateUi("Could not create the group. Try again.")));
     }
   }
 
@@ -415,10 +415,8 @@ export function NewGroupDialog({
     >
       <GroupedDialogContent scrollMode="body" className="md:max-w-md">
         <DialogHeader className="shrink-0 pr-6">
-          <DialogTitle>New crew</DialogTitle>
-          <DialogDescription>
-            Chat with up to {ASSISTANT_GROUP_MAX_MEMBERS} of your agents at
-            once. {GROUP_ROUTING_COPY}
+          <DialogTitle>{translateUi("New crew")}</DialogTitle>
+          <DialogDescription>{translateUi("Chat with up to ")}{ASSISTANT_GROUP_MAX_MEMBERS}{translateUi(" of your agents at once. ")}{translateUi(GROUP_ROUTING_COPY)}
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
@@ -432,10 +430,10 @@ export function NewGroupDialog({
               }} />
               {!org && collaborationAvailable.data ? (
                 <GroupedList
-                  title="People"
+                  title={translateUi("People")}
                   footer={
                     collaboration
-                      ? "Up to 16 people can join by invitation after creation. Everyone can read the full retained group history. Personal NyxBot cannot join."
+                      ? translateUi("Up to 16 people can join by invitation after creation. Everyone can read the full retained group history. Personal NyxBot cannot join.")
                       : undefined
                   }
                 >
@@ -445,7 +443,7 @@ export function NewGroupDialog({
                         form.setValue("collaboration", checked === true);
                         form.setValue("member_agent_ids", []);
                       }} />
-                      <span className="min-w-0 flex-1">Invite other people</span>
+                      <span className="min-w-0 flex-1">{translateUi("Invite other people")}</span>
                     </Label>
                   </GroupedRow>
                 </GroupedList>
@@ -460,17 +458,17 @@ export function NewGroupDialog({
                 <GroupedList
                   footer={
                     <p role="alert" className="text-destructive">
-                      {error}
+                      {translateUi(error)}
                     </p>
                   }
                 >
-                  <GroupedRow title="Crew could not be created" />
+                  <GroupedRow title={translateUi("Crew could not be created")} />
                 </GroupedList>
               ) : null}
             </DialogBody>
             <GroupedDialogActions
               intent="create"
-              label="new crew"
+              label={translateUi("new crew")}
               dirty={form.formState.isDirty}
               pending={create.isPending}
               disabled={!form.formState.isValid}
@@ -479,7 +477,7 @@ export function NewGroupDialog({
                 form.reset();
                 setError(undefined);
               }}
-              saveLabel="Create crew"
+              saveLabel={translateUi("Create crew")}
             />
           </form>
         </Form>
@@ -502,6 +500,7 @@ export function GroupSettingsDialog({
   readonly onOpenChange: (open: boolean) => void;
   readonly onDeleted: () => void;
 }) {
+  useUiTranslation();
   const update = useUpdateNyxBotGroup();
   const org = group.owner?.type === "org" ? group.owner.id : undefined;
   const canManage = !org || group.your_role === "creator" || group.your_role === "admin";
@@ -551,7 +550,7 @@ export function GroupSettingsDialog({
       onOpenChange(false);
       return true;
     } catch (cause) {
-      setError(errorMessage(cause, "Could not save the group. Try again."));
+      setError(errorMessage(cause, translateUi("Could not save the group. Try again.")));
       return false;
     }
   }
@@ -560,7 +559,7 @@ export function GroupSettingsDialog({
     try {
       await update.mutateAsync({ id: group.id, leave: true });
       onDeleted();
-    } catch (cause) { setError(errorMessage(cause, "Could not leave the group.")); }
+    } catch (cause) { setError(errorMessage(cause, translateUi("Could not leave the group."))); }
   }
 
   async function deleteGroup() {
@@ -570,7 +569,7 @@ export function GroupSettingsDialog({
       setConfirmDelete(false);
       onDeleted();
     } catch (cause) {
-      setError(errorMessage(cause, "Could not delete the group. Try again."));
+      setError(errorMessage(cause, translateUi("Could not delete the group. Try again.")));
     }
   }
 
@@ -584,23 +583,23 @@ export function GroupSettingsDialog({
       >
         <GroupedDialogContent scrollMode="body" className="md:max-w-md">
           <DialogHeader className="shrink-0 pr-6">
-            <DialogTitle>Group settings</DialogTitle>
-            <DialogDescription>{GROUP_ROUTING_COPY}</DialogDescription>
+            <DialogTitle>{translateUi("Group settings")}</DialogTitle>
+            <DialogDescription>{translateUi(GROUP_ROUTING_COPY)}</DialogDescription>
           </DialogHeader>
           <Form {...form}>
             <form
-              aria-label="Group settings"
+              aria-label={translateUi("Group settings")}
               noValidate
               onSubmit={form.handleSubmit(save)}
             >
               <DialogBody className="space-y-6 pb-4">
                 {org ? (
                   <GroupedList
-                    title="Ownership"
+                    title={translateUi("Ownership")}
                     footer={
                       canManage
-                        ? "You can manage this group."
-                        : "Only the creator and participating Admins manage this group."
+                        ? translateUi("You can manage this group.")
+                        : translateUi("Only the creator and participating Admins manage this group.")
                     }
                   >
                     <GroupedRow title={group.owner?.name} />
@@ -611,24 +610,18 @@ export function GroupSettingsDialog({
                     form={form}
                     rows={pickerRows(agents.filter((agent) => org ? agent.owner_id === org : true), group)}
                     memberFooter={!org ? (
-                      <p>
-                        Removing an agent stops its crew work and deletes its
-                        private crew thread. Re-adding starts a new thread.
-                        Published crew messages stay.
-                      </p>
+                      <p>{translateUi("Removing an agent stops its crew work and deletes its private crew thread. Re-adding starts a new thread. Published crew messages stay.")}</p>
                     ) : undefined}
                   />
                   {org ? (
                     <>
                       <GroupParticipantPicker org={org} value={form.watch("participant_user_ids") ?? []} onChange={(ids) => form.setValue("participant_user_ids", ids)} />
-                      <GroupedList title="Routing">
+                      <GroupedList title={translateUi("Routing")}>
                         <GroupedRow>
                           <Label
                             htmlFor="group-lead"
                             className="flex-1"
-                          >
-                            Lead agent
-                          </Label>
+                          >{translateUi("Lead agent")}</Label>
                           <Select value={form.watch("lead_agent_id")} onValueChange={(id) => form.setValue("lead_agent_id", id)}>
                             <SelectTrigger id="group-lead"><SelectValue /></SelectTrigger>
                             <SelectContent>{agents.filter((agent) => members.includes(agent.id)).map((agent) => <SelectItem key={agent.id} value={agent.id}>{agentTitle(agent)}</SelectItem>)}</SelectContent>
@@ -640,8 +633,8 @@ export function GroupSettingsDialog({
                 </fieldset>
                 {goneMembers && !form.formState.isDirty && canManage && (
                   <GroupedList
-                    title="Unavailable agents"
-                    footer="Unavailable agents will be removed on the next save."
+                    title={translateUi("Unavailable agents")}
+                    footer={translateUi("Unavailable agents will be removed on the next save.")}
                   >
                     <ChangeReview entries={[{ label: "group settings", dirty: true, changes, save: form.handleSubmit(save), discard: () => {} }]} disabled={busy || !members.length} save={async () => {
                       let saved = false;
@@ -652,29 +645,19 @@ export function GroupSettingsDialog({
                         type="button"
                         disabled={busy || !members.length}
                         onClick={review}
-                      >
-                        Remove unavailable agents
-                      </button>
+                      >{translateUi("Remove unavailable agents")}</button>
                     </GroupedRow>}</ChangeReview>
                   </GroupedList>
                 )}
                 <GroupedList
-                  title="Group actions"
+                  title={translateUi("Group actions")}
                   footer={
                     <>
                       {org && (
-                        <p>
-                          The creator or a participating Admin must remain.
-                          Leaving as the last participant deletes the group.
-                          Wait for your running turns to finish before leaving
-                          or being removed.
-                        </p>
+                        <p>{translateUi("The creator or a participating Admin must remain. Leaving as the last participant deletes the group. Wait for your running turns to finish before leaving or being removed.")}</p>
                       )}
                       {canManage && (
-                        <p>
-                          Delete removes the group and its messages. Your agents
-                          and their own threads stay.
-                        </p>
+                        <p>{translateUi("Delete removes the group and its messages. Your agents and their own threads stay.")}</p>
                       )}
                     </>
                   }
@@ -686,9 +669,7 @@ export function GroupSettingsDialog({
                         className="text-destructive"
                         disabled={busy}
                         onClick={() => void leaveGroup()}
-                      >
-                        Leave group
-                      </button>
+                      >{translateUi("Leave group")}</button>
                     </GroupedRow>
                   )}
                   {canManage && (
@@ -701,9 +682,7 @@ export function GroupSettingsDialog({
                           setError(undefined);
                           setConfirmDelete(true);
                         }}
-                      >
-                        Delete
-                      </button>
+                      >{translateUi("Delete")}</button>
                     </GroupedRow>
                   )}
                 </GroupedList>
@@ -711,17 +690,17 @@ export function GroupSettingsDialog({
                   <GroupedList
                     footer={
                       <p role="alert" className="text-destructive">
-                        {error}
+                        {translateUi(error)}
                       </p>
                     }
                   >
-                    <GroupedRow title="Group could not be saved" />
+                    <GroupedRow title={translateUi("Group could not be saved")} />
                   </GroupedList>
                 ) : null}
               </DialogBody>
               <GroupedDialogActions
                 changes={changes}
-                label="group settings"
+                label={translateUi("group settings")}
                 dirty={form.formState.isDirty}
                 pending={busy}
                 disabled={!canManage || !form.formState.isValid}
@@ -730,7 +709,7 @@ export function GroupSettingsDialog({
                   form.reset();
                   setError(undefined);
                 }}
-                saveLabel="Save"
+                saveLabel={translateUi("Save")}
               />
             </form>
           </Form>
@@ -744,14 +723,12 @@ export function GroupSettingsDialog({
       >
         <DialogContent className="md:max-w-md">
           <DialogHeader>
-            <DialogTitle>Delete {group.name}?</DialogTitle>
-            <DialogDescription>
-              The group and its messages are deleted. This cannot be undone.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Delete ")}{group.name}?</DialogTitle>
+            <DialogDescription>{translateUi("The group and its messages are deleted. This cannot be undone.")}</DialogDescription>
           </DialogHeader>
           {error ? (
             <p role="alert" className="text-14 text-destructive">
-              {error}
+              {translateUi(error)}
             </p>
           ) : null}
           <DialogFooter>
@@ -759,16 +736,12 @@ export function GroupSettingsDialog({
               variant="ghost"
               disabled={remove.isPending}
               onClick={() => setConfirmDelete(false)}
-            >
-              Cancel
-            </Button>
+            >{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               isLoading={remove.isPending}
               onClick={() => void deleteGroup()}
-            >
-              Delete group
-            </Button>
+            >{translateUi("Delete group")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

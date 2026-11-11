@@ -1,3 +1,7 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useId, useState, type ReactNode } from "react";
 import { Bot, ChevronDown, Copy, Link2, MessageSquare } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +13,7 @@ import { cmaReadableLabel } from "@/lib/assistant/cma-display";
 import { toast } from "sonner";
 
 export function CmaStatus({ status }: { readonly status: string }) {
+  useUiTranslation();
   const label =
     status === "incomplete"
       ? "Not completed"
@@ -42,14 +47,15 @@ export function CmaTime({
   readonly value?: string | null;
   readonly timeOnly?: boolean;
 }) {
+  useUiTranslation();
   if (!value || Number.isNaN(Date.parse(value))) return null;
   return (
     <time
       dateTime={value}
-      title={new Date(value).toLocaleString()}
+      title={new Date(value).toLocaleString(getFormattingLocale())}
       className="shrink-0 type-meta text-text-tertiary"
     >
-      {new Date(value).toLocaleString(undefined, {
+      {new Date(value).toLocaleString(getFormattingLocale(), {
         ...(!timeOnly && ({ month: "short", day: "numeric" } as const)),
         hour: "2-digit",
         minute: "2-digit",
@@ -67,6 +73,7 @@ export function CmaDisclosure({
   readonly count?: number;
   readonly children: ReactNode;
 }) {
+  useUiTranslation();
   const [open, setOpen] = useState(false);
   const id = useId();
   return (
@@ -88,8 +95,7 @@ export function CmaDisclosure({
         {title}
         {count !== undefined && (
           <span className="ml-auto type-secondary text-text-tertiary">
-            {count} records
-          </span>
+            {count}{translateUi(" records")}</span>
         )}
       </button>
       {open && (
@@ -119,6 +125,7 @@ export function CmaMessage({
   readonly assistantName?: string;
   readonly linked?: boolean;
 }) {
+  useUiTranslation();
   const request = role === "user";
   const Icon = request ? MessageSquare : Bot;
   const id = useId();
@@ -153,12 +160,10 @@ export function CmaMessage({
         >
           {linked && (
             <span className="mr-auto inline-flex items-center gap-1 text-nyx-secondary-400">
-              <Link2 aria-hidden className="size-3" />
-              From your chat
-            </span>
+              <Link2 aria-hidden className="size-3" />{translateUi("From your chat")}</span>
           )}
           <h3 className="type-group-label text-muted-foreground">
-            {request ? "Work request" : assistantName}
+            {request ? translateUi("Work request") : assistantName}
           </h3>
           <CmaTime value={time} timeOnly />
         </div>
@@ -186,7 +191,7 @@ export function CmaMessage({
                 onClick={() => setExpanded(!expanded)}
                 className="mt-2 inline-flex items-center gap-1 rounded type-button text-text-tertiary hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
               >
-                {expanded ? "Show less" : "Show full message"}
+                {expanded ? translateUi("Show less") : translateUi("Show full message")}
                 <ChevronDown
                   aria-hidden
                   className={cn("size-3", expanded && "rotate-180")}
@@ -202,11 +207,11 @@ export function CmaMessage({
                 variant="ghost"
                 size="icon"
                 className="size-7 text-text-tertiary"
-                aria-label="Copy reply"
+                aria-label={translateUi("Copy reply")}
                 onClick={() => {
                   void copyToClipboard(text).then(
-                    () => toast.success("Reply copied"),
-                    () => toast.error("Failed to copy reply"),
+                    () => toast.success(translateUi("Reply copied")),
+                    () => toast.error(translateErrorMessage("Failed to copy reply")),
                   );
                 }}
               >
@@ -227,6 +232,7 @@ export function CmaEmptyState({
   readonly title: string;
   readonly text: string;
 }) {
+  useUiTranslation();
   return (
     <div
       role="status"

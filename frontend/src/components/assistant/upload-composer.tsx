@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { loadVoicePanel } from "@/lib/assistant/voice-panel-loader";
 import { PreparedMicrophone, microphoneDevice, microphoneError } from "@/lib/microphone-capture";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
@@ -72,6 +74,7 @@ type Props = Omit<ComponentProps<typeof ChatComposer>, "onSend" | "onVoice"> & {
 
 /** Keyed by owner + conversation at the call site: drafts never cross threads. */
 export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoicePrepare, attachmentMenuItems, imageWarning, ...props }: Props) {
+  useUiTranslation();
   const [files, setFiles] = useState<Pending[]>([]);
   const [notice, setNotice] = useState<string>();
   const [preview, setPreview] = useState<Pending>();
@@ -151,7 +154,7 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
     for (const file of incoming) {
       if (pending.current.size >= 10) {
         setNotice(
-          "Up to 10 files fit in one message. Send the remaining files in another message.",
+          translateUi("Up to 10 files fit in one message. Send the remaining files in another message."),
         );
         break;
       }
@@ -337,16 +340,12 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
             <div
               role="status"
               className="flex items-center justify-between gap-2 pb-2 text-14 text-text-secondary"
-            >
-              Allow microphone access…
-              <Button
+            >{translateUi("Allow microphone access…")}<Button
                 type="button"
                 size="sm"
                 variant="ghost"
                 onClick={cancelVoicePreparation}
-              >
-                Cancel
-              </Button>
+              >{translateUi("Cancel")}</Button>
             </div>
           )}
           {props.voiceControls}
@@ -406,7 +405,7 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
             <div className="relative min-w-0">
               <ul
                 ref={attachmentStrip}
-                aria-label="Attachments"
+                aria-label={translateUi("Attachments")}
                 tabIndex={0}
                 data-scroll-fade=""
                 className="assistant-scrollbar flex gap-2 overflow-x-auto overscroll-x-contain py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-xl"
@@ -414,14 +413,14 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
                 {files.map((file) => (
                   <li
                     key={file.key}
-                    title={`${file.name} · Type @${file.handle} to refer to this file`}
+                    title={translateUi("{{value1}} · Type @{{value2}} to refer to this file", { value1: file.name, value2: file.handle })}
                     className={`relative flex min-h-[8em] max-w-[75vw] shrink-0 flex-col overflow-hidden rounded-xl border bg-card text-14 ${file.error ? "border-destructive/50" : "border-hairline"} ${file.preview ? "w-[8em]" : "w-[14em]"}`}
                   >
                     {file.preview ? (
                       <button
                         type="button"
                         className="w-full flex-1 bg-muted/30 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-                        aria-label={`Preview ${file.name}`}
+                        aria-label={translateUi("Preview {{value1}}", { value1: file.name })}
                         onClick={() => setPreview(file)}
                       >
                         <img
@@ -446,22 +445,22 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
                         <div className="min-w-0">
                           <p className="truncate font-medium">
                             {file.kind === "pasted-text"
-                              ? "Pasted text"
+                              ? translateUi("Pasted text")
                               : (file.item?.label ?? file.name)}
                           </p>
                           {!file.error && file.item && (
                             <p className="mt-0.5 text-12 text-muted-foreground">
                               {file.kind === "pasted-text"
-                                ? "TEXT"
+                                ? translateUi("TEXT")
                                 : file.name.includes(".")
                                   ? file.name.split(".").pop()?.toUpperCase()
-                                  : "FILE"}
+                                  : translateUi("FILE")}
                               {" · "}
                               {file.size < 1024
-                                ? `${file.size} B`
+                                ? translateUi("{{size}} B", { size: file.size })
                                 : file.size < 1024 * 1024
-                                  ? `${Math.ceil(file.size / 1024)} KB`
-                                  : `${(file.size / (1024 * 1024)).toFixed(1)} MB`}
+                                  ? translateUi("{{value1}} KB", { value1: Math.ceil(file.size / 1024) })
+                                  : translateUi("{{value1}} MB", { value1: (file.size / (1024 * 1024)).toFixed(1) })}
                             </p>
                           )}
                         </div>
@@ -485,16 +484,16 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
                         }
                       >
                         {file.item
-                          ? "Ready"
+                          ? translateUi("Ready")
                           : file.progress >= 99
-                            ? "Checking file…"
-                            : `Uploading ${file.progress}%`}
+                            ? translateUi("Checking file…")
+                            : translateUi("Uploading {{value1}}%", { value1: file.progress })}
                       </p>
                     )}
                     <button data-icon-button=""
                       type="button"
                       className="absolute right-1 top-1 flex items-center justify-center rounded-full border border-hairline bg-background/95 text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
-                      aria-label={`Remove ${file.name}`}
+                      aria-label={translateUi("Remove {{value1}}", { value1: file.name })}
                       onClick={() => remove(file.key)}
                       disabled={props.sending}
                     >
@@ -542,9 +541,7 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
               )}
               <DialogFooter>
                 <DialogClose asChild>
-                  <Button type="button" variant="secondary">
-                    Close preview
-                  </Button>
+                  <Button type="button" variant="secondary">{translateUi("Close preview")}</Button>
                 </DialogClose>
               </DialogFooter>
             </DialogContent>
@@ -562,7 +559,7 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
             multiple
             className="sr-only"
             tabIndex={-1}
-            aria-label="Choose attachments"
+            aria-label={translateUi("Choose attachments")}
             disabled={locked}
             onChange={(event) => {
               void add(Array.from(event.target.files ?? []));
@@ -573,14 +570,13 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button ref={attach} type="button" variant="ghost" size="icon"
-                  className="shrink-0 text-muted-foreground" aria-label="Add context" disabled={locked}>
+                  className="shrink-0 text-muted-foreground" aria-label={translateUi("Add context")} disabled={locked}>
                   <Plus aria-hidden className="size-4" />
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent side="top" align="start" collisionPadding={12} aria-label="Add context">
+              <DropdownMenuContent side="top" align="start" collisionPadding={12} aria-label={translateUi("Add context")}>
                 <DropdownMenuItem disabled={files.length >= 10} onSelect={() => input.current?.click()}>
-                  <Paperclip aria-hidden className="size-4" />Attach files
-                </DropdownMenuItem>
+                  <Paperclip aria-hidden className="size-4" />{translateUi("Attach files")}</DropdownMenuItem>
                 {attachmentMenuItems}
               </DropdownMenuContent>
             </DropdownMenu>
@@ -593,17 +589,14 @@ export function UploadComposer({ scope, onSend, onVoice, onVoiceSettings, onVoic
                   size="icon"
                   className="shrink-0 text-muted-foreground"
                   ref={attach}
-                  aria-label="Attach files"
+                  aria-label={translateUi("Attach files")}
                   disabled={locked || files.length >= 10}
                   onClick={() => input.current?.click()}
                 >
                   <Paperclip className="h-4 w-4" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent className="max-w-64">
-                PNG, JPEG, GIF, WebP, PDF, DOCX, text, Markdown, CSV and JSON.
-                Up to 20 MB each, 10 files per message.
-              </TooltipContent>
+              <TooltipContent className="max-w-64">{translateUi("PNG, JPEG, GIF, WebP, PDF, DOCX, text, Markdown, CSV and JSON. Up to 20 MB each, 10 files per message.")}</TooltipContent>
             </Tooltip>
           </TooltipProvider>}
         </>

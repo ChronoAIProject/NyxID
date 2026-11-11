@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useState } from "react";
 import type { LlmStatusResponse } from "@/types/api";
 import {
@@ -19,6 +21,7 @@ interface GatewayInfoCardProps {
 }
 
 export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
+  useUiTranslation();
   const readyProviders = llmStatus.providers.filter(
     (p) => p.status === "ready",
   );
@@ -47,11 +50,8 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <CardTitle className="text-15">LLM Gateway</CardTitle>
-            <CardDescription className="text-13">
-              Route LLM requests through NyxID with your connected provider
-              credentials.
-            </CardDescription>
+            <CardTitle className="text-15">{translateUi("LLM Gateway")}</CardTitle>
+            <CardDescription className="text-13">{translateUi("Route LLM requests through NyxID with your connected provider credentials.")}</CardDescription>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {readyProviders.length > 0 && (
@@ -59,36 +59,26 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
                 variant="success"
                 className="hidden whitespace-nowrap sm:inline-flex"
               >
-                {String(readyProviders.length)} provider
-                {readyProviders.length === 1 ? "" : "s"} ready
-              </Badge>
+                {String(readyProviders.length)}{translateUi(" provider")}{readyProviders.length === 1 ? "" : "s"}{translateUi(" ready")}</Badge>
             )}
           </div>
         </div>
         {readyProviders.length > 0 && (
           <Badge variant="success" className="mt-2 w-fit sm:hidden">
-            {String(readyProviders.length)} provider
-            {readyProviders.length === 1 ? "" : "s"} ready
-          </Badge>
+            {String(readyProviders.length)}{translateUi(" provider")}{readyProviders.length === 1 ? "" : "s"}{translateUi(" ready")}</Badge>
         )}
       </CardHeader>
 
       <CardContent className="space-y-4">
-        <CopyableField label="Gateway URL" value={gatewayUrl} />
+        <CopyableField label={translateUi("Gateway URL")} value={gatewayUrl} />
 
         <div className="rounded-xl border border-border/50 bg-muted/30 p-3">
-          <p className="text-13 text-muted-foreground">
-            The gateway accepts OpenAI-compatible requests and routes them to
-            the correct provider based on the model name. Your provider
-            credentials are injected server-side.
-          </p>
+          <p className="text-13 text-muted-foreground">{translateUi("The gateway accepts OpenAI-compatible requests and routes them to the correct provider based on the model name. Your provider credentials are injected server-side.")}</p>
         </div>
 
         {readyProviders.length > 0 && (
           <div>
-            <p className="mb-2 type-secondary-emphasis text-muted-foreground">
-              Ready Providers
-            </p>
+            <p className="mb-2 type-secondary-emphasis text-muted-foreground">{translateUi("Ready Providers")}</p>
             <div className="flex flex-wrap gap-1.5">
               {readyProviders.map((p) => (
                 <Badge
@@ -104,23 +94,19 @@ export function GatewayInfoCard({ llmStatus }: GatewayInfoCardProps) {
         )}
 
         <div>
-          <p className="mb-2 type-secondary-emphasis text-muted-foreground">
-            Agent Key
-          </p>
+          <p className="mb-2 type-secondary-emphasis text-muted-foreground">{translateUi("Agent Key")}</p>
           <AgentKeyPicker onSelect={setPickedKey} />
         </div>
 
         <div>
-          <p className="mb-1 type-secondary-emphasis text-muted-foreground">
-            Example Request
-          </p>
+          <p className="mb-1 type-secondary-emphasis text-muted-foreground">{translateUi("Example Request")}</p>
           <pre className="rounded-xl border border-border bg-muted px-3 py-2 text-14 overflow-x-auto whitespace-pre-wrap break-all">
             {exampleCurl}
           </pre>
           <p className="mt-1 text-12 text-muted-foreground">
             {pickedKey
-              ? "Using the picked Agent Key preview. Copy the full key from the Agent Keys tab to run this."
-              : "Create an Agent Key in the Agent Keys tab, then pick it above to see a ready-to-run example."}
+              ? translateUi("Using the picked Agent Key preview. Copy the full key from the Agent Keys tab to run this.")
+              : translateUi("Create an Agent Key in the Agent Keys tab, then pick it above to see a ready-to-run example.")}
           </p>
         </div>
       </CardContent>

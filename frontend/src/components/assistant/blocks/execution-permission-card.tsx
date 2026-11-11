@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -34,6 +37,7 @@ export function ExecutionPermissionCard({
   readonly proposal: ExecutionProposal;
   readonly disabled?: boolean;
 }) {
+  useUiTranslation();
   const queryClient = useQueryClient();
   const [choiceId, setChoiceId] = useState("operation");
   const [busy, setBusy] = useState(false);
@@ -98,45 +102,44 @@ export function ExecutionPermissionCard({
   return (
     <section
       className="max-w-xl space-y-3 rounded-xl border border-border bg-card p-4"
-      aria-label="Execution permission"
+      aria-label={translateUi("Execution permission")}
     >
       <p className="type-card-title">
-        {statusLabel[current.state] ?? "Permission status unavailable"}
+        {statusLabel[current.state] ?? translateUi("Permission status unavailable")}
       </p>
       {current.review && (
         <dl className="space-y-1 text-12">
           <div>
-            <dt className="inline text-muted-foreground">{current.source ? "Source: " : "Agent: "}</dt>
+            <dt className="inline text-muted-foreground">{current.source ? translateUi("Source: ") : translateUi("Agent: ")}</dt>
             <dd className="inline">{current.source ?? current.review.agent}</dd>
           </div>
           <div>
-            <dt className="inline text-muted-foreground">Connection: </dt>
+            <dt className="inline text-muted-foreground">{translateUi("Connection: ")}</dt>
             <dd className="inline">{current.review.connection}</dd>
           </div>
           <div>
-            <dt className="inline text-muted-foreground">Operation: </dt>
+            <dt className="inline text-muted-foreground">{translateUi("Operation: ")}</dt>
             <dd className="inline break-all">{current.review.operation}</dd>
           </div>
           <div>
-            <dt className="inline text-muted-foreground">Audience: </dt>
+            <dt className="inline text-muted-foreground">{translateUi("Audience: ")}</dt>
             <dd className="inline">{current.review.audience}</dd>
           </div>
           <div>
-            <dt className="inline text-muted-foreground">Scope: </dt>
+            <dt className="inline text-muted-foreground">{translateUi("Scope: ")}</dt>
             <dd className="inline">{current.review.scope}</dd>
           </div>
           <div>
-            <dt className="inline text-muted-foreground">
-              Current permission:{" "}
+            <dt className="inline text-muted-foreground">{translateUi("Current permission:")}{" "}
             </dt>
             <dd className="inline">{current.review.existing_permission}</dd>
           </div>
           <div>
-            <dt className="inline text-muted-foreground">Adds: </dt>
+            <dt className="inline text-muted-foreground">{translateUi("Adds: ")}</dt>
             <dd className="inline">{current.review.added_permission}</dd>
           </div>
           <div>
-            <dt className="text-muted-foreground">Inputs</dt>
+            <dt className="text-muted-foreground">{translateUi("Inputs")}</dt>
             <dd className="max-h-48 overflow-auto whitespace-pre-wrap break-all">
               {current.review.inputs}
             </dd>
@@ -147,7 +150,7 @@ export function ExecutionPermissionCard({
         <>
           <fieldset className="space-y-2" disabled={disabled || busy}>
             <Label asChild>
-              <legend className="mb-2">Allow for</legend>
+              <legend className="mb-2">{translateUi("Allow for")}</legend>
             </Label>
             {current.choices.map((c) => (
               <Label key={c.id} className="flex items-start gap-2">
@@ -161,8 +164,7 @@ export function ExecutionPermissionCard({
                 <span>
                   {c.label}
                   {c.valid_until && (
-                    <span className="block text-muted-foreground">
-                      Until {new Date(c.valid_until).toLocaleString()}
+                    <span className="block text-muted-foreground">{translateUi("Until ")}{new Date(c.valid_until).toLocaleString(getFormattingLocale())}
                     </span>
                   )}
                 </span>
@@ -170,8 +172,7 @@ export function ExecutionPermissionCard({
             ))}
           </fieldset>
           {choice?.context_scope && (
-            <p className="text-12 text-muted-foreground">
-              Applies to: {executionContextLabel(choice.context_scope)}
+            <p className="text-12 text-muted-foreground">{translateUi("Applies to: ")}{executionContextLabel(choice.context_scope)}
             </p>
           )}
           {current.review?.reusable_unavailable && (
@@ -179,26 +180,20 @@ export function ExecutionPermissionCard({
               {current.review.reusable_unavailable}
             </p>
           )}
-          <p className="text-12 text-muted-foreground">
-            This saves the displayed permission and resumes the retained
-            operation. Other required reviews still apply.
-          </p>
+          <p className="text-12 text-muted-foreground">{translateUi("This saves the displayed permission and resumes the retained operation. Other required reviews still apply.")}</p>
           <div className="flex gap-2">
             <Button
               variant="outline"
               disabled={disabled || busy}
               onClick={() => void decide(false)}
-            >
-              Deny
-            </Button>
+            >{translateUi("Deny")}</Button>
             <Button
               disabled={disabled || busy || !choice}
               onClick={() => void decide(true)}
-            >
-              Allow{" "}
+            >{translateUi("Allow")}{" "}
               {choice?.id === "operation"
-                ? "this operation"
-                : "selected permission"}
+                ? translateUi("this operation")
+                : translateUi("selected permission")}
             </Button>
           </div>
         </>
@@ -206,8 +201,8 @@ export function ExecutionPermissionCard({
       {current.state === "expired" && (
         <p className="text-12">
           {current.version === 2
-            ? "This expired operation will not be sent. To request a new operation, use a new request context."
-            : "Return to the original conversation and explicitly request the task again. This expired operation will not be sent."}
+            ? translateUi("This expired operation will not be sent. To request a new operation, use a new request context.")
+            : translateUi("Return to the original conversation and explicitly request the task again. This expired operation will not be sent.")}
         </p>
       )}
       {error && (
@@ -216,20 +211,16 @@ export function ExecutionPermissionCard({
         </p>
       )}
       {query.isError && (
-        <p role="alert" className="text-12 text-destructive">
-          The current status could not be loaded.
-        </p>
+        <p role="alert" className="text-12 text-destructive">{translateUi("The current status could not be loaded.")}</p>
       )}
       {current.result_text && (
         <details className="text-12">
-          <summary className="cursor-pointer">Your private operation result</summary>
+          <summary className="cursor-pointer">{translateUi("Your private operation result")}</summary>
           <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all font-sans">{current.result_text}</pre>
         </details>
       )}
       {current.grant_id && (
-        <a href="/approvals/grants" className="text-12 underline">
-          Inspect or revoke the saved permission
-        </a>
+        <a href="/approvals/grants" className="text-12 underline">{translateUi("Inspect or revoke the saved permission")}</a>
       )}
     </section>
   );

@@ -1,7 +1,8 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { appI18n } from "@/i18n";
 import { useAuthStore } from "@/stores/auth-store";
 import { ApiError } from "@/lib/api-client";
 import { ProviderCredentials } from "./credentials";
@@ -59,7 +60,8 @@ function show(node: ReactNode) {
     ),
   };
 }
-beforeEach(() => {
+beforeEach(async () => {
+  await appI18n.changeLanguage("en");
   vi.clearAllMocks();
   useAuthStore.setState({
     user: {
@@ -73,7 +75,38 @@ beforeEach(() => {
   mock.post.mockResolvedValue(record);
   mock.put.mockResolvedValue(record);
 });
+afterEach(async () => {
+  cleanup();
+  await appI18n.changeLanguage("en");
+});
 describe("provider credentials", () => {
+  it("switches all credential controls and save errors without changing the secret or request kind", async () => {
+    show(<ProviderCredentials readOnly={false} />);
+    await userEvent.click(screen.getByRole("button", { name: "Add credential" }));
+    await userEvent.type(screen.getByLabelText("Credential name"), "Authored name");
+    await userEvent.selectOptions(screen.getByLabelText("Credential kind"), "openai");
+    const input = screen.getByLabelText("Provider credential");
+    await userEvent.type(input, "private-test-only-key");
+    for (const [language, label, save] of [
+      ["zh-CN", "提供商凭据", "保存凭据"],
+      ["zh-TW", "供應商憑證", "儲存憑證"],
+    ] as const) {
+      await act(async () => { await appI18n.changeLanguage(language); });
+      expect(screen.getByLabelText(label)).toBe(input);
+      expect(input).toHaveValue("private-test-only-key");
+      expect(screen.getByRole("button", { name: save })).toBeEnabled();
+    }
+    mock.post.mockRejectedValue(new ApiError(400, { message: "private-test-only-key" } as never));
+    await userEvent.click(screen.getByRole("button", { name: "儲存憑證" }));
+    expect(await screen.findByText(/無法儲存憑證/)).toBeInTheDocument();
+    expect(input).toHaveValue("");
+    expect(mock.post).toHaveBeenCalledWith("/admin/platform-models/credentials", {
+      name: "Authored name", kind: "openai", credential: "private-test-only-key",
+    });
+    await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+    expect(screen.getByText(/无法保存凭据/)).toBeInTheDocument();
+    expect(screen.queryByText("private-test-only-key")).not.toBeInTheDocument();
+  });
   it("lists metadata and references while hiding writes for read-only viewers", async () => {
     mock.get.mockResolvedValue({
       records: [

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { ProviderCredentials } from "@/components/platform-models/credentials";
 import { titleCase } from "@/schemas/platform-models";
 import { PublicPreview } from "@/components/platform-models/public-preview";
@@ -28,6 +30,7 @@ function useReadOnly() {
   return !canAdminWrite(user) || !enabled;
 }
 export function AdminPlatformModelsPage() {
+  useUiTranslation();
   const query = usePlatformModels(true);
   const readOnly = useReadOnly();
   const [creating, setCreating] = useState(false);
@@ -35,20 +38,15 @@ export function AdminPlatformModelsPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Platform Models"
-        description="Public model contracts, private routes, access and retail price revisions."
+        title={translateUi("Platform Models")}
+        description={translateUi("Public model contracts, private routes, access and retail price revisions.")}
       />
       {readOnly && (
-        <p className="type-secondary text-muted-foreground">
-          Read-only. Editing requires an administrator with Platform Models
-          enabled.
-        </p>
+        <p className="type-secondary text-muted-foreground">{translateUi("Read-only. Editing requires an administrator with Platform Models enabled.")}</p>
       )}
       <ProviderCredentials readOnly={readOnly} />
       {!readOnly && !creating && (
-        <Button variant="primary" onClick={() => setCreating(true)}>
-          Create model
-        </Button>
+        <Button variant="primary" onClick={() => setCreating(true)}>{translateUi("Create model")}</Button>
       )}
       {creating && !readOnly && (
         <ModelFormEditor
@@ -63,11 +61,9 @@ export function AdminPlatformModelsPage() {
         />
       )}
       <SaveError error={query.error} />
-      {query.isLoading && <p className="type-body">Loading models…</p>}
+      {query.isLoading && <p className="type-body">{translateUi("Loading models…")}</p>}
       {query.data?.pages[0]?.models.length === 0 && (
-        <p className="type-body text-muted-foreground">
-          No models configured. Create a disabled draft to begin.
-        </p>
+        <p className="type-body text-muted-foreground">{translateUi("No models configured. Create a disabled draft to begin.")}</p>
       )}
       <div className="divide-y divide-border/30 rounded-xl border border-border/50">
         {query.data?.pages.flatMap((page) =>
@@ -87,8 +83,8 @@ export function AdminPlatformModelsPage() {
                   </p>
                 </div>
                 <div className="type-secondary text-muted-foreground">
-                  {titleCase(model.lifecycle)} ·{" "}
-                  {model.enabled ? "Enabled" : "Disabled"} · Revision{" "}
+                  {translateUi(titleCase(model.lifecycle))} ·{" "}
+                  {model.enabled ? translateUi("Enabled") : translateUi("Disabled")}{translateUi(" · Revision")}{" "}
                   {model.revision}
                 </div>
               </Link>
@@ -101,14 +97,13 @@ export function AdminPlatformModelsPage() {
           variant="outline"
           disabled={query.isFetchingNextPage}
           onClick={() => void query.fetchNextPage()}
-        >
-          Load more models
-        </Button>
+        >{translateUi("Load more models")}</Button>
       )}
     </div>
   );
 }
 export function AdminPlatformModelDetailPage() {
+  useUiTranslation();
   const { modelId } = useParams({
     from: "/dashboard/admin/platform-models/$modelId",
   });
@@ -124,36 +119,30 @@ export function AdminPlatformModelDetailPage() {
     return (
       <div className="space-y-4">
         <SaveError error={query.error} />
-        {query.isLoading && <p className="type-body">Loading model…</p>}
+        {query.isLoading && <p className="type-body">{translateUi("Loading model…")}</p>}
       </div>
     );
   return (
     <div className="space-y-6">
       <PageHeader title={model.display_name} description={model.public_id} />
       {readOnly && (
-        <p className="type-secondary text-muted-foreground">
-          Read-only. Editing requires an administrator with Platform Models
-          enabled.
-        </p>
+        <p className="type-secondary text-muted-foreground">{translateUi("Read-only. Editing requires an administrator with Platform Models enabled.")}</p>
       )}
       <div className="rounded-xl border border-border/50 p-4 space-y-2">
         <p className="type-body">
           {model.execution_ready
-            ? "Execution ready"
-            : `Execution unavailable: ${titleCase(model.blocking_reason)}`}
+            ? translateUi("Execution ready")
+            : translateUi("Execution unavailable: {{value1}}", { value1: translateUi(titleCase(model.blocking_reason)) })}
         </p>
-        <p className="type-secondary text-muted-foreground">
-          Required fleet readiness: {model.required_readiness.join(", ")}.
-          Feature access does not override model readiness or entitlements.
-        </p>
+        <p className="type-secondary text-muted-foreground">{translateUi("Required fleet readiness: ")}{model.required_readiness.join(", ")}{translateUi(". Feature access does not override model readiness or entitlements. ")}</p>
       </div>
       <Tabs defaultValue="contract">
         <TabsList className="flex flex-wrap h-auto">
-          <TabsTrigger value="contract">Public contract</TabsTrigger>
-          <TabsTrigger value="routes">Private routes</TabsTrigger>
-          <TabsTrigger value="preview">Public preview</TabsTrigger>
-          <TabsTrigger value="access">Access</TabsTrigger>
-          <TabsTrigger value="prices">Prices & readiness</TabsTrigger>
+          <TabsTrigger value="contract">{translateUi("Public contract")}</TabsTrigger>
+          <TabsTrigger value="routes">{translateUi("Private routes")}</TabsTrigger>
+          <TabsTrigger value="preview">{translateUi("Public preview")}</TabsTrigger>
+          <TabsTrigger value="access">{translateUi("Access")}</TabsTrigger>
+          <TabsTrigger value="prices">{translateUi("Prices & readiness")}</TabsTrigger>
         </TabsList>
         <div key={`${model.id}-${model.revision}-${epoch}`}>
           <TabsContent value="contract">

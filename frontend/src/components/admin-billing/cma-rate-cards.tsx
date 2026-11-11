@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   useCmaRateCards,
@@ -32,27 +35,24 @@ import {
 } from "@/components/ui/table";
 
 export function CmaRateCards({ canWrite }: { readonly canWrite: boolean }) {
+  useUiTranslation();
   const cards = useCmaRateCards();
   return (
     <Card>
       <CardHeader>
-        <CardTitle>CMA Sandbox rates</CardTitle>
-        <p className="type-body text-muted-foreground">
-          Prices apply to allocated CPU, RAM and retained disk. Publishing a
-          rate does not enable billing. Use Feature Flags to enable CMA billing
-          globally or for selected people.
-        </p>
+        <CardTitle>{translateUi("CMA Sandbox rates")}</CardTitle>
+        <p className="type-body text-muted-foreground">{translateUi("Prices apply to allocated CPU, RAM and retained disk. Publishing a rate does not enable billing. Use Feature Flags to enable CMA billing globally or for selected people.")}</p>
       </CardHeader>
       <CardContent className="space-y-4">
         {cards.error && (
           <ErrorBanner
-            message="Unable to load CMA rate history"
+            message={translateUi("Unable to load CMA rate history")}
             onRetry={() => void cards.refetch()}
           />
         )}
-        {cards.isLoading && <p>Loading CMA rates…</p>}
+        {cards.isLoading && <p>{translateUi("Loading CMA rates…")}</p>}
         {cards.data?.length === 0 && (
-          <p>The initial CMA rate card has not been installed.</p>
+          <p>{translateUi("The initial CMA rate card has not been installed.")}</p>
         )}
         {canWrite && cards.data?.[0] && (
           <PublishForm key={cards.data[0].version} latest={cards.data[0]} />
@@ -61,12 +61,12 @@ export function CmaRateCards({ canWrite }: { readonly canWrite: boolean }) {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Version</TableHead>
-                <TableHead>Effective from</TableHead>
-                <TableHead>CPU / millicore-second</TableHead>
-                <TableHead>RAM / MiB-second</TableHead>
-                <TableHead>Disk / GiB-second</TableHead>
-                <TableHead>Price sync</TableHead>
+                <TableHead>{translateUi("Version")}</TableHead>
+                <TableHead>{translateUi("Effective from")}</TableHead>
+                <TableHead>{translateUi("CPU / millicore-second")}</TableHead>
+                <TableHead>{translateUi("RAM / MiB-second")}</TableHead>
+                <TableHead>{translateUi("Disk / GiB-second")}</TableHead>
+                <TableHead>{translateUi("Price sync")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -74,7 +74,7 @@ export function CmaRateCards({ canWrite }: { readonly canWrite: boolean }) {
                 <TableRow key={card.id}>
                   <TableCell>{card.version}</TableCell>
                   <TableCell>
-                    {new Date(card.effective_from).toLocaleString()}
+                    {new Date(card.effective_from).toLocaleString(getFormattingLocale())}
                   </TableCell>
                   {Object.keys(CMA_RESOURCE_LABELS).map((resource) => (
                     <TableCell key={resource}>
@@ -92,6 +92,7 @@ export function CmaRateCards({ canWrite }: { readonly canWrite: boolean }) {
   );
 }
 function PublishForm({ latest }: { readonly latest: CmaRateCard }) {
+  useUiTranslation();
   const publish = usePublishCmaRateCard();
   const form = useAppForm<CmaRateForm>({
     resolver: zodResolver(cmaRateFormSchema),
@@ -123,11 +124,7 @@ function PublishForm({ latest }: { readonly latest: CmaRateCard }) {
         }}
         className="space-y-4"
       >
-        <p className="type-body text-muted-foreground">
-          Publish a new version with at least 301 seconds’ notice. Existing
-          charges keep their original rates. Sandboxes need a fresh quote and
-          authorized operation at the price change.
-        </p>
+        <p className="type-body text-muted-foreground">{translateUi("Publish a new version with at least 301 seconds’ notice. Existing charges keep their original rates. Sandboxes need a fresh quote and authorized operation at the price change.")}</p>
         {Object.entries(CMA_RESOURCE_LABELS).map(([resource, label]) => (
           <FormField
             key={resource}
@@ -149,7 +146,7 @@ function PublishForm({ latest }: { readonly latest: CmaRateCard }) {
           name="effective_from"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>Effective from (local time)</FormLabel>
+              <FormLabel>{translateUi("Effective from (local time)")}</FormLabel>
               <FormControl>
                 <Input {...field} type="datetime-local" step="1" />
               </FormControl>
@@ -162,18 +159,14 @@ function PublishForm({ latest }: { readonly latest: CmaRateCard }) {
             message={
               publish.error instanceof Error
                 ? publish.error.message
-                : "Unable to publish rate card"
+                : translateUi("Unable to publish rate card")
             }
           />
         )}
         {publish.isSuccess && (
-          <p role="status">
-            Rate card published. Price synchronization is pending.
-          </p>
+          <p role="status">{translateUi("Rate card published. Price synchronization is pending.")}</p>
         )}
-        <Button type="submit" disabled={publish.isPending}>
-          Publish rate version
-        </Button>
+        <Button type="submit" disabled={publish.isPending}>{translateUi("Publish rate version")}</Button>
       </form>
     </Form>
   );

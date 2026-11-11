@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 /**
  * Context-aware footer for the shared wizard shell.
  *
@@ -22,24 +24,24 @@ const FOOTER_CLASS =
   "mt-6 flex flex-wrap gap-2 border-t border-border pt-4 text-14 text-muted-foreground short:mt-4 very-short:hidden"
 
 export function WizardFooter({ context, localOrigin }: WizardFooterProps) {
+  useUiTranslation();
   if (context === "local") {
     return (
       <footer className={FOOTER_CLASS}>
-        <span>
-          Served locally from{" "}
+        <span>{translateUi("Served locally from")}{" "}
           <code className="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-14">
             {localOrigin ?? window.location.host}
           </code>
         </span>
-        <span>· Nothing leaves your machine</span>
+        <span>{translateUi("· Nothing leaves your machine")}</span>
       </footer>
     )
   }
 
   return (
     <footer className={FOOTER_CLASS}>
-      <span>Pairing with a remote CLI</span>
-      <span>· Secrets never travel back through the pairing channel</span>
+      <span>{translateUi("Pairing with a remote CLI")}</span>
+      <span>{translateUi("· Secrets never travel back through the pairing channel")}</span>
     </footer>
   )
 }

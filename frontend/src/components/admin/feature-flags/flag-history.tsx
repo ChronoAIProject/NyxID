@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useState } from "react";
 import { History } from "lucide-react";
 import { useFeatureFlagHistory } from "@/hooks/use-admin-feature-flags";
@@ -76,6 +79,7 @@ export function FlagHistory({
   flagKey: string;
   enabled: boolean;
 }) {
+  useUiTranslation();
   const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const history = useFeatureFlagHistory(
     flagKey,
@@ -84,51 +88,37 @@ export function FlagHistory({
   );
   return (
     <div className="space-y-3">
-      <p className="text-14 text-muted-foreground">
-        Who changed this flag, what changed, and when. Code-defined flags
-        originate in source control; this history includes recorded admin
-        changes.
-      </p>
+      <p className="text-14 text-muted-foreground">{translateUi("Who changed this flag, what changed, and when. Code-defined flags originate in source control; this history includes recorded admin changes.")}</p>
       {history.isLoading && <Skeleton className="h-24" />}
       {history.error && (
-        <div role="alert" className="flex items-center gap-3 text-14">
-          Unable to load flag history.
-          <Button size="sm" onClick={() => void history.refetch()}>
-            Retry history
-          </Button>
+        <div role="alert" className="flex items-center gap-3 text-14">{translateUi("Unable to load flag history.")}<Button size="sm" onClick={() => void history.refetch()}>{translateUi("Retry history")}</Button>
         </div>
       )}
       {!history.isLoading &&
         !history.error &&
         !history.data?.entries.length && (
-          <p className="py-6 text-center text-14 text-muted-foreground">
-            No recorded changes for this flag.
-          </p>
+          <p className="py-6 text-center text-14 text-muted-foreground">{translateUi("No recorded changes for this flag.")}</p>
         )}
       {history.data && (
         <p className="text-14">
           {history.data.origin.created_by ? (
-            <>
-              Created by{" "}
+            <>{translateUi("Created by")}{" "}
               <span className="font-medium">
                 {history.data.origin.creator_name ??
                   history.data.origin.created_by}
               </span>
               {history.data.origin.created_at
-                ? ` on ${new Date(history.data.origin.created_at).toLocaleString()}`
+                ? translateUi(" on {{value1}}", { value1: new Date(history.data.origin.created_at).toLocaleString(getFormattingLocale()) })
                 : ""}
               .
             </>
           ) : (
-            "Declared in code. Creation and default changes are tracked in source control."
+            translateUi("Declared in code. Creation and default changes are tracked in source control.")
           )}
         </p>
       )}
       {history.data?.legacy_ambiguous_omitted && (
-        <p className="text-13 text-muted-foreground">
-          Some older changes may have been omitted because this flag key was
-          reused and their identity cannot be verified.
-        </p>
+        <p className="text-13 text-muted-foreground">{translateUi("Some older changes may have been omitted because this flag key was reused and their identity cannot be verified.")}</p>
       )}
       <ol className="divide-y divide-border/60">
         {history.data?.entries.map((entry) => (
@@ -147,16 +137,16 @@ export function FlagHistory({
                     {entry.actor_name ??
                       entry.actor_email ??
                       entry.actor_id ??
-                      "System"}
+                      translateUi("System")}
                   </span>{" "}
                   <span className="text-muted-foreground">
                     {entry.event_type.endsWith("created")
-                      ? "created this flag"
+                      ? translateUi("created this flag")
                       : entry.event_type.includes("metadata")
-                        ? "updated flag details"
+                        ? translateUi("updated flag details")
                         : entry.event_type.endsWith("cleared")
-                          ? "removed an override"
-                          : "changed rollout"}
+                          ? translateUi("removed an override")
+                          : translateUi("changed rollout")}
                   </span>
                 </span>
                 <time
@@ -164,13 +154,11 @@ export function FlagHistory({
                   title={new Date(entry.created_at).toISOString()}
                   className="text-13 text-muted-foreground"
                 >
-                  {new Date(entry.created_at).toLocaleString()}
+                  {new Date(entry.created_at).toLocaleString(getFormattingLocale())}
                 </time>
               </div>
               {entry.legacy && (
-                <p className="text-13 text-muted-foreground">
-                  Legacy record · flag identity inferred from available records
-                </p>
+                <p className="text-13 text-muted-foreground">{translateUi("Legacy record · flag identity inferred from available records")}</p>
               )}
               {changes(entry).map((change, i) => (
                 <p
@@ -190,19 +178,15 @@ export function FlagHistory({
             size="sm"
             disabled={cursors.length === 1 || history.isFetching}
             onClick={() => setCursors((items) => items.slice(0, -1))}
-          >
-            Newer
-          </Button>
-          <span>Page {cursors.length}</span>
+          >{translateUi("Newer")}</Button>
+          <span>{translateUi("Page ")}{cursors.length}</span>
           <Button
             size="sm"
             disabled={!history.data?.next_cursor || history.isFetching}
             onClick={() =>
               setCursors((items) => [...items, history.data!.next_cursor!])
             }
-          >
-            Older
-          </Button>
+          >{translateUi("Older")}</Button>
         </div>
       )}
     </div>

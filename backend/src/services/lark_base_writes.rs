@@ -49,6 +49,7 @@ pub(crate) async fn contracts(
         downstream_service::{COLLECTION_NAME as CATALOG, DownstreamService},
         service_endpoint::{COLLECTION_NAME as ENDPOINTS, PublicationState, ServiceEndpoint},
     };
+    use attachment::eligibility::Reason;
     use futures::TryStreamExt;
     let McpToolSource::UserManaged {
         catalog_service_id: Some(catalog),
@@ -56,52 +57,102 @@ pub(crate) async fn contracts(
         ..
     } = &service.source
     else {
-        return Err(attachment::refused());
+        return Err(Reason::ConnectionRequired.error());
     };
     let catalog = db
         .collection::<DownstreamService>(CATALOG)
         .find_one(doc! {"_id":catalog,"is_active":true})
         .await?
-        .ok_or_else(attachment::refused)?;
+        .ok_or_else(|| Reason::CatalogUnavailable.error())?;
     let instance = super::user_service_service::find_user_service_by_id(db, user_service_id)
         .await?
         .filter(|s| s.is_active)
-        .ok_or_else(attachment::refused)?;
+        .ok_or_else(|| Reason::ConnectionUnavailable.error())?;
     let mounted = super::service_history::collection::<crate::models::user_endpoint::UserEndpoint>(
         db,
         "user_endpoints",
     )
     .find_one(doc! {"_id":&instance.endpoint_id})
     .await?
-    .ok_or_else(attachment::refused)?;
-    if mounted.openapi_spec_url.is_some()
-        || instance.catalog_service_id.as_deref() != Some(&catalog.id)
-    {
-        return Err(attachment::refused());
+    .ok_or_else(|| Reason::ConnectionUnavailable.error())?;
+    if mounted.openapi_spec_url.is_some() {
+        return Err(Reason::SpecOverride.error());
     }
+    if instance.catalog_service_id.as_deref() != Some(&catalog.id) {
+        return Err(Reason::CatalogMismatch.error());
+    }
+    if super::platform_key_service::binding(&instance) != "user" {
+        return Err(Reason::ConnectionCredentialRequired.error());
+    }
+    if instance.node_id.as_deref().is_some_and(|id| !id.is_empty()) {
+        return Err(Reason::HostedRequired.error());
+    }
+    let credential_id = instance
+        .api_key_id
+        .as_ref()
+        .filter(|_| instance.auth_method != "none")
+        .ok_or_else(|| Reason::CredentialUnavailable.error())?;
+    let credential = db
+        .collection::<bson::Document>("user_api_keys")
+        .find_one(doc! {"_id":credential_id,"user_id":&instance.user_id,"status":"active"})
+        .projection(doc! {"credential_type":1})
+        .await?
+        .ok_or_else(|| Reason::CredentialUnavailable.error())?;
+    let credential_type = credential
+        .get_str("credential_type")
+        .map_err(|_| Reason::CredentialUnavailable.error())?;
+    if matches!(credential_type, "node_managed" | "ssh_certificate") {
+        return Err(Reason::HostedRequired.error());
+    }
+    // Use the same serde publication default as discovery. Missing means
+    // Published on legacy rows; explicit admin states are never overwritten.
+    let names = [
+        attachment::COMPOSITE_OPERATION,
+        attachment::FIELDS_OPERATION,
+        attachment::UPLOAD_OPERATION,
+        attachment::CREATE_OPERATION,
+    ];
     let rows: Vec<ServiceEndpoint> = db
         .collection::<ServiceEndpoint>(ENDPOINTS)
-        .find(doc! {"service_id":&catalog.id,"is_active":true,"publication":"published"})
+        .find(doc! {"service_id":&catalog.id,"name":{"$in":names.to_vec()}})
         .await?
         .try_collect()
         .await?;
-    if rows
-        .iter()
-        .any(|row| row.publication != PublicationState::Published)
-    {
-        return Err(attachment::refused());
+    let mut required = Vec::new();
+    for name in names {
+        let mut matches = rows.iter().filter(|row| row.name == name);
+        let row = matches
+            .next()
+            .ok_or_else(|| Reason::MissingOperation.error())?;
+        if matches.next().is_some() {
+            return Err(Reason::UntrustedContract.error());
+        }
+        if !row.is_active || row.publication != PublicationState::Published {
+            return Err(Reason::NotPublished.error());
+        }
+        if row.operation_generation <= 0 {
+            return Err(Reason::InvalidGeneration.error());
+        }
+        if service
+            .durable_endpoint_metadata
+            .get(&row.id)
+            .is_none_or(|metadata| metadata.operation_generation != row.operation_generation)
+        {
+            return Err(Reason::GenerationChanged.error());
+        }
+        required.push(row);
     }
-    let mut loaded = mcp::service_endpoints_to_mcp(&rows.iter().collect::<Vec<_>>());
+    let mut loaded = mcp::service_endpoints_to_mcp(&required);
     attachment::stored_projections(Some(&catalog), &mut loaded);
     let current = loaded
         .iter()
         .find(|ep| ep.endpoint_id == endpoint.endpoint_id)
-        .ok_or_else(attachment::refused)?;
+        .ok_or_else(|| Reason::MissingOperation.error())?;
     let Some(attachment::Projection::Managed(mark)) = &current.attachment_input else {
-        return Err(attachment::refused());
+        return Err(Reason::UntrustedContract.error());
     };
     if mcp::endpoint_contract_digest(current) != mcp::endpoint_contract_digest(endpoint) {
-        return Err(attachment::refused());
+        return Err(Reason::ContractChanged.error());
     }
     let mut digests = mark.contract_digests.clone();
     digests.insert(
@@ -120,24 +171,20 @@ pub(crate) async fn prepare(
     args: &Value,
     body: &Value,
 ) -> AppResult<Prepared> {
+    let contract_digests =
+        attachment::eligibility::require_eligible(db, chat, service, endpoint).await?;
     if !matches!(
         endpoint.attachment_input,
         Some(attachment::Projection::Managed(_))
-    ) || endpoint.async_operation.is_some()
-        || !attachment::writes_enabled(db, chat).await?
-    {
-        return Err(attachment::refused());
+    ) {
+        return Err(attachment::eligibility::Reason::UntrustedContract.error());
     }
-    let chat = chat
-        .filter(|chat| !chat.guest)
-        .ok_or_else(attachment::refused)?;
-    super::assistant_resource_service::require_live(db, chat).await?;
+    let chat = chat.ok_or_else(|| attachment::eligibility::Reason::NotLive.error())?;
     let app = args["app_token"].as_str().ok_or_else(invalid)?.to_owned();
     let table = args["table_id"].as_str().ok_or_else(invalid)?.to_owned();
     validation::token(&app)?;
     validation::token(&table)?;
     let (fields, assignments) = validation::body(body)?;
-    let contract_digests = contracts(db, service, endpoint).await?;
     let ids: HashSet<_> = assignments.values().flatten().cloned().collect();
     let mut inputs = Vec::new();
     let mut total = 0usize;

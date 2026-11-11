@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -59,10 +61,12 @@ const names: Record<string, string> = {
 };
 const operationName = (name: string) => name.replaceAll("_", " ");
 export function ChannelAdapterBindings() {
+  useUiTranslation();
   const actor = useAuthStore((s) => s.user?.id);
   return <OwnedAdapterBindings key={actor ?? "signed-out"} />;
 }
 function OwnedAdapterBindings() {
+  useUiTranslation();
   const query = useChannelAdapterBindings();
   const catalog = useChannelAdapterCatalog();
   const [adding, setAdding] = useState(false);
@@ -71,23 +75,14 @@ function OwnedAdapterBindings() {
   return (
     <section className="space-y-4 text-14">
       <GroupedList
-        title="Phone and speech connections"
+        title={translateUi("Phone and speech connections")}
         footer={
           <>
-            <p>
-              Answer calls and SMS with a scoped NyxBot specialist. Each caller gets a
-              separate guest conversation. For a Notion FAQ, grant the specialist your
-              Notion connection and set its Guest access to Read in the specialist’s
-              permissions.
-            </p>
-            <p>
-              The carrier handles the phone connection, the speech provider
-              handles audio, and NyxBot runs the agent and its permitted tools.
-              Browser voice permissions do not apply to callers.
-            </p>
+            <p>{translateUi("Answer calls and SMS with a scoped NyxBot specialist. Each caller gets a separate guest conversation. For a Notion FAQ, grant the specialist your Notion connection and set its Guest access to Read in the specialist’s permissions.")}</p>
+            <p>{translateUi("The carrier handles the phone connection, the speech provider handles audio, and NyxBot runs the agent and its permitted tools. Browser voice permissions do not apply to callers.")}</p>
             {(query.error || catalog.error) && (
               <ErrorBanner
-                message="Could not load phone and speech connections."
+                message={translateUi("Could not load phone and speech connections.")}
                 onRetry={() => {
                   void query.refetch();
                   void catalog.refetch();
@@ -98,19 +93,17 @@ function OwnedAdapterBindings() {
         }
       >
         {query.isPending && (
-          <GroupedRow title="Loading connections…" role="status" />
+          <GroupedRow title={translateUi("Loading connections…")} role="status" />
         )}
         {query.isSuccess && query.data?.length === 0 && (
-          <GroupedRow title="No phone or speech connections yet." />
+          <GroupedRow title={translateUi("No phone or speech connections yet.")} />
         )}
         <GroupedRow asChild interactive>
           <button
             type="button"
             onClick={() => setAdding(true)}
             disabled={profiles.length === 0}
-          >
-            Add phone or speech connection
-          </button>
+          >{translateUi("Add phone or speech connection")}</button>
         </GroupedRow>
         {query.hasNextPage && (
           <GroupedRow asChild interactive>
@@ -118,9 +111,7 @@ function OwnedAdapterBindings() {
               type="button"
               disabled={query.isFetchingNextPage}
               onClick={() => void query.fetchNextPage()}
-            >
-              Load more connections
-            </button>
+            >{translateUi("Load more connections")}</button>
           </GroupedRow>
         )}
       </GroupedList>
@@ -134,11 +125,8 @@ function OwnedAdapterBindings() {
       <GroupedDialog open={adding} onOpenChange={setAdding}>
         <GroupedDialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Connect a specialist</DialogTitle>
-            <DialogDescription>
-              NyxID verifies the provider account and resources before saving.
-              This does not send a message or place a call.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Connect a specialist")}</DialogTitle>
+            <DialogDescription>{translateUi("NyxID verifies the provider account and resources before saving. This does not send a message or place a call.")}</DialogDescription>
           </DialogHeader>
           {adding && (
             <SetupForm descriptors={profiles} onDone={() => setAdding(false)} />
@@ -155,6 +143,7 @@ function BindingCard({
   binding: AdapterBinding;
   descriptor?: AdapterDescriptor;
 }) {
+  useUiTranslation();
   const actions = useChannelAdapterActions();
   const [detail, setDetail] = useState(false);
   const [secret, setSecret] = useState<string>();
@@ -181,8 +170,8 @@ function BindingCard({
             )}
             <p>
               {b.adapter_id.startsWith("elevenlabs.")
-                ? "Create a session for each ElevenLabs conversation and pass its extra_body from your client."
-                : "Set the provider application’s inbound webhook and terminal/status callback to this URL (POST). Keep provider recording disabled unless separately authorized."}
+                ? translateUi("Create a session for each ElevenLabs conversation and pass its extra_body from your client.")
+                : translateUi("Set the provider application’s inbound webhook and terminal/status callback to this URL (POST). Keep provider recording disabled unless separately authorized.")}
             </p>
             {error && <ErrorBanner message={error} />}
           </>
@@ -201,11 +190,9 @@ function BindingCard({
         />
         <GroupedRow asChild className="block space-y-0.5">
           <Label>
-            <span className="text-text-tertiary">
-              Webhook URL
-            </span>
+            <span className="text-text-tertiary">{translateUi("Webhook URL")}</span>
             <Input
-              aria-label={`${b.label} webhook URL`}
+              aria-label={translateUi("{{value1}} webhook URL", { value1: b.label })}
               value={b.webhook_url}
               readOnly
             />
@@ -214,9 +201,7 @@ function BindingCard({
         <GroupedDisclosure
           aria-expanded={detail}
           onClick={() => setDetail(!detail)}
-        >
-          Capabilities and readiness
-        </GroupedDisclosure>
+        >{translateUi("Capabilities and readiness")}</GroupedDisclosure>
 
         <GroupedRow asChild interactive>
           <button
@@ -224,7 +209,7 @@ function BindingCard({
             disabled={actions.verify.isPending}
             onClick={() => void act(() => actions.verify.mutateAsync(b.id))}
           >
-            {b.enabled ? "Verify again" : "Verify and enable"}
+            {b.enabled ? translateUi("Verify again") : translateUi("Verify and enable")}
           </button>
         </GroupedRow>
         {!b.enabled && (
@@ -234,9 +219,7 @@ function BindingCard({
               className="text-destructive"
               disabled={actions.remove.isPending}
               onClick={() => void act(() => actions.remove.mutateAsync(b.id))}
-            >
-              Remove connection
-            </button>
+            >{translateUi("Remove connection")}</button>
           </GroupedRow>
         )}
         {b.enabled && (
@@ -246,9 +229,7 @@ function BindingCard({
               className="text-destructive"
               disabled={actions.disable.isPending}
               onClick={() => void act(() => actions.disable.mutateAsync(b.id))}
-            >
-              Disable
-            </button>
+            >{translateUi("Disable")}</button>
           </GroupedRow>
         )}
         {b.enabled && b.adapter_id === "elevenlabs.custom_llm" && (
@@ -263,9 +244,7 @@ function BindingCard({
                     actions.customSetup.reset();
                   })
                 }
-              >
-                Show Custom LLM setup
-              </button>
+              >{translateUi("Show Custom LLM setup")}</button>
             </GroupedRow>
             <GroupedRow asChild interactive>
               <button
@@ -278,9 +257,7 @@ function BindingCard({
                     actions.customSession.reset();
                   })
                 }
-              >
-                Create guest session
-              </button>
+              >{translateUi("Create guest session")}</button>
             </GroupedRow>
           </>
         )}
@@ -295,25 +272,23 @@ function BindingCard({
                   setSecret(undefined);
                 })
               }
-            >
-              End guest session
-            </button>
+            >{translateUi("End guest session")}</button>
           </GroupedRow>
         )}
       </GroupedList>
       {detail && (
         <GroupedList
-          title="Capabilities and readiness"
-          footer="Provider acceptance does not prove delivery or that a caller heard a reply. Interrupted or uncertain effects are not automatically replayed."
+          title={translateUi("Capabilities and readiness")}
+          footer={translateUi("Provider acceptance does not prove delivery or that a caller heard a reply. Interrupted or uncertain effects are not automatically replayed.")}
         >
           <GroupedRow
-            title="Instructions refresh"
+            title={translateUi("Instructions refresh")}
             accessory={operationName(
               d?.instructions.nyxbot_refresh ?? "unknown",
             )}
           />
           <GroupedRow
-            title="Delivery evidence"
+            title={translateUi("Delivery evidence")}
             accessory={operationName(
               d?.messaging.outbound_text
                 ? d.messaging.delivery
@@ -321,7 +296,7 @@ function BindingCard({
             )}
           />
           <GroupedRow
-            title="SMS limit"
+            title={translateUi("SMS limit")}
             accessory={
               d?.messaging.max_text_bytes
                 ? `${d.messaging.max_text_bytes} bytes; multipart billed per provider part`
@@ -350,9 +325,7 @@ function BindingCard({
           ))}
           {d?.setup.documentation && (
             <GroupedRow asChild interactive>
-              <a href={d.setup.documentation} target="_blank" rel="noreferrer">
-                Provider setup documentation
-              </a>
+              <a href={d.setup.documentation} target="_blank" rel="noreferrer">{translateUi("Provider setup documentation")}</a>
             </GroupedRow>
           )}
         </GroupedList>
@@ -365,12 +338,8 @@ function BindingCard({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>ElevenLabs connection values</DialogTitle>
-            <DialogDescription>
-              These values authorize this connection. Copy them into your
-              provider/client configuration. They disappear when this dialog
-              closes.
-            </DialogDescription>
+            <DialogTitle>{translateUi("ElevenLabs connection values")}</DialogTitle>
+            <DialogDescription>{translateUi("These values authorize this connection. Copy them into your provider/client configuration. They disappear when this dialog closes.")}</DialogDescription>
           </DialogHeader>
           <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-overlay p-3 text-14">
             {secret}
@@ -387,6 +356,7 @@ function SetupForm({
   descriptors: AdapterDescriptor[];
   onDone: () => void;
 }) {
+  useUiTranslation();
   const actor = useAuthStore((s) => s.user?.id);
   const agents = useNyxBotAgents();
   const keys = useKeys();
@@ -472,13 +442,13 @@ function SetupForm({
   return (
     <Form {...form}>
       <form onSubmit={form.handleSubmit(save)} className="space-y-6">
-        <GroupedList title="Connection">
+        <GroupedList title={translateUi("Connection")}>
           <FormField
             control={form.control}
             name="adapter_id"
             render={({ field }) => (
               <FormItem inline>
-                <FormLabel>Profile</FormLabel>
+                <FormLabel>{translateUi("Profile")}</FormLabel>
                 <Select value={field.value} onValueChange={profile}>
                   <FormControl>
                     <SelectTrigger>
@@ -502,9 +472,9 @@ function SetupForm({
             name="label"
             render={({ field }) => (
               <FormItem>
-                <FormLabel>Connection name</FormLabel>
+                <FormLabel>{translateUi("Connection name")}</FormLabel>
                 <FormControl>
-                  <Input {...field} placeholder="Support FAQ" />
+                  <Input {...field} placeholder={translateUi("Support FAQ")} />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -515,11 +485,11 @@ function SetupForm({
             name="agent_id"
             render={({ field }) => (
               <FormItem inline>
-                <FormLabel>Specialist</FormLabel>
+                <FormLabel>{translateUi("Specialist")}</FormLabel>
                 <Select value={field.value} onValueChange={field.onChange}>
                   <FormControl>
                     <SelectTrigger>
-                      <SelectValue placeholder="Choose your specialist" />
+                      <SelectValue placeholder={translateUi("Choose your specialist")} />
                     </SelectTrigger>
                   </FormControl>
                   <SelectContent>
@@ -531,11 +501,7 @@ function SetupForm({
                   </SelectContent>
                 </Select>
                 <GroupedFooter>
-                  <p>
-                    Create a specialist in NyxBot’s Agents view first. For FAQ
-                    access, grant Notion and choose Guest access Read. The main
-                    NyxBot’s guest turns cannot use tools.
-                  </p>
+                  <p>{translateUi("Create a specialist in NyxBot’s Agents view first. For FAQ access, grant Notion and choose Guest access Read. The main NyxBot’s guest turns cannot use tools.")}</p>
                 </GroupedFooter>
                 <FormMessage />
               </FormItem>
@@ -545,9 +511,7 @@ function SetupForm({
             <Label
               className="min-w-0 flex-1 text-foreground"
               htmlFor="adapter-credential-mode"
-            >
-              Credentials
-            </Label>
+            >{translateUi("Credentials")}</Label>
             <Select
               value={mode}
               onValueChange={(v) => {
@@ -572,8 +536,8 @@ function SetupForm({
                     disabled={!m.implemented}
                   >
                     {m.kind === "connection"
-                      ? "Your service connection"
-                      : "Explicit platform account"}
+                      ? translateUi("Your service connection")
+                      : translateUi("Explicit platform account")}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -592,8 +556,8 @@ function SetupForm({
               htmlFor="adapter-connection"
             >
               {mode === "connection"
-                ? "Service connection"
-                : "Platform service"}
+                ? translateUi("Service connection")
+                : translateUi("Platform service")}
             </Label>
             <Select
               value={selectedConnection}
@@ -607,7 +571,7 @@ function SetupForm({
               }
             >
               <SelectTrigger id="adapter-connection">
-                <SelectValue placeholder="Choose an available service" />
+                <SelectValue placeholder={translateUi("Choose an available service")} />
               </SelectTrigger>
               <SelectContent>
                 {connections.map((k) => (
@@ -622,10 +586,7 @@ function SetupForm({
             </Select>
             {connections.length === 0 && (
               <GroupedFooter>
-                <p>
-                  Connect {provider} under Services first. Platform mode also
-                  requires an administrator’s allocation and configured billing.
-                </p>
+                <p>{translateUi("Connect ")}{provider}{translateUi(" under Services first. Platform mode also requires an administrator’s allocation and configured billing.")}</p>
               </GroupedFooter>
             )}
           </GroupedRow>
@@ -676,16 +637,12 @@ function SetupForm({
               name="webhook_public_key"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Telnyx Ed25519 public key</FormLabel>
+                  <FormLabel>{translateUi("Telnyx Ed25519 public key")}</FormLabel>
                   <FormControl>
                     <Input {...field} value={field.value ?? ""} />
                   </FormControl>
                   <GroupedFooter>
-                    <p>
-                      Copy the public key from this account’s Mission Control.
-                      Platform verification keys are managed by an
-                      administrator.
-                    </p>
+                    <p>{translateUi("Copy the public key from this account’s Mission Control. Platform verification keys are managed by an administrator.")}</p>
                   </GroupedFooter>
                   <FormMessage />
                 </FormItem>
@@ -693,12 +650,8 @@ function SetupForm({
             />
           )}
           <GroupedFooter>
-            <p>
-              Find provider number/application IDs in the carrier console.
-              Assign the number to that application before verification. Voice:{" "}
-              {form.watch("voice")} · en-US. Twilio uses the pinned Google voice
-              and a provider call time limit.
-            </p>
+            <p>{translateUi("Find provider number/application IDs in the carrier console. Assign the number to that application before verification. Voice:")}{" "}
+              {form.watch("voice")}{translateUi(" · en-US. Twilio uses the pinned Google voice and a provider call time limit.")}</p>
           </GroupedFooter>
           <GroupedFooter>
             {error && <ErrorBanner message={error} />}
@@ -706,7 +659,7 @@ function SetupForm({
         </GroupedList>
         <GroupedDialogActions
           intent="create"
-          label="phone or speech connection"
+          label={translateUi("phone or speech connection")}
           dirty={form.formState.isDirty}
           pending={actions.create.isPending}
           disabled={!form.formState.isValid}
@@ -717,7 +670,7 @@ function SetupForm({
             setError(undefined);
           }}
           saveLabel={
-            actions.create.isPending ? "Verifying…" : "Verify and connect"
+            actions.create.isPending ? translateUi("Verifying…") : translateUi("Verify and connect")
           }
         />
       </form>

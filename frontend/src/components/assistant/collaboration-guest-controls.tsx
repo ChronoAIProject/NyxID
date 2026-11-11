@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { GroupedList, GroupedRow } from "@/components/ui/grouped-list";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -35,6 +38,7 @@ export function CollaborationGuestControls({
   readonly agentId: string;
   readonly disabled?: boolean;
 }) {
+  useUiTranslation();
   const flag = useFeature(FEATURE_FLAG.SHARED_AGENTS);
   const actor = useAuthStore((s) => s.user?.id);
   const client = useQueryClient();
@@ -79,28 +83,19 @@ export function CollaborationGuestControls({
   });
   if (!query.data?.length) return null;
   return (
-    <section className="space-y-2 text-14" aria-label="Group guest replies">
+    <section className="space-y-2 text-14" aria-label={translateUi("Group guest replies")}>
       {query.data.map((row) => (
         <GroupedList
           key={row.group_id}
-          title={`Group ${row.group_id}`}
+          title={translateUi("Group {{value1}}", { value1: row.group_id })}
           info="Allow people in this group to use this agent under your guest service policy. This does not give you access to the group’s transcript or participants."
           footer={
             <>
-              <p>
-                Allow guests separately for each group. This gives you no access
-                to its transcript or participants.
-              </p>
+              <p>{translateUi("Allow guests separately for each group. This gives you no access to its transcript or participants.")}</p>
               {row.request?.status === "pending" && !row.enabled ? (
                 <>
-                  <p>
-                    Allow current and future participants without use rights to
-                    use this agent under your guest service policy. They use
-                    your identity and billing; they cannot approve cards or use
-                    private account tools.
-                  </p>
-                  <p>
-                    Expires {new Date(row.request.expires_at).toLocaleString()}
+                  <p>{translateUi("Allow current and future participants without use rights to use this agent under your guest service policy. They use your identity and billing; they cannot approve cards or use private account tools.")}</p>
+                  <p>{translateUi("Expires ")}{new Date(row.request.expires_at).toLocaleString(getFormattingLocale())}
                   </p>
                 </>
               ) : null}
@@ -114,12 +109,12 @@ export function CollaborationGuestControls({
         >
           <GroupedRow
             search={{ id: `group-guests-${row.group_id}`, title: "Guest replies", breadcrumb: `Access › Group ${row.group_id}`, keywords: row.enabled ? "Enabled" : "Disabled" }}
-            title="Guest replies"
+            title={translateUi("Guest replies")}
             accessory={row.enabled ? "Enabled" : "Disabled"}
           />
           {row.request ? (
             <GroupedRow
-              title="Request"
+              title={translateUi("Request")}
               accessory={row.request.status.replaceAll("_", " ")}
             />
           ) : null}
@@ -130,18 +125,14 @@ export function CollaborationGuestControls({
                   type="button"
                   disabled={disabled || cancel.isPending || mutation.isPending}
                   onClick={() => mutation.mutate(row)}
-                >
-                  Approve participant access
-                </button>
+                >{translateUi("Approve participant access")}</button>
               </GroupedRow>
               <GroupedRow asChild interactive>
                 <button
                   type="button"
                   disabled={disabled || mutation.isPending || cancel.isPending}
                   onClick={() => cancel.mutate(row)}
-                >
-                  Cancel request
-                </button>
+                >{translateUi("Cancel request")}</button>
               </GroupedRow>
             </>
           ) : (
@@ -153,7 +144,7 @@ export function CollaborationGuestControls({
                   row.enabled ? mutation.mutate(row) : setConfirm(row)
                 }
               >
-                {row.enabled ? "Disable guests" : "Enable guests"}
+                {row.enabled ? translateUi("Disable guests") : translateUi("Enable guests")}
               </button>
             </GroupedRow>
           )}
@@ -169,22 +160,17 @@ export function CollaborationGuestControls({
         >
           <DialogContent className="md:max-w-md">
             <DialogHeader>
-              <DialogTitle>Enable guest replies?</DialogTitle>
-              <DialogDescription>
-                Current and future participants without use rights can use this
-                agent under your guest service policy, and you pay. Applies only
-                to group {confirm.group_id}.
+              <DialogTitle>{translateUi("Enable guest replies?")}</DialogTitle>
+              <DialogDescription>{translateUi("Current and future participants without use rights can use this agent under your guest service policy, and you pay. Applies only to group ")}{confirm.group_id}.
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
-              <Button onClick={() => setConfirm(undefined)}>Cancel</Button>
+              <Button onClick={() => setConfirm(undefined)}>{translateUi("Cancel")}</Button>
               <Button
                 variant="ghost"
                 isLoading={mutation.isPending}
                 onClick={() => mutation.mutate(confirm)}
-              >
-                Enable guests
-              </Button>
+              >{translateUi("Enable guests")}</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>

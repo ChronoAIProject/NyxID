@@ -2312,9 +2312,11 @@ pub(crate) async fn setup_link_tool(
     let now = Utc::now();
     let family = canonical_platform(&platform).to_owned();
     let mut set = provenance.fields();
+    set.insert("source_turn_id", provenance.source_turn_id.clone());
     set.insert("agent_id", agent.id.clone());
     set.insert("conversation_id", source_conversation_id);
     set.insert("connect_link_id", &created.link.id);
+    set.insert("source_connect_link_id", &created.link.id);
     set.insert("created_at", bson::DateTime::from_chrono(now));
     set.insert(
         "expires_at",
@@ -2350,7 +2352,7 @@ pub(crate) async fn setup_link_tool(
             "expires_at": created.link.expires_at,
             "note": "Give the user this link and end your turn. Do not ask them to reply when \
                 done: once the bot exists NyxID links it and wakes you with the \
-                owner-verification step to pass on.",
+                owner-verification step to pass on. Keep unanswered onboarding questions pending; creating or linking a bot does not answer them or authorize opening to customers. A new bot stays owner-only.",
         }),
         false,
     ))
@@ -2383,6 +2385,8 @@ pub(crate) async fn watch_connect_link(
     let now = Utc::now();
     let invocation_id = provenance.invocation_id.clone();
     let watch = NyxbotWatch {
+        source_connect_link_id: None,
+        source_turn_id: None,
         invocation_id: provenance.invocation_id.clone(),
         trigger_prefill: None,
         trigger_id: None,
@@ -2416,6 +2420,13 @@ fn watch_snapshot(watch: &NyxbotWatch) -> bson::Document {
     "created_at":bson::DateTime::from_chrono(watch.created_at),
     "expires_at":bson::DateTime::from_chrono(watch.expires_at),
     "report_to":&watch.report_to,"report_provenance":watch.report_provenance as i32};
+    if watch.kind == "channel_bot" {
+        filter.insert("source_turn_id", watch.source_turn_id.clone());
+        filter.insert(
+            "source_connect_link_id",
+            watch.source_connect_link_id.clone(),
+        );
+    }
     if watch.report_provenance == 0 {
         // Pre-provenance rows deserialize as legacy version zero.
         filter.insert("report_provenance", doc! {"$in":[0,bson::Bson::Null]});
@@ -2709,6 +2720,8 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
     let Some(bot) = candidate else {
         return Ok(());
     };
+    let context =
+        crate::services::nyxbot_watch_service::onboarding_context(&state.db, watch).await?;
     if !claim(state, watch, doc! {"channel_bot_id": &bot.id}).await? {
         return Ok(());
     }
@@ -2725,7 +2738,7 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
         // Created in Telegram through NyxID: the account that created it is
         // already the owner's, so nothing is left to verify.
         Ok((agent, value)) if value["channel_agent"]["owner_linked"] == true => format!(
-            "The {} channel bot {} the user just created is now linked to {}, and their \
+            "The {} channel bot {} the user just created is now linked to {}. Their \
             account there is already verified. Tell them to open the bot and press Start (or \
             send a message) to check the first reply. A reply has not been verified yet. Only if they chat from a different account, \
             give them this verification step: {}",
@@ -2756,7 +2769,7 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
         state,
         watch,
         "channel_bot_linked",
-        text,
+        format!("{}\n{context}", text.chars().take(1200).collect::<String>()),
         outcome.as_ref().err().map(error_code),
     )
     .await?;
@@ -3188,7 +3201,26 @@ pub async fn link_channel(
     }
     if let Some(agent_id) = body.agent_id.as_deref() {
         let agent = requested_agent(&state, &owner, Some(agent_id)).await?;
-        result = link(&state, &owner, &id, &agent).await?;
+        let linked = link(&state, &owner, &id, &agent).await?;
+        if let (Some(result), Some(linked)) = (result.as_object_mut(), linked.as_object()) {
+            result.extend(linked.clone());
+        }
+        // A combined relink/audience PATCH must describe the final target, not
+        // the agent loaded before linking. Diagnostics cannot undo a saved change.
+        if settings.private_chats.as_deref() == Some("everyone") {
+            match chats::audience_readiness(&state, &owner, &id).await {
+                Ok(facts) => {
+                    result["guest_readiness"] = json!(&facts.guest_readiness);
+                    result["audience_readiness"] = json!(facts);
+                }
+                Err(_) => {
+                    result["guest_readiness"] = json!({"status":"not_ready","reason":"readiness_unavailable",
+                        "fix":"Access and agent were saved. Refresh customer model readiness before relying on replies."});
+                    result["audience_readiness"] = json!({"guest_readiness":result["guest_readiness"],"configuration":null,
+                        "note":crate::services::assistant_service_execution::readiness::AUDIENCE_READINESS_NOTE});
+                }
+            }
+        }
     }
     Ok(Json(result))
 }
@@ -7257,6 +7289,8 @@ pub(crate) async fn trigger_setup_link(
     let id = Uuid::new_v4().to_string();
     let invocation_id = provenance.invocation_id.clone();
     let watch = NyxbotWatch {
+        source_connect_link_id: None,
+        source_turn_id: None,
         invocation_id: provenance.invocation_id.clone(),
         agent_id: Some(prefill.agent_id.clone()),
         trigger_prefill: Some(prefill),

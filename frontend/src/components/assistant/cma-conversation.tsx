@@ -1,3 +1,6 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -15,7 +18,7 @@ function turnDate(turn: CmaTranscriptTurn): string | undefined {
     turn.started_at ??
     turn.messages.find((message) => message.created_at)?.created_at;
   if (!value || Number.isNaN(Date.parse(value))) return undefined;
-  return new Date(value).toLocaleDateString(undefined, {
+  return new Date(value).toLocaleDateString(getFormattingLocale(), {
     year: "numeric",
     month: "long",
     day: "numeric",
@@ -39,6 +42,7 @@ export function CmaConversation({
   readonly active?: boolean;
   readonly historyControl?: ReactNode;
 }) {
+  useUiTranslation();
   const entries = [...turns]
     .sort((a, b) => a.turn_sequence - b.turn_sequence)
     .map((turn) => ({
@@ -86,19 +90,14 @@ export function CmaConversation({
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 flex-wrap items-center gap-2 pb-3">
-        <p className="min-w-0 flex-1 type-secondary text-text-tertiary">
-          Requests and replies from all NyxBot chats that use this assistant, in
-          time order.
-        </p>
+        <p className="min-w-0 flex-1 type-secondary text-text-tertiary">{translateUi("Requests and replies from all NyxBot chats that use this assistant, in time order.")}</p>
         <Button variant="ghost" size="sm" onClick={jumpToLatest}>
-          <ArrowDown aria-hidden />
-          Jump to latest
-        </Button>
+          <ArrowDown aria-hidden />{translateUi("Jump to latest")}</Button>
       </div>
       <div
         ref={viewport}
         role="region"
-        aria-label="Conversation messages"
+        aria-label={translateUi("Conversation messages")}
         tabIndex={0}
         data-scroll-fade=""
         className="assistant-scrollbar min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain px-1 py-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring"
@@ -140,9 +139,7 @@ export function CmaConversation({
             className="pointer-events-auto rounded-full bg-card shadow-lg"
             onClick={jumpToLatest}
           >
-            <ArrowDown aria-hidden />
-            View new activity
-          </Button>
+            <ArrowDown aria-hidden />{translateUi("View new activity")}</Button>
         </div>
       )}
     </div>
@@ -162,6 +159,7 @@ function ConversationEntry({
   readonly latest: boolean;
   readonly linked: boolean;
 }) {
+  useUiTranslation();
   const status = cmaTurnStatus(turn, events);
   const messages = turn.messages.filter((message) =>
     ["user", "assistant"].includes(message.role),
@@ -172,15 +170,15 @@ function ConversationEntry({
       data-cma-turn={turn.turn_sequence}
       aria-label={
         linked
-          ? "Linked request"
+          ? translateUi("Linked request")
           : latest
-            ? "Latest request"
-            : "Earlier request"
+            ? translateUi("Latest request")
+            : translateUi("Earlier request")
       }
       className="scroll-m-4 space-y-6"
     >
       {linked && requestIndex === -1 && (
-        <p className="type-meta text-nyx-secondary-400">From your chat</p>
+        <p className="type-meta text-nyx-secondary-400">{translateUi("From your chat")}</p>
       )}
       {messages.map((message, index) => (
         <CmaMessage
@@ -194,20 +192,16 @@ function ConversationEntry({
       ))}
       <div className="space-y-3 pl-9 sm:pl-10">
         {status === "waiting_approval" && (
-          <p className="text-12 text-text-tertiary">
-            This request is waiting for confirmation before it can continue.
-          </p>
+          <p className="text-12 text-text-tertiary">{translateUi("This request is waiting for confirmation before it can continue.")}</p>
         )}
         {status === "interrupted" && (
-          <p className="text-12 text-text-tertiary">
-            This request was interrupted. Its available replies are kept above.
-          </p>
+          <p className="text-12 text-text-tertiary">{translateUi("This request was interrupted. Its available replies are kept above.")}</p>
         )}
         {!messages.some((message) => message.role === "assistant") && (
           <p className="text-12 text-text-tertiary">
             {turn.status === "active"
-              ? "No assistant reply yet."
-              : "No assistant reply was published."}
+              ? translateUi("No assistant reply yet.")
+              : translateUi("No assistant reply was published.")}
           </p>
         )}
         <div className="flex flex-wrap items-center gap-2">

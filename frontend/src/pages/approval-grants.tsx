@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -34,6 +37,7 @@ import { SmartLockIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 
 export function ApprovalGrantsPage() {
+  useUiTranslation();
   const [page, setPage] = useState(1);
   const [revokeGrantId, setRevokeGrantId] = useState<string | null>(null);
 
@@ -71,7 +75,7 @@ export function ApprovalGrantsPage() {
   async function handleRevoke() {
     if (!revokeGrantId) return;
     if (revokeTarget?.org_scoped && !revokeTarget.org_id) {
-      toast.error("This organization grant is missing its owner information");
+      toast.error(translateErrorMessage("This organization grant is missing its owner information"));
       setRevokeGrantId(null);
       return;
     }
@@ -81,10 +85,10 @@ export function ApprovalGrantsPage() {
           ? { grantId: revokeGrantId, orgId: revokeTarget.org_id }
           : { grantId: revokeGrantId },
       );
-      toast.success("Grant revoked");
+      toast.success(translateUi("Grant revoked"));
     } catch (err) {
       toast.error(
-        err instanceof ApiError ? err.message : "Failed to revoke grant",
+        translateErrorMessage(err instanceof ApiError ? err.message : "Failed to revoke grant"),
       );
     } finally {
       setRevokeGrantId(null);
@@ -100,8 +104,8 @@ export function ApprovalGrantsPage() {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Active Grants"
-        description="Manage active approval grants. Revoking a grant will require re-approval on the next request."
+        title={translateUi("Active Grants")}
+        description={translateUi("Manage active approval grants. Revoking a grant will require re-approval on the next request.")}
       />
 
       {isLoading || (grants.length === 0 && configsLoading) ? (
@@ -112,7 +116,7 @@ export function ApprovalGrantsPage() {
         </div>
       ) : error ? (
         <ErrorBanner
-          message="Failed to load grants. Please try again."
+          message={translateUi("Failed to load grants. Please try again.")}
           onRetry={refetch}
         />
       ) : grants.length === 0 ? (
@@ -121,25 +125,23 @@ export function ApprovalGrantsPage() {
           <div className="max-w-md space-y-2">
             <p className="type-row-title text-muted-foreground">
               {grantModeStatusUnavailable
-                ? "Policy Status Unavailable"
+                ? translateUi("Policy Status Unavailable")
                 : grantModeKnownOff
-                  ? "Grant Mode Is Off"
-                  : "No Active Grants"}
+                  ? translateUi("Grant Mode Is Off")
+                  : translateUi("No Active Grants")}
             </p>
             <p className="text-14 text-muted-foreground">
               {grantModeStatusUnavailable
-                ? "No grants are active, but approval policy status could not be loaded."
+                ? translateUi("No grants are active, but approval policy status could not be loaded.")
                 : hasGrantModeService
-                  ? "Your grant-enabled services have no active grants. Grants appear here after an approval is granted."
+                  ? translateUi("Your grant-enabled services have no active grants. Grants appear here after an approval is granted.")
                   : grantModeKnownOff
-                    ? "All configured services use per-request approval. Enable time-based grant mode for a service to create standing approvals."
-                    : "No grants are active. Organization policies are managed by an org admin and may define grant mode separately."}
+                    ? translateUi("All configured services use per-request approval. Enable time-based grant mode for a service to create standing approvals.")
+                    : translateUi("No grants are active. Organization policies are managed by an org admin and may define grant mode separately.")}
             </p>
             {(grantModeKnownOff || hasDominantOrgPolicies) && (
               <Button asChild variant="outline" className="mt-2">
-                <Link to="/approvals/settings">
-                  Configure approval policies
-                </Link>
+                <Link to="/approvals/settings">{translateUi("Configure approval policies")}</Link>
               </Button>
             )}
           </div>
@@ -158,7 +160,7 @@ export function ApprovalGrantsPage() {
                     variant="ghost"
                     size="icon"
                     className="h-7 w-7"
-                    aria-label={`Revoke grant for ${grant.service_name}`}
+                    aria-label={translateUi("Revoke grant for {{value1}}", { value1: grant.service_name })}
                     onClick={() => setRevokeGrantId(grant.id)}
                   >
                     <Trash2 className="h-3.5 w-3.5 text-destructive" />
@@ -172,9 +174,8 @@ export function ApprovalGrantsPage() {
                     <Badge
                       variant="info"
                       className="max-w-[12rem] shrink-0 truncate"
-                      title={grant.org_name ?? "Organization"}
-                    >
-                      Org: {grant.org_name ?? "Organization"}
+                      title={grant.org_name ?? translateUi("Organization")}
+                    >{translateUi("Org: ")}{grant.org_name ?? translateUi("Organization")}
                     </Badge>
                   )}
                 </div>
@@ -183,16 +184,15 @@ export function ApprovalGrantsPage() {
                 </p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   {!grant.execution && isExpiringSoon(grant.expires_at) && (
-                    <Badge variant="warning">Expiring soon</Badge>
+                    <Badge variant="warning">{translateUi("Expiring soon")}</Badge>
                   )}
                 </div>
                 {grant.execution && <ExecutionGrantDetails grant={grant} />}
                 <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-13 text-muted-foreground">
-                  <span>Granted {formatDate(grant.granted_at)}</span>
-                  <span>
-                    Expires{" "}
+                  <span>{translateUi("Granted ")}{formatDate(grant.granted_at)}</span>
+                  <span>{translateUi("Expires")}{" "}
                     {grant.execution?.validity === "persistent"
-                      ? "Until revoked or binding changes"
+                      ? translateUi("Until revoked or binding changes")
                       : formatDate(
                           grant.execution?.valid_until ?? grant.expires_at,
                         )}
@@ -207,11 +207,11 @@ export function ApprovalGrantsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Service</TableHead>
-                  <TableHead>Requester</TableHead>
-                  <TableHead>Granted</TableHead>
-                  <TableHead>Expires</TableHead>
-                  <TableHead className="w-[60px]">Actions</TableHead>
+                  <TableHead>{translateUi("Service")}</TableHead>
+                  <TableHead>{translateUi("Requester")}</TableHead>
+                  <TableHead>{translateUi("Granted")}</TableHead>
+                  <TableHead>{translateUi("Expires")}</TableHead>
+                  <TableHead className="w-[60px]">{translateUi("Actions")}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -227,9 +227,8 @@ export function ApprovalGrantsPage() {
                           <Badge
                             variant="info"
                             className="max-w-[12rem] truncate"
-                            title={grant.org_name ?? "Organization"}
-                          >
-                            Org: {grant.org_name ?? "Organization"}
+                            title={grant.org_name ?? translateUi("Organization")}
+                          >{translateUi("Org: ")}{grant.org_name ?? translateUi("Organization")}
                           </Badge>
                         )}
                       </div>
@@ -251,7 +250,7 @@ export function ApprovalGrantsPage() {
                       <div className="flex items-center gap-2">
                         <span className="text-muted-foreground">
                           {grant.execution?.validity === "persistent"
-                            ? "Until revoked or binding changes"
+                            ? translateUi("Until revoked or binding changes")
                             : formatDate(
                                 grant.execution?.valid_until ??
                                   grant.expires_at,
@@ -259,9 +258,7 @@ export function ApprovalGrantsPage() {
                         </span>
                         {!grant.execution &&
                           isExpiringSoon(grant.expires_at) && (
-                            <Badge variant="warning" className="text-12">
-                              Expiring soon
-                            </Badge>
+                            <Badge variant="warning" className="text-12">{translateUi("Expiring soon")}</Badge>
                           )}
                       </div>
                     </TableCell>
@@ -270,7 +267,7 @@ export function ApprovalGrantsPage() {
                         variant="ghost"
                         size="icon"
                         className="h-8 w-8"
-                        aria-label={`Revoke grant for ${grant.service_name}`}
+                        aria-label={translateUi("Revoke grant for {{value1}}", { value1: grant.service_name })}
                         onClick={() => setRevokeGrantId(grant.id)}
                       >
                         <Trash2 className="h-4 w-4 text-destructive" />
@@ -285,9 +282,8 @@ export function ApprovalGrantsPage() {
           {/* Pagination */}
           {totalPages > 1 && (
             <div className="flex items-center justify-between">
-              <p className="text-13 text-text-tertiary">
-                Showing {String((page - 1) * perPage + 1)}-
-                {String(Math.min(page * perPage, total))} of {String(total)}
+              <p className="text-13 text-text-tertiary">{translateUi("Showing ")}{String((page - 1) * perPage + 1)}-
+                {String(Math.min(page * perPage, total))}{translateUi(" of ")}{String(total)}
               </p>
               <div className="flex items-center gap-2">
                 <Button
@@ -295,19 +291,18 @@ export function ApprovalGrantsPage() {
                   size="icon"
                   disabled={page <= 1}
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  aria-label="Previous page"
+                  aria-label={translateUi("Previous page")}
                 >
                   <ChevronLeft className="h-3 w-3" />
                 </Button>
-                <span className="text-13 text-text-tertiary">
-                  Page {String(page)} of {String(totalPages)}
+                <span className="text-13 text-text-tertiary">{translateUi("Page ")}{String(page)}{translateUi(" of ")}{String(totalPages)}
                 </span>
                 <Button
                   variant="outline"
                   size="icon"
                   disabled={page >= totalPages}
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  aria-label="Next page"
+                  aria-label={translateUi("Next page")}
                 >
                   <ChevronRight className="h-3 w-3" />
                 </Button>
@@ -326,24 +321,17 @@ export function ApprovalGrantsPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Revoke Grant</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to revoke the grant for{" "}
-              {revokeTarget ? `"${revokeTarget.service_name}"` : "this service"}
-              ? The requester will need to request approval again.
-            </DialogDescription>
+            <DialogTitle>{translateUi("Revoke Grant")}</DialogTitle>
+            <DialogDescription>{translateUi("Are you sure you want to revoke the grant for")}{" "}
+              {revokeTarget ? translateUi("\"{{service_name}}\"", { service_name: revokeTarget.service_name }) : translateUi("this service")}{translateUi("? The requester will need to request approval again.")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setRevokeGrantId(null)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setRevokeGrantId(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={() => void handleRevoke()}
               isLoading={revokeMutation.isPending}
-            >
-              Revoke Grant
-            </Button>
+            >{translateUi("Revoke Grant")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -356,22 +344,21 @@ function ExecutionGrantDetails({
 }: {
   readonly grant: import("@/types/approvals").ApprovalGrantItem;
 }) {
+  useUiTranslation();
   const permission = grant.execution;
   if (!permission) return null;
   if (!permission.supported)
     return (
-      <p className="text-12">
-        This permission version is unavailable; it may be revoked.
-      </p>
+      <p className="text-12">{translateUi("This permission version is unavailable; it may be revoked.")}</p>
     );
   return (
     <details className="max-w-lg text-12">
       <summary className="cursor-pointer">
-        {permission.review?.operation ?? "Execution permission"} ·{" "}
+        {permission.review?.operation ?? translateUi("Execution permission")} ·{" "}
         {permission.validity}
       </summary>
       {executionContextLabel(permission.context_scope) && (
-        <p>Applies to: {executionContextLabel(permission.context_scope)}</p>
+        <p>{translateUi("Applies to: ")}{executionContextLabel(permission.context_scope)}</p>
       )}
       {permission.review && (
         <div className="space-y-1 py-2">
@@ -385,18 +372,15 @@ function ExecutionGrantDetails({
           </pre>
         </div>
       )}
-      <p>
-        Last dispatched:{" "}
+      <p>{translateUi("Last dispatched:")}{" "}
         {permission.last_dispatched_at
           ? formatDate(permission.last_dispatched_at)
-          : "Not yet dispatched"}
+          : translateUi("Not yet dispatched")}
       </p>
       <a
         href={permission.source_review_path ?? "/assistant/approvals"}
         className="underline"
-      >
-        View source permission request
-      </a>
+      >{translateUi("View source permission request")}</a>
     </details>
   );
 }

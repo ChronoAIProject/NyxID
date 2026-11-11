@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -74,7 +77,7 @@ function stateOf(sandbox: CmaSandbox) {
 function dateLabel(value: string | null) {
   if (!value || !Number.isFinite(new Date(value).getTime()))
     return "Unavailable";
-  return new Date(value).toLocaleString([], {
+  return new Date(value).toLocaleString(getFormattingLocale(), {
     year: "numeric",
     month: "short",
     day: "numeric",
@@ -84,13 +87,12 @@ function dateLabel(value: string | null) {
 }
 
 export function AssistantCmaSandboxesPage() {
+  useUiTranslation();
   const enabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
   const query = useCmaSandboxes();
   if (!enabled)
     return (
-      <p role="status" className="text-13 text-text-tertiary">
-        Sandboxes are not enabled for this account.
-      </p>
+      <p role="status" className="text-13 text-text-tertiary">{translateUi("Sandboxes are not enabled for this account.")}</p>
     );
   const rows =
     query.data?.sandboxes.filter(
@@ -105,14 +107,9 @@ export function AssistantCmaSandboxesPage() {
     <div className="mx-auto w-full max-w-4xl space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <p className="mb-2 type-secondary text-text-tertiary">Workspace</p>
-          <h1 className="type-compact-page-title sm:type-page-title tracking-tight">
-            Sandboxes
-          </h1>
-          <p className="mt-2 text-13 text-text-tertiary">
-            Only Sandboxes created through NyxID appear here and use this
-            allocation.
-          </p>
+          <p className="mb-2 type-secondary text-text-tertiary">{translateUi("Workspace")}</p>
+          <h1 className="type-compact-page-title sm:type-page-title tracking-tight">{translateUi("Sandboxes")}</h1>
+          <p className="mt-2 text-13 text-text-tertiary">{translateUi("Only Sandboxes created through NyxID appear here and use this allocation.")}</p>
         </div>
         <div className="flex gap-2">
           <Button
@@ -120,45 +117,33 @@ export function AssistantCmaSandboxesPage() {
             onClick={() => void query.refetch()}
             isLoading={query.isFetching}
           >
-            <RefreshCw />
-            Refresh
-          </Button>
+            <RefreshCw />{translateUi("Refresh")}</Button>
         </div>
       </header>
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-hairline px-4 py-3 text-12">
         <span className="flex items-center gap-2.5">
-          <ShieldCheck className="size-4 text-text-tertiary" />
-          Personal account{" "}
+          <ShieldCheck className="size-4 text-text-tertiary" />{translateUi("Personal account")}{" "}
           <span className="text-text-tertiary">/ NyxID Sandbox allocation</span>
         </span>
         <span className="font-medium tabular-nums">
           {query.data?.occupied ?? "—"}{" "}
           <span className="text-text-tertiary">
-            / {query.data?.limit ?? "—"} used
-          </span>
+            / {query.data?.limit ?? "—"}{translateUi(" used")}</span>
         </span>
       </div>
-      {query.isPending && <p role="status">Checking your environment…</p>}
+      {query.isPending && <p role="status">{translateUi("Checking your environment…")}</p>}
       {query.error && (
         <p role="alert" className="text-13 text-destructive">
           {query.error.message}
         </p>
       )}
       {query.data && !query.data.inventory_complete && (
-        <Notice>
-          Live resource status could not be fully confirmed. Existing
-          allocations remain reserved until CMA confirms the outcome.
-        </Notice>
+        <Notice>{translateUi("Live resource status could not be fully confirmed. Existing allocations remain reserved until CMA confirms the outcome.")}</Notice>
       )}
       {query.data?.conflict && (
         <Notice>
-          <strong className="font-medium">
-            Your account has multiple Sandboxes created through NyxID.
-          </strong>
-          <p className="mt-1">
-            Review each Sandbox and retire those you no longer need. New
-            Sandboxes through NyxID are blocked until the conflict is resolved.
-          </p>
+          <strong className="font-medium">{translateUi("Your account has multiple Sandboxes created through NyxID.")}</strong>
+          <p className="mt-1">{translateUi("Review each Sandbox and retire those you no longer need. New Sandboxes through NyxID are blocked until the conflict is resolved.")}</p>
         </Notice>
       )}
       {confirmedEmpty && (
@@ -169,17 +154,12 @@ export function AssistantCmaSandboxesPage() {
           />
           <h2 className="type-section-heading">
             {query.data?.sandboxes.some((row) => row.retired_at)
-              ? "Environment retired"
-              : "Room for your next task"}
+              ? translateUi("Environment retired")
+              : translateUi("Room for your next task")}
           </h2>
-          <p className="mx-auto mt-3 max-w-sm type-secondary text-text-tertiary">
-            NyxBot creates an environment when a task needs it. Simply opening
-            this page doesn’t start one.
-          </p>
+          <p className="mx-auto mt-3 max-w-sm type-secondary text-text-tertiary">{translateUi("NyxBot creates an environment when a task needs it. Simply opening this page doesn’t start one.")}</p>
           <Button asChild variant="primary" className="mt-6">
-            <Link to="/assistant">
-              Ask NyxBot
-              <ArrowRight />
+            <Link to="/assistant">{translateUi("Ask NyxBot")}<ArrowRight />
             </Link>
           </Button>
         </section>
@@ -192,6 +172,7 @@ export function AssistantCmaSandboxesPage() {
 }
 
 function Notice({ children }: { readonly children: React.ReactNode }) {
+  useUiTranslation();
   return (
     <div
       role="status"
@@ -209,6 +190,7 @@ export function CmaSandboxCard({
   readonly sandbox: CmaSandbox;
   readonly detail?: boolean;
 }) {
+  useUiTranslation();
   const [action, setAction] = useState<Action>();
   const status = stateOf(sandbox);
   const pending = [
@@ -244,7 +226,7 @@ export function CmaSandboxCard({
     unit: string,
   ) =>
     capacityConfirmed && value != null && value > 0
-      ? `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value / divisor)} ${unit}`
+      ? `${new Intl.NumberFormat(getFormattingLocale(), { maximumFractionDigits: 2 }).format(value / divisor)} ${unit}`
       : "Not confirmed";
   return (
     <>
@@ -253,12 +235,10 @@ export function CmaSandboxCard({
           to="/assistant/sandboxes"
           className="mb-4 inline-flex items-center gap-1.5 text-12 text-text-tertiary"
         >
-          <ArrowLeft className="size-3" />
-          Sandboxes
-        </Link>
+          <ArrowLeft className="size-3" />{translateUi("Sandboxes")}</Link>
       )}
       <section
-        aria-label={`Environment ${sandbox.label}`}
+        aria-label={translateUi("Environment {{value1}}", { value1: sandbox.label })}
         className="overflow-hidden rounded-xl border border-hairline bg-card shadow-sm"
       >
         <div className="flex flex-wrap items-start justify-between gap-3 p-5 sm:p-6">
@@ -279,18 +259,18 @@ export function CmaSandboxCard({
                         : "text-text-tertiary",
                   )}
                 >
-                  {statusLabels[status] ?? "Not confirmed"}
+                  {statusLabels[status] ?? translateUi("Not confirmed")}
                 </span>
               </div>
               <p className="mt-1 break-all font-mono type-secondary text-text-tertiary">
-                {sandbox.cma_sandbox_id ?? "Environment identity pending"}
+                {sandbox.cma_sandbox_id ?? translateUi("Environment identity pending")}
               </p>
             </div>
           </div>
           <Button
             size="icon"
             variant="ghost"
-            aria-label="Rename environment"
+            aria-label={translateUi("Rename environment")}
             onClick={() => setAction("rename")}
             disabled={retired}
           >
@@ -301,32 +281,26 @@ export function CmaSandboxCard({
           <div className="mx-5 mb-5 sm:mx-6">
             <Notice>
               {unknown
-                ? "We haven’t confirmed the resource state. This allocation remains reserved. Check the existing request before starting a new environment."
+                ? translateUi("We haven’t confirmed the resource state. This allocation remains reserved. Check the existing request before starting a new environment.")
                 : status === "retiring"
-                  ? "Retirement requested. Waiting for confirmation. Your allocation stays in use until retirement is confirmed."
-                  : "Preparing your environment. This allocation stays in use while the request is being confirmed."}
+                  ? translateUi("Retirement requested. Waiting for confirmation. Your allocation stays in use until retirement is confirmed.")
+                  : translateUi("Preparing your environment. This allocation stays in use while the request is being confirmed.")}
             </Notice>
           </div>
         )}
         <div className="border-y border-hairline bg-overlay px-5 py-5 sm:px-6">
-          <h3 className="mb-4 type-group-label text-text-tertiary">
-            Resources
-          </h3>
+          <h3 className="mb-4 type-group-label text-text-tertiary">{translateUi("Resources")}</h3>
           <dl className="grid grid-cols-2 gap-5">
             <div>
               <dt className="flex items-center gap-1.5 type-secondary text-text-tertiary">
-                <Cpu className="size-3" />
-                CPU
-              </dt>
+                <Cpu className="size-3" />{translateUi("CPU")}</dt>
               <dd className="mt-2 type-secondary-emphasis">
                 {capacity(sandbox.capacity?.cpu_millis, 1000, "vCPU")}
               </dd>
             </div>
             <div>
               <dt className="flex items-center gap-1.5 type-secondary text-text-tertiary">
-                <MemoryStick className="size-3" />
-                Memory
-              </dt>
+                <MemoryStick className="size-3" />{translateUi("Memory")}</dt>
               <dd className="mt-2 type-secondary-emphasis">
                 {capacity(sandbox.capacity?.memory_mib, 1024, "GiB")}
               </dd>
@@ -336,17 +310,14 @@ export function CmaSandboxCard({
         <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-4 sm:px-6">
           <div className="space-y-1 type-meta text-text-tertiary">
             <p className="flex items-center gap-1.5">
-              <Clock3 className="size-3" />
-              CMA · Last active {dateLabel(sandbox.last_activity_at)}
+              <Clock3 className="size-3" />{translateUi("CMA · Last active ")}{dateLabel(sandbox.last_activity_at)}
             </p>
-            <p>Last observed {dateLabel(sandbox.last_observed)}</p>
+            <p>{translateUi("Last observed ")}{dateLabel(sandbox.last_observed)}</p>
           </div>
           <div className="flex flex-wrap gap-2">
             {recoveryAvailable && (
               <Button onClick={() => setAction("recover_creation")}>
-                <RefreshCw />
-                Recover creation
-              </Button>
+                <RefreshCw />{translateUi("Recover creation")}</Button>
             )}
             <Button
               disabled={!actionable || !["ready", "paused"].includes(status)}
@@ -355,16 +326,14 @@ export function CmaSandboxCard({
               }
             >
               {status === "paused" ? <Play /> : <Pause />}
-              {status === "paused" ? "Resume" : "Pause"}
+              {status === "paused" ? translateUi("Resume") : translateUi("Pause")}
             </Button>
             {!detail && (
               <Button asChild>
                 <Link
                   to="/assistant/sandboxes/$sandboxId"
                   params={{ sandboxId: sandbox.id }}
-                >
-                  View details
-                  <ArrowRight />
+                >{translateUi("View details")}<ArrowRight />
                 </Link>
               </Button>
             )}
@@ -374,7 +343,7 @@ export function CmaSandboxCard({
               onClick={() => setAction("retire")}
             >
               <Trash2 />
-              {retirementRetry ? "Retry retirement" : "Retire environment"}
+              {retirementRetry ? translateUi("Retry retirement") : translateUi("Retire environment")}
             </Button>
           </div>
         </div>
@@ -400,6 +369,7 @@ function SandboxActionDialog({
   readonly action: Action;
   readonly onClose: () => void;
 }) {
+  useUiTranslation();
   const rename = useRenameCmaSandbox();
   const command = useCmaSandboxCommand();
   const retire = useRetireCmaSandbox();
@@ -432,7 +402,7 @@ function SandboxActionDialog({
           generation: sandbox.generation,
           label: parsed.label,
         });
-        toast.success("Environment name updated");
+        toast.success(translateUi("Environment name updated"));
       } else {
         const identity = {
           id: sandbox.id,
@@ -450,9 +420,9 @@ function SandboxActionDialog({
               ? await retire.mutateAsync(identity)
               : await command.mutateAsync({ ...identity, command: action });
         toast.success(
-          result.pending
+          translateUi(result.pending
             ? "Request accepted. Waiting for CMA confirmation."
-            : "CMA resource status updated.",
+            : "CMA resource status updated."),
         );
       }
       onClose();
@@ -478,14 +448,14 @@ function SandboxActionDialog({
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>
             {action === "rename"
-              ? "This is a local display name. The CMA resource ID stays the same."
+              ? translateUi("This is a local display name. The CMA resource ID stays the same.")
               : action === "recover_creation"
-                ? "Check or retry the original creation request. This allocation stays reserved until CMA confirms the result."
+                ? translateUi("Check or retry the original creation request. This allocation stays reserved until CMA confirms the result.")
                 : action === "retire"
-                  ? "Permanently remove this environment, all Agents, workspaces and files. Submitting retirement does not mean cleanup or billing has completed."
+                  ? translateUi("Permanently remove this environment, all Agents, workspaces and files. Submitting retirement does not mean cleanup or billing has completed.")
                   : action === "pause"
-                    ? "All Agents in this Sandbox may become unavailable. Active work and shared desktop sessions may be interrupted."
-                    : "CMA will resume the environment. Task continuation depends on each Agent’s state."}
+                    ? translateUi("All Agents in this Sandbox may become unavailable. Active work and shared desktop sessions may be interrupted.")
+                    : translateUi("CMA will resume the environment. Task continuation depends on each Agent’s state.")}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -502,7 +472,7 @@ function SandboxActionDialog({
         >
           {action === "rename" && (
             <div className="space-y-2">
-              <Label htmlFor="cma-label">Environment name</Label>
+              <Label htmlFor="cma-label">{translateUi("Environment name")}</Label>
               <Input
                 id="cma-label"
                 maxLength={100}
@@ -517,9 +487,7 @@ function SandboxActionDialog({
           )}
           {action === "retire" && (
             <div className="space-y-2">
-              <Label htmlFor="cma-retire-confirm">
-                Type {sandbox.label} to confirm
-              </Label>
+              <Label htmlFor="cma-retire-confirm">{translateUi("Type ")}{sandbox.label}{translateUi(" to confirm")}</Label>
               <Input
                 id="cma-retire-confirm"
                 autoComplete="off"
@@ -534,9 +502,7 @@ function SandboxActionDialog({
             </p>
           )}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
-              Cancel
-            </Button>
+            <Button type="button" variant="outline" onClick={onClose}>{translateUi("Cancel")}</Button>
             <Button
               type="submit"
               variant={action === "retire" ? "destructive" : "primary"}
@@ -547,7 +513,7 @@ function SandboxActionDialog({
                 (action === "rename" && !form.formState.isDirty)
               }
             >
-              {action === "rename" ? "Save name" : title}
+              {action === "rename" ? translateUi("Save name") : title}
             </Button>
           </DialogFooter>
         </form>

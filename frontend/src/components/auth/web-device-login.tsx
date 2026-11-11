@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import QRCode from "qrcode";
@@ -42,6 +45,7 @@ export function WebDeviceLogin({
   transport,
   onVerified,
 }: WebDeviceLoginProps) {
+  useUiTranslation();
   const navigate = useNavigate();
   const [internalOpen, setInternalOpen] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
@@ -172,11 +176,9 @@ export function WebDeviceLogin({
         type="button"
         onClick={closePanel}
         className="mb-5 flex cursor-pointer items-center gap-1.5 type-row-title unthemed:text-12 text-muted-foreground transition-colors hover:text-foreground"
-        aria-label="Back to all sign-in options"
+        aria-label={translateUi("Back to all sign-in options")}
       >
-        <ArrowLeft className="size-3.5" />
-        Back to all sign-in options
-      </button>
+        <ArrowLeft className="size-3.5" />{translateUi("Back to all sign-in options")}</button>
 
       <div className="text-center">
         <h2
@@ -184,13 +186,8 @@ export function WebDeviceLogin({
           ref={headingRef}
           tabIndex={-1}
           className="type-section-heading outline-none"
-        >
-          Continue with the NyxID app
-        </h2>
-        <p className="mx-auto mt-1.5 max-w-[340px] text-14 text-muted-foreground">
-          Approve this sign-in from a phone that&apos;s already signed in to
-          NyxID.
-        </p>
+        >{translateUi("Continue with the NyxID app")}</h2>
+        <p className="mx-auto mt-1.5 max-w-[340px] text-14 text-muted-foreground">{translateUi("Approve this sign-in from a phone that's already signed in to NyxID.")}</p>
       </div>
 
       {deviceLogin.phase === "requesting" && (
@@ -198,16 +195,12 @@ export function WebDeviceLogin({
           className="mt-8 flex items-center justify-center gap-2 text-14 unthemed:text-12 text-muted-foreground"
           role="status"
         >
-          <RefreshCw className="size-3.5 animate-spin" />
-          Generating a sign-in code...
-        </div>
+          <RefreshCw className="size-3.5 animate-spin" />{translateUi("Generating a sign-in code...")}</div>
       )}
 
       {deviceLogin.phase === "restoring" && (
         <div className="mt-8 flex items-center justify-center gap-2 text-14 unthemed:text-12 text-muted-foreground" role="status">
-          <RefreshCw className="size-3.5 animate-spin" />
-          Loading your approved account...
-        </div>
+          <RefreshCw className="size-3.5 animate-spin" />{translateUi("Loading your approved account...")}</div>
       )}
 
       {deviceLogin.request && pending && (
@@ -217,22 +210,18 @@ export function WebDeviceLogin({
               {qrDataUrl ? (
                 <img
                   src={qrDataUrl}
-                  alt="QR code to continue with the NyxID app"
+                  alt={translateUi("QR code to continue with the NyxID app")}
                   className="size-[208px] rounded-md object-contain"
                 />
               ) : (
                 <div className="flex size-[208px] items-center justify-center gap-2 text-14 unthemed:text-12 text-muted-foreground">
-                  <ScanLine className="size-4" />
-                  Preparing QR code...
-                </div>
+                  <ScanLine className="size-4" />{translateUi("Preparing QR code...")}</div>
               )}
             </div>
           </div>
 
           <div className="text-center">
-            <p className="text-13 unthemed:text-11 uppercase text-text-tertiary">
-              Manual code
-            </p>
+            <p className="text-13 unthemed:text-11 uppercase text-text-tertiary">{translateUi("Manual code")}</p>
             <div className="mt-1.5 flex items-center justify-center gap-2">
               <span className="font-mono type-section-heading text-foreground">
                 {formattedCode}
@@ -241,7 +230,7 @@ export function WebDeviceLogin({
                 type="button"
                 onClick={() => void copyCode()}
                 className="flex size-8 cursor-pointer items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground"
-                aria-label={copied ? "Sign-in code copied" : "Copy sign-in code"}
+                aria-label={copied ? translateUi("Sign-in code copied") : translateUi("Copy sign-in code")}
               >
                 {copied ? (
                   <Check className="size-3.5 text-success" />
@@ -252,17 +241,13 @@ export function WebDeviceLogin({
             </div>
           </div>
 
-          <p className="text-center text-14 unthemed:text-12 text-muted-foreground">
-            Scan the code, or open{" "}
+          <p className="text-center text-14 unthemed:text-12 text-muted-foreground">{translateUi("Scan the code, or open")}{" "}
             <span className="break-all font-mono text-13 unthemed:text-11 text-foreground">
               {deviceLogin.request.verification_uri}
-            </span>{" "}
-            on your phone and enter the manual code.
-          </p>
+            </span>{" "}{translateUi("on your phone and enter the manual code.")}</p>
 
           <div className="flex items-center justify-center gap-1.5 text-13 unthemed:text-11 text-warning">
-            <Clock3 className="size-3.5" />
-            Expires in{" "}
+            <Clock3 className="size-3.5" />{translateUi("Expires in")}{" "}
             {formatWebAuthDeviceRemaining(
               deviceLogin.remainingSeconds ?? deviceLogin.request.expires_in,
             )}
@@ -277,7 +262,7 @@ export function WebDeviceLogin({
         >
           <AlertTriangle className="mx-auto size-5 text-destructive" />
           <p className="mt-2 type-card-title unthemed:text-13 text-destructive">
-            {terminalMessage}
+            {translateUi(terminalMessage)}
           </p>
           <Button
             type="button"
@@ -289,7 +274,7 @@ export function WebDeviceLogin({
             <ButtonIcon>
               <RefreshCw />
             </ButtonIcon>
-            {deviceLogin.phase === "restore_error" ? "Retry loading account" : "Generate new code"}
+            {deviceLogin.phase === "restore_error" ? translateUi("Retry loading account") : translateUi("Generate new code")}
           </Button>
         </div>
       )}
@@ -297,11 +282,11 @@ export function WebDeviceLogin({
       {deviceLogin.phase === "restricted" && deviceLogin.loginCode && (
         <section className="mt-6 space-y-3 text-center" aria-live="polite">
           <CheckCircle2 className="mx-auto size-6 text-success" />
-          <h3 className="type-card-title">Restricted terminal login</h3>
-          <p className="text-14 unthemed:text-12 text-muted-foreground">This browser remains signed out.</p>
+          <h3 className="type-card-title">{translateUi("Restricted terminal login")}</h3>
+          <p className="text-14 unthemed:text-12 text-muted-foreground">{translateUi("This browser remains signed out.")}</p>
           <code data-sensitive className="block font-mono text-14">{deviceLogin.loginCode.code}</code>
-          <p className="text-14 unthemed:text-12">Terminal command: <code>nyxid login --code</code></p>
-          <p className="text-14 unthemed:text-12 text-muted-foreground">Expires {new Date(deviceLogin.loginCode.expires_at).toLocaleTimeString()}</p>
+          <p className="text-14 unthemed:text-12">{translateUi("Terminal command: ")}<code>nyxid login --code</code></p>
+          <p className="text-14 unthemed:text-12 text-muted-foreground">{translateUi("Expires ")}{new Date(deviceLogin.loginCode.expires_at).toLocaleTimeString(getFormattingLocale())}</p>
         </section>
       )}
 
@@ -311,7 +296,7 @@ export function WebDeviceLogin({
           role="status"
         >
           <CheckCircle2 className="size-4" />
-          {onVerified ? "Identity verified" : "Signed in. Redirecting..."}
+          {onVerified ? translateUi("Identity verified") : translateUi("Signed in. Redirecting...")}
         </div>
       )}
     </section>

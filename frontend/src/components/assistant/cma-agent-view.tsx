@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import {
@@ -51,6 +53,7 @@ export function CmaAgentView({
   readonly presentation?: "page" | "panel";
   readonly footerAction?: ReactNode;
 }) {
+  useUiTranslation();
   const panel = presentation === "panel";
   const Heading = panel ? "h2" : "h1";
   const enabled = useFeature(FEATURE_FLAG.ASSISTANT_CMA_SANDBOXES);
@@ -107,7 +110,7 @@ export function CmaAgentView({
       (scanMore && !isFetchNextPageError));
   const linkError = responseId && (task.error || (task.data && !bound));
   if (!enabled)
-    return <p role="status">CMA execution is not enabled for this account.</p>;
+    return <p role="status">{translateUi("CMA execution is not enabled for this account.")}</p>;
   return (
     <div className="mx-auto flex h-full min-h-0 w-full max-w-5xl flex-col gap-4">
       <header className="flex shrink-0 items-start gap-3">
@@ -116,9 +119,7 @@ export function CmaAgentView({
         </span>
         <div className="min-w-0">
           {!panel && (
-            <p className="mb-1 type-secondary text-text-tertiary">
-              Cloud assistant
-            </p>
+            <p className="mb-1 type-secondary text-text-tertiary">{translateUi("Cloud assistant")}</p>
           )}
           <Heading
             className={
@@ -127,10 +128,10 @@ export function CmaAgentView({
                 : "type-compact-page-title sm:type-page-title tracking-tight"
             }
           >
-            {agent.data?.label ?? "Cloud assistant"}
+            {agent.data?.label ?? translateUi("Cloud assistant")}
           </Heading>
           <div className="mt-2 flex flex-wrap items-center gap-3 text-12">
-            <span className="sr-only">Assistant status</span>
+            <span className="sr-only">{translateUi("Assistant status")}</span>
             <CmaStatus status={agent.data?.status ?? "checking_status"} />
             {agent.data?.sandbox_id && (
               <Link
@@ -140,9 +141,7 @@ export function CmaAgentView({
                 rel={panel ? "noopener noreferrer" : undefined}
                 className="inline-flex items-center gap-1.5 text-text-tertiary hover:text-foreground"
               >
-                <Box className="size-3" />
-                Environment
-              </Link>
+                <Box className="size-3" />{translateUi("Environment")}</Link>
             )}
           </div>
         </div>
@@ -156,11 +155,7 @@ export function CmaAgentView({
         <p
           role="status"
           className="rounded-lg border border-dashed border-border p-5 text-13 text-text-tertiary"
-        >
-          This assistant is currently unavailable. Its saved reference is
-          retained, but its conversation and desktop may no longer be
-          accessible.
-        </p>
+        >{translateUi("This assistant is currently unavailable. Its saved reference is retained, but its conversation and desktop may no longer be accessible.")}</p>
       )}
       <Tabs
         value={tab}
@@ -170,13 +165,9 @@ export function CmaAgentView({
         <div className="flex shrink-0 items-center justify-between gap-3">
           <TabsList>
             <TabsTrigger value="conversation">
-              <MessageSquare className="mr-1.5 size-3.5" />
-              Conversation
-            </TabsTrigger>
+              <MessageSquare className="mr-1.5 size-3.5" />{translateUi("Conversation")}</TabsTrigger>
             <TabsTrigger value="desktop">
-              <Monitor className="mr-1.5 size-3.5" />
-              Desktop
-            </TabsTrigger>
+              <Monitor className="mr-1.5 size-3.5" />{translateUi("Desktop")}</TabsTrigger>
           </TabsList>
           {tab === "conversation" && (
             <Button
@@ -190,9 +181,7 @@ export function CmaAgentView({
                 stream.reconnect();
               }}
             >
-              <RefreshCw />
-              Refresh
-            </Button>
+              <RefreshCw />{translateUi("Refresh")}</Button>
           )}
         </div>
         <TabsContent
@@ -205,12 +194,12 @@ export function CmaAgentView({
               <Link2 aria-hidden className="size-3 shrink-0" />
               <p className="min-w-0 flex-1">
                 {locating
-                  ? "Finding the request from this link…"
+                  ? translateUi("Finding the request from this link…")
                   : linkError
-                    ? "This request link could not be verified for this assistant."
+                    ? translateUi("This request link could not be verified for this assistant.")
                     : linkedTurn !== undefined
-                      ? "Opened at the request from your chat. Earlier and newer messages remain in the conversation."
-                      : "This request could not be located in the available conversation."}
+                      ? translateUi("Opened at the request from your chat. Earlier and newer messages remain in the conversation.")
+                      : translateUi("This request could not be located in the available conversation.")}
               </p>
             </div>
           )}
@@ -220,23 +209,16 @@ export function CmaAgentView({
             </p>
           )}
           {linkError && (
-            <p role="alert" className="text-12 text-destructive">
-              The linked request is unavailable or does not belong to this
-              assistant.
-            </p>
+            <p role="alert" className="text-12 text-destructive">{translateUi("The linked request is unavailable or does not belong to this assistant.")}</p>
           )}
           {snapshot.error && (
-            <p role="alert" className="text-12 text-destructive">
-              Execution details could not be updated. Refresh to try again.
-            </p>
+            <p role="alert" className="text-12 text-destructive">{translateUi("Execution details could not be updated. Refresh to try again.")}</p>
           )}
           {(loading || locating) && live && (
             <p
               role="status"
               className="py-6 text-center text-13 text-text-tertiary"
-            >
-              Loading conversation…
-            </p>
+            >{translateUi("Loading conversation…")}</p>
           )}
           {!loading && turns.length > 0 && (
             <CmaConversation
@@ -252,9 +234,7 @@ export function CmaAgentView({
                   <Button
                     isLoading={transcript.isFetchingNextPage}
                     onClick={() => void transcript.fetchNextPage()}
-                  >
-                    Load earlier conversation
-                  </Button>
+                  >{translateUi("Load earlier conversation")}</Button>
                 ) : undefined
               }
             />
@@ -265,7 +245,7 @@ export function CmaAgentView({
             live &&
             !transcript.error && (
               <CmaEmptyState
-                title="No conversation yet"
+                title={translateUi("No conversation yet")}
                 text="Work requests and replies will appear here when this assistant starts working."
               />
             )}
@@ -282,48 +262,43 @@ export function CmaAgentView({
       <footer className="flex shrink-0 flex-wrap items-center gap-3 border-t border-hairline pt-3">
         <p className="min-w-0 basis-full type-secondary text-text-tertiary sm:min-w-32 sm:flex-1 sm:basis-auto">
           {panel
-            ? "Continue through NyxBot"
-            : "Continue working with this assistant through NyxBot. Results return to the original chat."}
+            ? translateUi("Continue through NyxBot")
+            : translateUi("Continue working with this assistant through NyxBot. Results return to the original chat.")}
         </p>
         {live && tab === "conversation" && (
           <div className="flex min-w-0 flex-1 flex-wrap items-center gap-3 type-secondary text-text-tertiary sm:flex-none">
             <span role="status">
               {stream.state === "connected"
-                ? "Live updates connected"
+                ? translateUi("Live updates connected")
                 : stream.state === "connecting"
-                  ? "Connecting to live updates…"
-                  : "Live updates paused"}
+                  ? translateUi("Connecting to live updates…")
+                  : translateUi("Live updates paused")}
             </span>
             {stream.state === "disconnected" && (
-              <Button variant="outline" onClick={stream.reconnect}>
-                Reconnect
-              </Button>
+              <Button variant="outline" onClick={stream.reconnect}>{translateUi("Reconnect")}</Button>
             )}
           </div>
         )}
         {footerAction}
         <Dialog>
           <DialogTrigger asChild>
-            <Button variant="ghost" size="icon" aria-label="Assistant details">
+            <Button variant="ghost" size="icon" aria-label={translateUi("Assistant details")}>
               <Info aria-hidden />
             </Button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Assistant details</DialogTitle>
-              <DialogDescription>
-                Saved reference and live connection information for this
-                assistant.
-              </DialogDescription>
+              <DialogTitle>{translateUi("Assistant details")}</DialogTitle>
+              <DialogDescription>{translateUi("Saved reference and live connection information for this assistant.")}</DialogDescription>
             </DialogHeader>
             <dl className="space-y-2 type-secondary text-text-tertiary">
               <div>
-                <dt>Assistant reference</dt>
+                <dt>{translateUi("Assistant reference")}</dt>
                 <dd className="break-all font-mono">{remote}</dd>
               </div>
               {agent.data?.last_observed && (
                 <div>
-                  <dt>Last updated</dt>
+                  <dt>{translateUi("Last updated")}</dt>
                   <dd>
                     <CmaTime value={agent.data.last_observed} />
                   </dd>
@@ -338,9 +313,7 @@ export function CmaAgentView({
                 className="mt-3"
                 isLoading={isFetchingNextPage}
                 onClick={() => void fetchNextPage()}
-              >
-                Load more execution details
-              </Button>
+              >{translateUi("Load more execution details")}</Button>
             )}
           </DialogContent>
         </Dialog>

@@ -1,3 +1,5 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { ProviderConfig } from "@/types/api";
 import { useProviders, useServiceRequirements } from "@/hooks/use-providers";
 import { EngineerCapIcon } from "@/components/icons/empty-state";
@@ -14,6 +16,7 @@ export function ServiceRequirementsView({
   serviceId,
   userTokenProviderIds,
 }: ServiceRequirementsViewProps) {
+  useUiTranslation();
   const { data: requirements, isLoading: reqLoading } =
     useServiceRequirements(serviceId);
   const { data: providers, isLoading: provLoading } = useProviders();
@@ -28,9 +31,7 @@ export function ServiceRequirementsView({
     return (
       <div className="flex flex-col items-center justify-center gap-1 py-8">
         <EngineerCapIcon className="h-48 w-48 text-muted-foreground/30" />
-        <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">
-          This service has no provider requirements.
-        </div>
+        <div className="rounded-lg border border-dashed border-border px-4 py-3 text-14 text-muted-foreground">{translateUi("This service has no provider requirements.")}</div>
       </div>
     );
   }
@@ -59,18 +60,18 @@ export function ServiceRequirementsView({
                 </p>
                 <p className="text-13 text-muted-foreground">
                   {req.injection_method === "bearer"
-                    ? "Bearer token"
+                    ? translateUi("Bearer token")
                     : req.injection_method === "header"
-                      ? `Header: ${req.injection_key ?? ""}`
+                      ? translateUi("Header: {{value1}}", { value1: req.injection_key ?? "" })
                       : req.injection_method === "path"
-                        ? `Path prefix: ${req.injection_key ?? ""}`
-                        : `Query: ${req.injection_key ?? ""}`}
+                        ? translateUi("Path prefix: {{value1}}", { value1: req.injection_key ?? "" })
+                        : translateUi("Query: {{value1}}", { value1: req.injection_key ?? "" })}
                 </p>
               </div>
             </div>
             <div className="flex items-center gap-2">
               <Badge variant={req.required ? "default" : "secondary"}>
-                {req.required ? "Required" : "Optional"}
+                {req.required ? translateUi("Required") : translateUi("Optional")}
               </Badge>
               {userTokenProviderIds !== undefined &&
                 (hasToken ? (

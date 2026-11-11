@@ -29,10 +29,94 @@ impl GuestReadiness {
     }
 }
 
+/// Structural configuration only: neither business completeness nor a test verdict.
+#[derive(Clone, serde::Serialize)]
+pub struct AgentConfiguration {
+    pub instructions_present: bool,
+    pub persona_present: bool,
+    pub memory_notes: usize,
+    pub skills: usize,
+    pub service_grants: usize,
+    pub account_read: bool,
+}
+impl AgentConfiguration {
+    pub fn of(agent: &AssistantAgent) -> Self {
+        Self {
+            instructions_present: !agent.description.trim().is_empty(),
+            persona_present: agent
+                .persona
+                .as_deref()
+                .is_some_and(|v| !v.trim().is_empty()),
+            memory_notes: agent.memory.len(),
+            skills: agent.skills.len(),
+            service_grants: agent.grants.service_ids.len()
+                + agent.grants.platform_service_ids.len(),
+            account_read: agent.grants.account_read,
+        }
+    }
+}
+
+pub const AUDIENCE_READINESS_NOTE: &str = "These are configuration facts, not proof of complete business information or a successful customer test. Opening access is your choice. While model setup is pending, customer requests wait briefly or receive a safe setup failure.";
+
+#[derive(Clone, serde::Serialize)]
+pub struct AudienceReadiness {
+    pub guest_readiness: GuestReadiness,
+    pub configuration: Option<AgentConfiguration>,
+    pub note: &'static str,
+}
+impl AudienceReadiness {
+    pub fn summary(&self) -> String {
+        let status = match self.guest_readiness.status {
+            "ready" => "ready",
+            "setting_up" => "setting up",
+            _ => "not ready",
+        };
+        let mut text = format!("Customer model: {status}");
+        if let Some(reason) = &self.guest_readiness.reason {
+            text.push_str(&format!(" ({reason})"));
+        }
+        if let Some(c) = &self.configuration {
+            let present = |v| if v { "present" } else { "missing" };
+            text.push_str(&format!(". Instructions: {}; persona: {}; memory notes: {}; skills: {}; service grants: {}; account read: {}.", present(c.instructions_present), present(c.persona_present), c.memory_notes, c.skills, c.service_grants, c.account_read));
+        } else {
+            text.push_str(". Agent configuration unavailable.");
+        }
+        text.push(' ');
+        text.push_str(self.note);
+        text
+    }
+}
+
+pub async fn audience_readiness(
+    db: &Database,
+    keys: &crate::crypto::aes::EncryptionKeys,
+    owner: &str,
+    agent_id: Option<&str>,
+) -> AppResult<AudienceReadiness> {
+    let mut filter = doc! {"user_id":owner,"destroyed_at":null};
+    if let Some(id) = agent_id {
+        filter.insert("_id", id);
+    } else {
+        filter.insert("kind", "nyxbot");
+    }
+    let configuration = db
+        .collection::<AssistantAgent>("assistant_agents")
+        .find_one(filter)
+        .await?
+        .as_ref()
+        .map(AgentConfiguration::of);
+    Ok(AudienceReadiness {
+        guest_readiness: guest_readiness(db, keys, owner, agent_id, None).await?,
+        configuration,
+        note: AUDIENCE_READINESS_NOTE,
+    })
+}
+
 #[derive(serde::Serialize)]
 pub struct GuestReadinessSettings {
     #[serde(flatten)]
     readiness: GuestReadiness,
+    configuration: AgentConfiguration,
     /// Only these chats need a separate settings read; ordinary customer chats
     /// reuse the agent result. Bound the settings payload, with safe fallback.
     conversation_overrides: Vec<String>,
@@ -86,6 +170,7 @@ pub async fn guest_readiness_settings(
     let conversation_overrides_truncated = conversation_overrides.len() > 512;
     conversation_overrides.truncate(512);
     Ok(GuestReadinessSettings {
+        configuration: AgentConfiguration::of(&agent),
         readiness,
         conversation_overrides,
         conversation_overrides_truncated,

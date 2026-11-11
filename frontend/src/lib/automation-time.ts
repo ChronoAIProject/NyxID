@@ -1,3 +1,4 @@
+import { getFormattingLocale } from "@/lib/formatting-locale";
 /** Calendar input and display always use the owner's selected IANA timezone. */
 export const browserTimezone = () =>
   Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -8,7 +9,7 @@ export function formatAutomationTime(
   withSeconds = false,
 ) {
   return value
-    ? new Intl.DateTimeFormat(undefined, {
+    ? new Intl.DateTimeFormat(getFormattingLocale(), {
         timeZone: timezone,
         dateStyle: "medium",
         timeStyle: withSeconds ? "medium" : "short",

@@ -1,3 +1,6 @@
+import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useState } from "react";
 import {
   useAgentBindings,
@@ -59,13 +62,13 @@ function sameOwner(
 function invalidReasonLabel(reason: string | undefined): string {
   switch (reason) {
     case "missing_service":
-      return "Bound service has been deleted.";
+      return translateUi("Bound service has been deleted.");
     case "inactive_service":
-      return "Bound service is disabled.";
+      return translateUi("Bound service is disabled.");
     case "missing_credential":
-      return "Override credential has been deleted.";
+      return translateUi("Override credential has been deleted.");
     default:
-      return "This binding is no longer valid.";
+      return translateUi("This binding is no longer valid.");
   }
 }
 
@@ -76,6 +79,7 @@ export function BindingsCard({
   readonly keyId: string;
   readonly apiKeySource?: CredentialSource;
 }) {
+  useUiTranslation();
   const { data: bindings, isLoading } = useAgentBindings(keyId);
   const { data: allKeys } = useKeys();
   const createBinding = useCreateBinding();
@@ -107,7 +111,7 @@ export function BindingsCard({
     if (!selectedServiceId) return;
     const service = services.find((s) => s.id === selectedServiceId);
     if (!service?.api_key_id) {
-      toast.error("Selected service has no credential configured");
+      toast.error(translateErrorMessage("Selected service has no credential configured"));
       return;
     }
     createBinding.mutate(
@@ -118,7 +122,7 @@ export function BindingsCard({
       },
       {
         onSuccess: () => {
-          toast.success("Service binding created");
+          toast.success(translateUi("Service binding created"));
           setAdding(false);
           setSelectedServiceId("");
         },
@@ -127,7 +131,7 @@ export function BindingsCard({
             err instanceof ApiError
               ? err.message
               : "Failed to create binding";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -139,7 +143,7 @@ export function BindingsCard({
       { keyId, bindingId: deleteTarget.id },
       {
         onSuccess: () => {
-          toast.success("Binding removed");
+          toast.success(translateUi("Binding removed"));
           setDeleteTarget(null);
         },
         onError: (err) => {
@@ -147,7 +151,7 @@ export function BindingsCard({
             err instanceof ApiError
               ? err.message
               : "Failed to remove binding";
-          toast.error(message);
+          toast.error(translateErrorMessage(message));
         },
       },
     );
@@ -159,7 +163,7 @@ export function BindingsCard({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Link2 className="h-4 w-4 text-primary-text" />
-            <CardTitle className="text-15">Service Bindings</CardTitle>
+            <CardTitle className="text-15">{translateUi("Service Bindings")}</CardTitle>
           </div>
           <button
             type="button"
@@ -169,25 +173,21 @@ export function BindingsCard({
           >
             <span className="flex h-[18px] w-[18px] items-center justify-center rounded-[5px] border border-hairline bg-overlay">
               <Plus className="h-2.5 w-2.5" />
-            </span>
-            Add Binding
-          </button>
+            </span>{translateUi("Add Binding")}</button>
         </div>
-        <CardDescription>
-          Bindings override the default credentials for selected services. Manage service access in Service Scope.
-        </CardDescription>
+        <CardDescription>{translateUi("Bindings override the default credentials for selected services. Manage service access in Service Scope.")}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {adding && (
           <div className="rounded-lg border border-border p-3 space-y-3">
             <div className="space-y-1.5">
-              <Label>AI Service</Label>
+              <Label>{translateUi("AI Service")}</Label>
               <Select
                 value={selectedServiceId}
                 onValueChange={setSelectedServiceId}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="Select a service" />
+                  <SelectValue placeholder={translateUi("Select a service")} />
                 </SelectTrigger>
                 <SelectContent>
                   {availableServices.map((s) => (
@@ -196,7 +196,7 @@ export function BindingsCard({
                         <ServiceIcon slug={s.catalog_service_slug} iconUrl={connectionIconUrl(s)} size="2xs" />
                         <span>
                           {s.label}
-                          {s.slug !== s.label ? ` (${s.slug})` : ""}
+                          {s.slug !== s.label ? translateUi(" ({{slug}})", { slug: s.slug }) : ""}
                         </span>
                       </span>
                     </SelectItem>
@@ -211,16 +211,12 @@ export function BindingsCard({
                   setAdding(false);
                   setSelectedServiceId("");
                 }}
-              >
-                Cancel
-              </Button>
+              >{translateUi("Cancel")}</Button>
               <Button
                 variant="primary"
                 onClick={handleCreate}
                 disabled={createBinding.isPending || !selectedServiceId}
-              >
-                Add
-              </Button>
+              >{translateUi("Add")}</Button>
             </div>
           </div>
         )}
@@ -268,9 +264,7 @@ export function BindingsCard({
                   </p>
                   {b.is_invalid && (
                     <p className="text-13 text-destructive">
-                      {invalidReasonLabel(b.invalid_reason)} Remove this
-                      orphan binding to clean up.
-                    </p>
+                      {invalidReasonLabel(b.invalid_reason)}{translateUi(" Remove this orphan binding to clean up.")}</p>
                   )}
                   </div>
                 </div>
@@ -289,10 +283,7 @@ export function BindingsCard({
         ) : (
           <div className="flex flex-col items-center justify-center gap-1 py-8 text-center">
             <CrystalLatticeIcon className="h-48 w-48 text-muted-foreground/30" />
-            <p className="text-13 text-muted-foreground">
-              No credential overrides. This agent uses default credentials for
-              all services.
-            </p>
+            <p className="text-13 text-muted-foreground">{translateUi("No credential overrides. This agent uses default credentials for all services.")}</p>
           </div>
         )}
       </CardContent>
@@ -305,23 +296,16 @@ export function BindingsCard({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Remove Binding</DialogTitle>
-            <DialogDescription>
-              Remove &quot;{deleteTarget?.service_label}&quot; from this
-              agent's service bindings?
-            </DialogDescription>
+            <DialogTitle>{translateUi("Remove Binding")}</DialogTitle>
+            <DialogDescription>{translateUi("Remove \"")}{deleteTarget?.service_label}{translateUi("\" from this agent's service bindings?")}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDeleteTarget(null)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>{translateUi("Cancel")}</Button>
             <Button
               variant="destructive"
               onClick={handleDelete}
               disabled={deleteBinding.isPending}
-            >
-              Remove
-            </Button>
+            >{translateUi("Remove")}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

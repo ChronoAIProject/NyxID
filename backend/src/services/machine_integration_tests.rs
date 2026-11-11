@@ -1816,6 +1816,8 @@ async fn machine_watches_and_jobs_carry_validated_report_provenance() {
         (7, Some("nyxa-assigning"), false, None),
     ] {
         let watch = NyxbotWatch {
+            source_connect_link_id: None,
+            source_turn_id: None,
             invocation_id: None,
             trigger_prefill: None,
             trigger_id: None,
@@ -1899,6 +1901,7 @@ async fn machine_watches_and_jobs_carry_validated_report_provenance() {
     // action (no chat) stores legacy provenance.
     use super::nyxbot_watch_service::ReportProvenance;
     let assigned = ReportProvenance {
+        source_turn_id: None,
         invocation_id: None,
         report_to: Some("nyxa-assigning".into()),
         version: REPORT_PROVENANCE_V1,
@@ -2003,6 +2006,10 @@ async fn machine_watches_and_jobs_carry_validated_report_provenance() {
     let mut live = f.chat.clone();
     live.report_to = Some("nyxa-assigning".into());
     assert_eq!(ReportProvenance::from_chat(&live), assigned);
+    let setup = ReportProvenance::from_channel_setup_chat(&live);
+    assert_eq!(setup.source_turn_id, live.turn_id);
+    assert_eq!(setup.carried(), assigned.carried());
+    assert_eq!(setup.fields(), assigned.fields());
     f.state.db.drop().await.unwrap();
 }
 

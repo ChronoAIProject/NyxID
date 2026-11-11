@@ -11,6 +11,7 @@ import { z } from "zod";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Switch } from "@/components/ui/switch";
 import { Form, FormSubmitErrors, useAppForm } from "./form";
+import { appI18n } from "@/i18n/instance";
 
 interface TestValues {
   enabled: boolean;
@@ -20,6 +21,32 @@ interface TestValues {
 const defaultValues: TestValues = { enabled: false, name: "" };
 
 describe("useAppForm", () => {
+  it("updates existing validation in the selected language without changing the draft", async () => {
+    const schema = z.object({ email: z.email(), note: z.string() });
+    const { result } = renderHook(() => {
+      const form = useAppForm({
+        resolver: zodResolver(schema),
+        defaultValues: { email: "", note: "" },
+      });
+      return { form, errors: form.formState.errors, dirty: form.formState.isDirty };
+    });
+    await act(async () => {
+      result.current.form.setValue("email", "Keep this draft");
+      result.current.form.setError("note", { type: "server", message: "Provider detail" });
+      await result.current.form.trigger("email");
+    });
+    const english = result.current.errors.email?.message;
+    try {
+      await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+      await waitFor(() => expect(result.current.errors.email?.message).not.toBe(english));
+      expect(result.current.errors.email?.message).toMatch(/[\u3400-\u9fff]/);
+      expect(result.current.form.getValues("email")).toBe("Keep this draft");
+      expect(result.current.dirty).toBe(true);
+      expect(result.current.errors.note?.message).toBe("Provider detail");
+    } finally {
+      await act(async () => { await appI18n.changeLanguage("en"); });
+    }
+  });
   it("marks the field dirty and touched on plain setValue", () => {
     const { result } = renderHook(() => useAppForm<TestValues>({ defaultValues }));
     // Read isDirty before the update so the formState proxy subscribes to it.
