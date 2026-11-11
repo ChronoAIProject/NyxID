@@ -12022,5 +12022,14 @@
   "Affected bots": "受影响的机器人",
   "Selected operations only": "仅限所选操作",
   "Apply reviewed guest settings": "应用已查看的访客设置",
-  "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.": "访客使用你的计费方式。专属智能体的每项服务访客访问权限决定访客可使用哪些服务。NyxBot 不会为访客使用你的服务。"
+  "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.": "访客使用你的计费方式。专属智能体的每项服务访客访问权限决定访客可使用哪些服务。NyxBot 不会为访客使用你的服务。",
+  "Projects (read)": "项目（只读）",
+  "Projects (read/write)": "项目（读写）",
+  "Read user and organization projects.": "读取用户和组织的项目。",
+  "Read and write user and organization projects.": "读取和修改用户及组织的项目。",
+  "I understand that removing these permissions may stop apps using this connection.": "我了解移除这些权限可能导致使用此连接的应用停止工作。",
+  "Requested permissions unavailable on NyxID's shared app: {{scopes}}. Remove them or connect with your own OAuth app.": "NyxID 的共享应用不提供所请求的权限：{{scopes}}。请移除这些权限，或使用自己的 OAuth 应用连接。",
+  "Remove requested permission: {{scope}}": "移除请求的权限：{{scope}}",
+  "Removing a permission re-authorizes this connection and may stop apps that rely on it. Review the removed permissions before continuing. Revoking older access depends on the provider.": "移除权限会重新授权此连接，并可能导致依赖该权限的应用停止工作。继续前请检查要移除的权限。能否撤销旧授权取决于服务提供方。",
+  "Scopes marked “granted” are already authorized and locked. NyxID supports adding permissions here; removing older access requires managing the grant at the provider.": "标记为“已授权”的权限已获授权并已锁定。NyxID 支持在此添加权限；移除旧权限需要在服务提供方管理授权。"
 }
