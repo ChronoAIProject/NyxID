@@ -11992,9 +11992,9 @@
   "Model disabled": "模型已停用",
   "Explicit deny": "明確拒絕",
   "No entitlement": "沒有存取授權",
-  "Instructions: {{instructions}}; persona: {{persona}}; memory notes: {{memoryNotes}}; skills: {{skills}}; service grants: {{serviceGrants}}; account read: {{accountRead}}.": "指示：{{instructions}}；角色設定：{{persona}}；記憶筆記：{{memoryNotes}}；技能：{{skills}}；服務授權：{{serviceGrants}}；帳戶讀取：{{accountRead}}。",
-  "present": "已提供",
-  "Agent configuration has not been checked.": "尚未檢查智慧體設定。",
-  "These facts do not confirm complete business information or a successful customer test. Opening access is your choice. During model setup, customer requests wait briefly or receive a safe setup failure.": "這些資訊無法確認業務資訊是否完整，也無法確認客戶測試是否成功。是否開放存取由你決定。在設定模型期間，客戶請求會短暫等待，或收到安全的設定失敗提示。",
-  "Customer readiness is unavailable. Refresh to check before relying on replies.": "暫時無法取得客戶就緒狀態。請先重新整理檢查，再依賴機器人回覆。"
+  "Instructions: {{instructions}}; persona: {{persona}}; memory notes: {{memoryNotes}}; skills: {{skills}}; service grants: {{serviceGrants}}; account read: {{accountRead}}.": "指令：{{instructions}}；人設：{{persona}}；記憶筆記：{{memoryNotes}}；技能：{{skills}}；服務授權：{{serviceGrants}}；帳號讀取：{{accountRead}}。",
+  "Agent configuration has not been checked.": "尚未檢查代理程式設定。",
+  "These facts do not confirm complete business information or a successful customer test. Opening access is your choice. During model setup, customer requests wait briefly or receive a safe setup failure.": "這些資訊無法確認業務資訊完整，也無法確認客戶測試成功。是否開放存取由你決定。在模型設定期間，客戶請求會短暫等待，或收到安全的設定失敗提示。",
+  "Customer readiness is unavailable. Refresh to check before relying on replies.": "無法取得客戶就緒狀態。請重新整理檢查後再依賴回覆。",
+  "present": "已設定"
 }
