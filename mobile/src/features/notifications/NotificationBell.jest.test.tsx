@@ -7,14 +7,16 @@ jest.mock("../../theme/ThemeContext", () => {
 });
 
 describe("NotificationBell", () => {
-  it.each([[9, "9"], [10, "10"], [99, "99"], [100, "99+"]])("announces %s unread, displays %s and reports presses", async (unread, badge) => {
+  it.each([[9, "9"], [10, "10"], [24, "24"], [99, "99"], [100, "99+"]])("announces %s unread, displays %s and reports presses", async (unread, badge) => {
     const onPress = jest.fn();
     await render(<NotificationBell unread={Number(unread)} needsDecision={1} onPress={onPress} />);
     const bell = screen.getByRole("button", {
       name: `Notifications, ${unread} unread, 1 needs your decision`,
     });
     expect(screen.getByText(String(badge))).toBeTruthy();
-    expect(screen.getByTestId("notification-bell-badge")).toHaveStyle({ position: "absolute", top: -6, right: -6 });
+    expect(screen.getByTestId("notification-bell-badge-ring")).toHaveStyle({ position: "absolute", left: 8.5, top: -8, borderWidth: 2 });
+    expect(screen.getByTestId("notification-bell-badge")).toHaveStyle({ height: 14, minWidth: 14, paddingHorizontal: 3 });
+    expect(screen.getByText(String(badge))).toHaveStyle({ fontSize: 10, lineHeight: 10, fontWeight: "600" });
     expect(screen.getByTestId("notification-bell-glyph")).toHaveStyle({ position: "relative" });
     expect(screen.queryByTestId("notification-bell-attention")).toBeNull();
     const { lightColors } = jest.requireActual("../../theme/mobileTheme");

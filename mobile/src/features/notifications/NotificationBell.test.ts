@@ -68,3 +68,22 @@ for (const [mode, colors] of [["light", lightColors], ["dark", darkColors]] as c
     x.h.unmount();
   });
 }
+
+for (const [mode, colors] of [["light", lightColors], ["dark", darkColors]] as const) {
+  for (const [unread, text] of [[9, "9"], [24, "24"], [100, "99+"]] as const) {
+    test(`${mode} ${text} grows right from the bell's midpoint and leaves the lower half visible`, () => {
+      const x = render({ unread, needsDecision: 1, onPress: () => {} }, colors);
+      const glyph = x.all().find(n => n.props.testID === "notification-bell-glyph")!;
+      const ring = x.all().find(n => n.props.testID === "notification-bell-badge-ring")!;
+      const badge = x.all().find(n => n.props.testID === "notification-bell-badge")!;
+      const frame = ring.props.style[0];
+      const fill = badge.props.style[0];
+      assert.equal(frame.right, undefined);
+      assert.equal(frame.left + frame.borderWidth, glyph.props.style.width / 2);
+      assert.ok(frame.left + frame.borderWidth >= 8);
+      assert.ok(frame.top + frame.borderWidth + fill.height <= 9);
+      assert.equal(nodes(badge).find(n => n.type === "Text")!.props.children, text);
+      x.h.unmount();
+    });
+  }
+}

@@ -48,7 +48,7 @@ export function NotificationsBell() {
             aria-expanded={active}
             onClick={() => void open("notifications", {}, trigger.current)}
             className={cn(
-              "relative flex shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
+              "relative mr-0.5 flex shrink-0 items-center justify-center rounded-lg text-text-tertiary transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring",
               active && "bg-overlay-strong text-foreground",
             )}
           >
@@ -59,7 +59,7 @@ export function NotificationsBell() {
                   aria-hidden="true"
                   data-notification-count=""
                   className={cn(
-                    "absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full px-1 type-group-label tabular-nums ring-2 ring-sidebar",
+                    "absolute left-2 -top-1.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full px-[3px] type-count-badge tabular-nums ring-2 ring-sidebar",
                     needsDecision > 0
                       ? "bg-warning text-neutral-950 light:text-white"
                       : "bg-primary text-primary-foreground",

@@ -54,20 +54,21 @@ it("is absent, and reads nothing, without the Notifications feature", async () =
   expect(summaryReads).toBe(0);
 });
 
-it.each([[9, "9"], [10, "10"], [99, "99"], [100, "99+"]])("shows %s unread as %s and uses one amber count pill", async (count, badge) => {
+it.each([[9, "9"], [10, "10"], [24, "24"], [99, "99"], [100, "99+"]])("shows %s unread as %s and uses one amber count pill", async (count, badge) => {
   signIn([FEATURE_FLAG.NYXAGENT_ENGINE, FEATURE_FLAG.ASSISTANT_NOTIFICATIONS]);
   summary = { unread_count: count, needs_decision_count: 2, by_source: [] };
   renderBell();
   const bell = await screen.findByRole("button", { name: `Notifications, ${count} unread, 2 need you` });
   const countBadge = bell.querySelector("[data-notification-count]")!;
   expect(countBadge).toHaveTextContent(String(badge));
-  expect(countBadge).toHaveClass("absolute", "-right-1.5", "-top-1.5", "h-4", "min-w-4", "ring-2", "ring-sidebar", "tabular-nums");
+  expect(countBadge).toHaveClass("absolute", "left-2", "-top-1.5", "h-3.5", "min-w-3.5", "px-[3px]", "type-count-badge", "ring-2", "ring-sidebar", "tabular-nums");
   expect(countBadge.className).not.toMatch(/bg-\S+\//);
   expect(countBadge.parentElement).toHaveClass("relative");
   expect(countBadge.parentElement?.querySelector("svg")).toHaveStyle({ width: "100%", height: "100%" });
   expect(bell.querySelector("[data-needs-decision]")).toBeNull();
   expect(countBadge).toHaveClass("bg-warning", "text-neutral-950", "light:text-white");
   expect(countBadge).not.toHaveAttribute("data-needs-decision");
+  expect(bell).toHaveClass("mr-0.5");
   expect(bell).toHaveAttribute("aria-haspopup", "dialog");
   expect(bell).toHaveAttribute("aria-expanded", "false");
 });

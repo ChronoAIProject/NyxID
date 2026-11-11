@@ -110,6 +110,7 @@ consumers customize layout and semantic color, not individual typography propert
 | Field validation error | `text-13` | 500 | 1.5 | 11.05 |
 | Tooltip | `text-13` | 400 | 1.5 | 11.05 |
 | Group label / badge | `text-12` | 500 | 1.5 | 10.2 |
+| Compact notification counter | `text-10` | 600 | 1 | 8.5 |
 | Table column heading | `text-12` | 600 | 1.5 | 10.2 |
 | Account name | `text-14` | 500 | 1.5 | 11.9 |
 | Account email | `text-12` | 400 | 1.5 | 10.2 |

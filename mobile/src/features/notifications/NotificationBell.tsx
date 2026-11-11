@@ -40,21 +40,20 @@ export function NotificationBell({
         <Bell size={21} color={colors.textPrimary} />
         {badge ? (
           <View
-            testID="notification-bell-badge"
-            style={[
-              styles.badge,
-              {
-                backgroundColor: attention ? colors.warning : colors.primary,
-                borderColor: colors.sidebarBase,
-              },
-            ]}
+            testID="notification-bell-badge-ring"
+            style={[styles.badgeRing, { borderColor: colors.sidebarBase }]}
           >
-            <Text
-              maxFontSizeMultiplier={1.2}
-              style={[styles.badgeText, { color: attention ? colors.onWarning : colors.onPrimary }]}
+            <View
+              testID="notification-bell-badge"
+              style={[styles.badge, { backgroundColor: attention ? colors.warning : colors.primary }]}
             >
-              {badge}
-            </Text>
+              <Text
+                maxFontSizeMultiplier={1.2}
+                style={[styles.badgeText, { color: attention ? colors.onWarning : colors.onPrimary }]}
+              >
+                {badge}
+              </Text>
+            </View>
           </View>
         ) : null}
       </View>
@@ -71,20 +70,24 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
   },
   glyph: { position: "relative", width: 21, height: 21 },
-  badge: {
+  badgeRing: {
     position: "absolute",
-    top: -6,
-    right: -6,
-    minWidth: 20,
-    height: 20,
-    paddingHorizontal: 4,
-    borderRadius: radius.full,
+    // The fill starts at the 21px glyph's midpoint; the ring sits outside it.
+    left: 10.5 - 2,
+    top: -6 - 2,
     borderWidth: 2,
+    borderRadius: radius.full,
+  },
+  badge: {
+    minWidth: 14,
+    height: 14,
+    paddingHorizontal: 3,
+    borderRadius: radius.full,
     alignItems: "center",
     justifyContent: "center",
   },
   badgeText: {
-    ...typeScale.badge,
+    ...typeScale.countBadge,
     fontVariant: ["tabular-nums"],
   },
 });
