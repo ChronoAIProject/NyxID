@@ -2828,7 +2828,7 @@ it.each(["history", "index"] as const)("2345 on 2365 preserves HTTP errors and s
     requests.push(init.method ?? "GET");
     return response();
   };
-  const load = () => read === "history" ? transport.history(id) : transport.index();
+  const load = () => read === "history" ? transport.history(id) : transport.list();
   const valid = response;
   await load();
   for (const [status, body, message] of [
