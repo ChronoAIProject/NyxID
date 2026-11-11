@@ -283,7 +283,10 @@ does not replay an existing skipped row.
 Push is queued only when an opted-in notification row is first created, never
 when a coalesced count increases. `push.kind` snapshots that first event's kind, so a
 later mention or agent reply cannot change which preference authorizes its push.
-The push uses that original kind and current source references for its preview.
+Push consent and payload kind use that original kind. Source access, labels and
+preview follow the latest activity, so merging chat and event replies cannot
+invent or omit a channel visibility check. Group mentions retain their original
+mention title using the current group label.
 The worker rechecks preferences, visibility and the
 existing FCM/APNs configuration. It permits at most one push per person/source
 in ten minutes and at most thirty pushes per person/hour, across replicas.

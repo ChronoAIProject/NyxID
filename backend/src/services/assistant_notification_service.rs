@@ -3609,9 +3609,14 @@ async fn prepare_for_person(
 ) -> AppResult<Vec<(AssistantNotification, NotificationItem)>> {
     let db = &state.db;
     let view_of = |row: &AssistantNotification| {
-        // Title and preview follow the pushed kind with the latest refs.
         let mut view = row.clone();
-        view.kind = push_kind(row);
+        // Group mentions and replies share the same source ACL and shape, so
+        // the creating kind can retain its mention title. Saved conversations
+        // must use the latest kind: an older chat kind cannot invent missing
+        // channel refs, and an older agent kind cannot bypass a live chat ACL.
+        if row.source.group_id.is_some() {
+            view.kind = push_kind(row);
+        }
         view
     };
     let mut prepared: HashMap<String, NotificationItem> =
