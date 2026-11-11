@@ -349,7 +349,7 @@ async fn pm_f6_list_and_summary_share_the_same_live_visibility_matrix() {
         "collaboration_removed",
         "retired_channel",
         "stale_channel_epoch",
-        "stale_channel_binding",
+        "changed_channel_binding",
         "current_channel_stamp",
         "unlinked_platform",
         "deleted_trigger",
@@ -369,7 +369,12 @@ async fn pm_f6_list_and_summary_share_the_same_live_visibility_matrix() {
         let mut kind = NotificationKind::AgentUpdate;
         let expected = matches!(
             case,
-            "personal" | "org" | "pending_card" | "org_guest_admin" | "current_channel_stamp"
+            "personal"
+                | "org"
+                | "pending_card"
+                | "org_guest_admin"
+                | "current_channel_stamp"
+                | "changed_channel_binding"
         );
         if matches!(
             case,
@@ -435,7 +440,7 @@ async fn pm_f6_list_and_summary_share_the_same_live_visibility_matrix() {
             case,
             "retired_channel"
                 | "stale_channel_epoch"
-                | "stale_channel_binding"
+                | "changed_channel_binding"
                 | "current_channel_stamp"
         ) {
             let (channel, thread) = seed_channel(&f, &f.owner, None).await;
@@ -453,7 +458,7 @@ async fn pm_f6_list_and_summary_share_the_same_live_visibility_matrix() {
             source.thread_id = Some(thread);
             source.channel_epoch = if case == "stale_channel_epoch" { 6 } else { 7 };
             source.channel_binding_id = Some(
-                if case == "stale_channel_binding" {
+                if case == "changed_channel_binding" {
                     "bnd_previous"
                 } else {
                     "bnd_current"
@@ -621,9 +626,10 @@ async fn pm_f2_delivery_concurrency_is_bounded_even_for_one_person() {
     }
 }
 
-async fn stale_channel_snapshot_is_rejected(change: &str) {
+#[tokio::test]
+async fn pm_g1_retirement_racing_another_chats_settlement_rejects_the_stale_stamp() {
     use crate::models::{nyxbot_channel::NyxbotChannel, nyxbot_gateway_release::ReleaseReason};
-    let f = fixture(&format!("pm_g1_{change}_snapshot")).await;
+    let f = fixture("pm_g1_retire_snapshot").await;
     let db = &f.state.db;
     set_flag(&f, true).await;
     push_prefs(&f, &f.owner, all_push()).await;
@@ -680,34 +686,17 @@ async fn stale_channel_snapshot_is_rejected(change: &str) {
         .await
         .unwrap()
         .unwrap();
-    if change == "retire" {
-        crate::services::nyxbot_gateway_release_service::retire_connection(
-            &f.state,
-            &connection,
-            ReleaseReason::Disconnect,
-            "disconnected",
-            None,
-        )
-        .await
-        .unwrap();
-    } else {
-        assert!(
-            crate::services::nyxbot_chat_settings_service::remove_binding(
-                db,
-                &connection,
-                "bnd_original"
-            )
-            .await
-            .unwrap()
-        );
-        // Reattach with a successor ID or the same ID (ABA): the epoch must
-        // reject the old snapshot even when binding equality alone cannot.
-        db.collection::<Document>(CHANNELS).update_one(doc! {"_id": &channel},
-            doc! {"$set": {"binding_id": if change == "aba" {"bnd_original"} else {"bnd_successor"}}})
-            .await.unwrap();
-    }
+    crate::services::nyxbot_gateway_release_service::retire_connection(
+        &f.state,
+        &connection,
+        ReleaseReason::Disconnect,
+        "disconnected",
+        None,
+    )
+    .await
+    .unwrap();
     // No channel write is needed: committing this stale row is safe because
-    // every reader checks its stamped epoch/binding against the live channel.
+    // every reader checks its stamped epoch against the live channel.
     record_turn_settled_in_session(db, &mut tx, &late, turn, &message)
         .await
         .unwrap();
@@ -739,17 +728,6 @@ async fn stale_channel_snapshot_is_rejected(change: &str) {
         "a stale channel stamp must never push"
     );
     assert!(rows_of(&f, &f.owner).await.is_empty());
-}
-
-#[tokio::test]
-async fn pm_g1_retirement_racing_another_chats_settlement_rejects_the_stale_stamp() {
-    stale_channel_snapshot_is_rejected("retire").await;
-}
-
-#[tokio::test]
-async fn pm_g1_rebind_racing_settlement_rejects_stale_binding_and_aba_epoch() {
-    stale_channel_snapshot_is_rejected("rebind").await;
-    stale_channel_snapshot_is_rejected("aba").await;
 }
 
 #[tokio::test]

@@ -2158,8 +2158,7 @@ fn channel_state<'a>(lookups: &'a Lookups, source: &NotificationSource) -> Chann
     {
         None => ChannelState::Absent,
         Some(channel)
-            if channel.get_i64("notification_epoch").unwrap_or(0) != source.channel_epoch
-                || channel.get_str("binding_id").ok() != source.channel_binding_id.as_deref() =>
+            if channel.get_i64("notification_epoch").unwrap_or(0) != source.channel_epoch =>
         {
             ChannelState::Absent
         }
@@ -2695,9 +2694,9 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
         missing_or_null("$source.thread_id"),
         present("$thread"),
     ]};
-    let channel_stamp_ok = doc! {"$and": [
-        {"$eq": [{"$ifNull": ["$chan0.notification_epoch", 0]}, {"$ifNull": ["$source.channel_epoch", 0]}]},
-        {"$eq": [{"$ifNull": ["$chan0.binding_id", bson::Bson::Null]}, {"$ifNull": ["$source.channel_binding_id", bson::Bson::Null]}]},
+    let channel_stamp_ok = doc! {"$eq": [
+        {"$ifNull": ["$chan0.notification_epoch", 0]},
+        {"$ifNull": ["$source.channel_epoch", 0]},
     ]};
     let chan_ok = doc! {"$and": [
         channel_stamp_ok.clone(),

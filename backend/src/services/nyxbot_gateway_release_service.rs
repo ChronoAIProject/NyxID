@@ -189,7 +189,7 @@ pub(crate) async fn reserve(
     session.start_transaction().and_run2(async move |session| {
         let work:AppResult<_>=Box::pin(async {
             let mut fence=fence.clone(); fence.insert("gateway_setup_release_id",bson::Bson::Null);
-            if db.collection::<Document>(CHANNELS).update_one(fence,doc! {"$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64},"$set":{"gateway_setup_release_id":&release.id,"binding_id":&release.binding_id}})
+            if db.collection::<Document>(CHANNELS).update_one(fence,doc! {"$inc":{"execution_policy_revision":1_i64},"$set":{"gateway_setup_release_id":&release.id,"binding_id":&release.binding_id}})
                 .session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
             db.collection::<Release>(RELEASES).insert_one(&release).session(&mut *session).await?;
             if native_source {
@@ -571,7 +571,7 @@ pub(crate) async fn retire_attempt(
                         unset.insert("link_code_hash","");unset.insert("link_code_expires_at","");
                     }
                     db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&row.id,"gateway_setup_release_id":&id},doc! {
-                        "$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64},"$set":set,"$unset":unset}).session(&mut *session).await?;
+                        "$inc":{"execution_policy_revision":1_i64},"$set":set,"$unset":unset}).session(&mut *session).await?;
                 }
             }
             queue(&db,&release,reason,session).await?;
@@ -1392,7 +1392,7 @@ pub(crate) async fn fallback(
             if let Some(key)=current.agent_api_key_id.as_deref() {revoke_in_session(&db,&current.user_id,key,session).await?;}
             super::channel_routing_service::fence_route_key(&db,&next_key,session).await?;
             db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id,"status":"pending"},doc! {
-                "$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64},"$set":{"transport":"direct","route_api_key_id":&next_key,"gateway_no_progress":false,"gateway_fallback_at":bson::DateTime::now()},
+                "$inc":{"execution_policy_revision":1_i64},"$set":{"transport":"direct","route_api_key_id":&next_key,"gateway_no_progress":false,"gateway_fallback_at":bson::DateTime::now()},
                 "$unset":{"gateway_setup_release_id":"","agent_api_key_id":"","agent_key_ciphertext":"","gateway_channel_id":"","gateway_record_id":"","gateway_version":"","binding_id":"","gateway_bot_id":"","gateway_source":"","gateway_native_phase":""}})
                 .session(&mut *session).await?;
             Ok(ids)

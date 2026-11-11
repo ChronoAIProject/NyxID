@@ -574,7 +574,7 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
         .await
         .unwrap()
         .notification_epoch;
-    assert_eq!(bound_epoch, row.notification_epoch + 1);
+    assert_eq!(bound_epoch, row.notification_epoch);
     // Re-binding the same ID is idempotent; another ID conflicts.
     let again = bind(bearer(&agent_key), binding_body(&agent_key, OWNER), "bnd_1").await;
     assert_eq!(again.status(), StatusCode::OK);
@@ -608,7 +608,7 @@ async fn provider_binding_requires_the_channel_agent_key_and_its_owner() {
     assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
     let saved = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert!(saved.binding_id.is_none());
-    assert_eq!(saved.notification_epoch, bound_epoch + 1);
+    assert_eq!(saved.notification_epoch, bound_epoch);
     assert!(!format!("{saved:?}").contains(&agent_key));
     crate::test_utils::assert_notification_probe(&state.db, &same_channel, true).await;
     crate::test_utils::assert_notification_probe(&state.db, &retained, true).await;

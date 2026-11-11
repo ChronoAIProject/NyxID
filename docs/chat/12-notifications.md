@@ -96,21 +96,21 @@ personal/organization/collaboration groups, hidden member threads, agent
 destruction and purge, channel retirement and thread deletion, trigger deletion,
 and personal erasure. A channel producer writes only its provider chat's
 `nyxbot_threads` row, then projection-reads the live channel and stamps the
-notification with its `notification_epoch` and `binding_id`. Exact-chat removal
-deletes that same thread row, forcing concurrent settlement to retry. Retirement,
-relinking and provider binding changes increment the epoch in a channel write
-that the lifecycle operation already performs. Retirement still purges by
-`source.channel_id`; it adds no notification writes to retained threads.
+notification with its `notification_epoch`; its recorded `binding_id` is
+informational. Exact-chat removal deletes that same thread row, forcing
+concurrent settlement to retry. Channel retirement and org-specialist relinking
+increment the epoch in the existing channel write, in the same transaction that
+purges that channel's notification rows. Personal relinking, provider binding
+changes, setup attempts and relay/gateway transport moves preserve the epoch
+and unread notifications. Retirement adds no notification writes to retained
+threads.
 
-A settlement racing a retirement or rebind can commit its old snapshot. List
-and push preparation purge a row whose epoch or binding differs from the current
-channel; summary excludes it using the same joined fields. Default epoch zero
-and an absent binding preserve unstamped rows on legacy channels that also
-have no provider binding.
-Binding transitions invalidate prior feed notifications, including after a
-same-ID reattachment; saved conversations and card histories remain readable.
-A status-only failure with an unchanged stamp hides rows until repair.
-Channel-bound card creation makes one projection read to obtain the stamp.
+A settlement racing retirement can commit its old snapshot. List and push
+preparation purge a row whose epoch differs from the current channel; summary
+excludes it using the same joined field. Default epoch zero preserves unstamped
+rows on legacy channels. A status-only failure with an unchanged epoch hides
+rows until repair. Channel-bound card creation makes one projection read to
+obtain the stamp.
 
 All four ordinary new-chat paths retain their original atomic upserts: inbound
 recording, fallback conversation reservations, gateway conversation PUT and

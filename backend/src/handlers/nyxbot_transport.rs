@@ -55,7 +55,7 @@ pub(super) async fn swap_route(
         .or_insert_with(|| bson::Bson::Document(doc! {}))
         .as_document_mut()
         .ok_or_else(|| AppError::Internal("Invalid channel mutation".into()))?
-        .extend(doc! {"execution_policy_revision": 1_i64, "notification_epoch": 1_i64});
+        .extend(doc! {"execution_policy_revision": 1_i64});
     let route_id = row
         .route_id
         .clone()

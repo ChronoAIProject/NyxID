@@ -1260,7 +1260,7 @@ async fn connect_gateway(
             .await?;
     let db = &state.db;
     if db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&row.id,"status":"pending","gateway_setup_release_id":&release.id},
-        doc! {"$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64},"$set":{"gateway_channel_id":&channel_id,"gateway_record_id":record_id,"gateway_version":version,"binding_id":&release.binding_id,"gateway_no_progress":false}})
+        doc! {"$inc":{"execution_policy_revision":1_i64},"$set":{"gateway_channel_id":&channel_id,"gateway_record_id":record_id,"gateway_version":version,"binding_id":&release.binding_id,"gateway_no_progress":false}})
         .await.map_err(|_|"storage_unavailable")?.matched_count!=1 {return Err("channel_changed");}
     if key_service::update_api_key_scope_with_scope_authorization(
         db,
@@ -1701,7 +1701,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
         .update_one(
             doc! {"_id": &row.id, "status": "active", "transport": "direct",
             "route_api_key_id": &row.route_api_key_id, "pending_agent_api_key_id": null, "pending_route_api_key_id": null},
-            doc! {"$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64},"$set": {"pending_agent_api_key_id": &agent.id,
+            doc! {"$inc":{"execution_policy_revision":1_i64},"$set": {"pending_agent_api_key_id": &agent.id,
             "pending_route_api_key_id": &route_key.id, "gateway_no_progress": false,
             "gateway_source":bson::to_bson(&source).map_err(|_|"storage_unavailable")?,
             "gateway_native_phase":source.as_ref().map(|_|"preparing"),"gateway_native_activation_detail":bson::Bson::Null,"gateway_native_activation_operation":bson::Bson::Null},
@@ -4422,10 +4422,7 @@ pub async fn put_binding(
                 }
                 let mut update = doc! {"$set": set};
                 if row.binding_id.as_deref() != Some(binding_id.as_str()) {
-                    update.insert(
-                        "$inc",
-                        doc! {"execution_policy_revision":1_i64,"notification_epoch":1_i64},
-                    );
+                    update.insert("$inc", doc! {"execution_policy_revision":1_i64});
                 }
                 update
             },

@@ -108,10 +108,11 @@ pub struct NotificationSource {
     /// `nyxbot_channels._id` for channel chats.
     #[serde(default)]
     pub channel_id: Option<String>,
-    /// Channel generation and provider binding observed by the producer.
+    /// Retirement generation observed by the producer.
     #[serde(default)]
     pub channel_epoch: i64,
     #[serde(default)]
+    /// Informational provider binding; transport moves do not invalidate activity.
     pub channel_binding_id: Option<String>,
     /// `nyxbot_threads._id` for channel chats (personal chats and
     /// organization public transcripts).
