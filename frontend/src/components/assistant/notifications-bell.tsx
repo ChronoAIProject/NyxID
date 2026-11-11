@@ -1,7 +1,6 @@
 import { useRef } from "react";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { Bell } from "lucide-react";
-import { badgeVariants } from "@/components/ui/badge";
 import {
   Tooltip,
   TooltipContent,
@@ -54,14 +53,16 @@ export function NotificationsBell() {
             )}
           >
             <span aria-hidden="true" className="relative flex h-4 w-4 items-center justify-center">
-              <Bell className="h-4 w-4" />
+              <Bell className="h-full w-full" style={{ width: "100%", height: "100%" }} />
               {count > 0 ? (
                 <span
                   aria-hidden="true"
                   data-notification-count=""
                   className={cn(
-                    badgeVariants({ variant: needsDecision > 0 ? "warning" : "secondary" }),
-                    "absolute right-0 top-0 min-w-4 -translate-y-1/2 translate-x-1/2 justify-center rounded-full border-hairline px-1 py-0 tabular-nums",
+                    "absolute -right-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full px-1 type-group-label tabular-nums ring-2 ring-sidebar",
+                    needsDecision > 0
+                      ? "bg-warning text-neutral-950 light:text-white"
+                      : "bg-primary text-primary-foreground",
                   )}
                 >
                   {notificationBadgeText(count)}

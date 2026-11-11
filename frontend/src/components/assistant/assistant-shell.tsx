@@ -151,7 +151,7 @@ function AssistantShellLayout({
             <div className="min-w-0 flex-1 truncate text-14 text-muted-foreground">
               {!desktop ? shellTitle : null}
             </div>
-            <div data-header-actions="" className="flex shrink-0 flex-nowrap items-center gap-1">
+            <div data-header-actions="" className="-ml-1.5 flex shrink-0 flex-nowrap items-center gap-1">
               <button
                 type="button"
                 onClick={() => setMobileSidebarOpen(true)}
@@ -203,7 +203,7 @@ function AssistantShellLayout({
                   <Link to="/assistant" search={{}} aria-label={translateUi("Assistant home")} className="mr-auto">
                     <NyxidLogo className="h-5 w-auto" />
                   </Link>
-                  <div data-header-actions="" className="flex shrink-0 flex-nowrap items-center gap-1">
+                  <div data-header-actions="" className="-ml-1.5 flex shrink-0 flex-nowrap items-center gap-1">
                     {desktop ? headerActions : null}
                     <NotificationsBell />
                     <AssistantSearchButton onOpen={openSearch} />
@@ -285,7 +285,7 @@ function AssistantShellLayout({
               >
                 <div className="flex min-h-[max(3.25rem,calc(1.5rem+var(--spacing)*6))] shrink-0 flex-wrap items-center justify-between gap-1 border-b border-border/60 px-4 py-1">
                   <NyxidLogo className="mr-auto h-5 w-auto" />
-                  <div data-header-actions="" className="flex shrink-0 flex-nowrap items-center gap-1">
+                  <div data-header-actions="" className="-ml-1.5 flex shrink-0 flex-nowrap items-center gap-1">
                     <AssistantSearchButton onOpen={openSearch} />
                     <button
                       type="button"

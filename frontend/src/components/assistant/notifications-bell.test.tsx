@@ -61,10 +61,12 @@ it.each([[9, "9"], [10, "10"], [99, "99"], [100, "99+"]])("shows %s unread as %s
   const bell = await screen.findByRole("button", { name: `Notifications, ${count} unread, 2 need you` });
   const countBadge = bell.querySelector("[data-notification-count]")!;
   expect(countBadge).toHaveTextContent(String(badge));
-  expect(countBadge).toHaveClass("absolute", "tabular-nums");
+  expect(countBadge).toHaveClass("absolute", "-right-1.5", "-top-1.5", "h-4", "min-w-4", "ring-2", "ring-sidebar", "tabular-nums");
+  expect(countBadge.className).not.toMatch(/bg-\S+\//);
   expect(countBadge.parentElement).toHaveClass("relative");
+  expect(countBadge.parentElement?.querySelector("svg")).toHaveStyle({ width: "100%", height: "100%" });
   expect(bell.querySelector("[data-needs-decision]")).toBeNull();
-  expect(countBadge).toHaveClass("bg-warning/10", "text-warning", "light:text-amber-700");
+  expect(countBadge).toHaveClass("bg-warning", "text-neutral-950", "light:text-white");
   expect(countBadge).not.toHaveAttribute("data-needs-decision");
   expect(bell).toHaveAttribute("aria-haspopup", "dialog");
   expect(bell).toHaveAttribute("aria-expanded", "false");
@@ -76,7 +78,7 @@ it("uses the neutral badge when nothing needs a decision and none at zero", asyn
   const view = renderBell();
   const bell = await screen.findByRole("button", { name: "Notifications, 3 unread" });
   expect(bell).toHaveTextContent("3");
-  expect(bell.querySelector("[data-notification-count]")).toHaveClass("bg-muted", "text-muted-foreground");
+  expect(bell.querySelector("[data-notification-count]")).toHaveClass("bg-primary", "text-primary-foreground");
   expect(bell.querySelector("[data-needs-decision]")).toBeNull();
   view.unmount();
   summary = { unread_count: 0, needs_decision_count: 0, by_source: [] };
@@ -116,6 +118,6 @@ it("shows the decision count in the single amber pill when unread is zero", asyn
   const bell = await screen.findByRole("button", { name: "Notifications, 0 unread, 2 need you" });
   expect(bell.querySelectorAll("[data-notification-count]")).toHaveLength(1);
   expect(bell.querySelector("[data-notification-count]")).toHaveTextContent("2");
-  expect(bell.querySelector("[data-notification-count]")).toHaveClass("bg-warning/10");
+  expect(bell.querySelector("[data-notification-count]")).toHaveClass("bg-warning");
   expect(bell.querySelector("[data-needs-decision]")).toBeNull();
 });

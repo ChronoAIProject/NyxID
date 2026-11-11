@@ -36,7 +36,7 @@ test("the bell names its counts, caps the badge and uses one amber-capable indic
   const x = render({ unread: 23, needsDecision: 2, onPress: () => pressed.push(1) });
   assert.equal(x.root.props.accessibilityLabel, "Notifications, 23 unread, 2 need your decision");
   const badge = x.all().find((n) => n.props.testID === "notification-bell-badge")!;
-  assert.equal(badge.props.style[1].backgroundColor, lightColors.warningTone.bg);
+  assert.equal(badge.props.style[1].backgroundColor, lightColors.warning);
   assert.equal(x.all().some((n) => n.props.testID === "notification-bell-attention"), false);
   assert.equal(nodes(badge).find((n) => n.type === "Text")!.props.children, "23");
   assert.ok(x.root.props.style[0].minWidth >= 44 && x.root.props.style[0].minHeight >= 44);
@@ -45,7 +45,7 @@ test("the bell names its counts, caps the badge and uses one amber-capable indic
   x.h.unmount();
   const quiet = render({ unread: 3, needsDecision: 0, onPress: () => {} });
   const plain = quiet.all().find((n) => n.props.testID === "notification-bell-badge")!;
-  assert.equal(plain.props.style[1].backgroundColor, lightColors.card);
+  assert.equal(plain.props.style[1].backgroundColor, lightColors.primary);
   assert.equal(nodes(plain).find((n) => n.type === "Text")!.props.children, "3");
   quiet.h.unmount();
   const empty = render({ unread: 0, needsDecision: 0, onPress: () => {}, disabled: true });
@@ -60,9 +60,9 @@ for (const [mode, colors] of [["light", lightColors], ["dark", darkColors]] as c
   test(`one warning pill uses the ${mode} theme tone even at zero unread`, () => {
     const x = render({ unread: 0, needsDecision: 100, onPress: () => {} }, colors);
     const badge = x.all().find((n) => n.props.testID === "notification-bell-badge")!;
-    assert.equal(badge.props.style[1].backgroundColor, colors.warningTone.bg);
+    assert.equal(badge.props.style[1].backgroundColor, colors.warning);
     const label = nodes(badge).find((n) => n.type === "Text")!;
-    assert.equal(label.props.style[1].color, colors.warningTone.text);
+    assert.equal(label.props.style[1].color, colors.onWarning);
     assert.equal(label.props.children, "99+");
     assert.equal(x.all().some((n) => n.props.testID === "notification-bell-attention"), false);
     x.h.unmount();

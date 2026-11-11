@@ -44,14 +44,14 @@ export function NotificationBell({
             style={[
               styles.badge,
               {
-                backgroundColor: attention ? colors.warningTone.bg : colors.card,
-                borderColor: attention ? colors.warningTone.border : colors.bg,
+                backgroundColor: attention ? colors.warning : colors.primary,
+                borderColor: colors.sidebarBase,
               },
             ]}
           >
             <Text
               maxFontSizeMultiplier={1.2}
-              style={[styles.badgeText, { color: attention ? colors.warningTone.text : colors.textPrimary }]}
+              style={[styles.badgeText, { color: attention ? colors.onWarning : colors.onPrimary }]}
             >
               {badge}
             </Text>
@@ -74,11 +74,11 @@ const styles = StyleSheet.create({
   badge: {
     position: "absolute",
     top: -6,
-    right: -8,
-    minWidth: 18,
-    height: 18,
+    right: -6,
+    minWidth: 20,
+    height: 20,
     paddingHorizontal: 4,
-    borderRadius: 9,
+    borderRadius: radius.full,
     borderWidth: 2,
     alignItems: "center",
     justifyContent: "center",
