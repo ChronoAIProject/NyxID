@@ -122,8 +122,8 @@ runs cannot re-enter `finish_update`, and the pause producer already writes its
 trigger in the same transaction. Retained terminal history adds no fence writes.
 Notification cleanup uses the source reference rather than assuming the source
 owner and recipient are the same person. Exact-chat deletion purges that chat's
-rows; provider detachment preserves durable chat/card history while invalidating
-notifications from the old binding.
+rows; provider detachment preserves durable chat/card history and unread
+notifications.
 
 ## HTTP contract
 
