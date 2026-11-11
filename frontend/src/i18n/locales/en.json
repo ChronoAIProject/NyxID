@@ -9020,5 +9020,8 @@
   "Assistant or legacy principal; Agent identity not reported": "Assistant or legacy principal; Agent identity not reported",
   "OAuth client {{id}}": "OAuth client {{id}}",
   "Parent Key {{id}}": "Parent Key {{id}}",
-  " · Child {{id}}": " · Child {{id}}"
+  " · Child {{id}}": " · Child {{id}}",
+  "Different owner": "Different owner",
+  "No callback URL": "No callback URL",
+  "Assistant chat key": "Assistant chat key"
 }
