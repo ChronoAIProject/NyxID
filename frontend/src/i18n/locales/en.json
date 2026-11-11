@@ -12022,5 +12022,11 @@
   "Affected bots": "Affected bots",
   "Selected operations only": "Selected operations only",
   "Apply reviewed guest settings": "Apply reviewed guest settings",
-  "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.": "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests."
+  "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.": "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.",
+  "Authorize your bot's permissions below, then finish callback setup.": "Authorize your bot's permissions below, then finish callback setup.",
+  "Grant bot permissions": "Grant bot permissions",
+  "The required permissions are already selected. Open the link and confirm to enable them in {{platform}}.": "The required permissions are already selected. Open the link and confirm to enable them in {{platform}}.",
+  "Authorize {{platform}}": "Authorize {{platform}}",
+  "Paste the callback URL, then subscribe to {{messageEvent}} and {{cardEvent}}.": "Paste the callback URL, then subscribe to {{messageEvent}} and {{cardEvent}}.",
+  "Open Events & Callbacks": "Open Events & Callbacks"
 }

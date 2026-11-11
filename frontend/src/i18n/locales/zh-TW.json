@@ -12022,5 +12022,11 @@
   "Affected bots": "受影響的機器人",
   "Selected operations only": "僅限所選操作",
   "Apply reviewed guest settings": "套用已檢視的訪客設定",
-  "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.": "訪客使用你的計費方式。專家代理程式的每項服務訪客存取權限決定訪客可使用哪些服務。NyxBot 不會為訪客使用你的服務。"
+  "Guests use your billing. A specialist's per-service guest access controls which services they can use. NyxBot does not use your services for guests.": "訪客使用你的計費方式。專家代理程式的每項服務訪客存取權限決定訪客可使用哪些服務。NyxBot 不會為訪客使用你的服務。",
+  "Authorize your bot's permissions below, then finish callback setup.": "請先在下方授權機器人的權限，再完成回呼設定。",
+  "Grant bot permissions": "授予機器人權限",
+  "The required permissions are already selected. Open the link and confirm to enable them in {{platform}}.": "所需權限已預選。開啟連結並確認，即可在 {{platform}} 中啟用。",
+  "Authorize {{platform}}": "授權 {{platform}}",
+  "Paste the callback URL, then subscribe to {{messageEvent}} and {{cardEvent}}.": "貼上回呼網址，然後訂閱 {{messageEvent}} 和 {{cardEvent}}。",
+  "Open Events & Callbacks": "開啟事件與回呼"
 }
