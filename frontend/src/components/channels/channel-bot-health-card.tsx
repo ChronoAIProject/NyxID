@@ -1,5 +1,4 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
-import { translateUi } from "@/i18n/use-ui-translation";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -12,7 +11,7 @@ import {
 import type { ChannelBotHealth } from "@/schemas/channel-bot-health";
 
 function when(value: string | null): string {
-  if (!value) return "never";
+  if (!value) return translateUi("never");
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString(getFormattingLocale());
 }
@@ -58,6 +57,12 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
   const outbound = errorLine(d.last_outbound_error);
   const webhook = errorLine(d.last_webhook_error);
   const healthy = data.recommended_action === "none";
+  const healthyLabel = data.platform === "x"
+    ? d.last_inbound_outcome?.code === "x_reply_sent"
+      ? translateUi("Reply accepted")
+      : translateUi("No problem detected")
+    : translateUi("Healthy");
+  const inboundOutcomes = Object.entries(d.inbound_outcomes ?? {});
   const action =
     data.can_write && data.recommended_action === "resubscribe"
       ? {
@@ -87,7 +92,7 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
       className="space-y-2 rounded-md border border-border p-3"
     >
       <div className="flex items-center gap-2 type-card-title">{translateUi("Health")}<Badge variant={healthy ? "success" : "warning"}>
-          {healthy ? translateUi("Healthy") : translateUi("Needs attention")}
+          {healthy ? healthyLabel : translateUi("Needs attention")}
         </Badge>
         <Badge variant="secondary">
           {data.platform === "discord" ? (data.discord_intake?.receiving_side === "interactions_only" ? translateUi("Interactions") : translateUi("Gateway")) : data.mode === "poll" ? translateUi("Polling") : translateUi("Webhook")}
@@ -112,7 +117,35 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
             : "No local connection recorded. Relay chat requires channel:discord-gateway and Discord Message Content Intent. Gateway-hosted bots use the Agent Event Gateway connection."}
         />
       )}
-      <Row label={translateUi("Last reply sent")} value={when(d.last_outbound_at)} />
+      <Row label={translateUi("Last outbound attempt")} value={when(d.last_outbound_at)} />
+      {d.last_inbound_outcome && (
+        <Row
+          label={translateUi("Last inbound outcome")}
+          value={translateUi("{{code}} at {{time}}", {
+            code: d.last_inbound_outcome.code,
+            time: when(d.last_inbound_outcome.at),
+          })}
+        />
+      )}
+      {inboundOutcomes.length > 0 && (
+        <details>
+          <summary className="cursor-pointer type-secondary text-muted-foreground">
+            {translateUi("Inbound diagnostics")}
+          </summary>
+          <div className="space-y-2 pt-2">
+            {inboundOutcomes.map(([code, outcome]) => (
+              <Row
+                key={code}
+                label={code}
+                value={translateUi("{{count}} observed; last {{time}}", {
+                  count: outcome.count,
+                  time: when(outcome.at),
+                })}
+              />
+            ))}
+          </div>
+        </details>
+      )}
       {outbound && <Row label={translateUi("Last reply error")} value={outbound} />}
       {d.last_outbound_notice?.reason === "telegram_formatting_fallback" && (
         <Row

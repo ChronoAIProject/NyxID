@@ -1212,13 +1212,13 @@ fn action_summary(name: &str, args: &Value) -> String {
             }
             if let Some(budget) = guests.get("daily_credits").and_then(Value::as_str) {
                 details.push(format!(
-                    "daily organization guest budget {} credits",
+                    "legacy daily organization guest budget {} credits (ignored after Grants rollout)",
                     crate::services::assistant_nyxagent::identifier(budget)
                 ));
             }
             if let Some(services) = guests.get("service_ids").and_then(Value::as_array) {
                 details.push(format!(
-                    "{} delegated organization services",
+                    "{} legacy delegated organization services (ignored after Grants rollout)",
                     services.len()
                 ));
             }

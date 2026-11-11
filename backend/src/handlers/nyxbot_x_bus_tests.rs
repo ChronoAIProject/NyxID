@@ -420,3 +420,336 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
     nyxid.abort();
     model.abort();
 }
+
+#[tokio::test]
+async fn org_x_verification_then_personal_specialist_dm_is_answered_and_private_drops_are_visible()
+{
+    use crate::models::org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgMembership, OrgRole};
+    let (mut state, calls, model) = setup("x_2043_org_personal").await;
+    let mut bot = x_bot(&state).await;
+    let org = Uuid::new_v4().to_string();
+    state
+        .db
+        .collection(USERS)
+        .insert_one(test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<OrgMembership>(MEMBERSHIPS)
+        .insert_one(crate::test_utils::test_membership(
+            &org,
+            OWNER,
+            OrgRole::Admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    bot.user_id.clone_from(&org);
+    state
+        .db
+        .collection::<bson::Document>(BOTS)
+        .update_one(doc! {"_id":&bot.id}, doc! {"$set":{"user_id":&org}})
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&bot.connection_id},
+            doc! {"$set":{"user_id":&org}},
+        )
+        .await
+        .unwrap();
+    let (specialist, _) = crate::services::assistant_team_service::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        OWNER,
+        crate::services::assistant_team_service::CreateRequest {
+            machines: None,
+            logins: None,
+            name: "community-nyxbot".into(),
+            description: "Community help".into(),
+            display_name: None,
+            persona: None,
+            voice_instructions: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let x = MockServer::start().await;
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(
+            bot.id.clone(),
+            Arc::new(XAdapter {
+                api_base: Some(x.uri()),
+            }),
+        );
+    mount_send(
+        &x,
+        "2-10",
+        ResponseTemplate::new(201).set_body_json(json!({"data":{"dm_event_id":"900"}})),
+    )
+    .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    state.config.base_url = format!("http://{}", listener.local_addr().unwrap());
+    let (_, router) = crate::routes::build_router_with_state(state.clone());
+    let app = router.with_state(state.clone());
+    let nyxid = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let (row, link) = connect(&state, OWNER, None, &bot.id, &specialist)
+        .await
+        .unwrap();
+    assert_eq!(row.bot_owner_id.as_deref(), Some(org.as_str()));
+    assert!(row.org_specialist.is_none());
+    assert_eq!(row.transport, "direct");
+    assert_eq!(
+        key_service::get_api_key(&state.db, &org, &row.route_api_key_id)
+            .await
+            .unwrap()
+            .user_id,
+        org
+    );
+    let deliver = |id: &str, sender: &str, text: &str| {
+        let body = dm(&bot.id, id, sender, text);
+        let state = state.clone();
+        async move {
+            crate::handlers::channel_webhooks::dispatch_platform_webhook(
+                &state,
+                "x",
+                &sign(&body),
+                &body,
+            )
+            .await
+            .unwrap();
+        }
+    };
+    deliver("800", "2", &link.code).await;
+    let sent = x_requests(&x, "2-10", 1).await;
+    assert!(
+        sent[0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Linked. I'm community-nyxbot")
+    );
+    // Wait for the exact callback, not only receipt of the provider request.
+    wait_x_counter(&state, &bot.id, "x_reply_sent", 1).await;
+    let chat = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"channel_id":&row.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(chat.owner_chat);
+    assert!(chat.owner_seen);
+    assert_eq!(chat.title.as_deref(), Some("You"));
+    assert!(
+        calls.lock().await.is_empty(),
+        "verification never reaches the model"
+    );
+    let linked = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(linked.owner_sender_ids, vec!["2"]);
+    // A concurrent request holding the original link snapshot cannot claim success.
+    let stale_sender = Sender {
+        original_kind: None,
+        media: Vec::new(),
+        original_message: true,
+        kind: crate::models::channel_thread::ThreadSenderKind::Human,
+        owner_eligible: true,
+        id: "3",
+        display_name: None,
+    };
+    assert!(matches!(
+        link_owner(&state, &row, &stale_sender, &link.code, true)
+            .await
+            .unwrap(),
+        Some(Inbound::Silent("refused_link_consumed"))
+    ));
+    assert_eq!(
+        load_channel(&state, OWNER, &row.id)
+            .await
+            .unwrap()
+            .owner_sender_ids,
+        vec!["2"]
+    );
+    // Identical verification delivery is deduped; a distinct ordinary DM is not.
+    deliver("800", "2", &link.code).await;
+    deliver("801", "2", "chronoai是做什么的").await;
+    let sent = x_requests(&x, "2-10", 2).await;
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1]["text"], "Here is your answer");
+    let ready = x_delivery(&state, &bot, &row.id, "801", "sent", None).await;
+    assert!(ready.diagnostics.last_outbound_at.is_some());
+    wait_x_counter(&state, &bot.id, "x_reply_sent", 2).await;
+    let chat = state
+        .db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"_id":&chat.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let conversation = engine::get(&state.db, OWNER, chat.conversation_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        conversation.agent_id.as_deref(),
+        Some(specialist.id.as_str())
+    );
+    assert!(!conversation.guest_turn);
+    // Empty private DM used to be silent and absent from admission diagnostics.
+    deliver("802", "2", "").await;
+    let inbound = state
+        .db
+        .collection::<bson::Document>("channel_messages")
+        .find_one(doc! {"channel_bot_id":&bot.id,"platform_message_id":"802","direction":"inbound"})
+        .await
+        .unwrap()
+        .unwrap();
+    for _ in 0..400 {
+        let current = state
+            .db
+            .collection::<bson::Document>("channel_messages")
+            .find_one(doc! {"_id":inbound.get_str("_id").unwrap()})
+            .await
+            .unwrap()
+            .unwrap();
+        if current
+            .get_document("nyxbot_admission")
+            .ok()
+            .and_then(|d| d.get_str("disposition").ok())
+            == Some("refused_empty_content")
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let inbound = state
+        .db
+        .collection::<bson::Document>("channel_messages")
+        .find_one(doc! {"_id":inbound.get_str("_id").unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        inbound
+            .get_document("nyxbot_admission")
+            .unwrap()
+            .get_str("disposition")
+            .unwrap(),
+        "refused_empty_content"
+    );
+    let current = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    let health = crate::services::channel_bot_health::setup_evidence(&state.db, &current, false)
+        .await
+        .unwrap();
+    assert_eq!(
+        health["last_inbound_outcome"]["code"],
+        "x_content_unavailable"
+    );
+    assert!(
+        health["recommended_action_text"]
+            .as_str()
+            .unwrap()
+            .contains("does not prove encryption")
+    );
+    // Another sender never inherits the owner's verification, even in the same route.
+    mount_send(
+        &x,
+        "3-10",
+        ResponseTemplate::new(201).set_body_json(json!({"data":{"dm_event_id":"901"}})),
+    )
+    .await;
+    deliver("803", "3", "你好").await;
+    let refused = x_requests(&x, "3-10", 1).await;
+    assert_eq!(refused[0]["text"], PRIVATE_REFUSAL);
+    assert_eq!(calls.lock().await.len(), 1);
+    wait_x_counter(&state, &bot.id, "x_chat_policy_refused", 1).await;
+    // An unreadable authority row is a transient check failure, never a demotion.
+    state
+        .db
+        .collection::<bson::Document>(MEMBERSHIPS)
+        .update_one(
+            doc! {"org_user_id":&org,"member_user_id":OWNER},
+            doc! {"$set":{"role":"invalid-role"}},
+        )
+        .await
+        .unwrap();
+    deliver("805", "2", "authority unavailable").await;
+    wait_x_counter(&state, &bot.id, "x_org_access_unavailable", 1).await;
+    assert_eq!(
+        load_channel(&state, OWNER, &row.id).await.unwrap().status,
+        "active"
+    );
+    assert_eq!(calls.lock().await.len(), 1);
+    state
+        .db
+        .collection::<bson::Document>(MEMBERSHIPS)
+        .update_one(
+            doc! {"org_user_id":&org,"member_user_id":OWNER},
+            doc! {"$set":{"role":"admin"}},
+        )
+        .await
+        .unwrap();
+    // Loss of org-admin authority refuses the next callback before any new turn.
+    state
+        .db
+        .collection::<bson::Document>(MEMBERSHIPS)
+        .update_one(
+            doc! {"org_user_id":&org,"member_user_id":OWNER},
+            doc! {"$set":{"role":"viewer"}},
+        )
+        .await
+        .unwrap();
+    deliver("804", "2", "no authority").await;
+    let current = channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        current.diagnostics.inbound_outcomes["x_org_access_lost"].count,
+        1
+    );
+    assert_eq!(calls.lock().await.len(), 1);
+    assert_eq!(
+        load_channel(&state, OWNER, &row.id).await.unwrap().status,
+        "failed"
+    );
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .remove(&bot.id);
+    nyxid.abort();
+    model.abort();
+    state.db.drop().await.unwrap();
+}
+
+async fn wait_x_counter(state: &AppState, bot: &str, code: &str, count: i64) {
+    for _ in 0..400 {
+        let current = channel_bot_service::get_bot(&state.db, bot).await.unwrap();
+        if current
+            .diagnostics
+            .inbound_outcomes
+            .get(code)
+            .is_some_and(|c| c.count >= count)
+        {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("X outcome {code} did not reach {count}");
+}

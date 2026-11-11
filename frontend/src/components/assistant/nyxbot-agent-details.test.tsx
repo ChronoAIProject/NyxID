@@ -101,6 +101,9 @@ beforeEach(() => {
     const body = init.body ? (JSON.parse(String(init.body)) as unknown) : null;
     if (method !== "GET") writes.push({ method, endpoint, body });
     const id = String(agent.id);
+    if (endpoint === `/assistant/nyxagent/agents/${id}/org-guest-grants`) {
+      return new Response(JSON.stringify({ ready: true, pending: false, review: "none", bots: [], services: [] }));
+    }
     if (endpoint === `/assistant/nyxagent/agents/${id}/guest-readiness`) {
       readinessReads++;
       return new Response(JSON.stringify({ status: "not_ready", fix: "Send one message to this assistant yourself." }));

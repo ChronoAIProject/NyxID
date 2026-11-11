@@ -77,7 +77,11 @@ pub(crate) async fn reserve(
         .as_ref()
         .ok_or_else(super::denied)?
         .guests;
-    let cap = policy.daily_credits.ok_or_else(super::denied)?;
+    let cap = if access.guest_grants_ready {
+        None
+    } else {
+        Some(policy.daily_credits.ok_or_else(super::denied)?)
+    };
     let admitted_at = Utc::now();
     let channel = policy
         .continuity_channel_id
@@ -125,9 +129,18 @@ pub(crate) async fn reserve(
                 allowance.quantity,
             )?)?;
         }
-        let changed = db.collection::<Document>(BUDGETS).update_one(doc!{"_id":&day,
-            "$expr":{"$lte":[{"$add":["$spent_credits","$reserved_credits",held.decimal()]},cap.decimal()]}},
-            doc!{"$inc":{"reserved_credits":held},"$set":{"updated_at":bson::DateTime::now()}}).session(&mut *session).await?;
+        let mut filter = doc! {"_id": &day};
+        if let Some(cap) = cap {
+            filter.insert("$expr", doc! {"$lte":[{"$add":["$spent_credits","$reserved_credits",held.decimal()]},cap.decimal()]});
+        }
+        let changed = db
+            .collection::<Document>(BUDGETS)
+            .update_one(
+                filter,
+                doc! {"$inc":{"reserved_credits":held},"$set":{"updated_at":bson::DateTime::now()}},
+            )
+            .session(&mut *session)
+            .await?;
         if changed.matched_count != 1 {
             return Err(AppError::Forbidden(
                 "org_channel_guest_budget_exhausted".into(),

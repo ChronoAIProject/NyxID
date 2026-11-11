@@ -1,3 +1,4 @@
+import { OrgGuestGrantsAdoption } from "./org-guest-grants-adoption";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
@@ -1151,6 +1152,9 @@ function GrantsForm({
           )}
         </form>
       </Form>
+      {agent.owner_kind === "org" && canManageGuests && !readOnly ? (
+        <OrgGuestGrantsAdoption agentId={agent.id} disabled={form.formState.isDirty || grants.isPending} />
+      ) : null}
     </section>
   );
 }
