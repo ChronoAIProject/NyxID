@@ -385,6 +385,17 @@ pub(crate) fn catalog_execution_fingerprint(service: &DownstreamService) -> Stri
     hex::encode(digest.finalize())
 }
 
+fn require_same_deployment_target(
+    catalog: &DownstreamService,
+    service_id: &str,
+    base_url: &str,
+) -> CmaResult<()> {
+    if catalog.id != service_id || catalog.base_url != base_url {
+        return Err(CmaGatewayError::ConfigurationRequired);
+    }
+    Ok(())
+}
+
 impl CatalogCmaGateway {
     pub fn new(state: &AppState) -> Self {
         Self {
@@ -439,6 +450,9 @@ impl CatalogCmaGateway {
         self
     }
 
+    /// Compare catalog snapshots for native operations. Ordinary proxy
+    /// connections may have their own identity policy and must instead bind
+    /// their actual deployment through `deployment_fingerprint_for_target`.
     pub async fn verify_catalog(
         &self,
         owner_id: &str,
@@ -449,6 +463,17 @@ impl CatalogCmaGateway {
             return Err(CmaGatewayError::ConfigurationRequired);
         }
         Ok(())
+    }
+
+    pub(crate) async fn deployment_fingerprint_for_target(
+        &self,
+        owner_id: &str,
+        service_id: &str,
+        base_url: &str,
+    ) -> CmaResult<String> {
+        let (catalog, _, _) = self.resolve(owner_id).await?;
+        require_same_deployment_target(&catalog, service_id, base_url)?;
+        Ok(catalog_execution_fingerprint(&catalog))
     }
 
     /// A fresh human recovery uses the saved request through the same catalog
@@ -2370,6 +2395,38 @@ impl CmaGateway for CatalogCmaGateway {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_identity_flags_do_not_define_cma_deployment() {
+        let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+        catalog.identity_propagation_mode = "jwt".into();
+        catalog.identity_include_user_id = false;
+        catalog.identity_include_email = false;
+        catalog.identity_include_name = false;
+        let mut connection = catalog.clone();
+        connection.identity_include_user_id = true;
+        connection.identity_include_email = true;
+        connection.identity_include_name = true;
+        assert_ne!(
+            catalog_execution_fingerprint(&catalog),
+            catalog_execution_fingerprint(&connection)
+        );
+        assert!(
+            require_same_deployment_target(&catalog, &connection.id, &connection.base_url).is_ok()
+        );
+        assert!(
+            require_same_deployment_target(&catalog, "another-service", &connection.base_url)
+                .is_err()
+        );
+        assert!(
+            require_same_deployment_target(
+                &catalog,
+                &connection.id,
+                "https://another-deployment.example"
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn sandbox_authority_projection_keeps_exact_identity_without_profile_enrichment() {
         let body = json!({
