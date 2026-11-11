@@ -15,6 +15,8 @@ import {
   SettingsRow,
 } from "../../components/settings/SettingsList";
 import { SkeletonRows } from "../../components/Skeleton";
+import { OfflineBanner } from "../../components/OfflineBanner";
+import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { WorkspaceSelectionSheet } from "../../components/workspace/WorkspaceSelectionField";
 import {
   Label,
@@ -56,13 +58,17 @@ const failure = (cause: unknown) =>
 export function PluginSkills({ agentId }: { agentId?: string }) {
   const { colors } = useTheme();
   const focused = useIsFocused();
+  const { isConnected } = useNetworkStatus();
+  const canFetch = focused && isConnected;
+  const currentCanFetch = useRef(canFetch);
+  currentCanFetch.current = canFetch;
   const epoch = getAuthEpoch();
   const [chosen, setChosen] = useState(agentId ?? "");
   const [picking, setPicking] = useState(false);
   const agents = useQuery({
     queryKey: ["workspace", "agents", "list"],
     queryFn: ({ signal }) => agentsApi.list(signal),
-    enabled: focused,
+    enabled: canFetch,
     retry: false,
   });
 
@@ -87,6 +93,9 @@ export function PluginSkills({ agentId }: { agentId?: string }) {
   }, [selectionScope, focused]);
   return (
     <View style={styles.stack}>
+      {!isConnected && !agent && (
+        <OfflineBanner subtitle="Reconnect to load agents and their skills." />
+      )}
       <SettingsGroup title="Agent">
         <SettingsRow
           leading={agent ? <AgentAvatar agent={agent} size="md" /> : undefined}
@@ -135,7 +144,7 @@ export function PluginSkills({ agentId }: { agentId?: string }) {
           onClose={() => setPicking(false)}
         />
       )}
-      {agents.isPending && (
+      {isConnected && agents.isPending && (
         <SkeletonRows
           rows={3}
           title
@@ -149,12 +158,15 @@ export function PluginSkills({ agentId }: { agentId?: string }) {
             <SettingsRow
               label="Retry agents"
               tone="action"
-              onPress={() => void agents.refetch()}
+              disabled={!canFetch}
+              onPress={() => {
+                if (currentCanFetch.current) void agents.refetch();
+              }}
             />
           </SettingsGroup>
         </>
       )}
-      {!agents.isPending && !agents.isError && !agent && (
+      {isConnected && !agents.isPending && !agents.isError && !agent && (
         <Text style={[styles.note, { color: colors.textMuted }]}>
           {chosen
             ? "Requested agent unavailable. It may have been deleted or your maintenance access changed. Choose another agent to manage its skills."
@@ -178,10 +190,11 @@ export function PluginSkillPage({
 }: ContentScreenProps<"SkillDetail" | "SkillVersions" | "SkillHistory">) {
   const { colors } = useTheme();
   const focused = useIsFocused();
+  const { isConnected } = useNetworkStatus();
   const agent = useQuery({
     queryKey: ["workspace", "agents", "detail", route.params.agentId],
     queryFn: ({ signal }) => agentsApi.detail(route.params.agentId, signal),
-    enabled: focused,
+    enabled: focused && isConnected,
     retry: false,
   });
 
@@ -194,7 +207,10 @@ export function PluginSkillPage({
       showHeading={false}
       contentStyle={styles.grouped}
     >
-      {agent.isPending && (
+      {!isConnected && !agent.data && (
+        <OfflineBanner subtitle="Reconnect to load this skill's agent." />
+      )}
+      {isConnected && agent.isPending && (
         <SkeletonRows rows={3} title accessibilityLabel="Loading skill agent" />
       )}
       {agent.isError && <Notice tone="error" message={failure(agent.error)} />}
@@ -248,6 +264,12 @@ function AgentSkillsManager({
   const { colors } = useTheme();
   const client = useQueryClient();
   const focused = useIsFocused();
+  const { isConnected } = useNetworkStatus();
+  const canFetch = focused && isConnected;
+  // Native callbacks and confirmation alerts may outlive the render that
+  // created them; recheck the current connection before issuing requests.
+  const currentCanFetch = useRef(canFetch);
+  currentCanFetch.current = canFetch;
   const [catalogInput, setCatalogInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [page, setPage] = useState(1);
@@ -272,7 +294,7 @@ function AgentSkillsManager({
   const current = useQuery({
     queryKey: currentKey,
     queryFn: ({ signal }) => api.current(agent.id, signal),
-    enabled: focused,
+    enabled: canFetch,
     retry: false,
   });
   const currentReady = Boolean(current.data) && !current.isError;
@@ -287,13 +309,13 @@ function AgentSkillsManager({
   const catalog = useQuery({
     queryKey: [...ROOT, "catalog", searchQuery, page],
     queryFn: ({ signal }) => api.search(searchQuery, page, signal),
-    enabled: focused && !waitingForQuery,
+    enabled: canFetch && !waitingForQuery,
     retry: false,
   });
   const versions = useQuery({
     queryKey: [...ROOT, "versions", detail?.id, versionPage],
     queryFn: ({ signal }) => api.versions(detail!.id, versionPage, signal),
-    enabled: focused && Boolean(detail),
+    enabled: canFetch && Boolean(detail),
     retry: false,
   });
   const initialVersionApplied = useRef(false);
@@ -310,20 +332,20 @@ function AgentSkillsManager({
     queryFn: ({ signal }) =>
       api.preview(detail!.id, selectedVersion!.version, signal),
     enabled:
-      focused && Boolean(detail && selectedVersion) && view === "versions",
+      canFetch && Boolean(detail && selectedVersion) && view === "versions",
     retry: false,
   });
   const tested = useQuery({
     queryKey: [...ROOT, "test", agent.id, detail?.id],
     queryFn: ({ signal }) => api.test(agent.id, detail!.id, signal),
-    enabled: focused && testing && Boolean(detail),
+    enabled: canFetch && testing && Boolean(detail),
     retry: false,
     staleTime: 0,
   });
   const history = useQuery({
     queryKey: [...ROOT, "history", agent.id],
     queryFn: ({ signal }) => api.history(agent.id, signal),
-    enabled: focused && Boolean(detail) && view === "history",
+    enabled: canFetch && Boolean(detail) && view === "history",
     retry: false,
   });
   function openSkill(id: string, name: string, description?: string | null) {
@@ -342,6 +364,7 @@ function AgentSkillsManager({
       });
   }
   async function refresh() {
+    if (!currentCanFetch.current) return;
     await Promise.all([
       client.invalidateQueries({ queryKey: currentKey }),
       client.invalidateQueries({ queryKey: [...ROOT, "history", agent.id] }),
@@ -349,7 +372,7 @@ function AgentSkillsManager({
     ]);
   }
   async function run(action: () => Promise<void>) {
-    if (lock.current) return;
+    if (lock.current || !currentCanFetch.current) return;
     lock.current = true;
     setBusy(true);
     setError(undefined);
@@ -388,6 +411,8 @@ function AgentSkillsManager({
         throw new Error(
           "Your account session changed. Reopen Plugins to continue.",
         );
+      if (!currentCanFetch.current)
+        throw new Error("Reconnect before changing this agent's skills.");
       await api.write(agent.id, selection);
       await refresh();
       setTesting(false);
@@ -414,14 +439,29 @@ function AgentSkillsManager({
     pin.version === latestVersion.version &&
     pin.sha256 === latestVersion.sha256,
   );
+  const cached = Boolean(
+    current.data ||
+    (!skillPage ? catalog.data :
+      view === "versions" ? versions.data || preview.data :
+      view === "history" ? history.data : versions.data),
+  );
+  function retry(refetch: () => unknown) {
+    if (currentCanFetch.current) void refetch();
+  }
 
   return (
     <View style={styles.stack}>
+      {!isConnected && (
+        <OfflineBanner subtitle={cached
+          ? "Showing cached skill information. Reconnect to refresh or make changes."
+          : "Reconnect to load skill information."} />
+      )}
       {!detail && notice && <Notice tone="success" message={notice} />}
       {!detail && error && <Notice tone="error" message={error} />}
       {!skillPage && (
         <SkillLibrary
           agentName={titleOf(agent)}
+          offline={!isConnected}
           query={catalogInput}
           onQueryChange={setCatalogInput}
           added={{
@@ -434,10 +474,10 @@ function AgentSkillsManager({
               disabled: item.disabled,
             })),
             known: Boolean(current.data),
-            loading: current.isPending,
-            error: current.isError ? failure(current.error) : undefined,
+            loading: isConnected && current.isPending,
+            error: isConnected && current.isError ? failure(current.error) : undefined,
             onRetry: () => {
-              void current.refetch();
+              retry(() => current.refetch());
             },
           }}
           catalog={{
@@ -445,18 +485,20 @@ function AgentSkillsManager({
             known: !waitingForQuery && Boolean(catalog.data),
             // A background refetch keeps the cached results; only a new
             // search or page (no data yet) shows the result skeleton.
-            loading: waitingForQuery || catalog.isPending,
+            loading: isConnected && (waitingForQuery || catalog.isPending),
             error:
-              !waitingForQuery && catalog.isError
+              isConnected && !waitingForQuery && catalog.isError
                 ? failure(catalog.error)
                 : undefined,
             onRetry: () => {
-              void catalog.refetch();
+              retry(() => catalog.refetch());
             },
           }}
           page={page}
           totalPages={catalog.data?.total_pages ?? 1}
-          onPageChange={setPage}
+          onPageChange={(value) => {
+            if (currentCanFetch.current) setPage(value);
+          }}
           onOpenSkill={openSkill}
         />
       )}
@@ -470,8 +512,11 @@ function AgentSkillsManager({
                 <SettingsRow
                   label="Reload current skills"
                   tone="action"
-                  disabled={busy}
-                  onPress={() => void refresh().then(() => setError(undefined))}
+                  disabled={busy || !canFetch}
+                  onPress={() => {
+                    if (currentCanFetch.current)
+                      void refresh().then(() => setError(undefined));
+                  }}
                 />
               </SettingsGroup>
             </>
@@ -491,13 +536,13 @@ function AgentSkillsManager({
                 <SettingsRow
                   label="Retry attached skills"
                   tone="action"
-                  disabled={busy || !focused || current.isFetching}
+                  disabled={busy || !canFetch || current.isFetching}
                   accessory={
-                    current.isFetching ? (
+                    isConnected && current.isFetching ? (
                       <ActivityIndicator color={colors.primary} />
                     ) : undefined
                   }
-                  onPress={() => void current.refetch()}
+                  onPress={() => retry(() => current.refetch())}
                 />
               </SettingsGroup>
             </>
@@ -531,7 +576,7 @@ function AgentSkillsManager({
                   detail={pinnedLatest ? "Latest version" : undefined}
                   value={
                     pin?.version ??
-                    (current.isPending
+                    (isConnected && current.isPending
                       ? "Loading attached version…"
                       : currentReady
                         ? "Not attached"
@@ -597,25 +642,26 @@ function AgentSkillsManager({
                   >
                     <SettingsRow
                       label={
-                        tested.isFetching && testing
+                        isConnected && tested.isFetching && testing
                           ? "Testing attached skill…"
                           : "Read pinned package"
                       }
                       tone="action"
-                      disabled={busy || (testing && tested.isFetching)}
+                      disabled={busy || !canFetch || (testing && tested.isFetching)}
                       accessory={
-                        testing && tested.isFetching ? (
+                        isConnected && testing && tested.isFetching ? (
                           <ActivityIndicator color={colors.primary} />
                         ) : undefined
                       }
                       onPress={() => {
+                        if (!currentCanFetch.current) return;
                         if (testing) void tested.refetch();
                         else setTesting(true);
                       }}
                     />
                     {testing &&
                       tested.data &&
-                      !tested.isFetching &&
+                      (!tested.isFetching || !isConnected) &&
                       !tested.isError &&
                       tested.data.excerpt ? (
                       <View style={styles.excerpt}>
@@ -633,7 +679,7 @@ function AgentSkillsManager({
                   )}
                   {testing &&
                     tested.data &&
-                    !tested.isFetching &&
+                    (!tested.isFetching || !isConnected) &&
                     !tested.isError && (
                       <Notice
                         tone={tested.data.readable ? "success" : "info"}
@@ -658,7 +704,7 @@ function AgentSkillsManager({
                     <SettingsRow
                       label="Remove from agent"
                       tone="danger"
-                      disabled={busy || !currentReady}
+                      disabled={busy || !canFetch || !currentReady}
                       onPress={() =>
                         confirmRemoval(pin.name, titleOf(agent), () =>
                           void change({
@@ -675,7 +721,7 @@ function AgentSkillsManager({
           )}
           {view === "versions" && detail && (
             <>
-              {versions.isPending && (
+              {isConnected && versions.isPending && (
                 <SkeletonRows
                   rows={4}
                   icon={false}
@@ -690,10 +736,16 @@ function AgentSkillsManager({
                     <SettingsRow
                       label="Retry versions"
                       tone="action"
-                      onPress={() => void versions.refetch()}
+                      disabled={!canFetch}
+                      onPress={() => retry(() => versions.refetch())}
                     />
                   </SettingsGroup>
                 </>
+              )}
+              {!isConnected && !versions.data && (
+                <Text style={[styles.note, { color: colors.textMuted }]}>
+                  Reconnect to load published skill versions.
+                </Text>
               )}
               {versions.data?.items.length === 0 && (
                 <Text style={[styles.note, { color: colors.textMuted }]}>
@@ -752,14 +804,15 @@ function AgentSkillsManager({
                 <Pagination
                   page={versionPage}
                   total={versions.data.total_pages}
-                  disabled={busy || versions.isFetching}
+                  disabled={busy || !canFetch || versions.isFetching}
                   onChange={(value) => {
+                    if (!currentCanFetch.current) return;
                     setVersionPage(value);
                     setSelectedVersion(undefined);
                   }}
                 />
               )}
-              {selectedVersion && preview.isFetching && (
+              {isConnected && selectedVersion && preview.isFetching && (
                 <Text style={[styles.note, { color: colors.textMuted }]}>
                   Verifying package…
                 </Text>
@@ -771,12 +824,18 @@ function AgentSkillsManager({
                     <SettingsRow
                       label="Retry package preview"
                       tone="action"
-                      onPress={() => void preview.refetch()}
+                      disabled={!canFetch}
+                      onPress={() => retry(() => preview.refetch())}
                     />
                   </SettingsGroup>
                 </>
               )}
-              {preview.data && selectedVersion && !preview.isFetching && (
+              {!isConnected && selectedVersion && !preview.data && (
+                <Text style={[styles.note, { color: colors.textMuted }]}>
+                  Reconnect to load this package preview.
+                </Text>
+              )}
+              {preview.data && selectedVersion && (!preview.isFetching || !isConnected) && (
                 <SettingsGroup
                   title="Package"
                   inset={false}
@@ -826,6 +885,7 @@ function AgentSkillsManager({
                   }
                   disabled={
                     busy ||
+                    !canFetch ||
                     !currentReady ||
                     Boolean(pin?.disabled) ||
                     !selectedVersion ||
@@ -854,7 +914,7 @@ function AgentSkillsManager({
           )}
           {view === "history" && (
             <>
-              {history.isPending && (
+              {isConnected && history.isPending && (
                 <SkeletonRows
                   rows={4}
                   title
@@ -868,10 +928,16 @@ function AgentSkillsManager({
                     <SettingsRow
                       label="Retry skill history"
                       tone="action"
-                      onPress={() => void history.refetch()}
+                      disabled={!canFetch}
+                      onPress={() => retry(() => history.refetch())}
                     />
                   </SettingsGroup>
                 </>
+              )}
+              {!isConnected && !history.data && (
+                <Text style={[styles.note, { color: colors.textMuted }]}>
+                  Reconnect to load skill history.
+                </Text>
               )}
               {history.data?.items.length === 0 && (
                 <Text style={[styles.note, { color: colors.textMuted }]}>

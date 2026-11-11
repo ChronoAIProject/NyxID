@@ -12,8 +12,13 @@ function recognizer(events: string[]) {
   const listeners = new Map<string, Set<Listener>>();
   let permission = deferred<Permission>();
   const module = {
+    available: true,
     onDevice: true,
     options: undefined as Record<string, unknown> | undefined,
+    isRecognitionAvailable: () => {
+      events.push("availability");
+      return module.available;
+    },
     requestPermissionsAsync: () => {
       events.push("permission");
       return permission.promise;
@@ -51,7 +56,7 @@ function recognizer(events: string[]) {
   return module;
 }
 
-function setup({ chosen }: { chosen?: string } = {}) {
+function setup({ chosen, platform = "ios" }: { chosen?: string; platform?: "ios" | "android" } = {}) {
   let state = "active",
     focused = true,
     sheetOpen = false,
@@ -71,6 +76,7 @@ function setup({ chosen }: { chosen?: string } = {}) {
   };
   const h = hookHarness<ReturnType<typeof useComposerDictation>>({
     "react-native": {
+      Platform: { OS: platform },
       Linking: {
         openSettings: async () => {
           events.push("settings");
@@ -189,6 +195,116 @@ test("on-device recognition is only required when the iPhone supports it", async
   await x.begin();
   assert.equal(x.native.options!.requiresOnDeviceRecognition, false);
   x.h.unmount();
+});
+
+test("Android without a recognition service explains the unavailable feature before requesting microphone permission", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  t.after(x.h.unmount);
+  x.native.available = false;
+  x.native.grant({ granted: true });
+  await x.h.value().start();
+  await x.h.settle();
+  assert.deepEqual(x.events, ["availability"]);
+  assert.equal(x.h.value().phase, "idle");
+  assert.equal(x.h.value().permissionDenied, false);
+  assert.match(x.h.value().error!, /device.*speech recognition service.*keep typing/i);
+  t.mock.timers.tick(60_000);
+  x.h.flush();
+  assert.match(x.h.value().error!, /speech recognition service/);
+  assert.deepEqual(x.inserted, []);
+
+  x.h.value().discard();
+  x.h.flush();
+  assert.equal(x.h.value().error, undefined);
+  x.native.available = true;
+  await x.begin();
+  assert.deepEqual(x.events, ["availability", "availability", "permission", "start"]);
+  assert.equal(x.h.value().recording, true);
+});
+
+test("a recognizer that never starts times out, releases the microphone and supports a clean retry", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  t.after(x.h.unmount);
+  const pending = x.h.value().start();
+  x.native.grant({ granted: true });
+  await pending;
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "connecting");
+  t.mock.timers.tick(7999);
+  x.h.flush();
+  assert.equal(x.h.value().phase, "connecting");
+  t.mock.timers.tick(1);
+  x.h.flush();
+  assert.equal(x.h.value().active, false);
+  assert.match(x.h.value().error!, /could not start.*try again.*keep typing/i);
+  assert.equal(x.events.at(-1), "abort");
+  x.emit("start");
+  x.result("late words", true);
+  x.emit("end");
+  assert.deepEqual(x.inserted, []);
+  assert.equal(x.h.value().phase, "idle");
+  t.mock.timers.tick(60_000);
+  x.h.flush();
+  assert.match(x.h.value().error!, /could not start/);
+
+  x.native.resetPermission();
+  await x.begin();
+  assert.equal(x.h.value().error, undefined);
+  t.mock.timers.tick(60_000);
+  x.h.flush();
+  assert.equal(x.h.value().phase, "listening", "a started recognizer clears its startup deadline");
+  x.result("retry words", true);
+  x.emit("end");
+  assert.deepEqual(x.inserted, ["retry words"]);
+});
+
+test("a stalled locale lookup cannot start recognition after its startup deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const x = setup({ platform: "android" });
+  t.after(x.h.unmount);
+  const locales = deferred<Awaited<ReturnType<typeof x.native.getSupportedLocales>>>();
+  x.native.getSupportedLocales = () => locales.promise;
+  const pending = x.h.value().start();
+  x.native.grant({ granted: true });
+  await x.h.settle();
+  assert.equal(x.h.value().phase, "connecting");
+  t.mock.timers.tick(8000);
+  x.h.flush();
+  assert.equal(x.h.value().phase, "idle");
+  assert.match(x.h.value().error!, /could not start/);
+  locales.resolve({ locales: ["en-US"], installedLocales: [] });
+  await pending;
+  await x.h.settle();
+  assert.deepEqual(x.events, ["availability", "permission"]);
+  assert.deepEqual(x.inserted, []);
+});
+
+test("Android permission and recognition errors provide device-appropriate recovery instructions", async (t) => {
+  for (const restricted of [false, true]) {
+    const x = setup({ platform: "android" });
+    t.after(x.h.unmount);
+    const pending = x.h.value().start();
+    x.native.grant({ granted: false, restricted });
+    await pending;
+    await x.h.settle();
+    assert.equal(x.h.value().permissionDenied, true);
+    assert.match(x.h.value().error!, restricted ? /restricted on this device/ : /Allow microphone access in Settings/);
+    assert.doesNotMatch(x.h.value().error!, /iPhone|Screen Time|General.*Keyboard/);
+    x.h.value().openSettings();
+    assert.equal(x.events.at(-1), "settings");
+  }
+  for (const code of ["language-not-supported", "service-not-allowed"]) {
+    const x = setup({ platform: "android" });
+    t.after(x.h.unmount);
+    await x.begin();
+    x.emit("error", { error: code });
+    x.emit("end");
+    assert.equal(x.h.value().active, false);
+    assert.match(x.h.value().error!, /language|device.*speech recognition/i);
+    assert.doesNotMatch(x.h.value().error!, /iPhone|Screen Time|General.*Keyboard/);
+  }
 });
 
 test("interim words are replaced, final segments append, and finishing inserts once into the draft", async () => {

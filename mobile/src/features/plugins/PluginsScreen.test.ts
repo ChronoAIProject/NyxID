@@ -151,14 +151,17 @@ test("Added rows render catalog brand slugs for suffixed production instances ev
 function setup({
   connections = [personal, dnsPersonal, dnsWork],
   catalog = [github, cloudflare, slack],
+  connected = true,
 }: {
   connections?: ServiceConnection[];
   catalog?: CatalogEntry[];
+  connected?: boolean;
 } = {}) {
   const calls: { method: string; args: unknown[] }[] = [];
   const queries = new Map<string, QueryOptions>();
   let back: { active: boolean; onBack: () => void; defaultRole?: string };
   let focused = true;
+  let online = connected;
   let foreground: (state: string) => void = () => {};
   const record =
     (method: string) =>
@@ -170,6 +173,7 @@ function setup({
     isPending: false,
     isFetching: false,
     isError: false,
+    fetchStatus: "idle" as "idle" | "fetching" | "paused",
     error: undefined as Error | undefined,
     refetch: record(`refetch-${name}`),
   });
@@ -257,6 +261,8 @@ function setup({
     "./pluginConnectors": { deriveConnectorItems, matchesPluginQuery },
     "./PluginSkills": { PluginSkills: "PluginSkills" },
     "../../components/Skeleton": { SkeletonRows: "SkeletonRows" },
+    "../../components/OfflineBanner": { OfflineBanner: "OfflineBanner" },
+    "../../hooks/useNetworkStatus": { useNetworkStatus: () => ({ isConnected: online }) },
   };
   const harness = hookHarness<Element>(mocks);
   // The real pull-refresh hook runs on the harness's React.
@@ -307,6 +313,10 @@ function setup({
       ),
     focused: (value: boolean) => {
       focused = value;
+      harness.render();
+    },
+    online: (value: boolean) => {
+      online = value;
       harness.render();
     },
     foreground: (value: boolean) => {
@@ -593,6 +603,92 @@ test("background refetches never show the pull or Refresh spinner; the user's ow
     finish();
     await env.harness.settle();
     assert.equal(env.list().refreshing, false);
+  } finally {
+    env.unmount();
+  }
+});
+
+test("offline cold loads show reconnection guidance instead of an endless pending skeleton", async () => {
+  const env = setup({ connected: false });
+  try {
+    for (const state of Object.values(env.states))
+      Object.assign(state, { data: undefined, isPending: true, fetchStatus: "paused" });
+    env.harness.render();
+    assert.equal(env.queries.get("plugins")?.enabled, false);
+    assert.equal(env.queries.get("catalog")?.enabled, false);
+    assert.equal(env.all().some((row) => row.type === "SkeletonRows"), false);
+    assert.equal(env.all().some((row) => row.type === "OfflineBanner"), true);
+    assert.match(env.texts(), /Reconnect to load/);
+    assert.doesNotMatch(env.texts(), /No connectors added yet|All available connectors are already added/);
+    assert.equal(env.control("Refresh plugins").props.disabled, true);
+    env.list().onRefresh();
+    env.foreground(false);
+    env.foreground(true);
+    await env.harness.settle();
+    assert.equal(env.list().refreshing, false);
+    assert.equal(env.calls.some((call) => call.method.startsWith("refetch-")), false);
+  } finally {
+    env.unmount();
+  }
+});
+
+test("offline connectors retain cached rows even when the missing catalog remains pending", () => {
+  const env = setup({ connected: false });
+  try {
+    Object.assign(env.states.catalog, { data: undefined, isPending: true, fetchStatus: "paused" });
+    env.harness.render();
+    assert.deepEqual(names(env.added()), ["Personal GitHub", "Personal Cloudflare"]);
+    assert.ok(env.control("Search connectors"));
+    assert.equal(env.all().some((row) => row.type === "SkeletonRows"), false);
+    assert.match(
+      env.all().find((row) => row.type === "OfflineBanner")?.props.subtitle,
+      /cached/i,
+    );
+  } finally {
+    env.unmount();
+  }
+});
+
+test("reconnecting enables normal queries and refresh without replaying offline refreshes", async () => {
+  const env = setup({ connected: false });
+  try {
+    for (const state of Object.values(env.states))
+      Object.assign(state, { data: undefined, isPending: true, fetchStatus: "paused" });
+    env.harness.render();
+    env.list().onRefresh();
+    await env.harness.settle();
+    assert.equal(env.calls.some((call) => call.method.startsWith("refetch-")), false);
+    env.online(true);
+    assert.equal(env.queries.get("plugins")?.enabled, true);
+    assert.equal(env.queries.get("catalog")?.enabled, true);
+    assert.equal(env.all().some((row) => row.type === "OfflineBanner"), false);
+    Object.assign(env.states.plugins, { data: [personal], isPending: false, fetchStatus: "idle" });
+    Object.assign(env.states.catalog, { data: [github, slack], isPending: false, fetchStatus: "idle" });
+    env.harness.render();
+    assert.deepEqual(names(env.added()), ["GitHub"]);
+    assert.deepEqual(names(env.discover()), ["Slack"]);
+    env.list().onRefresh();
+    await env.harness.settle();
+    assert.deepEqual(
+      env.calls.filter((call) => call.method.startsWith("refetch-")).map((call) => call.method),
+      ["refetch-plugins", "refetch-catalog"],
+    );
+  } finally {
+    env.unmount();
+  }
+});
+
+test("offline connector management does not claim an uncached connection was removed", () => {
+  const env = setup({ connected: false });
+  try {
+    for (const state of Object.values(env.states))
+      Object.assign(state, { data: undefined, isPending: true, fetchStatus: "paused" });
+    env.connector("service:api-github");
+    assert.equal(env.all().some((row) => row.type === "OfflineBanner"), true);
+    const group = env.all().find((row) => row.type === "SettingsGroup");
+    assert.match(group?.props.footer, /Reconnect/);
+    assert.doesNotMatch(group?.props.footer, /no longer/);
+    assert.equal(env.control("Refresh plugins").props.disabled, true);
   } finally {
     env.unmount();
   }

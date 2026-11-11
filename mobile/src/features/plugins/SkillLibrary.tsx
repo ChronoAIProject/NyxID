@@ -53,6 +53,7 @@ export function SkillLibrary({
   totalPages,
   onPageChange,
   onOpenSkill,
+  offline = false,
 }: {
   agentName: string;
   query: string;
@@ -63,6 +64,7 @@ export function SkillLibrary({
   totalPages: number;
   onPageChange: (page: number) => void;
   onOpenSkill: (id: string, name: string, description?: string | null) => void;
+  offline?: boolean;
 }) {
   const { colors } = useTheme();
   const needle = searchable(query);
@@ -108,10 +110,19 @@ export function SkillLibrary({
             <SettingsRow
               label="Reload skills"
               tone="action"
+              disabled={offline}
               onPress={added.onRetry}
             />
           </SettingsGroup>
         </>
+      )}
+      {offline && !added.known && (
+        <SettingsGroup
+          title={addedTitle}
+          footer="Reconnect to load this agent's skills."
+        >
+          <SettingsRow icon={BookOpen} label="Added skills unavailable offline" />
+        </SettingsGroup>
       )}
       {added.loading && (
         <SkeletonRows
@@ -159,10 +170,19 @@ export function SkillLibrary({
             <SettingsRow
               label="Retry skill catalog"
               tone="action"
+              disabled={offline}
               onPress={catalog.onRetry}
             />
           </SettingsGroup>
         </>
+      )}
+      {offline && !catalog.known && (
+        <SettingsGroup
+          title="Discover"
+          footer="Reconnect to search the skill catalog."
+        >
+          <SettingsRow icon={Search} label="Skill catalog unavailable offline" />
+        </SettingsGroup>
       )}
       {catalog.items.length ? (
         <SettingsGroup
@@ -204,7 +224,7 @@ export function SkillLibrary({
             tone="action"
             accessibilityLabel="Previous"
             accessibilityHint="Shows the previous page of results"
-            disabled={catalog.loading || page <= 1}
+            disabled={offline || catalog.loading || page <= 1}
             onPress={() => onPageChange(page - 1)}
           />
           <SettingsRow
@@ -212,7 +232,7 @@ export function SkillLibrary({
             tone="action"
             accessibilityLabel="Next"
             accessibilityHint="Shows the next page of results"
-            disabled={catalog.loading || page >= totalPages}
+            disabled={offline || catalog.loading || page >= totalPages}
             onPress={() => onPageChange(page + 1)}
           />
         </SettingsGroup>

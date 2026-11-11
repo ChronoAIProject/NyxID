@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AppState, Linking } from "react-native";
+import { AppState, Linking, Platform } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
 import {
   ExpoSpeechRecognitionModule as Recognizer,
@@ -22,26 +22,38 @@ type Phase =
 const NO_SPEECH = "No speech was detected. Try again.";
 const DENIED =
   "Allow microphone and speech recognition access in Settings to dictate. You can keep typing.";
+/** Locale discovery or a native recognizer must not leave the composer starting forever. */
+const START_TIMEOUT_MS = 8000;
 /** A stopped recognizer that never reports `end` still releases the microphone. */
 const STOP_TIMEOUT_MS = 8000;
 /** How long a new attempt waits for an aborted one's `end`. */
 const RELEASE_TIMEOUT_MS = 1500;
+
+function permissionDeniedMessage() {
+  return Platform.OS === "android"
+    ? "Allow microphone access in Settings to dictate. You can keep typing."
+    : DENIED;
+}
 
 function dictationError(code: ExpoSpeechRecognitionErrorCode) {
   switch (code) {
     case "aborted":
       return undefined;
     case "not-allowed":
-      return DENIED;
+      return permissionDeniedMessage();
     case "no-speech":
     case "speech-timeout":
       return NO_SPEECH;
     case "language-not-supported":
-      return "Dictation isn't available in your iPhone's language. You can keep typing.";
+      return Platform.OS === "android"
+        ? "Dictation isn't available in your selected language. Choose another language or keep typing."
+        : "Dictation isn't available in your iPhone's language. You can keep typing.";
     case "network":
       return "Speech recognition needs a connection for your language. Check your connection and try again.";
     case "service-not-allowed":
-      return "Speech recognition isn't available right now. Check that Dictation is on in Settings › General › Keyboard, then try again.";
+      return Platform.OS === "android"
+        ? "Speech recognition isn't available right now. Check microphone access and your device's speech recognition service, then try again. You can keep typing."
+        : "Speech recognition isn't available right now. Check that Dictation is on in Settings › General › Keyboard, then try again.";
     case "audio-capture":
       return "The microphone couldn't record. Close other apps using it and try again.";
     case "interrupted":
@@ -74,7 +86,7 @@ function release() {
   Recognizer.abort();
 }
 
-/** The chosen dictation language when still supported, else the iPhone's. */
+/** The chosen dictation language when still supported, else the device's. */
 async function recognitionLanguage() {
   const chosen = await savedDictationLanguage();
   let phone: string | undefined;
@@ -115,8 +127,8 @@ function levelSource() {
 }
 
 /**
- * Composer dictation on Apple's speech recognizer (on-device when the iPhone
- * supports it). The words appear in the composer as they are recognized and
+ * Composer dictation on the device's speech recognizer (on-device when
+ * supported). The words appear in the composer as they are recognized and
  * join the draft when recording finishes; nothing reaches NyxID until the
  * person sends the message themselves.
  */
@@ -183,6 +195,7 @@ export function useComposerDictation({
     let interimText = "";
     let failure: string | undefined;
     let subscriptions: { remove(): void }[] = [];
+    let startTimer: ReturnType<typeof setTimeout> | undefined;
     let stopTimer: ReturnType<typeof setTimeout> | undefined;
     const spoken = () =>
       [finalText.trim(), interimText.trim()].filter(Boolean).join(" ");
@@ -198,6 +211,7 @@ export function useComposerDictation({
       for (const subscription of subscriptions) subscription.remove();
       subscriptions = [];
       appState.remove();
+      clearTimeout(startTimer);
       clearTimeout(stopTimer);
     };
     const cancel = () => {
@@ -266,20 +280,36 @@ export function useComposerDictation({
     setCaption({ final: "", interim: "" });
     setPhase("permission");
     try {
+      if (Platform.OS === "android" && !Recognizer.isRecognitionAvailable()) {
+        throw new Error(
+          "This device doesn't have a speech recognition service available. You can keep typing.",
+        );
+      }
       const result = await Recognizer.requestPermissionsAsync();
       if (!valid()) return;
       if (!result.granted) {
         setPermissionDenied(true);
         throw new Error(
           result.restricted
-            ? "Speech recognition is restricted on this iPhone in Screen Time. You can keep typing."
-            : DENIED,
+            ? Platform.OS === "android"
+              ? "Speech recognition is restricted on this device. You can keep typing."
+              : "Speech recognition is restricted on this iPhone in Screen Time. You can keep typing."
+            : permissionDeniedMessage(),
         );
       }
       await waitForVoiceForeground(AppState, controller.signal, valid);
       permission = false;
       if (!valid()) return;
       setPhase("connecting");
+      startTimer = setTimeout(() => {
+        if (!valid()) return;
+        cancel();
+        operation.current = undefined;
+        setPhase("idle");
+        setError(
+          (previous) => previous ?? "Dictation could not start. Please try again. You can keep typing.",
+        );
+      }, START_TIMEOUT_MS);
       const lang = await recognitionLanguage();
       if (!valid()) return;
       await releasing;
@@ -289,6 +319,7 @@ export function useComposerDictation({
       subscriptions = [
         Recognizer.addListener("start", () => {
           if (!valid()) return;
+          clearTimeout(startTimer);
           listening = true;
           setPhase("listening");
         }),
@@ -364,7 +395,9 @@ export function useComposerDictation({
     openSettings: () => {
       void Linking.openSettings().catch(() =>
         setError(
-          "Open your iPhone Settings to allow microphone and speech recognition access.",
+          Platform.OS === "android"
+            ? "Open your device Settings to allow microphone access."
+            : "Open your iPhone Settings to allow microphone and speech recognition access.",
         ),
       );
     },

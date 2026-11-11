@@ -1,6 +1,6 @@
 import { waitForVoiceForeground } from "./voicePermission";
 import { useEffect, useRef, useState } from "react";
-import { AppState } from "react-native";
+import { AppState, Platform } from "react-native";
 import { Camera } from "expo-camera";
 import * as Crypto from "expo-crypto";
 import { getAuthEpoch } from "../../../lib/auth/authEpoch";
@@ -16,6 +16,13 @@ import type {
 } from "./voiceContracts";
 
 type Environment = ReturnType<typeof nativeVoiceEnvironment>;
+const MICROPHONE_PERMISSION_TIMEOUT_MS = 60_000;
+type PermissionAttempt = {
+  generation: number;
+  androidBackgroundAllowed: boolean;
+  androidBackgrounded: boolean;
+  requestTimer?: ReturnType<typeof setTimeout>;
+};
 
 export function useNativeVoice(
   thread: string,
@@ -42,7 +49,7 @@ export function useNativeVoice(
   const mounted = useRef(true);
   const busy = useRef(false);
   const conflictBusy = useRef(false);
-  const permissionAttempt = useRef<number | undefined>(undefined);
+  const permissionAttempt = useRef<PermissionAttempt | undefined>(undefined);
   const pending = useRef<AbortController | undefined>(undefined);
   const update = useRef(onUpdate);
   update.current = onUpdate;
@@ -86,6 +93,7 @@ export function useNativeVoice(
     for (const controller of taskCancellations.current.values())
       controller.abort();
     taskCancellations.current.clear();
+    clearTimeout(permissionAttempt.current?.requestTimer);
     permissionAttempt.current = undefined;
     busy.current = false;
     conflictBusy.current = false;
@@ -118,12 +126,29 @@ export function useNativeVoice(
     setSpeakerMuted(false);
     setEndingConflict(false);
     const subscription = AppState.addEventListener("change", (state) => {
-      // System permission prompts may briefly inactivate the app before any
-      // microphone is acquired. Actual background always cancels the attempt.
+      const permission = permissionAttempt.current;
+      const awaitingPermission = permission?.generation === ticket.current;
+      if (state === "active") {
+        if (permission?.androidBackgrounded) {
+          // A subsequent background event is no longer the permission prompt.
+          permission.androidBackgroundAllowed = false;
+          permission.androidBackgrounded = false;
+        }
+        return;
+      }
+      // Android's permission activity reports background rather than inactive.
+      // Only a requested permission before media acquisition gets one bounded pause.
       if (
-        state !== "active" &&
-        !(state === "inactive" && permissionAttempt.current === ticket.current)
+        state === "background" &&
+        permission &&
+        awaitingPermission &&
+        permission.androidBackgroundAllowed &&
+        !current.current
       ) {
+        permission.androidBackgrounded = true;
+        return;
+      }
+      if (!(state === "inactive" && awaitingPermission)) {
         const hadVoiceWork = busy.current || current.current !== null;
         stopRef.current();
         if (hadVoiceWork)
@@ -181,21 +206,46 @@ export function useNativeVoice(
         );
       await environment.api.savePreferences(preferences, controller.signal);
       if (!valid()) return;
-      permissionAttempt.current = generation;
-      let permission;
-      try {
-        permission = await Camera.requestMicrophonePermissionsAsync();
-        if (!valid()) return;
-        if (!permission.granted)
-          throw new Error(
-            "Microphone access is off. Allow it in your device settings to use voice; you can keep chatting with text.",
-          );
-        await waitForVoiceForeground(AppState, controller.signal, valid);
-      } finally {
-        if (permissionAttempt.current === generation)
-          permissionAttempt.current = undefined;
+      let permission = await Camera.getMicrophonePermissionsAsync();
+      if (!valid()) return;
+      if (!permission.granted) {
+        const attempt: PermissionAttempt = {
+          generation,
+          androidBackgroundAllowed: Platform.OS === "android",
+          androidBackgrounded: false,
+        };
+        permissionAttempt.current = attempt;
+        try {
+          // Give people time to read the system prompt. The shorter foreground
+          // handoff timeout starts only once they have answered it.
+          attempt.requestTimer = setTimeout(() => {
+            if (permissionAttempt.current !== attempt) return;
+            stopRef.current();
+            reportError(
+              "Microphone permission took too long. Try voice again and respond to the permission prompt.",
+            );
+          }, MICROPHONE_PERMISSION_TIMEOUT_MS);
+          permission = await Camera.requestMicrophonePermissionsAsync();
+          clearTimeout(attempt.requestTimer);
+          attempt.requestTimer = undefined;
+          if (!valid()) return;
+          if (!permission.granted)
+            throw new Error(
+              "Microphone access is off. Allow it in your device settings to use voice; you can keep chatting with text.",
+            );
+          await waitForVoiceForeground(AppState, controller.signal, valid, {
+            allowInitialBackground: attempt.androidBackgroundAllowed,
+          });
+        } finally {
+          clearTimeout(attempt.requestTimer);
+          if (permissionAttempt.current === attempt) {
+            permissionAttempt.current = undefined;
+          }
+        }
       }
       if (!valid()) return;
+      if (AppState.currentState !== "active")
+        throw new Error("Keep NyxID open to start a voice call.");
       const nextMedia = new NativeVoiceMedia();
       const next = new AssistantVoiceClient({
         conversationId: thread,

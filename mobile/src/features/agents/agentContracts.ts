@@ -190,6 +190,9 @@ export function grantOptions(
   const rows = connections.filter(
     (connection) =>
       connection.is_active &&
+      // NyxBot Voice has no published MCP endpoints, so the backend's
+      // authorization catalog cannot grant it as a specialist tool.
+      (connection.catalog_service_slug ?? connection.slug) !== "nyxbot-voice" &&
       (org
         ? connection.credential_source?.type === "org" &&
           connection.credential_source.org_id === org &&

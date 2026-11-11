@@ -59,12 +59,13 @@ function snapshot(changes: Partial<VoiceSession> = {}): VoiceSnapshot {
 }
 
 /** The real hook executes; only native permission, media and network edges are replaced. */
-function setup(context: TestContext) {
+function setup(context: TestContext, platform: "ios" | "android" = "ios") {
   let epoch = 1;
   let thread = firstThread;
   let optionCalls = 0;
   let savedCalls = 0;
   let permissionCalls = 0;
+  let permissionChecks = 0;
   let refreshCalls = 0;
   const signals: AbortSignal[] = [];
   const controls: { thread: string; id: string; action: string }[] = [];
@@ -90,6 +91,7 @@ function setup(context: TestContext) {
   const responses = {
     options: async (): Promise<any> => ({ options: [available] }),
     save: async (): Promise<unknown> => ({}),
+    currentPermission: async () => ({ granted: false }),
     permission: async () => ({ granted: true }),
     start: async (_client: Client): Promise<void> => {},
     control: async (): Promise<unknown> => session({ state: "closed" }),
@@ -184,9 +186,13 @@ function setup(context: TestContext) {
   }
   let environment = { epoch, api, createSocket: async () => undefined };
   const harness = hookHarness<VoiceHook>({
-    "react-native": { AppState: native },
+    "react-native": { AppState: native, Platform: { OS: platform } },
     "expo-camera": {
       Camera: {
+        getMicrophonePermissionsAsync: async () => {
+          permissionChecks++;
+          return responses.currentPermission();
+        },
         requestMicrophonePermissionsAsync: async () => {
           permissionCalls++;
           return responses.permission();
@@ -239,6 +245,7 @@ function setup(context: TestContext) {
       optionCalls,
       savedCalls,
       permissionCalls,
+      permissionChecks,
       refreshCalls,
       listeners: appListeners.size,
     }),
@@ -392,6 +399,162 @@ test("permission denial keeps text usable and never constructs a provider client
   assert.equal(e.media.length, 0);
   assert.equal(state.starting, false);
   assert.match(state.error!, /Microphone access is off/);
+});
+
+test("already granted Android microphone access is checked without requesting system permission again", async (context) => {
+  const e = setup(context, "android");
+  e.responses.currentPermission = async () => ({ granted: true });
+  await e.start();
+  assert.equal(e.counts().permissionChecks, 1);
+  assert.equal(e.counts().permissionCalls, 0);
+  assert.equal(e.clients.length, 1);
+  await e.harness.value().end();
+  e.harness.flush();
+  await e.start();
+  assert.equal(e.counts().permissionChecks, 2, "permission is rechecked for each explicit start");
+  assert.equal(e.counts().permissionCalls, 0);
+  assert.equal(e.clients.length, 2);
+});
+
+for (const grantBeforeForeground of [true, false]) {
+  test(`Android permission background resumes safely when permission resolves ${grantBeforeForeground ? "before" : "after"} foreground`, async (context) => {
+    const e = setup(context, "android");
+    const permission = deferred<{ granted: boolean }>();
+    e.responses.permission = () => permission.promise;
+    const pending = e.harness.value().start(preferences, "openai_live");
+    await e.harness.settle();
+    assert.equal(e.counts().permissionCalls, 1);
+    assert.equal(e.appState("background").starting, true);
+    assert.equal(e.signals[0]!.aborted, false);
+    if (grantBeforeForeground) {
+      permission.resolve({ granted: true });
+      await e.harness.settle();
+    }
+    assert.equal(e.clients.length, 0, "no provider or microphone is acquired in the background");
+    assert.equal(e.media.length, 0);
+    assert.equal(e.harness.value().error, undefined);
+    e.appState("active");
+    if (!grantBeforeForeground) permission.resolve({ granted: true });
+    await pending;
+    assert.equal(e.clients.length, 1);
+    assert.equal(e.clients[0]!.starts, 1);
+    assert.equal(e.counts().listeners, 1);
+    e.appState("background");
+    assert.equal(e.clients[0]!.ends, 1, "a later real background transition ends the call immediately");
+  });
+}
+
+test("Android permission can be granted after reading the system prompt for more than five seconds", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context, "android");
+  const permission = deferred<{ granted: boolean }>();
+  e.responses.permission = () => permission.promise;
+  const pending = e.harness.value().start(preferences, "openai_live");
+  await e.harness.settle();
+  e.appState("background");
+  context.mock.timers.tick(30_000);
+  e.harness.flush();
+  assert.equal(e.harness.value().starting, true);
+  assert.equal(e.signals[0]!.aborted, false);
+  assert.equal(e.clients.length, 0);
+  assert.equal(e.media.length, 0);
+  permission.resolve({ granted: true });
+  await e.harness.settle();
+  context.mock.timers.tick(4_999);
+  await e.harness.settle();
+  assert.equal(e.harness.value().starting, true);
+  assert.equal(e.clients.length, 0);
+  e.appState("active");
+  await pending;
+  assert.equal(e.clients.length, 1);
+  assert.equal(e.clients[0]!.starts, 1);
+  context.mock.timers.tick(60_000);
+  e.harness.flush();
+  assert.equal(e.clients[0]!.ends, 0, "the cleared permission timer cannot end the call later");
+});
+
+test("an Android permission request left in the background is cancelled after a minute and cannot revive", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context, "android");
+  const permission = deferred<{ granted: boolean }>();
+  e.responses.permission = () => permission.promise;
+  const pending = e.harness.value().start(preferences, "openai_live");
+  await e.harness.settle();
+  e.appState("background");
+  context.mock.timers.tick(59_999);
+  e.harness.flush();
+  assert.equal(e.harness.value().starting, true);
+  context.mock.timers.tick(1);
+  e.harness.flush();
+  assert.equal(e.harness.value().starting, false);
+  assert.equal(e.signals[0]!.aborted, true);
+  assert.match(e.harness.value().error!, /Microphone permission took too long/);
+  permission.resolve({ granted: true });
+  await pending;
+  e.appState("active");
+  assert.equal(e.clients.length, 0);
+  assert.equal(e.media.length, 0);
+  e.responses.currentPermission = async () => ({ granted: true });
+  await e.start();
+  assert.equal(e.clients.length, 1, "only a new explicit start may proceed");
+});
+
+test("a second Android background after returning from the prompt cancels pending permission immediately", async (context) => {
+  const e = setup(context, "android");
+  const permission = deferred<{ granted: boolean }>();
+  e.responses.permission = () => permission.promise;
+  const pending = e.harness.value().start(preferences, "openai_live");
+  await e.harness.settle();
+  e.appState("background");
+  e.appState("active");
+  assert.equal(e.appState("background").starting, false);
+  assert.equal(e.signals[0]!.aborted, true);
+  permission.resolve({ granted: true });
+  await pending;
+  e.appState("active");
+  assert.equal(e.clients.length, 0);
+});
+
+test("Android permission resolution starts a separate five-second foreground deadline", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const e = setup(context, "android");
+  const permission = deferred<{ granted: boolean }>();
+  e.responses.permission = () => permission.promise;
+  const pending = e.harness.value().start(preferences, "openai_live");
+  await e.harness.settle();
+  e.appState("background");
+  context.mock.timers.tick(59_000);
+  permission.resolve({ granted: true });
+  await e.harness.settle();
+  assert.equal(e.counts().listeners, 2);
+  context.mock.timers.tick(4_999);
+  await e.harness.settle();
+  assert.equal(e.harness.value().starting, true, "the old permission deadline is cleared after grant");
+  assert.equal(e.clients.length, 0);
+  context.mock.timers.tick(1);
+  await pending;
+  e.harness.flush();
+  assert.equal(e.harness.value().starting, false);
+  assert.equal(e.counts().listeners, 1);
+  assert.match(e.harness.value().error!, /did not return to the foreground/);
+  e.appState("active");
+  assert.equal(e.clients.length, 0);
+  assert.equal(e.media.length, 0);
+});
+
+test("Android background before any permission prompt still cancels immediately", async (context) => {
+  const e = setup(context, "android");
+  const status = deferred<{ granted: boolean }>();
+  e.responses.currentPermission = () => status.promise;
+  const pending = e.harness.value().start(preferences, "openai_live");
+  await e.harness.settle();
+  assert.equal(e.counts().permissionChecks, 1);
+  assert.equal(e.appState("background").starting, false);
+  assert.equal(e.signals[0]!.aborted, true);
+  status.resolve({ granted: true });
+  await pending;
+  assert.equal(e.counts().permissionCalls, 0);
+  assert.equal(e.clients.length, 0);
 });
 
 test("End during option preflight aborts the request and rejects a late successful response", async (context) => {

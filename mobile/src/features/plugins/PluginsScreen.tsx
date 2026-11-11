@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   AppState,
@@ -18,6 +18,7 @@ import type { WorkspaceNavigationProp } from "../../app/navigationTypes";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
 import { ServiceIcon } from "../../components/ServiceIcon";
 import { SkeletonRows } from "../../components/Skeleton";
+import { OfflineBanner } from "../../components/OfflineBanner";
 import { SegmentControl } from "../../components/SegmentControl";
 import {
   SettingsGroup,
@@ -25,6 +26,7 @@ import {
 } from "../../components/settings/SettingsList";
 import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
 import { usePullRefresh } from "../../hooks/usePullRefresh";
+import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { servicesApi } from "../../lib/api/servicesApi";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
@@ -49,22 +51,26 @@ export function PluginsScreen({
   const { colors } = useTheme();
   const navigation = useNavigation<WorkspaceNavigationProp>();
   const focused = useIsFocused();
+  const { isConnected } = useNetworkStatus();
   const [foreground, setForeground] = useState(
     AppState.currentState === "active",
   );
   const [tab, setTab] = useState<Tab>(initialTab);
   const [query, setQuery] = useState("");
+  const canFetch = focused && foreground && isConnected;
+  const currentCanFetch = useRef(canFetch);
+  currentCanFetch.current = canFetch;
   const manageId = connectorId;
   const connections = useQuery({
     queryKey: [...ROOT, "plugins"],
     queryFn: ({ signal }) => servicesApi.pluginConnections(signal),
-    enabled: focused && foreground,
+    enabled: canFetch,
     retry: false,
   });
   const catalog = useQuery({
     queryKey: [...ROOT, "catalog"],
     queryFn: ({ signal }) => servicesApi.catalog(signal),
-    enabled: focused && foreground,
+    enabled: canFetch,
     staleTime: 60_000,
     retry: false,
   });
@@ -81,14 +87,25 @@ export function PluginsScreen({
       : [];
   const loadError = connections.error ?? catalog.error;
   const catalogKnown = !!connections.data && !connections.isError;
-  const loading = connections.isPending || catalog.isPending;
+  // Offline queries remain pending while paused; that is not active loading.
+  const loading = isConnected && (connections.isPending || catalog.isPending);
+  const cached = connections.data !== undefined || catalog.data !== undefined;
+  const offlineBanner = !isConnected ? (
+    <OfflineBanner
+      subtitle={cached
+        ? "Showing cached plugins. Reconnect to refresh."
+        : "Reconnect to load your plugins."}
+    />
+  ) : null;
   // Only the user's own pull or Refresh tap shows a spinner; background
   // refocus and foreground refetches never do.
   const pull = usePullRefresh(() =>
     Promise.all([connections.refetch(), catalog.refetch()]),
   );
-  const refreshing = pull.refreshing;
-  const refresh = pull.onRefresh;
+  const refreshing = canFetch && pull.refreshing;
+  const refresh = () => {
+    if (currentCanFetch.current) pull.onRefresh();
+  };
 
   useEffect(() => {
     setTab(initialTab);
@@ -96,13 +113,13 @@ export function PluginsScreen({
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
       setForeground(state === "active");
-      if (state === "active" && focused) {
+      if (state === "active" && focused && isConnected) {
         void connections.refetch();
         void catalog.refetch();
       }
     });
     return () => subscription.remove();
-  }, [focused, connections.refetch, catalog.refetch]);
+  }, [focused, isConnected, connections.refetch, catalog.refetch]);
   useEffect(() => {
     navigation.setOptions({ title: manageItem?.name ?? "Plugins" });
   }, [navigation, manageItem?.name]);
@@ -132,7 +149,8 @@ export function PluginsScreen({
         refreshing={refreshing}
         onRefresh={refresh}
       >
-        {loadError && <Notice message={errorText(loadError)} tone="error" />}
+        {offlineBanner}
+        {isConnected && loadError && <Notice message={errorText(loadError)} tone="error" />}
         {manageItem ? (
           <SettingsGroup
             title={manageItem.name}
@@ -174,11 +192,13 @@ export function PluginsScreen({
             ))}
           </SettingsGroup>
         ) : (
-          <SettingsGroup footer="These connections are no longer in your list. Refresh Plugins to see the current catalog.">
+          <SettingsGroup footer={!isConnected
+            ? "Reconnect to load these connections."
+            : "These connections are no longer in your list. Refresh Plugins to see the current catalog."}>
             <SettingsRow
               label="Refresh plugins"
               tone="action"
-              disabled={refreshing}
+              disabled={!canFetch || refreshing}
               onPress={refresh}
             />
           </SettingsGroup>
@@ -197,7 +217,9 @@ export function PluginsScreen({
       key: "added",
       title: `Added${addedCount === undefined ? "" : ` · ${addedCount}`}`,
       data: added,
-      empty: connections.isError
+      empty: !isConnected && !connections.data
+        ? "Reconnect to load your added connectors."
+        : connections.isError
         ? "Your connections could not be loaded."
         : searching
           ? "No added connectors match this search."
@@ -208,7 +230,9 @@ export function PluginsScreen({
       title: `Discover${discoverCount === undefined ? "" : ` · ${discoverCount}`}`,
       data: available,
       empty:
-        catalog.isError || !catalogKnown
+        !isConnected && (!catalog.data || !catalogKnown)
+          ? "Reconnect to load available connectors."
+          : catalog.isError || !catalogKnown
           ? "The available catalog could not be confirmed. Retry loading plugins."
           : searching
             ? "No available connectors match this search."
@@ -243,8 +267,8 @@ export function PluginsScreen({
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Refresh plugins"
-              accessibilityState={{ disabled: refreshing }}
-              disabled={refreshing}
+              accessibilityState={{ disabled: !canFetch || refreshing }}
+              disabled={!canFetch || refreshing}
               onPress={refresh}
               style={styles.refresh}
             >
@@ -297,19 +321,25 @@ export function PluginsScreen({
             refreshing={refreshing}
             onRefresh={refresh}
             ListHeaderComponent={
-              loadError ? (
+              !isConnected || loadError ? (
                 <View style={styles.listHeader}>
-                  <Notice
-                    message={`Some plugins could not be loaded. ${errorText(loadError)}`}
-                    tone="error"
-                  />
-                  <SettingsGroup>
-                    <SettingsRow
-                      label="Retry loading plugins"
-                      tone="action"
-                      onPress={refresh}
-                    />
-                  </SettingsGroup>
+                  {offlineBanner}
+                  {isConnected && loadError ? (
+                    <>
+                      <Notice
+                        message={`Some plugins could not be loaded. ${errorText(loadError)}`}
+                        tone="error"
+                      />
+                      <SettingsGroup>
+                        <SettingsRow
+                          label="Retry loading plugins"
+                          tone="action"
+                          disabled={!canFetch || refreshing}
+                          onPress={refresh}
+                        />
+                      </SettingsGroup>
+                    </>
+                  ) : null}
                 </View>
               ) : null
             }

@@ -163,6 +163,53 @@ test("org grant options are exact IDs in the same authorized owner scope", () =>
   );
 });
 
+test("specialist tool grants exclude NyxBot Voice by catalog identity and legacy slug", () => {
+  const voice = {
+    ...key,
+    id: "voice-connection",
+    label: "NyxBot Voice",
+    slug: "my-bot-voice",
+    catalog_service_slug: "nyxbot-voice",
+  };
+  assert.deepEqual(
+    grantOptions([
+      voice,
+      { ...voice, id: "legacy-voice", slug: "nyxbot-voice", catalog_service_slug: undefined },
+      { ...voice, id: "legacy-null-voice", slug: "nyxbot-voice", catalog_service_slug: null },
+      key,
+    ]).map((option) => option.value),
+    ["api-github"],
+  );
+  const orgSource = {
+    type: "org" as const,
+    org_id: "org-1",
+    org_name: "Team",
+    role: "admin" as const,
+    allowed: true,
+  };
+  assert.deepEqual(
+    grantOptions(
+      [voice, key].map((row) => ({ ...row, credential_source: orgSource })),
+      { ...agent, owner_kind: "org", owner_id: "org-1" },
+    ).map((option) => option.value),
+    [key.id],
+  );
+});
+
+test("other HTTP, automatic and temporarily unavailable connections remain grantable", () => {
+  const connections = [
+    key,
+    { ...key, id: "public", slug: "public-tools", auto_connected: true, service_type: "http" },
+    { ...key, id: "offline", slug: "offline-tools", status: "offline", credential_missing: true },
+    { ...key, id: "similarly-named", slug: "nyxbot-voice-helper", catalog_service_slug: undefined },
+    { ...key, id: "different-catalog", slug: "nyxbot-voice", catalog_service_slug: "other-service" },
+  ];
+  assert.deepEqual(
+    grantOptions(connections).map((option) => option.value),
+    connections.map((connection) => connection.slug),
+  );
+});
+
 test("permission signatures ignore ordering and detect account/guest authority changes", () => {
   const base = {
     ...agent,

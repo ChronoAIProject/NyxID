@@ -829,6 +829,51 @@ test("media diagnostics keep only bounded stage and exception-name enums", async
   media.close();
 });
 
+for (const platform of ["android", "ios"] as const) {
+  test(`${platform} explicitly starts media with native focus ordered before Android microphone access`, async () => {
+    type Element = { props: Record<string, any> };
+    const harness = hookHarness<Element>({
+      "react-native": {
+        Platform: { OS: platform },
+        StyleSheet: { create: (value: unknown) => value },
+      },
+      "react-native-webview": { WebView: "WebView" },
+      "./voiceMediaDocument": documentModule,
+    });
+    const module = harness.load(
+      fileURLToPath(new URL("./VoiceMediaBridge.tsx", import.meta.url)),
+    ) as {
+      NativeVoiceMedia: new () => Media;
+      VoiceMediaBridge(props: { media: Media; origin: string }): Element;
+    };
+    const media = new module.NativeVoiceMedia();
+    const bridge = harness.mount(() =>
+      module.VoiceMediaBridge({ media, origin: "https://app.example.test" }),
+    );
+    const calls: string[] = [];
+    bridge.props.ref.current = {
+      requestFocus: () => calls.push("native-focus"),
+      injectJavaScript: () => calls.push("media-command"),
+    };
+    media.receive(JSON.stringify({ type: "ready" }));
+    const prepared = media.prepare("openai_live", new AbortController().signal);
+    assert.deepEqual(
+      calls,
+      platform === "android"
+        ? ["native-focus", "media-command"]
+        : ["media-command"],
+    );
+    media.receive(JSON.stringify({ type: "response", generation: 1, requestId: 1, result: "offer" }));
+    assert.equal(await prepared, "offer");
+    calls.length = 0;
+    media.setInput(true);
+    media.muteSpeaker(true);
+    media.close();
+    assert.deepEqual(calls, ["media-command", "media-command", "media-command"], "ordinary audio controls and closing do not take focus");
+    harness.unmount();
+  });
+}
+
 test("the WebView is inaccessible, blocks later navigation, and closes on unmount", () => {
   type Element = { props: Record<string, any> };
   const harness = hookHarness<Element>({

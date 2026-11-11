@@ -79,7 +79,7 @@ export function DisplaySettingsScreen(
         </View>
         <SettingsRow
           label="Automatic"
-          detail={automatic ? "Follows your iPhone's appearance" : undefined}
+          detail={automatic ? "Follows your device's appearance" : undefined}
           accessory={
             <Switch
               accessibilityLabel="Automatic appearance"

@@ -111,6 +111,7 @@ async function setup(saved: boolean, waitForInitialHistory = false) {
       ]),
     ),
     "react-native": {
+      Platform: { OS: "ios" },
       AppState: {
         get currentState() {
           return appState;

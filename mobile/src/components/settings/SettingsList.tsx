@@ -443,31 +443,43 @@ export function usePopupMenu<Value extends string>({
   const { width: windowWidth, height } = useWindowDimensions();
   const anchor = useRef<View>(null);
   const [menu, setMenu] = useState<{
-    top: number;
+    anchorY: number;
+    anchorHeight: number;
     left?: number;
     right?: number;
-    maxHeight: number;
+    contentHeight?: number;
   } | null>(null);
+  const menuWindow = useRef({ width: windowWidth, height });
+  const anchorGeneration = useRef(0);
+  useLayoutEffect(() => {
+    if (
+      menuWindow.current.width === windowWidth &&
+      menuWindow.current.height === height
+    )
+      return;
+    // The trigger's window coordinates are stale after rotation or resizing.
+    menuWindow.current = { width: windowWidth, height };
+    anchorGeneration.current++;
+    setMenu(null);
+  }, [windowWidth, height]);
   // A menu never outlives the authority to choose from it.
   useEffect(() => {
-    if (disabled) setMenu(null);
+    if (disabled) {
+      anchorGeneration.current++;
+      setMenu(null);
+    }
   }, [disabled]);
   const open = () => {
     if (disabled) return;
-    const estimate =
-      options.reduce((sum, option) => sum + (option.detail ? 68 : 48), 0) + 8;
+    const generation = ++anchorGeneration.current;
     // Align with the trigger's nearer edge so the menu stays on screen.
     const place = (
       y: number,
       rowHeight: number,
       side: { left: number } | { right: number },
     ) => {
-      const below = y + rowHeight + 6;
-      const roomBelow = height - MENU_MARGIN - below;
-      const roomAbove = y - 6 - MENU_MARGIN;
-      const flip = estimate > roomBelow && roomAbove > roomBelow;
-      const maxHeight = Math.max(120, Math.min(estimate, flip ? roomAbove : roomBelow));
-      setMenu({ top: flip ? y - 6 - maxHeight : below, maxHeight, ...side });
+      if (generation !== anchorGeneration.current) return;
+      setMenu({ anchorY: y, anchorHeight: rowHeight, ...side });
     };
     if (!anchor.current?.measureInWindow) {
       place(height / 3, 0, { right: 16 });
@@ -483,7 +495,27 @@ export function usePopupMenu<Value extends string>({
       ),
     );
   };
-  const close = () => setMenu(null);
+  const close = () => {
+    anchorGeneration.current++;
+    setMenu(null);
+  };
+  const below = menu ? menu.anchorY + menu.anchorHeight + 6 : 0;
+  const roomBelow = Math.max(0, height - MENU_MARGIN - below);
+  const roomAbove = Math.max(0, (menu?.anchorY ?? 0) - 6 - MENU_MARGIN);
+  // Native text can wrap beyond the initial estimate. Give the surface an
+  // explicit measured height; a flex ScrollView cannot reliably size its
+  // absolute parent after text wraps to the final menu width.
+  const contentHeight =
+    menu?.contentHeight ??
+    options.reduce((sum, option) => sum + (option.detail ? 68 : 48), 0) + 8;
+  const intrinsicHeight = contentHeight + 2 * StyleSheet.hairlineWidth;
+  const flip = intrinsicHeight > roomBelow && roomAbove > roomBelow;
+  const maxHeight = flip ? roomAbove : roomBelow;
+  const position = {
+    ...(flip ? { bottom: height - (menu?.anchorY ?? 0) + 6 } : { top: below }),
+    height: Math.min(intrinsicHeight, maxHeight),
+    maxHeight,
+  };
   const popup = (
     <Modal transparent visible={!!menu} animationType="fade" onRequestClose={close}>
       <Pressable
@@ -499,10 +531,9 @@ export function usePopupMenu<Value extends string>({
           style={[
             styles.menu,
             {
-              top: menu.top,
+              ...position,
               left: menu.left,
               right: menu.right,
-              maxHeight: menu.maxHeight,
               backgroundColor: colors.menuFill,
               borderColor: colors.borderSoft,
               shadowColor: "#000",
@@ -511,7 +542,14 @@ export function usePopupMenu<Value extends string>({
         >
           <ScrollView
             bounces={false}
-            showsVerticalScrollIndicator={false}
+            showsVerticalScrollIndicator
+            onContentSizeChange={(_width, contentHeight) =>
+              setMenu((current) =>
+                current && current.contentHeight !== contentHeight
+                  ? { ...current, contentHeight }
+                  : current,
+              )
+            }
             style={styles.menuClip}
           >
             {options.map((option, index) => {

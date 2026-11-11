@@ -1,144 +1,127 @@
-# Android 全流程回归测试矩阵 v1
+# Android 全流程回归测试矩阵 v2
 
-这份矩阵覆盖当前 React Native Android 应用中实际可达的用户路径。它用于真机/模拟器手工验收，也用于把代码测试能够证明的部分和必须依赖真实设备、后端数据或第三方配置的部分分开记录。
+本矩阵覆盖当前 React Native Android 应用实际可达的用户路径。2026-11-11 已在真实运行的 Android 模拟器上，使用用户完成登录的会话逐项操作；设备证据和仍未覆盖的子步骤见 [本轮执行报告](ANDROID_RUNTIME_REGRESSION_2026-11-11.md)。聚合用例包含多个子步骤，打开页面或某个子步骤通过，不能把整行标成 `PASS`。
 
-测试范围以当前 `mobile/src/app/AppNavigator.tsx`、`mobile/src/app/navigationTypes.ts` 和 `mobile/src/components/workspace/WorkspaceDrawer.tsx` 为准。每个用例都要记录设备型号、Android 版本、应用 commit、账号/数据前置条件、执行时间、结果和截图或日志证据。没有设备或外部配置时使用 `BLOCKED`，不能把未执行写成通过。
+本轮执行工作树为 `codex/android-build-fixes`，开始实测时的提交为 `d633f15f0430de6bf8e78dcb196a8923a3bceb2a`。测试过程中同时修复移动端缺陷，因此应结合执行报告的修复记录和后续提交复核版本，不能将所有截图归为同一个未修改的 APK。
 
-## 结果标记
+当前 43 项聚合用例的统计为 **1 `PASS`、37 `PARTIAL`、5 `BLOCKED`**。AUTH-01 保留未登录公开入口的完整范围，OPS-01 保留实际应用并清空 Agent 筛选的范围，因此均为 `PARTIAL`。23 个直接测试文件的 365 项检查、语音控制 2 文件 65 项检查及构建环境 1 文件 22 项检查互不重叠，共 26 文件、452 项代码测试通过；不能据此上调设备路径结果。完整文件清单、精确命令与证据边界见执行报告的“聚焦验证记录”。
+
+## 标记和证据约定
 
 | 标记 | 含义 |
 | --- | --- |
-| `PASS` | 在目标 Android 设备上完成，结果符合预期，并保存了证据。 |
-| `FAIL` | 可以稳定复现的功能或回归问题，记录步骤、日志和截图。 |
-| `BLOCKED` | 缺少设备、后端数据、第三方凭据、Firebase/推送配置或其他前置条件。 |
-| `CODE-PASS` | 聚焦单测、静态检查或 Expo 配置检查通过，但尚未替代真实设备验收。 |
-| `N/A` | 当前 profile 或账号没有启用该能力。 |
+| `PASS` | 本行当前定义的用户路径已在目标 Android 模拟器上完成，并有对应证据。 |
+| `PARTIAL` | 已完成明确列出的子步骤；其余步骤尚未执行、缺少数据，或修复后仍待设备复验。 |
+| `BLOCKED` | 关键路径尚无可用或安全的前置条件；如只是待执行，明确注明，不声称设备或 SDK 缺失。 |
+| `FAIL` | 仍可复现且未通过设备复验的缺陷。修复过程和阻塞应在执行报告单独保留。 |
+| `CODE-PASS` | 聚焦单测、静态检查或配置检查通过；不能代替真实设备验收。 |
+| `N/A` | 当前账号、profile 或原生产品契约不提供该能力。 |
 
-## 统一前置条件
+截图保存在执行机器的 `/tmp/nyxid-android-runtime/`，下表用截图序号或文件名定位。截图和 UI XML 可能含个人数据，未提交到仓库；临时目录也不是持久化 CI 产物。本轮真实设备由主执行 agent 独占操作，其他 agent 负责独立分析、修复和审查，没有五个 agent 同时控制模拟器。
 
-```bash
-cd mobile
-pnpm install --frozen-lockfile
-pnpm run android -- --device
-```
+## 实测环境与前置条件
 
-开发包使用 `APP_ENV=dev` 和独立的 `DEV_ANDROID_PACKAGE`。没有开发 Firebase 文件时，`DEV_GOOGLE_SERVICES_FILE` 留空；远程 FCM 不作为本地开发包的通过条件。切换过生产构建后，必须重新走 `pnpm run android`，不能直接用裸 `expo run:android` 绕过 clean prebuild。
+- AVD：`NyxID_QA_API34`，Pixel 7，Android 14 / API 34，ARM64，`emulator-5554`，1080 × 2400。
+- Android SDK：`/Users/abigaildeng/Library/Android/sdk`；JDK 17：Homebrew OpenJDK 17。
+- 实测包：`dev.nyxid.nativecheck`，versionName `1.0.4`；Metro 提供当前工作树代码，连接真实后端。
+- 已实际完成原生 debug APK 构建、安装和启动，构建日志记录 `BUILD SUCCESSFUL`、464 tasks。旧版报告中“没有 adb/emulator/Java”的判断是发现方式有误，已撤回。
+- 用户本人完成 Google 登录。保留当前登录会话；本轮没有登录 Apple。
+- 开发包未配置远程 FCM；已有账户资源以只读操作为主。会改变数据的测试使用明确命名的临时 QA Agent、Crew、消息和文件。
+- `MODIFY_AUDIO_SETTINGS` 已通过 ARM64 debug 重建、`install -r` 和 `dumpsys package` 确认进入安装包并获准。最终无宿主音频复验中，语音从 Start 进入 Listening 并维持至 3:01 空闲结束，早先约 10 秒控制连接错误未再现；该轮使用 `-no-audio`，真实录音和播放仍未验证。
 
-至少准备：一个可登录账号、一个 MFA 账号或可触发 MFA 的账号、一个 Agent、一个已有长聊天、一个 Group（如果账号有权限）、一个可用插件连接、一个可用服务连接、一个自动化任务、一个待审批记录。Machines、OAuth、推送和真实语音需要额外环境，缺少时单独标 `BLOCKED`。
+日常开发可从 `mobile/` 使用 `pnpm run android`，该脚本负责相应 profile 的 clean prebuild。切换 profile 后不能用旧原生目录推断新配置已生效。本轮已经完成的 debug 原生构建属于运行模拟器所需的构建；完整前端套件、全量类型检查和生产构建交 GitHub CI，不能将历史静态检查与 release 验证混为一谈。
 
-## 所有用例都要检查的横向规则
+## 当前导航基准
 
-- Android Back 优先关闭键盘，再关闭内层 modal/sheet，再离开详情页，最后才退出根页面。
-- 快速重复点击不会创建重复请求、重复消息、重复审批或叠加 modal。
-- loading、空状态、错误、Retry、断网和恢复网络状态清楚，不能永久 loading。
-- 切后台再回前台不会重复发送、重复 OAuth callback、重复创建语音连接或丢失表单草稿。
-- status bar、navigation bar、键盘和底部操作栏不会遮挡内容；打开/关闭菜单后长列表滚动位置保持。
-- 亮色/暗色/系统主题、触控目标、可访问性标签和 Android 平板/大屏布局没有明显回归。
+- 聊天左上角打开 drawer，常用入口包括 Automations、Machines、Plugins、Activity、Settings，以及 Search、Recents、Scan QR code、Terminal login code、新建 Agent 和 Crews。
+- Agent 管理通过聊天身份选择器或 drawer 的 Agent 列表进入；不能假定有旧版的 “Agents & Groups” 页签。
+- 群组在当前界面叫 **Crews**；内部路由和代码中的 Group 命名不代表 UI 仍有 Groups tab。
+- 服务连接通过 **Plugins → Connectors** 进入；Skills 是 Plugins 的另一个页签。Connector 的 Added/Available 分组及管理页以实际界面为准。
+- 原生 Automations 为只读列表、详情和运行记录；创建或更改通过 **Ask NyxBot → 带预填草稿的新聊天**。不存在旧矩阵中的原生 Task → When → Delivery → Review 创建向导，也不要求原生 pause/resume、Run now、edit、delete 控件。
+- 原生设置不提供独立模型选择器或完整技能编辑器；测试不得把 Web 专属管理界面当作缺失的 Android 页面。
 
-## A. 冷启动、登录与公开入口（Agent 1）
+## 所有路径都应检查的横向规则
 
-| ID | 前置条件 | 步骤 | 预期结果 | 结果/证据 |
-| --- | --- | --- | --- | --- |
-| AUTH-01 | 干净安装 dev 包 | 冷启动；观察 splash、配置加载、Auth 页 | 无崩溃、无永久 loading；安装包名为 dev package；没有生产 Firebase mismatch | `TBD` |
-| AUTH-02 | Auth 页可访问 | 检查邮箱/密码、动态启用的 Google/GitHub/Apple、Terms、Privacy | 登录入口与 iOS 保持一致；不会只剩邮箱；法律页可打开并能返回 | `TBD` |
-| AUTH-03 | 错误凭据 | 空值、错误邮箱、错误密码、快速重复点击登录 | 有明确错误；按钮有防重复提交；输入状态合理保留 | `TBD` |
-| AUTH-04 | MFA 账号 | 正确凭据→错误验证码→重试→正确验证码 | MFA 可恢复；失败不会留下半登录会话；成功只建立一个会话 | `TBD` |
-| AUTH-05 | provider 已启用 | Google/GitHub/Apple 分别完成、取消、失败、回前台 | callback 只处理一次；取消不误报成功；失败回到可重试状态 | `TBD` |
-| AUTH-06 | 已登录和未登录各一次 | 登录前/登录后打开 Terms、Privacy；切后台再回来 | 正确落在 Auth 或 Workspace sheet；底层聊天/输入状态不被错误重置 | `TBD` |
-| AUTH-07 | 有效/无效/过期设备码（如启用） | 设备登录手动输入、扫码、取消、过期；验证 Back | preview、状态和错误正确；相机拒绝可重试；Back 先退出 scanner | `TBD` |
-| AUTH-08 | Agent Key 能力已启用 | 输入/扫码 code；preview、approve/deny/expired；从 Quick action mint code | code 状态正确；secret 只展示一次；切后台/取消清理敏感值 | `TBD` |
-| AUTH-09 | 已登录会话 | 模拟 401/refresh 失败或退出登录；杀进程重开 | 回到 Auth；旧账号 query/cache 清理；不能直接进入上一个账号 | `TBD` |
+Android Back 应优先收键盘、关闭当前内层界面，再返回详情或聊天；快速点击不应重复提交。加载、错误、重试、离线和前后台状态需要分别验证；一次正常网络下的页面打开不能代表这些异常路径通过。安全区域、底部栏、长文本、主题、文字缩放和窗口变化也需要分别留证。
 
-## B. Workspace 抽屉与 Assistant 全流程（Agent 2）
+## A. 冷启动、登录与公开入口
 
-| ID | 前置条件 | 步骤 | 预期结果 | 结果/证据 |
-| --- | --- | --- | --- | --- |
-| CHAT-01 | 已登录 | 打开/关闭 drawer；点击 Chat、Agents & Groups、Plugins、Automations、Activity、Machines、Settings、Search、Recents、Scan QR、Terminal code、新建 Agent/Group | 每个入口只打开目标页面；Back/关闭优先处理 drawer 或 sheet；快速点击不叠加页面 | `TBD` |
-| CHAT-02 | 有长聊天 | 滚动到中下部；点右上角 More/三个点；关闭 menu/sheet | 底层 chat 不跳顶部；关闭后滚动位置保留；复现 iPad 历史回归 | `TBD` |
-| CHAT-03 | 新建或历史聊天 | 发送短文本、长文本、多行文本；键盘打开/收起；发送后重新进入 | 每条只发送一次；composer 正确清空；第一次 Back 只收键盘；不会跳顶或丢草稿 | `TBD` |
-| CHAT-04 | 有文件权限 | DocumentPicker 选择、预览、删除、取消、上传失败/重试、发送附件 | 取消不会残留 pending；失败有明确状态；附件消息只发送一次 | `TBD` |
-| CHAT-05 | 有 Agent/mention 数据 | Agent chooser/manage；@mention 插入/删除；切换 Agent；打开 history/details/title/delete modal | 路由和 modal 层级正确；切换 Agent 不串聊天；删除有确认；返回回到原聊天 | `TBD` |
-| CHAT-06 | 有 stream/activity 卡片 | 发送触发 stream/tool activity 的消息；Stop、Retry、Refresh history | pending 到完成/失败正确；Stop 只执行一次；Retry 不复制消息 | `TBD` |
-| CHAT-07 | 有 acknowledgement 卡片 | 打开 Allow、Deny、过期、recovery-required、authored skill review | 卡片和 Activity 状态一致；错误可重试；不会永久 loading | `TBD` |
-| CHAT-08 | voice feature 和麦克风可用 | composer 开始、说话、停止、编辑识别文本、发送、取消；切后台/Back 中断 | 语音是 composer 入口；文字显示在 composer；没有第二个重复语音组件；中断可恢复普通输入 | `TBD` |
-| CHAT-09 | 有历史聊天/多个 Agent | history、load more、latest、recents/search；冷启动 conversation deep link（如启用） | 正确打开目标 conversation；加载/空/错误状态清楚；返回栈不乱 | `TBD` |
-
-## C. Agents、Groups、Plugins、Services、Machines（Agent 3）
-
-| ID | 前置条件 | 步骤 | 预期结果 | 结果/证据 |
-| --- | --- | --- | --- | --- |
-| WORK-01 | Agent 列表数据 | 搜索、清空、过滤、刷新、空/错误/Retry、打开详情 | 列表状态准确；刷新不会重复请求；详情返回保留当前筛选 | `TBD` |
-| WORK-02 | 有创建权限 | 创建 Agent；填写 name/description/model/permissions/services；保存、取消、dirty Back | 校验明确；不会重复创建；取消不保存；创建后进入正确详情 | `TBD` |
-| WORK-03 | Agent 详情数据 | 编辑 profile/model/grants/memory/channels/threads/skills/automations；destroy/delete（按权限） | 权限限制正确；冲突可 reload；destroy/read-only/delete confirmation 正确 | `TBD` |
-| WORK-04 | Group 权限和 Agent 数据 | Groups tab；创建/编辑 Group；选择成员/lead/参与者；保存、离开、删除 | dirty 状态和确认正确；成员/权限错误清楚；列表刷新一致 | `TBD` |
-| WORK-05 | Group chat | recipient pills、mention、附件、发送、pending action、feedback、settings | 群聊和个人聊天不混淆；操作只执行一次；Back/键盘/modal 不丢草稿 | `TBD` |
-| WORK-06 | Plugins 数据 | Connectors/Skills tabs；Added/Discover、搜索、刷新、connector manage | 空/错误/加载状态正确；连接状态不被误判；返回层级正确 | `TBD` |
-| WORK-07 | Skills 数据 | detail、versions、history、preview、test、attach/toggle/detach、authored review | 版本和绑定状态准确；审批/拒绝/刷新正确；权限错误可理解 | `TBD` |
-| WORK-08 | Services catalog/connection | Connected/Explore、搜索、API key/token exchange/platform/OAuth/Web handoff、回前台 | OAuth 取消不误报成功；credential 不泄露；连接状态以服务端为准 | `TBD` |
-| WORK-09 | Service manage 数据 | enable/disable、provider permissions、proxy copy、replace credential、remove、history | 危险操作有确认；剪贴板/浏览器返回不泄露；history metadata 正确 | `TBD` |
-| WORK-10 | Machine/node 已部署，否则 BLOCKED | Machines、MachineDetail、Policy、Activity/filter/detail、SavedLogin、AgentMachines、Desktop；在线/离线/Back | 有环境时逐页验证；离线/权限错误清楚；Desktop 关闭后恢复工作区 | `TBD` |
-
-## D. Automations、Activity/Approvals、Account/Settings（Agent 4）
-
-| ID | 前置条件 | 步骤 | 预期结果 | 结果/证据 |
-| --- | --- | --- | --- | --- |
-| OPS-01 | 自动化权限 | 列表搜索/status/agent filter；创建向导 Task→When→Delivery→Review；保存/取消 | 字段校验和 dirty Back 正确；不会重复创建；时区和间隔校验准确 | `TBD` |
-| OPS-02 | 已有 automation | detail；pause/resume、Run now、edit、delete confirmation、run history/filter/detail | 状态和列表一致；危险操作确认；运行记录分页/空/等待/失败清晰 | `TBD` |
-| OPS-03 | Activity 有 pending/history | Pending/History/Active grants；detail/evidence；Approve/Deny/revoke | 只处理一次；状态、toast、grant/revoke 与服务端一致；modal Back 正确 | `TBD` |
-| OPS-04 | 推送/deep link 可用，否则 BLOCKED | 前台通知、后台/终止态点击、重复点击；`nyxid://challenge/<id>` | 打开正确 ActivityDetail；重复 tap 不重复处理；无 active route 有安全 fallback | `TBD` |
-| OPS-05 | AccountSettings 可访问 | profile/sign-in method、Notifications、Telegram、Display/theme、Voice、Privacy、Usage/Credits、Terms/Privacy | 每个设置页能打开、返回和重新进入；主题/通知/Telegram 状态持久化正确 | `TBD` |
-| OPS-06 | AccountSecurity 数据 | display/avatar；MFA setup/confirm/recovery codes/disable；sessions revoke | 敏感值不在后台保留；确认和错误清楚；撤销当前会话回 Auth | `TBD` |
-| OPS-07 | 退出/删除能力 | Sign out confirm/cancel；杀进程重开；Delete account confirm/cancel/error（按环境） | 退出清理会话和缓存；取消不退出；删除失败不伪造成功 | `TBD` |
-
-## E. Android 原生、权限、深链接和横向质量（Agent 5）
-
-| ID | 前置条件 | 步骤 | 预期结果 | 结果/证据 |
-| --- | --- | --- | --- | --- |
-| NATIVE-01 | 当前分支和 Android SDK | dev/prod Expo config；串行 clean prebuild；检查 package、Firebase、intent filters | dev 不注入生产 Firebase；prod JSON package 精确匹配；配置可复现 | `TBD` |
-| NATIVE-02 | Android 真机/模拟器 | camera/mic/notification 权限分别允许、拒绝、永久拒绝→系统设置→重试 | 文案和功能对应；拒绝后可恢复；无权限时核心聊天不崩溃 | `TBD` |
-| NATIVE-03 | Android hardware Back | keyboard、drawer、More menu、sheet、详情、dirty editor、根页面逐层按 Back | 优先关闭当前层；不误退出、不丢草稿、不跳错误页面 | `TBD` |
-| NATIVE-04 | offline/online | 在 Chat、Agents、Plugins、Services、Activity、Settings 断网→Retry→恢复 | OfflineBanner/错误/Retry 正确；恢复后刷新；缓存不伪装成空数据 | `TBD` |
-| NATIVE-05 | background/foreground | 在 OAuth、voice、upload、stream、approval、editor 中切后台再回来 | 不重复 callback/请求/发送；敏感数据按规则清理；页面恢复 | `TBD` |
-| NATIVE-06 | 深链接配置 | `adb shell am start -a android.intent.action.VIEW -d 'nyxid://challenge/<id>' <dev.package>`；设备登录 link；前台/后台/冷启动 | 已登录打开目标详情；未登录进入正确认证；非法/过期参数安全 fallback | `TBD` |
-| NATIVE-07 | phone + tablet/large screen（如有） | 核心页面横竖屏/窗口变化；长列表、sheet、键盘、底部栏 | safe area、触控目标、文字和 modal 不重叠；iPad 菜单滚动回归不出现 | `TBD` |
-| NATIVE-08 | release Java/SDK，否则 BLOCKED | `pnpm build:android` 或 CI release job；观察 Gradle 命令和失败日志 | signing 密码不在 argv/log；AAB 生成；CI 检查通过 | `TBD` |
-
-## 明确不纳入当前 Android 通过条件的能力
-
-需要 Web 控制台的完整 Channel/Trigger 管理、Studio 资源管理、OAuth scope 编辑、组织创建/邀请、shared grant cascade、尚未有安全 native admission 契约的特殊 provider SDK、credential node/SSH setup、依赖支付平台回跳契约的 checkout，不作为当前 Android 页面通过条件。缺少账号、机器节点、Firebase/APNs、OAuth provider 或服务器权限时，条件能力记录为 `BLOCKED` 或 `N/A`，不能用“页面打开了”代替完整集成通过。
-
-## Agent 结果汇总
-
-本轮验证为五个独立分支，全部从同一个固定基线 `0246eebd3d587fc4805db09371ba8d36dd5dee41` 创建。每个分支使用独立 worktree，未修改业务代码；这样每组结果都能单独复核，后续如果发现缺陷也可以在对应分支隔离修复。
-
-| Agent | 分支 | Worktree |
-| --- | --- | --- |
-| Agent 1 | `codex/android-qa-auth` | `/Users/abigaildeng/.codex/worktrees/android-qa-auth/NyxID` |
-| Agent 2 | `codex/android-qa-chat` | `/Users/abigaildeng/.codex/worktrees/android-qa-chat/NyxID` |
-| Agent 3 | `codex/android-qa-workspace` | `/Users/abigaildeng/.codex/worktrees/android-qa-workspace/NyxID` |
-| Agent 4 | `codex/android-qa-ops` | `/Users/abigaildeng/.codex/worktrees/android-qa-ops/NyxID` |
-| Agent 5 | `codex/android-qa-native` | `/Users/abigaildeng/.codex/worktrees/android-qa-native/NyxID` |
-
-| Agent | 覆盖范围 | 状态 | 报告/证据 |
+| ID | 当前用户路径 | 结果 | 已验证证据与剩余步骤 |
 | --- | --- | --- | --- |
-| Agent 1 | Auth、MFA、Social OAuth、Device Login、Agent Key、公开入口 | `CODE-PASS / BLOCKED` | 独立分支聚焦测试 201 通过，扩展安全/session 选择集 240 通过，0 失败；真实 Android、provider、MFA backend、FCM 未可用，AUTH-01/05/07/08/09 的设备验收待补 |
-| Agent 2 | Workspace、Assistant、Chat、附件、acknowledgement、语音 | `CODE-PASS / BLOCKED` | 独立分支聚焦测试 942 通过，0 失败；adb/emulator/Java 不可用，CHAT-02/03/04/08 的真实滚动、键盘、权限、麦克风、前后台待补 |
-| Agent 3 | Agents、Groups、Plugins、Services、Machines | `CODE-PASS / BLOCKED` | 独立分支聚焦测试 329 通过，额外导航选择集 377 通过，0 失败；真实 backend、OAuth provider、机器节点和 Android 设备不可用，WORK-08/09/10 的集成验收待补 |
-| Agent 4 | Automations、Activity/Approvals、Account、Settings | `CODE-PASS / BLOCKED` | 独立分支聚焦测试 166 通过，0 失败；真实账号、FCM、Telegram、MFA、删除账户和 Android 权限不可用，OPS-04/05/06/07 的手测待补 |
-| Agent 5 | Android 原生、权限、深链接、离线/前后台、构建 | `CODE-PASS / BLOCKED` | 独立分支聚焦测试 65 通过，0 失败；dev/prod Expo config、Firebase 选择、scheme、intent filters、相机/录音权限和签名 helper 已静态核对，adb/emulator/Java 不可用，NATIVE-02~08 的真实设备或 release 构建待补 |
+| AUTH-01 | 安装 dev 包、启动、splash、公开配置加载、进入登录/工作区 | `PARTIAL` | 音频权限修复后的 ARM64 debug APK 构建、保留数据安装成功；161/197/208 重启后恢复已登录工作区。Google 登录本身由用户完成；未退出会话，最终包未独立复验未登录的公开配置入口。 |
+| AUTH-02 | 检查邮箱和服务器启用的社交登录入口、Terms、Privacy | `PARTIAL` | Google 登录由用户完成；已登录法律页 051–052 可打开返回。登录页完整入口在最终包中的再验及登录前法律页未补测；未登录 Apple。 |
+| AUTH-03 | 空值、错误邮箱/密码、重复点击登录、错误后重试 | `BLOCKED` | 为保留当前会话，尚未切回未登录状态或准备隔离的错误凭据用例；只有历史代码测试，不能标设备通过。 |
+| AUTH-04 | MFA 正确/错误验证码、恢复与最终登录 | `BLOCKED` | 未准备本轮可安全使用的 MFA 挑战及恢复数据，没有实际执行。 |
+| AUTH-05 | 已启用社交 provider 的完成、取消、失败和前台回调 | `PARTIAL` | 用户已完成 Google 登录；旧生产包移除后 `nyxid://` 回调只有当前 dev 包接收。GitHub 完整登录、取消/失败组合未测；用户明确不登录 Apple。 |
+| AUTH-06 | 登录前后法律页、返回和前后台恢复 | `PARTIAL` | 已登录 Terms/Privacy 051–052 打开并返回；登录前及法律页切后台组合未测。 |
+| AUTH-07 | Scan QR、相机拒绝/允许、手动设备码、无效/过期码与审批 | `PARTIAL` | 142–148 已测扫码入口、系统相机拒绝后重试允许、手动输入、无效码校验及 Back。有效/过期真实请求、扫码识别和 approve/deny 缺少测试请求。 |
+| AUTH-08 | Terminal login code / Agent Key 选择及生成、兑换、失效 | `PARTIAL` | 149–151 打开 Terminal 入口和 Agent Key 选择后返回；未生成或兑换 code，未执行 approve/deny/过期流程。 |
+| AUTH-09 | 401/refresh 失败、退出、缓存清理、杀进程重开 | `PARTIAL` | 196–197 force-stop 后冷启动恢复原登录；183–195 已测离线草稿和联网恢复。尚未执行失效/退出或清除凭据测试。 |
 
-## 已完成的代码级证据
+## B. Workspace 与 Assistant
 
-以下结果来自五个独立分支，只证明状态模型、导航模型、API contract、Expo 配置和组件逻辑；它们不能替代真实 Android 设备验收：
+| ID | 当前用户路径 | 结果 | 已验证证据与剩余步骤 |
+| --- | --- | --- | --- |
+| CHAT-01 | Drawer、Agent chooser、Crews、Plugins、Automations、Activity、Machines、Settings、Search/Recents、QR/Terminal | `PARTIAL` | 已实际访问上述入口，证据分布于 001–157；各页返回已覆盖多条路径。全入口快速重复点击、所有 modal/Back 组合未穷尽。 |
+| CHAT-02 | 长聊天滚到中部 → Chat options/Details → 返回 | `PASS` | 154 底部为编号 126–150，155 上移到 111–139；156 打开选项、157 返回，视口仍为 111–139，没有跳到顶部。 |
+| CHAT-03 | 短/长/多行文本、键盘、发送、重新进入、草稿 | `PARTIAL` | 014–016 短文本真实发送并回复；153–157 长文本回归；112–113 Crew 多行文本发送。全部私聊多行、草稿切换、重复点击和键盘 Back 组合仍待补齐。 |
+| CHAT-04 | Camera/Photos/Files、取消、选择/移除/重选、上传、发送和预览 | `PARTIAL` | 017–023 入口与系统选择器取消；124–128 选中 75-byte QA 文件、移除重选并发送成功；131 预览系统分享面板后 Back，未外部分享。Photos/Camera 成功采集、上传失败/重试、Crew 附件未测。 |
+| CHAT-05 | Agent chooser、Details、Title、History、Working context、Permissions、删除确认 | `PARTIAL` | 003–012 已开详情/标题/上下文/历史、取消已有聊天删除；092–096 选择器/管理。158 composer 权限面板、159 SettingsList 权限菜单全部说明完整。181–182 临时 QA 聊天改名保存通过；删除清理见执行报告。上下文 reset 等写操作未全部执行。 |
+| CHAT-06 | 回复 streaming、tool activity、Stop、Retry、history refresh | `PARTIAL` | 015–016、113、153 见到真实 running → 完成。Stop/失败 Retry、工具活动和历史刷新组合未完成。 |
+| CHAT-07 | acknowledgement、Allow/Deny、过期、recovery-required、技能发布审批 | `BLOCKED` | 本轮 Activity pending/history 为空，缺少安全的待审测试卡片；未对真实请求作批准/拒绝。 |
+| CHAT-08 | Composer dictation 与实时 Voice：开始、识别、编辑、发送、取消、前后台 | `PARTIAL` | 024–029 麦克风拒绝后允许；065 无 RecognitionService 的持久提示且草稿保留。067–070/140–141 记录启动错误和恢复，178 的约 10 秒控制错误保留为历史失败。最终 215 Start → 216 Listening 0:08 → 217 Listening 1:18；218 静音时维持 2:47 并收到服务端空闲提醒字幕，219 在 3:01 正常空闲结束，该次未再现早先控制错误。179 Home 终止、180 关闭后输入通过。最终轮为 `-no-audio`，不能证明录音、播放、真实转写或双向语音；dictation 实际识别仍受镜像缺少服务阻塞。 |
+| CHAT-09 | History、搜索、Recents、分页、目标聊天、conversation deep link | `PARTIAL` | 011–012 历史/无匹配搜索，152 全局搜索打开 QA chat；真实游标分页、latest 和冷启动 conversation link 未完整覆盖。 |
 
-- Agent 1：认证、MFA、OAuth callback、Device Login、Agent Key、session persistence、法律页和导航测试 201 个通过，扩展选择集 240 个通过，0 失败。
-- Agent 2：Assistant、composer、附件、stream、acknowledgement、voice、drawer、keyboard、sheet、recents/search/deep link 测试 942 个通过，0 失败。
-- Agent 3：Agents、Groups、Plugins、Services、Machines、desktop route 和导航测试 329 个通过，额外导航选择集 377 个通过，0 失败。
-- Agent 4：Automations、Activity/Approvals、Account、Security、Notifications、Display/Privacy、Sessions、MFA lifecycle 测试 166 个通过，0 失败。
-- Agent 5：Firebase/profile config、signing helper、linking、orientation、auth/navigation 聚焦检查 65 个通过，0 失败；`node --check`、`git diff --check` 通过。带最小测试环境变量的 Expo config 检查确认 dev package `dev.nyxid.nativecheck` 不注入 Firebase，prod package `fun.chronoai.nyxid` 使用 `./google-services.json`。
+## C. Agents、Crews、Plugins/Connectors、Machines
 
-## 当前真实设备阻塞
+| ID | 当前用户路径 | 结果 | 已验证证据与剩余步骤 |
+| --- | --- | --- | --- |
+| WORK-01 | Agent 管理列表、搜索/清空、筛选、刷新、空/错误/Retry、详情 | `PARTIAL` | 092–096 管理入口、搜索及筛选、详情已操作；服务端错误/Retry 和筛选返回状态组合未全部验证。 |
+| WORK-02 | 创建 Agent 实际表单、dirty Back、保存/取消、创建后详情 | `PARTIAL` | 085–088 创建临时 QA Agent，087 dirty Back 选择 Keep editing；创建后进入正确详情。未独立完成所有字段无效值、取消丢弃和快速重复提交组合；不要求不存在的原生模型选择器。 |
+| WORK-03 | Agent 改名、权限/连接、Memory、Channels/Threads/Skills/Automations、销毁/删除 | `PARTIAL` | 089 改名保存；090 machine access 空态、091 自动化筛选；101/123 GitHub grant 添加后移除；105–106 Memory 添加后忘记；135–138 QA Agent 销毁→只读→永久删除。122 验证内部 voice 服务已排除。Channels、全部 Skills 操作及冲突 reload 尚未完整覆盖。 |
+| WORK-04 | Crews 列表、创建、成员、设置改名、保存、离开/删除 | `PARTIAL` | 107–111 以 QA Agent 创建临时 Crew；114–115 改名持久化；119–120 确认删除。lead/成员无效组合、权限拒绝及 Leave 分支未执行。 |
+| WORK-05 | Crew 多行聊天、mention、收件人、附件、待处理 action、设置/返回 | `PARTIAL` | 112–113 多行键盘输入、发送和回复；116–118 mention picker 插入，114–115 设置。附件、pending action 和全部收件人/草稿/键盘组合未完成；不要求已按原生设计省略的投票控件。 |
+| WORK-06 | Plugins → Connectors/Skills，Added/Available、搜索/清空、刷新与管理页 | `PARTIAL` | 075–084 两页签、Connector 搜索/清空、GitHub 管理、Skills 详情已打开。185–186 发现离线无限 loading；199 无缓存离线提示、201 重连自动加载、202 离线缓存列表通过。Skills 的 203 双 busy 修复后，222 无缓存分别提示 Added/catalog unavailable offline；223 复网自动取数，224 目录实际加载，225 再断网缓存目录仍可读，226 离线点击没有跳转详情；远端调用 guard 另有聚焦代码测试。所有连接目录边界仍未覆盖。 |
+| WORK-07 | Skills 详情、版本、Agent 选择、精确 pin/remove、审批 | `PARTIAL` | 081–084 已打开详情、版本选择后 Back、Agent 选择后 Cancel；225 缓存目录可读，226 离线点击不发远端请求、不跳详情。没有修改现有技能绑定。pin/remove、版本冲突及 authored review 缺少安全测试数据；技能编辑属于 NyxBot。 |
+| WORK-08 | Plugins → Connectors → 连接设置，API key/platform/OAuth/Web handoff | `PARTIAL` | 077–080 已有 GitHub 连接管理只读页面可访问。未新建/替换现有凭据，没有完整 provider OAuth 取消/失败/成功验收。 |
+| WORK-09 | Connector scopes、history、advanced/proxy、替换/移除/启停 | `PARTIAL` | 078 scopes 展开、079 history、080 advanced 只读已验证。未操作现有连接启停、替换凭据、移除或分享代理数据。 |
+| WORK-10 | Machines、Saved logins、详情/Policy/Activity、Agent access、Desktop | `PARTIAL` | 073–074 inventory/Saved logins 空态；090 Agent machine access 空态。账号没有可用测试机器及 saved login，详情、策略写入、Desktop 与在线/离线组合 `BLOCKED`。 |
 
-当前执行环境没有 `adb`、Android emulator、Java runtime 或真实 Android 设备。因此以下项目必须在 Android 真机/模拟器上补测后，才能把对应行从 `BLOCKED` 改成 `PASS`：麦克风/相机/通知权限、hardware Back、键盘和长列表滚动、iPad 历史 More 菜单回归、OAuth 浏览器回调、FCM 前后台/冷启动、Telegram/系统设置回跳、横竖屏/平板布局、release Gradle/AAB 构建。
+## D. Automations、Activity、Settings
 
-原生静态检查还观察到自定义 scheme 与 Expo 生成的 scheme intent filter 可能在 manifest 中重复；当前不影响 intent resolution，但应在真机 deep-link 验收时确认不会出现错误路由。
+| ID | 当前用户路径 | 结果 | 已验证证据与剩余步骤 |
+| --- | --- | --- | --- |
+| OPS-01 | 只读 Automations 列表搜索、status/Agent 筛选、Ask NyxBot 草稿 | `PARTIAL` | 056–060 搜索无匹配后清空、Active 空态→All、Agent picker 打开/取消；064 Ask NyxBot 打开预填新聊天草稿。尚未实际应用 Agent 筛选后再清空；没有运行或修改已有自动化，也不存在旧版原生创建向导。 |
+| OPS-02 | Automation detail、run history/detail、目标线程链接、分页 | `PARTIAL` | 061–063 真实详情、运行历史和单次详情已访问；所有 run 状态、分页与目标线程跳转未完整执行。pause/resume、Run now、edit/delete 不属于当前原生界面。 |
+| OPS-03 | Activity Pending/History、Active grants、证据、Approve/Deny/revoke | `PARTIAL` | 071 refresh 后 Pending/History 空态，072 Active grants 空态。缺少待审批或可撤销的测试记录，未执行批准、拒绝或撤销。 |
+| OPS-04 | FCM 前台、后台/终止态通知点击、重复点击、challenge link | `BLOCKED` | 当前 dev profile 没有远程 FCM 配置及专用挑战记录；不能用普通页面导航替代真实推送验收。 |
+| OPS-05 | Account、Notifications/Telegram、Display、Voice、Privacy、Usage、法律页 | `PARTIAL` | 030–052 已逐页打开返回；033 Light→Dark→Automatic 恢复，034 composer 预览；036/037 语言/模式打开取消；204–205 设备中性文案已复验；038 通知已加载、039 Telegram link 打开取消，041 policy 不改。Telegram 实际绑定、远程推送与所有设置写入持久化未执行。 |
+| OPS-06 | Name/avatar、Security、MFA/recovery、sessions/broker revoke | `PARTIAL` | 042–048 页面、Name/avatar editor、授权 app/broker 与安全项只读已访问。未保存真实个人资料，未变更 MFA 或撤销任何现有会话。 |
+| OPS-07 | Sign out / Delete account 确认、取消、执行/失败、进程重开 | `PARTIAL` | 054 Sign out → Cancel；055 Delete account → Keep my account，均保留会话。196–197 杀进程后重开保留登录；真正退出、删除和注销后的缓存清理未执行。 |
+
+## E. 原生与横向检查
+
+| ID | 当前用户路径 | 结果 | 已验证证据与剩余步骤 |
+| --- | --- | --- | --- |
+| NATIVE-01 | dev/prod Expo 配置、原生包、Firebase、intent filters、重建 | `PARTIAL` | 已实际构建/安装/运行 dev APK；旧生产包移除后回调归属唯一；历史配置选择测试通过。新增音频 Manifest 权限已实际重建安装并确认 granted；生产 Firebase 和 release 包未验收。 |
+| NATIVE-02 | 相机/麦克风/通知允许、拒绝、永久拒绝、系统设置恢复 | `PARTIAL` | 024–029 mic deny→allow；142–145 camera deny→retry→allow。永久拒绝、系统设置回跳、通知权限和真正录音/识别仍有缺项。 |
+| NATIVE-03 | Hardware Back：键盘、drawer、menu、sheet、详情、dirty editor、根页面 | `PARTIAL` | 实测标题/详情/历史、文件选择器、QR、Agent dirty Back、分享面板等多层返回。所有输入/根页面/快速重复操作组合未穷尽。 |
+| NATIVE-04 | Chat/Agents/Plugins/Activity/Settings 断网 → Retry → 恢复、离线冷启动 | `PARTIAL` | 183 聊天离线禁止发送/保留草稿；187 Activity、188 Settings、190 Home 明确离线；193–195 恢复发送得到回复。199/201/202 Connectors 及 222–226 Skills 无缓存提示、复网自动加载、离线缓存路径已复验。227 离线冷启动为黑屏，228 未获得新的 root dump，离线冷启动仍未通过；debug 包依赖 Metro，现有证据不足以归因为业务层缺陷。没有执行所有页面的失败/Retry 组合。 |
+| NATIVE-05 | OAuth、voice、upload、stream、approval、editor 前后台恢复 | `PARTIAL` | 已处理系统 mic 权限 Activity 的临时切换，140–141 不再因权限窗口误判 inactive；179 实际 Home 后立即返回，通话已停止并提示 inactive；180 关闭语音后正常键盘输入。upload/stream/approval/editor 和最终 APK 中的所有组合仍未全测。 |
+| NATIVE-06 | challenge/device/Agent Key/auth links 的前台、后台、冷启动及无效参数 | `PARTIAL` | Google auth 回调已成功且当前 scheme 归属唯一；142–151 扫码/无效设备码/Terminal 入口可用。未执行所有 challenge/Agent Key link 的 adb 前后台/冷启动组合。 |
+| NATIVE-07 | Phone/large window、横竖屏、长列表、sheet、键盘、安全区域 | `PARTIAL` | 当前 phone 竖屏已覆盖多个长页、键盘与弹层，154–159 验证聊天滚动保持及权限说明完整。横屏/大屏/系统文字缩放的实际设备验证未完成；代码尺寸回归不算设备通过。 |
+| NATIVE-08 | 生产 signing、release Gradle/AAB、分发后验证 | `BLOCKED` | 本轮只有 debug 原生构建；release signing/AAB/分发没有执行，交对应 CI 与发布环境验收。 |
+
+## 历史五 agent 代码检查：保留记录，不计为设备通过
+
+以下分支均从固定基线 `0246eebd3d587fc4805db09371ba8d36dd5dee41` 创建；它们是先前的代码/契约检查，不是本轮模拟器执行结果。先前从 PATH 未发现工具就写成“没有 adb/emulator/Java”是错误结论；本轮已找到 SDK/JDK 并实际运行模拟器。
+
+| Agent | 分支 | 历史聚焦结果 | 能证明的范围 |
+| --- | --- | --- | --- |
+| 1 | `codex/android-qa-auth` | 201 通过；扩展选择集 240 通过 | 认证、OAuth/MFA/session/导航模型；不能证明第三方实际登录。 |
+| 2 | `codex/android-qa-chat` | 942 通过 | Assistant/composer/附件/voice/drawer 状态；不能证明原生录音、键盘和实际滚动。 |
+| 3 | `codex/android-qa-workspace` | 329 通过；额外导航选择集 377 通过 | Agents/Crews/Plugins/Services/Machines contract；不能证明真实 provider/机器执行。 |
+| 4 | `codex/android-qa-ops` | 166 通过 | Automations/Activity/Account/Security 状态；不能证明 FCM、MFA 或真实账户销毁。 |
+| 5 | `codex/android-qa-native` | 65 通过 | Expo/profile/Firebase/signing/linking 静态契约；不能证明 release 构建和设备权限。 |
+
+扩展选择集可能包含前一个选择集，不能将这些数字简单相加当作独立用例总数。本轮修复后的聚焦检查、设备证据和剩余阻塞另见执行报告。当前禁止把这张矩阵概括成“Android 全流程全部通过”。

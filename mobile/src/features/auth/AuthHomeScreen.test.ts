@@ -72,6 +72,8 @@ function setup({
   const urlListeners: Array<(event: { url: string }) => void> = [];
   let login = async (_input: LoginInput) => signedIn;
   let refetch = async () => ({ data: config, error: null as Error | null });
+  let configState = state;
+  let currentConfig = config;
   let configRefetches = 0;
   const appStateListeners: Array<(state: string) => void> = [];
   const colors = new Proxy(
@@ -97,13 +99,17 @@ function setup({
     "@react-navigation/native": { useIsFocused: () => true },
     "@tanstack/react-query": {
       useQuery: () => ({
-        data: state === "loading" ? undefined : config,
-        isPending: state === "loading",
-        isError: state === "error",
-        isFetching: state === "loading",
-        refetch: () => {
+        data: configState === "loading" ? undefined : currentConfig,
+        isPending: configState === "loading",
+        isError: configState === "error",
+        isFetching: configState === "loading",
+        refetch: async () => {
           configRefetches++;
-          return refetch();
+          const result = await refetch();
+          configState = result.error ? "error" : "ready";
+          currentConfig = result.data;
+          harness.render();
+          return result;
         },
       }),
     },
@@ -539,6 +545,44 @@ test("social login remains configured and revalidates availability before openin
     /GitHub sign-in is not enabled/,
   );
   assert.equal(screen.input("Password").props.editable, true);
+});
+
+test("a timed-out provider check recovers through config retry without a stale login error", async (t) => {
+  const screen = setup({ providers: ["google"] });
+  t.after(screen.harness.unmount);
+  const config = { emailAuthEnabled: false, socialProviders: ["google"] as const };
+  screen.setRefetch(async () => ({
+    data: { ...config, socialProviders: [...config.socialProviders] },
+    error: new Error("Loading sign-in options timed out. Check your connection and try again."),
+  }));
+  screen.social()[0]!.props.onPress();
+  await screen.harness.settle();
+  assert.deepEqual(screen.socialUrls, [], "failed provider discovery must not open OAuth");
+  assert.deepEqual(screen.social(), []);
+  const retry = elements(screen.harness.value()).find(
+    (element) => element.type === "Pressable" && textContent(element) === "Retry sign-in options",
+  );
+  assert.ok(retry);
+  assert.match(textContent(screen.harness.value()), /Could not load sign-in options/);
+  assert.doesNotMatch(textContent(screen.harness.value()), /Loading sign-in options timed out/);
+
+  screen.setRefetch(async () => ({
+    data: { ...config, socialProviders: [...config.socialProviders] },
+    error: null,
+  }));
+  retry.props.onPress();
+  await screen.harness.settle();
+  assert.deepEqual(screen.social().map((element) => element.props.provider), ["google"]);
+  assert.doesNotMatch(textContent(screen.harness.value()), /timed out|Could not load sign-in options/);
+  assert.equal(screen.configRefetches(), 2);
+  assert.equal(screen.social()[0]!.props.disabled, false);
+  assert.deepEqual(screen.sessions, []);
+
+  screen.social()[0]!.props.onPress();
+  await screen.harness.settle();
+  assert.equal(screen.configRefetches(), 3, "retrying Google still revalidates the provider");
+  assert.equal(screen.socialUrls.length, 1);
+  assert.match(textContent(screen.harness.value()), /Sign-in was closed \(cancel\)/);
 });
 
 test("a pending social attempt blocks concurrent email login", async (t) => {

@@ -70,6 +70,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       permissions: [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
+        // Chromium WebView requires both audio permissions to expose a microphone.
+        "android.permission.MODIFY_AUDIO_SETTINGS",
       ],
       blockedPermissions: [
         "android.permission.READ_EXTERNAL_STORAGE",

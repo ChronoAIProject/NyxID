@@ -342,6 +342,16 @@ function VoiceConversation({
   const main = colors.textPrimary;
   const onMain = colors.bg;
   const tray = tasksOpen || moreOpen;
+  const optionsError = !active ? options.error || settings.error : null;
+  const transcriptError = !!(
+    voice.error || voice.recovery || billingOpenError || optionsError
+  );
+  useEffect(() => {
+    // Equal-height error replacements may not emit a content-size event. Refs
+    // attach at commit; the content-size handler also covers the first layout.
+    if (transcriptError)
+      transcript.current?.scrollTo?.({ y: 0, animated: false });
+  }, [voice.error, voice.recovery?.message, billingOpenError, optionsError, transcriptError]);
   return (
     <>
       {voice.media ? (
@@ -500,10 +510,13 @@ function VoiceConversation({
               onScroll={(event) =>
                 transcriptEdges.scroll(event.nativeEvent.contentOffset.y)
               }
-              // The newest words stay in view; scroll up for the rest.
+              // Keep recovery at the top; only a live transcript follows new words.
               onContentSizeChange={(_width, height) => {
                 transcriptEdges.content(height);
-                transcript.current?.scrollToEnd?.({ animated: !reducedMotion });
+                if (transcriptError)
+                  transcript.current?.scrollTo?.({ y: 0, animated: false });
+                else if (active && captions.length)
+                  transcript.current?.scrollToEnd?.({ animated: !reducedMotion });
               }}
             >
             {voice.recovery ? (

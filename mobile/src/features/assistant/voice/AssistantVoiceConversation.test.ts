@@ -465,6 +465,101 @@ test("other startup errors also avoid claiming the call is ready or connected", 
   f.harness.unmount();
 });
 
+function trackTranscript(f: ReturnType<typeof setup>) {
+  const movements: unknown[][] = [];
+  const scroll = () =>
+    f.all().find((row) => row.type === "ScrollView" && row.props.ref)!;
+  scroll().props.ref.current = {
+    scrollTo: (options: unknown) => movements.push(["top", JSON.parse(JSON.stringify(options))]),
+    scrollToEnd: (options: unknown) => movements.push(["end", JSON.parse(JSON.stringify(options))]),
+  };
+  return {
+    movements,
+    content: () => scroll().props.onContentSizeChange(360, 500),
+  };
+}
+
+test("startup errors stay readable at the top instead of following the pricing footer", () => {
+  const f = setup({
+    error: "Voice ended while the app was inactive. Start a new call to continue.",
+  });
+  const transcript = trackTranscript(f);
+  transcript.content();
+  assert.deepEqual(transcript.movements, [["top", { y: 0, animated: false }]]);
+  assert.equal(f.button("Try again").props.disabled, false);
+  assert.ok(f.button("Close voice"));
+  f.harness.unmount();
+});
+
+test("live captions follow the newest words while an empty or ended call does not", () => {
+  const f = setup({ active: true, reducedMotion: true });
+  const transcript = trackTranscript(f);
+  transcript.content();
+  assert.deepEqual(transcript.movements, []);
+  f.voice.snapshot = {
+    ...snapshot,
+    captions: [{
+      id: "caption-1", speaker: "user", text: "Hello", sealed: false, complete: false,
+    }],
+  };
+  f.harness.render();
+  transcript.content();
+  assert.deepEqual(transcript.movements, [["end", { animated: false }]]);
+  f.voice.connected = false;
+  f.harness.render();
+  transcript.content();
+  assert.equal(transcript.movements.length, 1);
+  f.harness.unmount();
+});
+
+test("an error takes precedence over following existing live captions", () => {
+  const f = setup({ active: true, snapshot: {
+    ...snapshot,
+    captions: [{
+      id: "caption-1", speaker: "assistant", text: "Hello", sealed: true, complete: true,
+    }],
+  } });
+  const transcript = trackTranscript(f);
+  f.voice.error = "Voice disconnected. Please try again.";
+  f.harness.render();
+  assert.deepEqual(transcript.movements, [["top", { y: 0, animated: false }]]);
+  transcript.movements.length = 0;
+  transcript.content();
+  assert.deepEqual(transcript.movements, [["top", { y: 0, animated: false }]]);
+  f.harness.unmount();
+});
+
+test("hidden settings errors do not interrupt following a connected call's captions", () => {
+  const f = setup({ active: true, reducedMotion: true, snapshot: {
+    ...snapshot,
+    captions: [{
+      id: "caption-1", speaker: "assistant", text: "Hello", sealed: false, complete: false,
+    }],
+  } });
+  const transcript = trackTranscript(f);
+  f.query.settings.error = new Error("The settings refresh failed.");
+  f.harness.render();
+  transcript.content();
+  assert.deepEqual(transcript.movements, [["end", { animated: false }]]);
+  assert.equal(f.all().some((row) => row.props.message === "The settings refresh failed."), false);
+  f.harness.unmount();
+});
+
+test("replacing a visible error returns to its beginning even without a content-size event", () => {
+  const f = setup({ error: "Call ended. Try again." });
+  const transcript = trackTranscript(f);
+  transcript.content();
+  transcript.movements.length = 0;
+  // Equal-length replacement text can keep the same native layout height.
+  f.voice.error = "Call broke. Try again.";
+  f.harness.render();
+  assert.deepEqual(transcript.movements, [["top", { y: 0, animated: false }]]);
+  transcript.movements.length = 0;
+  f.harness.render();
+  assert.deepEqual(transcript.movements, []);
+  f.harness.unmount();
+});
+
 test("Grok forces Hold to talk even when the saved microphone mode was automatic", async () => {
   const grok: VoiceOption = {
     ...source,

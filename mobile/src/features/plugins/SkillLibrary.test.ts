@@ -432,3 +432,32 @@ test("blank descriptions offer review guidance rather than another opaque slug",
     /Open this skill to review its details and available versions/,
   );
 });
+
+test("offline unknown sections explain missing cache without claiming empty skills or showing busy states", () => {
+  const unknown = { items: [], known: false, loading: false, onRetry: () => {} };
+  const env = setup({ offline: true, added: unknown, catalog: unknown });
+  assert.match(env.text(), /Added skills unavailable offline/);
+  assert.match(env.text(), /Skill catalog unavailable offline/);
+  assert.match(env.text(), /Reconnect to load this agent's skills/);
+  assert.equal(env.hasText("No skills added yet"), false);
+  assert.equal(env.hasText("No skills found"), false);
+  assert.equal(env.hasText("Loading added skills"), false);
+  assert.equal(env.hasText("Searching skill catalog"), false);
+});
+
+test("offline cached rows remain reviewable and searchable while remote paging and retries are disabled", () => {
+  const env = setup({
+    offline: true, page: 2, totalPages: 4,
+    added: { items: pins, known: true, loading: false, error: "Old error", onRetry: () => {} },
+    catalog: { items: catalog, known: true, loading: false, error: "Old error", onRetry: () => {} },
+  });
+  assert.equal(env.addedRows().length, 2);
+  assert.equal(env.catalogRows().length, 2);
+  assert.equal(env.control("Previous").props.disabled, true);
+  assert.equal(env.control("Next").props.disabled, true);
+  assert.equal(env.control("Reload skills").props.disabled, true);
+  assert.equal(env.control("Retry skill catalog").props.disabled, true);
+  env.addedRows()[0]!.props.onPress();
+  env.control("Search skills").props.onChangeText("DNS");
+  assert.deepEqual(env.calls.map((call) => call.kind), ["open", "query"]);
+});
