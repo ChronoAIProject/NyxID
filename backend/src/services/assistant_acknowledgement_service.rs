@@ -420,6 +420,9 @@ pub fn known_action_class(tool: &str, args: &Value) -> Option<OwnerActionClass> 
         });
     }
     let name = tool.strip_prefix("nyxid__")?;
+    if name == "read_tool_result" {
+        return Some(Read);
+    }
     use super::{assistant_account_tools as account, assistant_team_tools as team};
     if name == "cma_save_attachment" {
         return Some(Change);

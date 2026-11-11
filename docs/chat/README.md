@@ -14,6 +14,7 @@ Each verified upstream contract wins over prose. If the deployed or pinned upstr
 3. [NyxAgent engine](08-nyxagent-engine.md) is the normative request, persistence, credential, recovery, and Stop contract, verified against NxyAgent `58f647e4`.
    - [NyxBot orchestrator](09-nyxbot-orchestrator.md): three existing permission modes, personal-first service priority and explicit organization-use confirmation, an orchestrator with persistent, key-scoped specialists that ask it for permission for work it assigned (a specialist you talk to directly handles the request itself and reports missing access to you), and NyxBot as the agent behind channel bots through the Agent Event Gateway (0.31.0).
    - [Notifications](12-notifications.md): per-person background updates, unread markers, optional mobile push and read-only NyxBot digests, behind `assistant:notifications`.
+   - [Activity history compatibility](activity-history-compat.md): tolerant client metadata, duplicate-retry presentation, and strict decision boundaries.
    - [Owner CLI and invocation API](09-owner-cli-api.md): first-party owner commands, durable recovery, exact cancellation, authentication boundaries, and rollout requirements.
    - [Source resources and image display](10-source-resources.md): shared image references, the first Notion source adapter, authorized file retrieval, display/inspection intents and attachment commit fences.
 4. [Direct Chrono-LLM spec](direct-chronollm-spec.md) is the detailed v3.2 contract implemented by the default-off `experimental:direct-chat-engine` surface.

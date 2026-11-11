@@ -864,7 +864,7 @@ export function AssistantScreen({
                         ? "Stopped"
                         : item.status === "failed"
                           ? "Turn failed"
-                          : "Completed"
+                          : item.status === "completed" ? "Completed" : "Status unavailable"
                     }
                     turnFailed={
                       item.status === "failed" &&

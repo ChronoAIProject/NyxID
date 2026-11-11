@@ -132,6 +132,14 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
             doc! {"_id":"agent-personal","user_id":&owner},
         ),
         (
+            "assistant_tool_results",
+            doc! {"_id":"personal-tool-result","user_id":&owner},
+        ),
+        (
+            "assistant_tool_results",
+            doc! {"_id":"actor-tool-result","user_id":&other,"actor_id":&owner},
+        ),
+        (
             "assistant_resources",
             doc! {"_id":"personal-resource","user_id":&owner,"conversation_id":"private-chat"},
         ),
@@ -235,6 +243,10 @@ async fn accepted_worker_erases_independent_multidomain_graph_and_retains_shared
         (
             "assistant_agent_learning_proposals",
             doc! {"_id":"org-draft","owner_id":&other,"agent_id":"org-agent"},
+        ),
+        (
+            "assistant_tool_results",
+            doc! {"_id":"other-tool-result","user_id":&other,"actor_id":&other},
         ),
         (
             "assistant_resources",

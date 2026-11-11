@@ -179,15 +179,7 @@ export type PersonalBinding = z.infer<typeof personalBindingSchema>;
 export type PersonalLinkReview = z.infer<typeof personalLinkReviewSchema>;
 
 export const platformThreadSchema = z.object({
-  platform: z.enum([
-    "telegram",
-    "slack",
-    "discord",
-    "whatsapp",
-    "lark",
-    "feishu",
-    "x",
-  ]),
+  platform: z.string(), // Display metadata; link/control surfaces above remain strict.
   manager_id: z.string(),
   binding_id: z.uuid(),
   binding_generation: version,

@@ -30,7 +30,7 @@ export function AgentAvatar({
   readonly agent: {
     readonly id: string;
     readonly name: string;
-    readonly kind: AssistantAgentKind;
+    readonly kind: AssistantAgentKind | "unknown";
     /** Initials come from the display name when there is one. */
     readonly display_name?: string | null;
   };
@@ -81,7 +81,7 @@ export function AgentAvatarStack({
   readonly agents: readonly {
     readonly id: string;
     readonly name: string;
-    readonly kind: AssistantAgentKind;
+    readonly kind: AssistantAgentKind | "unknown";
     readonly display_name?: string | null;
   }[];
   readonly max?: number;

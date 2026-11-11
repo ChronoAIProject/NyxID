@@ -12074,5 +12074,14 @@
   "{{count}} unread": "{{count}} 条未读",
   "{{count}} updates": "{{count}} 条更新",
   "{{title}}, unread": "{{title}}，未读",
-  "{{value1}}, group{{status}}": "{{value1}}，群组{{status}}"
+  "{{value1}}, group{{status}}": "{{value1}}，群组{{status}}",
+  "A resource needed for this step is unavailable.": "此步骤所需的资源不可用。",
+  "Activity details unavailable in this app version.": "此应用版本无法显示该操作的详细信息。",
+  "Already done in the previous attempt; skipped this time.": "上次尝试中已完成；本次已跳过。",
+  "Conversation history could not be loaded. Please try again.": "无法加载对话记录，请重试。",
+  "Refresh history": "刷新对话记录",
+  "Skipped": "已跳过",
+  "Some activity or confirmation details are unavailable in this app version. Refresh history or update the app.": "此应用版本无法显示部分操作或确认信息。请刷新对话记录或更新应用。",
+  "Status unavailable": "状态不可用",
+  "Workspace details unavailable": "工作区详细信息不可用"
 }

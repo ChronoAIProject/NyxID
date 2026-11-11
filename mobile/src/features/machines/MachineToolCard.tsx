@@ -144,7 +144,7 @@ export function MachineToolCard({
           detail={
             receipt.context_mode === "separated"
               ? "Separate workspace and browser for this agent"
-              : "Shared workspace and browser"
+              : receipt.context_mode === "unknown" ? "Workspace details unavailable" : "Shared workspace and browser"
           }
         />
         <Disclosure

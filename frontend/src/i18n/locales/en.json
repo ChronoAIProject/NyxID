@@ -12074,5 +12074,14 @@
   "{{count}} unread": "{{count}} unread",
   "{{count}} updates": "{{count}} updates",
   "{{title}}, unread": "{{title}}, unread",
-  "{{value1}}, group{{status}}": "{{value1}}, group{{status}}"
+  "{{value1}}, group{{status}}": "{{value1}}, group{{status}}",
+  "A resource needed for this step is unavailable.": "A resource needed for this step is unavailable.",
+  "Activity details unavailable in this app version.": "Activity details unavailable in this app version.",
+  "Already done in the previous attempt; skipped this time.": "Already done in the previous attempt; skipped this time.",
+  "Conversation history could not be loaded. Please try again.": "Conversation history could not be loaded. Please try again.",
+  "Refresh history": "Refresh history",
+  "Skipped": "Skipped",
+  "Some activity or confirmation details are unavailable in this app version. Refresh history or update the app.": "Some activity or confirmation details are unavailable in this app version. Refresh history or update the app.",
+  "Status unavailable": "Status unavailable",
+  "Workspace details unavailable": "Workspace details unavailable"
 }

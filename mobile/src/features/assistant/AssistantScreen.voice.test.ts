@@ -130,6 +130,7 @@ function setup(
     loading: false,
     loadingOlder: false,
     recoveryRequired: false,
+    error: undefined as string | undefined,
     mutating: false,
     openConversation: (id?: string, ack?: string) => {
       events.push(["open", id, ack]);
@@ -1921,5 +1922,20 @@ test("Home displays a friendly 503 beside Reload agents and clears it after retr
   assert.ok(x.events.some(([name]) => name === "reloadAgents"));
   assert.equal(x.all().some((node) => node.props.label === "Reload agents"), false);
   assert.equal(x.all().some((node) => node.props.message === "NyxID is temporarily unavailable. Try again in a moment."), false);
+  x.harness.unmount();
+});
+
+test("2345 history failure keeps the composer usable, offers refresh, and respects destroyed state", async () => {
+  const x = setup(A);
+  x.assistant.error = "Conversation history could not be loaded. Please try again.";
+  x.harness.render();
+  assert.notEqual(x.input().props.editable, false);
+  const refresh = x.all().find((node) => node.props.label === "Refresh history" || node.props.accessibilityLabel === "Refresh history");
+  assert.ok(refresh);
+  await refresh.props.onPress();
+  assert.ok(x.events.some(([name]) => name === "recover"));
+  x.assistant.history!.conversation.agent = { ...x.assistant.agent, destroyed: true };
+  x.harness.render();
+  assert.equal(x.input().props.editable, false);
   x.harness.unmount();
 });
