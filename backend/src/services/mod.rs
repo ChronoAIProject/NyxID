@@ -114,6 +114,7 @@ pub mod content_type;
 pub mod coordination_service;
 pub mod credential_push_service;
 pub(crate) mod credential_record_service;
+pub mod credential_verification;
 pub mod delegation_service;
 pub mod destination_routing;
 pub mod developer_webhook_service;

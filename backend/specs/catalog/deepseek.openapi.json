@@ -11,6 +11,7 @@
       "description": "DeepSeek API"
     }
   ],
+  "x-nyxid-credential-verification": { "operation": "models_list" },
   "paths": {
     "/chat/completions": {
       "post": {

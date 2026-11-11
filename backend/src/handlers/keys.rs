@@ -451,6 +451,7 @@ pub struct KeyResponse {
     pub auth_key_name: String,
     pub status: String,
     pub connection_status: Option<String>,
+    pub credential_verification: Option<crate::services::credential_verification::VerificationView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1156,6 +1157,9 @@ pub(crate) async fn create_key_with_service_id(
         });
     }
 
+    let verification =
+        super::credential_verification::after_save(&state, &auth_user, &result.service.id).await;
+
     // Tag the response `credential_source` based on whether this key was
     // created under the actor's personal scope or under an org. This is
     // cosmetic for the immediate response; subsequent `GET /keys/{id}`
@@ -1253,6 +1257,9 @@ pub(crate) async fn create_key_with_service_id(
         std::slice::from_mut(&mut response),
     )
     .await?;
+    if verification.is_some() {
+        response.credential_verification = verification;
+    }
     Ok(Json(response))
 }
 
@@ -2643,6 +2650,11 @@ pub async fn update_key(
         Vec::new()
     };
 
+    let verification = if body.credential.is_some() || body.endpoint_url.is_some() {
+        super::credential_verification::after_save(&state, &auth_user, &key_id).await
+    } else {
+        None
+    };
     // Return refreshed view
     let updated =
         unified_key_service::get_key(&state.db, &state.encryption_keys, &user_id_str, &key_id)
@@ -2677,6 +2689,9 @@ pub async fn update_key(
         std::slice::from_mut(&mut response),
     )
     .await?;
+    if verification.is_some() {
+        response.credential_verification = verification;
+    }
     Ok(Json(response))
 }
 
@@ -2850,6 +2865,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
             .as_ref()
             .map(|api_key| api_key.status.clone())
             .unwrap_or_else(|| "active".to_string()),
+        credential_verification: None,
         connection_status: result
             .api_key
             .as_ref()
@@ -2999,6 +3015,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         auth_key_name: view.auth_key_name,
         status: view.status,
         connection_status: view.connection_status,
+        credential_verification: None,
         catalog_service_id: view.catalog_service_id,
         catalog_service_slug: view.catalog_service_slug,
         icon_url: view.icon_url,
@@ -3256,6 +3273,36 @@ async fn enrich_key_discovery_metadata(
         .map(|endpoint| (endpoint.id.as_str(), endpoint))
         .collect();
 
+    let credential_ids: Vec<&str> = services
+        .iter()
+        .filter_map(|s| s.api_key_id.as_deref())
+        .collect();
+    let credentials: Vec<crate::models::user_api_key::UserApiKey> = db
+        .collection("user_api_keys")
+        .find(doc! {"_id":{"$in":credential_ids}})
+        .await?
+        .try_collect()
+        .await?;
+    let credential_by_id: std::collections::HashMap<_, _> =
+        credentials.iter().map(|k| (k.id.as_str(), k)).collect();
+    let verification_filters: Vec<_> = catalog_by_id
+        .values()
+        .filter_map(|c| {
+            c.credential_verification
+                .as_ref()
+                .map(|check| doc! {"service_id":&c.id,"name":&check.operation})
+        })
+        .collect();
+    let verification_operations: Vec<crate::models::service_endpoint::ServiceEndpoint> =
+        if verification_filters.is_empty() {
+            Vec::new()
+        } else {
+            db.collection("service_endpoints")
+                .find(doc! {"$or":verification_filters,"is_active":true})
+                .await?
+                .try_collect()
+                .await?
+        };
     for key in keys {
         let Some(service) = service_by_id.get(key.id.as_str()) else {
             continue;
@@ -3265,6 +3312,26 @@ async fn enrich_key_discovery_metadata(
             .catalog_service_id
             .as_deref()
             .and_then(|id| catalog_by_id.get(id));
+        key.credential_verification = service
+            .api_key_id
+            .as_deref()
+            .and_then(|id| credential_by_id.get(id))
+            .zip(endpoint_by_id.get(service.endpoint_id.as_str()))
+            .and_then(|(credential, endpoint)| {
+                crate::services::credential_verification::view(
+                    service,
+                    endpoint,
+                    credential,
+                    inherited_catalog.copied(),
+                    inherited_catalog.and_then(|c| {
+                        crate::services::credential_verification::select_operation(
+                            service,
+                            c,
+                            &verification_operations,
+                        )
+                    }),
+                )
+            });
         let effective_skills = if key.recommended_skills.is_some() {
             crate::models::catalog_skill_revision::SkillState {
                 recommended_skills: key.recommended_skills.clone(),

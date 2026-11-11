@@ -287,7 +287,7 @@ macro_rules! assistant_direct_billing_routes {
     };
 }
 
-macro_rules! codex_connection_billing_routes {
+macro_rules! credential_check_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
             (
@@ -295,6 +295,15 @@ macro_rules! codex_connection_billing_routes {
                 "/api/v1/providers/codex-connection/verify",
                 "handlers::codex_connection::verify",
                 post(handlers::codex_connection::verify),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+            (
+                "/keys/{key_id}/verify",
+                "/api/v1/keys/{key_id}/verify",
+                "handlers::credential_verification::check",
+                post(handlers::credential_verification::check),
                 crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
                     crate::services::billing::BillingIngress::Proxy
                 )
@@ -560,7 +569,7 @@ pub(crate) fn mounted_billing_route_inventory()
         collect_billing_route_specs,
         ()
     ));
-    routes.extend(codex_connection_billing_routes!(
+    routes.extend(credential_check_billing_routes!(
         collect_billing_route_specs,
         ()
     ));
@@ -3585,7 +3594,7 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/providers/codex-connection",
             get(handlers::codex_connection::status).post(handlers::codex_connection::import),
         )
-        .merge(codex_connection_billing_routes!(
+        .merge(credential_check_billing_routes!(
             register_billing_routes,
             Router::new()
         ))

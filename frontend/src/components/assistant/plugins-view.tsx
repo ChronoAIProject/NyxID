@@ -213,7 +213,7 @@ function ConnectorCard({
       item={item}
       status={
         item.added
-          ? `${item.disabled ? "Disabled" : "Connected"} · ${count} ${count === 1 ? "connection" : "connections"}`
+          ? `${translateUi(item.disabled ? "Disabled" : item.verificationLabel ?? "Connected")} · ${count} ${count === 1 ? "connection" : "connections"}`
           : item.meta
       }
       actionLabel={

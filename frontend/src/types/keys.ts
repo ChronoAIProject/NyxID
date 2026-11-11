@@ -6,6 +6,7 @@ import type { WsFrameInjection } from "@/schemas/services";
 export type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 
 export interface KeyInfo {
+  readonly credential_verification?: import("@/schemas/credential-verification").CredentialVerification | null;
   readonly offering_kind?: "ai_service" | "tool";
   readonly can_edit_configuration?: boolean;
   readonly preference_rank?: number | null;

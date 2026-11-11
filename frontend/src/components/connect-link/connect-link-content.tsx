@@ -1,3 +1,5 @@
+import { credentialVerificationMeta } from "@/lib/credential-verification";
+import type { CredentialVerification } from "@/schemas/credential-verification";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useCatalogEntry } from "@/hooks/use-keys";
@@ -488,6 +490,8 @@ function ConnectLinkSession({
       {terminal ? (
         <TerminalPanel
           status={terminal.status}
+          savedCredential={!usePlatformKey && preview.data?.connect_method === "api_key"}
+          credentialVerification={complete.data?.credential_verification}
           serviceName={preview.data?.service_name}
           callbackUrl={embedded ? null : (terminal.callbackUrl ?? null)}
         />
@@ -1118,16 +1122,23 @@ function DeviceCodePanel({
 }
 
 export function TerminalPanel({
+  savedCredential = false,
+  credentialVerification,
   status,
   serviceName,
   callbackUrl,
 }: {
+  readonly savedCredential?: boolean;
+  readonly credentialVerification?: CredentialVerification | null;
   readonly status: "completed" | "cancelled" | "expired";
   readonly serviceName?: string;
   readonly callbackUrl: string | null;
 }) {
   useUiTranslation();
   const completed = status === "completed";
+  const verification = savedCredential ? credentialVerificationMeta({
+    credential_type: "api_key", status: "active", node_id: null, credential_verification: credentialVerification,
+  }) : undefined;
   return (
     <section
       role="status"
@@ -1146,11 +1157,15 @@ export function TerminalPanel({
       ) : null}
       <h1 className="type-metric text-foreground sm:type-metric">
         {completed
-          ? translateUi("{{value1}} connected", { value1: serviceName ?? translateUi("Service") })
+          ? translateUi(savedCredential ? "{{value1}} saved" : "{{value1}} connected", { value1: serviceName ?? translateUi("Service") })
           : status === "cancelled"
             ? translateUi("Connection cancelled")
             : translateUi("Connection request expired")}
       </h1>
+      {completed && verification ? <div className="mt-4 text-14">
+        <p>{translateUi(verification.label)}</p>
+        <p>{translateUi(verification.tooltip)}</p>
+      </div> : null}
       <p className="mt-8 text-14 text-muted-foreground sm:mt-12 sm:text-14">
         {callbackUrl
           ? translateUi("Returning to the requesting application...")

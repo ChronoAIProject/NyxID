@@ -3547,6 +3547,7 @@ async fn finish_resolution(
     })
 
     }).await?;
+    super::credential_verification::require_resolution(&resolution)?;
     if !resolve_header_values {
         return Ok(resolution);
     }
@@ -4208,6 +4209,8 @@ fn build_minimal_downstream_service(
         git_http: None,
         concurrency_policy: None,
         inference_admin_modified: false,
+        credential_verification: None,
+        credential_verification_admin_modified: false,
         billing,
         auth_notes: None,
         known_limitations: None,
@@ -4576,6 +4579,7 @@ async fn forward_request_with_egress_guard_inner(
         crate::turn_trace::Stage::ProxyHeaders,
     );
     let result: Result<reqwest::Response, ForwardRequestError> = crate::turn_trace::scope(operation.context(), async {
+    super::credential_verification::require_target(target,&method,path).await.map_err(ForwardRequestError::PreDispatchRejected)?;
     target.require_credential_materialized()?;
     let dispatch_guard =
         super::service_dispatch_registry::verify(admission, target, dispatch_caller)
@@ -5102,6 +5106,9 @@ async fn forward_request_with_egress_guard_inner(
         result?
     };
 
+    if super::credential_verification::checking() {
+        return super::credential_verification::observe(response).await.map_err(ForwardRequestError::Application);
+    }
     // Cache successful billing-API responses so a follow-up request
     // with the same body replays from memory. Non-2xx responses are
     // passed through unchanged by `insert_and_replay`.
@@ -5115,6 +5122,16 @@ async fn forward_request_with_egress_guard_inner(
     Ok(response)
 
     }).await;
+    if let Err(ForwardRequestError::Transport(error)) = &result {
+        super::credential_verification::record(
+            "not_verified",
+            if error.is_timeout() {
+                "check_timeout"
+            } else {
+                "check_unavailable"
+            },
+        );
+    }
     match &result {
         Ok(response) => operation.finish(
             if response.status().is_success() {
@@ -7319,6 +7336,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -8788,6 +8807,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -8989,6 +9010,7 @@ mod tests {
             updated_at: Utc::now(),
             state_version: 1,
             rotation_predecessor_id: None,
+            credential_verification: None,
         }
     }
 
@@ -9194,6 +9216,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -9441,6 +9465,8 @@ mod tests {
                 git_http: None,
                 concurrency_policy: None,
                 inference_admin_modified: false,
+                credential_verification: None,
+                credential_verification_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -9701,6 +9727,8 @@ mod tests {
             git_http: None,
             concurrency_policy: None,
             inference_admin_modified: false,
+            credential_verification: None,
+            credential_verification_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
