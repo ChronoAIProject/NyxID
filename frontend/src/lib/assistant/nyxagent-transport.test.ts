@@ -1,3 +1,6 @@
+import retryHistory from "./__fixtures__/retry-duplicate-history.json";
+import { fireEvent } from "@testing-library/react";
+import { HISTORY_UNAVAILABLE } from "@/schemas/assistant-history-compat";
 import { createElement } from "react";
 import { capture } from "@/lib/telemetry";
 
@@ -2771,4 +2774,77 @@ it("preserves an acknowledgement 409 message, code and details without deciding 
     status: 409, message: body.message, errorCode: body.error_code, errorResponse: body,
   });
   expect(requests).toEqual([{ endpoint: `/assistant/nyxagent/conversations/${id}/acknowledgements/card-2275`, method: "POST" }]);
+});
+
+// #2345 supplies this exact fragment/path, not a complete production response.
+it("2345 renders the reported completed duplicate at active_turn.activities[1] neutrally", async () => {
+  const transport = new NyxAgentTransport();
+  globalThis.__nyxidAssistantHttpMock = () => json(retryHistory);
+  await transport.history(id);
+  expect(transport.isRunning(id)).toBe(true);
+  expect(transport.getHistory(id)?.conversation.active_turn?.activities).toHaveLength(13);
+  render(createElement(ChatMessageList, { session: transport.session(id), bottomInset: 0 }));
+  fireEvent.click(screen.getByRole("button", { name: /13 actions/ }));
+  const line = screen.getByText("Already done in the previous attempt; skipped this time.");
+  expect(line.closest("summary")).toHaveAttribute("data-tool-status", "skipped");
+  expect(line).not.toHaveClass("text-destructive");
+  expect(screen.getByLabelText("Skipped")).not.toHaveClass("text-success");
+});
+
+it("2345 unknown kind and status affect only their activity; settled history stays readable", async () => {
+  const page = history();
+  page.messages[1]!.activities = [
+    { id: "future", label: "tool", status: "completed", started_at: start, ended_at: start, failure: { kind: "future_kind" } },
+    { id: "future-status", label: "tool", status: "unknown", started_at: start, ended_at: null },
+  ];
+  const transport = new NyxAgentTransport();
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  await transport.history(id);
+  render(createElement(ChatMessageList, { session: transport.session(id), bottomInset: 0 }));
+  fireEvent.click(screen.getByRole("button", { name: /2 actions/ }));
+  expect(screen.getAllByText("Activity details unavailable in this app version.")).toHaveLength(2);
+  expect(screen.queryByLabelText("Succeeded")).toBeNull();
+  expect(screen.getByText("Answer 界")).toBeVisible();
+});
+
+it("2345 malformed history has a fixed error, retains cached replies, and GET retry recovers", async () => {
+  const transport = new NyxAgentTransport();
+  const fetcher = vi.fn().mockResolvedValueOnce(json(history()))
+    .mockResolvedValueOnce(json({ ...history(), messages: [{ text: "private data must not leak" }] }))
+    .mockResolvedValueOnce(json(history()));
+  globalThis.__nyxidAssistantHttpMock = fetcher;
+  await transport.history(id);
+  await expect(transport.history(id)).rejects.toThrow(HISTORY_UNAVAILABLE);
+  expect(transport.session(id).messages.some((row) => row.content === "Answer 界")).toBe(true);
+  await expect(transport.history(id)).resolves.toBeDefined();
+  expect(fetcher).toHaveBeenCalledTimes(3);
+});
+
+it.each(["history", "index"] as const)("2345 on 2365 preserves HTTP errors and sanitizes invalid %s before GET recovery", async (read) => {
+  const transport = new NyxAgentTransport();
+  const requests: string[] = [];
+  let response = () => json(read === "history" ? retryHistory : { conversations: [retryHistory.conversation], next_cursor: null });
+  globalThis.__nyxidAssistantHttpMock = ({ init }) => {
+    requests.push(init.method ?? "GET");
+    return response();
+  };
+  const load = () => read === "history" ? transport.history(id) : transport.list();
+  const valid = response;
+  await load();
+  for (const [status, body, message] of [
+    [503, "<html>nginx private proxy page</html>", "NyxBot is temporarily unavailable. Try again shortly."],
+    [502, "private upstream body", "NyxBot is temporarily unavailable. Try again shortly."],
+    [200, "<html>nginx private proxy page</html>", "NyxID couldn't complete this request. Please try again."],
+  ] as const) {
+    response = () => new Response(body, { status });
+    await expect(load()).rejects.toMatchObject({ status, message });
+  }
+  response = () => json({ messages: [{ text: "private validation data" }] });
+  await expect(load()).rejects.toThrow(HISTORY_UNAVAILABLE);
+  const body = { error: "conflict", error_code: 1004, message: "Conflict: Request expired", details: { status: "expired" } };
+  response = () => json(body, 409);
+  await expect(load()).rejects.toMatchObject({ status: 409, message: body.message, errorCode: body.error_code, errorResponse: body });
+  response = valid;
+  await expect(load()).resolves.toBeDefined();
+  expect(requests).toEqual(Array(7).fill("GET"));
 });

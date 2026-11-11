@@ -507,3 +507,9 @@ describe("CMA submission card", () => {
     },
   );
 });
+
+it("2345 unknown operation kind is neutral and has no execution controls", () => {
+  render(<CmaOperationCard operation={{ ...operation, kind: "future_kind", status: "ready", reason: "completed" }} />);
+  expect(screen.getByText("Activity details unavailable in this app version.")).toBeVisible();
+  expect(screen.queryByRole("button")).toBeNull();
+});
