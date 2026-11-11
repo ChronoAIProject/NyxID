@@ -158,9 +158,23 @@ export function createAssistantVoiceApi(
       // most ten other recent conversations, two reads in flight. Never read history.
       const read = async (id: string) => {
         assertActive();
-        return activeVoiceSessionSchema.parse(
-          await request(`${assistantVoiceSessionsPath(id)}/active`, { signal }),
-        ).session;
+        try {
+          return activeVoiceSessionSchema.parse(
+            await request(`${assistantVoiceSessionsPath(id)}/active`, {
+              signal,
+            }),
+          ).session;
+        } catch (error) {
+          // Recent chats include threads that can never hold a call (automation,
+          // channel and group threads answer 403; deleted ones 404). They hold
+          // no call; any other failure still leaves the scan unverified.
+          const status =
+            error && typeof error === "object" && "statusCode" in error
+              ? error.statusCode
+              : undefined;
+          if (id !== current && (status === 403 || status === 404)) return null;
+          throw error;
+        }
       };
       const own = await read(current);
       if (own) return { session: own, conversation_id: current };

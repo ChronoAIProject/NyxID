@@ -221,6 +221,53 @@ test("an old-server scan that finds no live call in recent chats clears recovery
   assert.equal(posts, 0);
 });
 
+test("recent automation, channel or deleted threads do not make the old-server scan unverifiable", async () => {
+  // A frequently running automation thread answers 403 "Voice requires a
+  // private owner thread"; it previously failed every status check.
+  const ids = Array.from(
+    { length: 4 },
+    (_, index) => `nyxa-${String(index + 200).padStart(32, "0")}`,
+  );
+  const api = createAssistantVoiceApi(async (path) => {
+    if (path === "/assistant/nyxagent/voice/active") throw { statusCode: 404 };
+    if (path.endsWith("?limit=10"))
+      return { conversations: ids.map((id) => ({ id })), next_cursor: "more" };
+    if (path.includes(ids[0]!)) throw { statusCode: 403 };
+    if (path.includes(ids[1]!)) throw { statusCode: 404 };
+    if (path.includes(ids[3]!)) return { session };
+    return { session: null };
+  }, origin);
+  assert.deepEqual(await api.accountActive(thread), {
+    session,
+    conversation_id: ids[3],
+  });
+  const empty = createAssistantVoiceApi(async (path) => {
+    if (path === "/assistant/nyxagent/voice/active") throw { statusCode: 404 };
+    if (path.endsWith("?limit=10"))
+      return { conversations: ids.map((id) => ({ id })), next_cursor: null };
+    if (path.includes(ids[0]!)) throw { statusCode: 403 };
+    return { session: null };
+  }, origin);
+  assert.deepEqual(await empty.accountActive(thread), {
+    session: null,
+    conversation_id: null,
+  });
+  // Network failures and the caller's own thread still fail closed.
+  const offline = createAssistantVoiceApi(async (path) => {
+    if (path === "/assistant/nyxagent/voice/active") throw { statusCode: 404 };
+    if (path.endsWith("?limit=10"))
+      return { conversations: ids.map((id) => ({ id })), next_cursor: null };
+    if (path.includes(ids[0]!)) throw new TypeError("Network request failed");
+    return { session: null };
+  }, origin);
+  await assert.rejects(offline.accountActive(thread), /Network request failed/);
+  const forbiddenOwn = createAssistantVoiceApi(async (path) => {
+    if (path === "/assistant/nyxagent/voice/active") throw { statusCode: 404 };
+    throw { statusCode: 403 };
+  }, origin);
+  await assert.rejects(forbiddenOwn.accountActive(thread));
+});
+
 test("account authorization failure or cancellation never triggers recent-chat scanning", async () => {
   for (const failure of [
     { statusCode: 401 },
